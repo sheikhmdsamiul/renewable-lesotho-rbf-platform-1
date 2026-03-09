@@ -1,0 +1,5 @@
+{
+  "name": "Renewable Lesotho RBF Platform",
+  "description": "Digital Results-Based Financing (RBF) system for managing renewable energy projects in Lesotho, featuring tender management, real-time monitoring, and milestone-based disbursements.",
+  "requestFramePermissions": ["geolocation"]
+}
