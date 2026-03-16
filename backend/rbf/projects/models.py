@@ -13,12 +13,28 @@ class ProjectStatus(models.TextChoices):
 
 
 class Project(models.Model):
+    tender = models.ForeignKey('tenders.Tender', related_name='projects', on_delete=models.SET_NULL, null=True, blank=True)
+    project_title = models.CharField(max_length=255, blank=True)
+    project_reference = models.CharField(max_length=64, blank=True)
+    milestone_plan_id = models.CharField(max_length=64, blank=True)
     vendor_id = models.CharField(max_length=64)
     vendor_name = models.CharField(max_length=255)
     tech_type = models.CharField(max_length=64)
     region = models.CharField(max_length=64)
+    district = models.CharField(max_length=64, blank=True)
     status = models.CharField(max_length=32, choices=ProjectStatus.choices)
+    contract_file = models.FileField(upload_to='project_contracts/', null=True, blank=True)
     progress = models.PositiveIntegerField(default=0)
+    start_date = models.DateField(null=True, blank=True)
+    end_date = models.DateField(null=True, blank=True)
+    budget = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    target_installations = models.PositiveIntegerField(default=0)
+    target_female_pct = models.PositiveIntegerField(default=50)
+    target_vulnerable_pct = models.PositiveIntegerField(default=30)
+    target_beneficiaries = models.PositiveIntegerField(default=0)
+    deployment_team_roster = models.TextField(blank=True)
+    deployment_equipment_plan = models.TextField(blank=True)
+    deployment_work_schedule = models.TextField(blank=True)
     energy_output = models.FloatField(default=0)  # kWh
     uptime = models.FloatField(default=0)  # %
     gender_impact = models.FloatField(default=0)  # % female beneficiaries
@@ -46,6 +62,50 @@ class Milestone(models.Model):
 
     def __str__(self):
         return f"{self.project_id} - {self.name} ({self.percentage}%)"
+
+
+class ProjectUpdate(models.Model):
+    project = models.ForeignKey(Project, related_name='updates', on_delete=models.CASCADE)
+    author = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        related_name='project_updates',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    title = models.CharField(max_length=255, blank=True)
+    body = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        if self.title:
+            return f"{self.project_id} - {self.title}"
+        return f"{self.project_id} update {self.id}"
+
+
+class ProjectDocument(models.Model):
+    project = models.ForeignKey(Project, related_name='documents', on_delete=models.CASCADE)
+    uploaded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        related_name='project_documents',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    title = models.CharField(max_length=255, blank=True)
+    file = models.FileField(upload_to='project_documents/')
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-uploaded_at']
+
+    def __str__(self):
+        if self.title:
+            return f"{self.project_id} - {self.title}"
+        return f"{self.project_id} document {self.id}"
 
 
 class PaymentClaimStatus(models.TextChoices):

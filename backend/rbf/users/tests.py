@@ -1,6 +1,7 @@
 import re
 
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.core import mail
 from django.core.management import call_command
 from django.test import override_settings
@@ -27,6 +28,7 @@ class UserApiTests(APITestCase):
             "gender": "Female",
             "role": "Digital Admin",
             "region": "Maseru",
+            "mobile_number": "26655555555",
             "organization_name": "RBF Office",
             "organization_type": "Government",
             "technology_types": ["SHS"],
@@ -84,6 +86,9 @@ class UserApiTests(APITestCase):
                 "email": "api@example.com",
                 "role": "Digital Admin",
                 "status": "Active",
+                "gender": "Male",
+                "region": "Maseru",
+                "mobile_number": "26655555555",
             },
             format="json",
         )
@@ -98,7 +103,8 @@ class UserApiTests(APITestCase):
         self.assertEqual(login_response.status_code, status.HTTP_200_OK)
         self.assertIn("access", login_response.data)
 
-    def test_pending_vendor_cannot_login(self):
+    def test_pending_vendor_can_login(self):
+        cache.set("registration_otp_verified:pending@example.com", True, timeout=300)
         self.client.post(
             "/api/users/",
             {
@@ -107,6 +113,17 @@ class UserApiTests(APITestCase):
                 "email": "pending@example.com",
                 "role": "Vendor",
                 "status": "Pending",
+                "full_name": "Pending Vendor",
+                "gender": "Female",
+                "region": "Maseru",
+                "mobile_number": "26655555555",
+                "national_id": "ID-123",
+                "address": "Maseru HQ",
+                "organization_name": "Pending Vendor Ltd",
+                "organization_type": "Private",
+                "technology_types": ["SHS"],
+                "registration_certificate_name": "reg.pdf",
+                "tax_id": "TIN-123",
             },
             format="json",
         )
@@ -117,7 +134,8 @@ class UserApiTests(APITestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("access", response.data)
 
     def test_invalid_credentials_are_rejected(self):
         response = self.client.post(
@@ -128,6 +146,7 @@ class UserApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
 
     def test_vendor_defaults_to_pending_on_registration(self):
+        cache.set("registration_otp_verified:new_vendor_default_pending@example.com", True, timeout=300)
         create_response = self.client.post(
             "/api/users/",
             {
@@ -135,6 +154,17 @@ class UserApiTests(APITestCase):
                 "password": "securePass123",
                 "email": "new_vendor_default_pending@example.com",
                 "role": "Vendor",
+                "full_name": "New Vendor",
+                "gender": "Male",
+                "region": "Maseru",
+                "mobile_number": "26655555555",
+                "national_id": "ID-234",
+                "address": "Maseru HQ",
+                "organization_name": "New Vendor Ltd",
+                "organization_type": "Private",
+                "technology_types": ["SHS"],
+                "registration_certificate_name": "reg.pdf",
+                "tax_id": "TIN-234",
             },
             format="json",
         )
@@ -276,6 +306,9 @@ class UserApiTests(APITestCase):
             "password": "securePass123",
             "email": "unauth@example.com",
             "role": "Digital Admin",
+            "gender": "Male",
+            "region": "Maseru",
+            "mobile_number": "26655555555",
         }
 
         response = self.client.post("/api/users/", payload, format="json")
@@ -314,6 +347,9 @@ class UserApiTests(APITestCase):
                 "password": "securePass123",
                 "email": "public-admin@example.com",
                 "role": "Digital Admin",
+                "gender": "Male",
+                "region": "Maseru",
+                "mobile_number": "26655555555",
             },
             format="json",
         )
@@ -327,12 +363,18 @@ class UserApiTests(APITestCase):
             password="securePass123",
             role="Vendor",
             status="Active",
+            gender="Male",
+            region="Maseru",
+            mobile_number="26655555555",
         )
         reviewer = User.objects.create_user(
             username="prequal_reviewer",
             password="securePass123",
             role="RBF Official",
             status="Active",
+            gender="Female",
+            region="Maseru",
+            mobile_number="26655555555",
         )
 
         self.client.force_authenticate(vendor)

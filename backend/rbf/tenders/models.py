@@ -1,4 +1,6 @@
 from django.db import models
+from django.conf import settings
+from django.utils import timezone
 
 
 class TenderStatus(models.TextChoices):
@@ -7,6 +9,15 @@ class TenderStatus(models.TextChoices):
     EVALUATION = 'Evaluation'
     AWARDED = 'Awarded'
     CLOSED = 'Closed'
+
+
+class BidStatus(models.TextChoices):
+    DRAFT = 'Draft'
+    SUBMITTED = 'Submitted'
+    UNDER_REVIEW = 'Under Review'
+    ACCEPTED = 'Accepted'
+    REJECTED = 'Rejected'
+    WITHDRAWN = 'Withdrawn'
 
 
 class Tender(models.Model):
@@ -38,6 +49,13 @@ class Tender(models.Model):
     contact_details = models.CharField(max_length=255, blank=True)
     technology_types = models.JSONField(default=list, blank=True)
     target_site_type = models.CharField(max_length=64, blank=True)
+    schedule_file = models.FileField(upload_to='tender_schedules/', blank=True)
+    rfp_documents_file = models.FileField(upload_to='tender_documents/', blank=True)
+    milestone_payment_schedule_file = models.FileField(upload_to='tender_documents/', blank=True)
+    trading_license_file = models.FileField(upload_to='tender_documents/', blank=True)
+    tax_clearance_file = models.FileField(upload_to='tender_documents/', blank=True)
+    company_registration_file = models.FileField(upload_to='tender_documents/', blank=True)
+    experience_portfolio_file = models.FileField(upload_to='tender_documents/', blank=True)
     is_verified = models.BooleanField(default=False)
     funding_source = models.CharField(max_length=128, blank=True)
     awarded_vendor_id = models.CharField(max_length=64, blank=True)
@@ -45,9 +63,161 @@ class Tender(models.Model):
     verified_at = models.DateTimeField(null=True, blank=True)
     published_at = models.DateTimeField(null=True, blank=True)
     awarded_at = models.DateTimeField(null=True, blank=True)
+    closed_at = models.DateTimeField(null=True, blank=True)
+
+    # Security verification fields
+    security_deposit_verified = models.BooleanField(default=False)
+    security_deposit_verified_at = models.DateTimeField(null=True, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['status', 'created_at']),
+            models.Index(fields=['deadline']),
+            models.Index(fields=['department']),
+            models.Index(fields=['category']),
+        ]
+
     def __str__(self):
         return f"{self.reference_number} - {self.name}"
+
+
+class TenderBid(models.Model):
+    """Track vendor bids/submissions for tenders"""
+    tender = models.ForeignKey(Tender, on_delete=models.CASCADE, related_name='bids')
+    vendor_id = models.CharField(max_length=64)
+    vendor_name = models.CharField(max_length=255)
+    vendor_email = models.EmailField(blank=True)
+    
+    # Bid content
+    bid_amount = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    proposal_file = models.FileField(upload_to='tender_bids/', null=True, blank=True)
+    stage = models.CharField(max_length=64, blank=True)  # e.g., "Pre-Qualification", "Site-Specific"
+    concept_note = models.TextField(blank=True)  # For Stage 1
+    technical_proposal = models.TextField(blank=True)  # For Stage 2
+    financial_proposal = models.TextField(blank=True)  # For Stage 2
+    technical_proposal_file = models.FileField(upload_to='tender_bids/', null=True, blank=True)
+    financial_proposal_file = models.FileField(upload_to='tender_bids/', null=True, blank=True)
+    boq_file = models.FileField(upload_to='tender_bids/', null=True, blank=True)
+    gender_action_plan_file = models.FileField(upload_to='tender_bids/', null=True, blank=True)
+    implementation_plan_file = models.FileField(upload_to='tender_bids/', null=True, blank=True)
+    
+    # Metadata
+    version_number = models.PositiveIntegerField(default=1)
+    status = models.CharField(max_length=32, choices=BidStatus.choices, default=BidStatus.DRAFT)
+    submitted_at = models.DateTimeField(auto_now_add=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    reviewed_by = models.CharField(max_length=255, blank=True)
+    rejection_reason = models.TextField(blank=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-submitted_at']
+        unique_together = ('tender', 'vendor_id', 'version_number')
+        indexes = [
+            models.Index(fields=['tender', 'status']),
+            models.Index(fields=['vendor_id']),
+            models.Index(fields=['status']),
+            models.Index(fields=['tender', 'vendor_id', 'version_number']),
+        ]
+
+    def __str__(self):
+        return f"Bid from {self.vendor_name} for {self.tender.reference_number}"
+
+
+class EvaluationStatus(models.TextChoices):
+    PENDING = 'Pending'
+    SCORED = 'Scored'
+
+
+class TenderBidEvaluation(models.Model):
+    bid = models.ForeignKey(TenderBid, on_delete=models.CASCADE, related_name='evaluations')
+    evaluator = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL)
+    status = models.CharField(max_length=16, choices=EvaluationStatus.choices, default=EvaluationStatus.PENDING)
+    technical_score = models.PositiveIntegerField(default=0)
+    financial_score = models.PositiveIntegerField(default=0)
+    feasibility_score = models.PositiveIntegerField(default=0)
+    kpi_score = models.PositiveIntegerField(default=0)
+    gender_score = models.PositiveIntegerField(default=0)
+    environmental_score = models.PositiveIntegerField(default=0)
+    om_score = models.PositiveIntegerField(default=0)
+    inclusivity_score = models.PositiveIntegerField(default=0)
+    total_score = models.PositiveIntegerField(default=0)
+    comments = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['status']),
+            models.Index(fields=['bid']),
+        ]
+
+    def __str__(self):
+        return f"Evaluation for bid {self.bid_id} ({self.status})"
+
+
+class ContractStatus(models.TextChoices):
+    GENERATED = 'Generated'
+    SUBMITTED = 'Submitted'
+    SIGNED = 'Signed'
+    APPROVED = 'Approved'
+    REJECTED = 'Rejected'
+
+
+class TenderContract(models.Model):
+    tender = models.ForeignKey(Tender, on_delete=models.CASCADE, related_name='contracts')
+    bid = models.ForeignKey(TenderBid, null=True, blank=True, on_delete=models.SET_NULL, related_name='contracts')
+    vendor_id = models.CharField(max_length=64)
+    vendor_name = models.CharField(max_length=255)
+    vendor_email = models.EmailField(blank=True)
+    reference_number = models.CharField(max_length=64, unique=True)
+    template_name = models.CharField(max_length=255, blank=True)
+    status = models.CharField(max_length=16, choices=ContractStatus.choices, default=ContractStatus.GENERATED)
+    generated_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    signed_file = models.FileField(upload_to='tender_contracts/', null=True, blank=True)
+    signed_at = models.DateTimeField(null=True, blank=True)
+    approved_at = models.DateTimeField(null=True, blank=True)
+    approved_by = models.CharField(max_length=255, blank=True)
+    rejection_reason = models.TextField(blank=True)
+    milestone_plan_id = models.CharField(max_length=64, blank=True)
+    project_id = models.CharField(max_length=64, blank=True)
+
+    class Meta:
+        ordering = ['-generated_at']
+        indexes = [
+            models.Index(fields=['status']),
+            models.Index(fields=['tender', 'vendor_id']),
+        ]
+
+    def __str__(self):
+        return f"Contract {self.reference_number} ({self.status})"
+
+
+class TenderBidSite(models.Model):
+    bid = models.ForeignKey(TenderBid, on_delete=models.CASCADE, related_name='sites')
+    site_name = models.CharField(max_length=255)
+    district = models.CharField(max_length=128, blank=True)
+    latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    system_configuration = models.JSONField(default=dict, blank=True)
+    boq_items = models.JSONField(default=list, blank=True)
+    notes = models.TextField(blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['id']
+        indexes = [
+            models.Index(fields=['bid']),
+        ]
+
+    def __str__(self):
+        return f"{self.site_name} ({self.bid.tender.reference_number})"

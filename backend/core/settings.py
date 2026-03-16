@@ -91,6 +91,8 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
 if DEBUG:
     STATICFILES_STORAGE = 'django.contrib.staticfiles.storage.StaticFilesStorage'
 else:
@@ -141,6 +143,9 @@ if not CORS_ALLOW_ALL_ORIGINS:
 
 CSRF_TRUSTED_ORIGINS = env.list('CSRF_TRUSTED_ORIGINS', default=[])
 
+# Frontend URL for email notifications
+FRONTEND_URL = env('FRONTEND_URL', default='http://localhost:5173')
+
 if DEBUG:
     SECURE_SSL_REDIRECT = False
     SESSION_COOKIE_SECURE = False
@@ -179,6 +184,14 @@ LOGGING = {
         'handlers': ['console'],
         'level': LOG_LEVEL,
     },
+}
+
+# Cache (OTP & other short-lived state)
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+        'LOCATION': env('REDIS_URL', default='redis://localhost:6379/0'),
+    }
 }
 
 # Email / OTP

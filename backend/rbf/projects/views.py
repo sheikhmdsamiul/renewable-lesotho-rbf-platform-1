@@ -11,6 +11,8 @@ from django_filters.rest_framework import DjangoFilterBackend
 from .models import (
     Project,
     Milestone,
+    ProjectUpdate,
+    ProjectDocument,
     PaymentClaim,
     PaymentClaimStatus,
     Disbursement,
@@ -20,6 +22,8 @@ from .models import (
 from .serializers import (
     ProjectSerializer,
     MilestoneSerializer,
+    ProjectUpdateSerializer,
+    ProjectDocumentSerializer,
     PaymentClaimSerializer,
     DisbursementSerializer,
     AuditLogSerializer,
@@ -38,18 +42,18 @@ def vendor_query_filter(user, prefix: str = ''):
 
 
 class ProjectViewSet(viewsets.ModelViewSet):
-    queryset = Project.objects.all().order_by('id')
+    queryset = Project.objects.select_related('tender').prefetch_related('milestones').all().order_by('id')
     serializer_class = ProjectSerializer
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    filterset_fields = ['status', 'tech_type', 'region']
+    filterset_fields = ['status', 'tech_type', 'region', 'district']
     search_fields = ['vendor_name', 'vendor_id']
     ordering_fields = ['progress', 'energy_output', 'uptime', 'gender_impact']
 
     WRITE_ROLES = {UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.DOE_OFFICER, UserRole.VENDOR}
 
     def get_queryset(self):
-        qs = Project.objects.all().order_by('id')
+        qs = Project.objects.select_related('tender').prefetch_related('milestones').all().order_by('id')
         user = self.request.user
         if user.role != UserRole.VENDOR:
             return qs
@@ -60,16 +64,30 @@ class ProjectViewSet(viewsets.ModelViewSet):
         if user.role not in self.WRITE_ROLES:
             raise PermissionDenied('You do not have permission to modify projects.')
 
+    def _enforce_vendor_locked_fields(self, data):
+        allowed = {
+            'deployment_team_roster',
+            'deployment_equipment_plan',
+            'deployment_work_schedule',
+        }
+        attempted = {key for key in data.keys() if key not in allowed}
+        if attempted:
+            raise PermissionDenied('Only deployment planning fields can be updated by vendors.')
+
     def create(self, request, *args, **kwargs):
         self._assert_write_permission()
         return super().create(request, *args, **kwargs)
 
     def update(self, request, *args, **kwargs):
         self._assert_write_permission()
+        if request.user.role == UserRole.VENDOR:
+            self._enforce_vendor_locked_fields(request.data)
         return super().update(request, *args, **kwargs)
 
     def partial_update(self, request, *args, **kwargs):
         self._assert_write_permission()
+        if request.user.role == UserRole.VENDOR:
+            self._enforce_vendor_locked_fields(request.data)
         return super().partial_update(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
@@ -103,6 +121,110 @@ class MilestoneViewSet(viewsets.ModelViewSet):
     def create(self, request, *args, **kwargs):
         self._assert_write_permission()
         return super().create(request, *args, **kwargs)
+
+    def update(self, request, *args, **kwargs):
+        self._assert_write_permission()
+        return super().update(request, *args, **kwargs)
+
+    def partial_update(self, request, *args, **kwargs):
+        self._assert_write_permission()
+        return super().partial_update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        self._assert_write_permission()
+        return super().destroy(request, *args, **kwargs)
+
+
+class ProjectUpdateViewSet(viewsets.ModelViewSet):
+    queryset = ProjectUpdate.objects.select_related('project', 'author').all()
+    serializer_class = ProjectUpdateSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['project']
+    search_fields = ['title', 'body']
+    ordering_fields = ['created_at']
+
+    WRITE_ROLES = {UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.DOE_OFFICER, UserRole.VENDOR}
+
+    def get_queryset(self):
+        qs = ProjectUpdate.objects.select_related('project', 'author').all()
+        user = self.request.user
+        if user.role != UserRole.VENDOR:
+            return qs
+        return qs.filter(vendor_query_filter(user, prefix='project__')).distinct()
+
+    def _assert_write_permission(self):
+        user = self.request.user
+        if user.role not in self.WRITE_ROLES:
+            raise PermissionDenied('You do not have permission to modify project updates.')
+
+    def _assert_project_access(self, project_id: str):
+        if not project_id:
+            raise PermissionDenied('project is required.')
+        if not Project.objects.filter(id=project_id).exists():
+            raise PermissionDenied('project not found.')
+        if self.request.user.role == UserRole.VENDOR:
+            if not Project.objects.filter(id=project_id).filter(vendor_query_filter(self.request.user)).exists():
+                raise PermissionDenied('You can only update your own projects.')
+
+    def perform_create(self, serializer):
+        self._assert_write_permission()
+        project_id = str(serializer.validated_data.get('project').id) if serializer.validated_data.get('project') else ''
+        self._assert_project_access(project_id)
+        update = serializer.save(author=self.request.user)
+        log_audit(self.request.user, 'project_update_added', update, {'project_id': project_id})
+
+    def update(self, request, *args, **kwargs):
+        self._assert_write_permission()
+        return super().update(request, *args, **kwargs)
+
+    def partial_update(self, request, *args, **kwargs):
+        self._assert_write_permission()
+        return super().partial_update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        self._assert_write_permission()
+        return super().destroy(request, *args, **kwargs)
+
+
+class ProjectDocumentViewSet(viewsets.ModelViewSet):
+    queryset = ProjectDocument.objects.select_related('project', 'uploaded_by').all()
+    serializer_class = ProjectDocumentSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['project']
+    search_fields = ['title']
+    ordering_fields = ['uploaded_at']
+
+    WRITE_ROLES = {UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.DOE_OFFICER, UserRole.VENDOR}
+
+    def get_queryset(self):
+        qs = ProjectDocument.objects.select_related('project', 'uploaded_by').all()
+        user = self.request.user
+        if user.role != UserRole.VENDOR:
+            return qs
+        return qs.filter(vendor_query_filter(user, prefix='project__')).distinct()
+
+    def _assert_write_permission(self):
+        user = self.request.user
+        if user.role not in self.WRITE_ROLES:
+            raise PermissionDenied('You do not have permission to modify project documents.')
+
+    def _assert_project_access(self, project_id: str):
+        if not project_id:
+            raise PermissionDenied('project is required.')
+        if not Project.objects.filter(id=project_id).exists():
+            raise PermissionDenied('project not found.')
+        if self.request.user.role == UserRole.VENDOR:
+            if not Project.objects.filter(id=project_id).filter(vendor_query_filter(self.request.user)).exists():
+                raise PermissionDenied('You can only update your own projects.')
+
+    def perform_create(self, serializer):
+        self._assert_write_permission()
+        project_id = str(serializer.validated_data.get('project').id) if serializer.validated_data.get('project') else ''
+        self._assert_project_access(project_id)
+        document = serializer.save(uploaded_by=self.request.user)
+        log_audit(self.request.user, 'project_document_uploaded', document, {'project_id': project_id})
 
     def update(self, request, *args, **kwargs):
         self._assert_write_permission()

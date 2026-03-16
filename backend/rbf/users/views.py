@@ -1,5 +1,6 @@
 import random
 import string
+import time
 
 from django.conf import settings
 from django.core.cache import cache
@@ -12,11 +13,16 @@ from rest_framework.views import APIView
 from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
+from rest_framework.parsers import MultiPartParser, FormParser
 from django.utils import timezone
 from drf_spectacular.utils import extend_schema
 from rest_framework.exceptions import APIException
 from rest_framework_simplejwt.views import TokenObtainPairView
 from .models import User, UserRole, VendorPrequalification, PrequalificationStatus
+
+# Simple in-process OTP fallback store for dev/local environments.
+# Key: cache key, Value: (otp, expires_at_epoch)
+_OTP_FALLBACK = {}
 from .serializers import UserSerializer, CustomTokenObtainPairSerializer, VendorPrequalificationSerializer
 from rbf.projects.audit import log_audit
 
@@ -44,6 +50,70 @@ class IsReviewerRole:
 class UserViewSet(viewsets.ModelViewSet):
     queryset = User.objects.all().order_by('-id')
     serializer_class = UserSerializer
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['cache'] = cache
+        return context
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        user = serializer.instance
+        headers = self.get_success_headers(serializer.data)
+
+        data = dict(serializer.data)
+        generated_password = getattr(serializer, 'generated_password', None)
+        email_configured = bool(settings.EMAIL_HOST_USER and settings.EMAIL_HOST_PASSWORD)
+        email_error = None
+        if generated_password and user.email:
+            subject = 'Your RBF Digital Platform account'
+            message = (
+                f'Hello {user.full_name or user.username},\n\n'
+                f'Your account has been created for the Renewable Lesotho RBF platform.\n'
+                f'Username: {user.username}\n'
+                f'Temporary password: {generated_password}\n\n'
+                'Please log in and change your password immediately.'
+            )
+            if email_configured:
+                try:
+                    send_mail(
+                        subject=subject,
+                        message=message,
+                        from_email=settings.DEFAULT_FROM_EMAIL,
+                        recipient_list=[user.email],
+                        fail_silently=False,
+                    )
+                except Exception as exc:
+                    email_error = str(exc)
+            else:
+                email_error = 'Email service is not configured.'
+
+        if settings.DEBUG and generated_password:
+            data['initial_password'] = generated_password
+            if email_error:
+                data['email_error'] = email_error
+
+        log_audit(
+            request.user if getattr(request.user, 'is_authenticated', False) else None,
+            'user_account_created',
+            user,
+            {
+                'role': user.role,
+                'region': user.region,
+                'tier_assignment': user.tier_assignment,
+                'verification_zone': user.verification_zone,
+            },
+        )
+
+        return Response(data, status=status.HTTP_201_CREATED, headers=headers)
+
+    def perform_create(self, serializer):
+        user = serializer.save()
+        if user.role != UserRole.VENDOR and not user.must_change_password:
+            user.must_change_password = True
+            user.save(update_fields=['must_change_password'])
 
     def get_permissions(self):
         if self.action == 'create':
@@ -88,12 +158,13 @@ class VendorPrequalificationViewSet(viewsets.ModelViewSet):
     queryset = VendorPrequalification.objects.select_related('vendor', 'reviewed_by').all()
     serializer_class = VendorPrequalificationSerializer
     permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser, *viewsets.ModelViewSet.parser_classes]
 
     def get_queryset(self):
         user = self.request.user
         if IsReviewerRole.check(user):
-            return self.queryset
-        return self.queryset.filter(vendor=user)
+            return self.queryset.order_by('-submitted_at', '-id')
+        return self.queryset.filter(vendor=user).order_by('-submitted_at', '-id')
 
     def create(self, request, *args, **kwargs):
         if request.user.role != UserRole.VENDOR:
@@ -170,37 +241,10 @@ class VendorPrequalificationViewSet(viewsets.ModelViewSet):
 class LoginView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer
 
-    DEMO_USERNAMES = {
-        'vendor_approved',
-        'admin_user',
-        'rbf_official',
-        'tac_member',
-        'doe_officer',
-        'field_verifier',
-        'donor_user',
-        'auditor_user',
-    }
-
     def post(self, request, *args, **kwargs):
-        username = (request.data.get('username') or '').strip()
-        try:
-            response = super().post(request, *args, **kwargs)
-        except APIException as exc:
-            if settings.DEBUG and username in self.DEMO_USERNAMES:
-                call_command('seed_demo_users')
-                return super().post(request, *args, **kwargs)
-            raise
-
-        # In debug/local setups, keep demo credentials usable even if DB was reset
-        if (
-            settings.DEBUG
-            and username in self.DEMO_USERNAMES
-            and response.status_code == status.HTTP_401_UNAUTHORIZED
-        ):
-            call_command('seed_demo_users')
-            response = super().post(request, *args, **kwargs)
-
-        return response
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        return Response(serializer.validated_data, status=status.HTTP_200_OK)
 
 
 class RequestRegistrationOtpView(APIView):
@@ -214,9 +258,15 @@ class RequestRegistrationOtpView(APIView):
         otp_length = max(4, int(getattr(settings, 'OTP_LENGTH', 6)))
         otp = ''.join(random.choices(string.digits, k=otp_length))
         cache_key = f'registration_otp:{email}'
-        cache.set(cache_key, otp, timeout=int(getattr(settings, 'OTP_EXPIRY_SECONDS', 300)))
+        otp_timeout = int(getattr(settings, 'OTP_EXPIRY_SECONDS', 300))
+        # Cache is preferred, but keep a local fallback for dev/local setups.
+        try:
+            cache.set(cache_key, otp, timeout=otp_timeout)
+        except Exception:
+            pass
+        _OTP_FALLBACK[cache_key] = (otp, time.time() + otp_timeout)
 
-        expiry_minutes = max(1, int(getattr(settings, 'OTP_EXPIRY_SECONDS', 300)) // 60)
+        expiry_minutes = max(1, otp_timeout // 60)
         subject = 'Your RBF registration OTP'
         message = (
             f'Your OTP for Renewable Lesotho RBF registration is: {otp}\n'
@@ -267,13 +317,41 @@ class VerifyRegistrationOtpView(APIView):
             return Response({'detail': 'Email and OTP are required.'}, status=status.HTTP_400_BAD_REQUEST)
 
         cache_key = f'registration_otp:{email}'
-        expected = cache.get(cache_key)
+        expected = None
+        try:
+            expected = cache.get(cache_key)
+        except Exception:
+            expected = None
+        if expected is None:
+            # Fallback: handle cache version mismatch if any
+            try:
+                expected = cache.get(cache_key, version=0)
+            except Exception:
+                expected = None
+        if expected is None:
+            fallback = _OTP_FALLBACK.get(cache_key)
+            if fallback:
+                fallback_otp, fallback_expires = fallback
+                if time.time() <= fallback_expires:
+                    expected = fallback_otp
+                else:
+                    _OTP_FALLBACK.pop(cache_key, None)
         if expected is None:
             return Response({'detail': 'OTP has expired. Please request a new one.'}, status=status.HTTP_400_BAD_REQUEST)
         if otp != expected:
             return Response({'detail': 'Invalid OTP.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        cache.delete(cache_key)
+        try:
+            cache.delete(cache_key)
+        except Exception:
+            pass
+        _OTP_FALLBACK.pop(cache_key, None)
+        verified_key = f'registration_otp_verified:{email}'
+        verified_timeout = int(getattr(settings, 'OTP_VERIFIED_SECONDS', 1800))
+        try:
+            cache.set(verified_key, True, timeout=verified_timeout)
+        except Exception:
+            pass
         return Response({'detail': 'OTP verified.'}, status=status.HTTP_200_OK)
 
 

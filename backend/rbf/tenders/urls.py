@@ -1,7 +1,10 @@
 from rest_framework.routers import DefaultRouter
-from .views import TenderViewSet
+from .views import TenderViewSet, TenderBidViewSet, TenderBidEvaluationViewSet, TenderContractViewSet
 
 router = DefaultRouter()
-router.register(r'', TenderViewSet, basename='tender')
+router.register(r'tenders', TenderViewSet, basename='tender')
+router.register(r'tender-bids', TenderBidViewSet, basename='tender-bid')
+router.register(r'tender-bid-evaluations', TenderBidEvaluationViewSet, basename='tender-bid-evaluation')
+router.register(r'tender-contracts', TenderContractViewSet, basename='tender-contract')
 
 urlpatterns = router.urls

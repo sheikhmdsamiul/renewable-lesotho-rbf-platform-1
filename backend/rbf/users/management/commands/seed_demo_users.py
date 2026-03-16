@@ -5,19 +5,6 @@ from rbf.users.models import User, UserRole
 
 DEMO_USERS = [
     {
-        'username': 'vendor_approved',
-        'password': 'Vendor@1234',
-        'email': 'vendor.approved@rbf.ls',
-        'full_name': 'Approved Vendor',
-        'role': UserRole.VENDOR,
-        'status': 'Active',
-        'gender': 'Female',
-        'organization_name': 'Lesotho Solar Solutions',
-        'organization_type': 'Private',
-        'technology_types': ['SHS', 'Mini-Grid'],
-        'region': 'Maseru',
-    },
-    {
         'username': 'admin_user',
         'password': 'Admin@1234',
         'email': 'admin@rbf.ls',
@@ -26,6 +13,7 @@ DEMO_USERS = [
         'status': 'Active',
         'gender': 'Male',
         'region': 'All',
+        'mobile_number': '26655555555',
     },
     {
         'username': 'rbf_official',
@@ -36,6 +24,7 @@ DEMO_USERS = [
         'status': 'Active',
         'gender': 'Male',
         'region': 'Maseru',
+        'mobile_number': '26655555555',
     },
     {
         'username': 'tac_member',
@@ -46,6 +35,7 @@ DEMO_USERS = [
         'status': 'Active',
         'gender': 'Female',
         'region': 'Leribe',
+        'mobile_number': '26655555555',
     },
     {
         'username': 'doe_officer',
@@ -56,6 +46,7 @@ DEMO_USERS = [
         'status': 'Active',
         'gender': 'Male',
         'region': 'Berea',
+        'mobile_number': '26655555555',
     },
     {
         'username': 'field_verifier',
@@ -66,6 +57,8 @@ DEMO_USERS = [
         'status': 'Active',
         'gender': 'Female',
         'region': 'Mokhotlong',
+        'mobile_number': '26655555555',
+        'verification_zone': 'Mokhotlong Zone A',
     },
     {
         'username': 'donor_user',
@@ -76,6 +69,7 @@ DEMO_USERS = [
         'status': 'Active',
         'gender': 'Other',
         'region': 'All',
+        'mobile_number': '26655555555',
     },
     {
         'username': 'auditor_user',
@@ -86,6 +80,7 @@ DEMO_USERS = [
         'status': 'Active',
         'gender': 'Male',
         'region': 'Quthing',
+        'mobile_number': '26655555555',
     },
 ]
 
@@ -105,9 +100,17 @@ class Command(BaseCommand):
                 'gender': '',
                 'role': UserRole.VENDOR,
                 'region': '',
+                'mobile_number': '',
+                'national_id': '',
+                'address': '',
                 'organization_name': '',
                 'organization_type': '',
                 'technology_types': [],
+                'registration_certificate_name': '',
+                'tax_id': '',
+                'device_id': '',
+                'tier_assignment': '',
+                'verification_zone': '',
                 'status': 'Active',
             }
             for field, fallback in field_defaults.items():
@@ -122,6 +125,9 @@ class Command(BaseCommand):
                 created += 1
             else:
                 updated += 1
+
+        # Explicitly remove the vendor demo user if it exists.
+        User.objects.filter(username='vendor_approved').delete()
 
         self.stdout.write(
             self.style.SUCCESS(

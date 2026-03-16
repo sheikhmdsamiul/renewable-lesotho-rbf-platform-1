@@ -7,7 +7,10 @@ from .models import User
 class UserAdmin(BaseUserAdmin):
     fieldsets = BaseUserAdmin.fieldsets + (
         ('Profile', {'fields': (
-            'full_name', 'gender', 'role', 'region', 'organization_name',
-            'organization_type', 'technology_types', 'status', 'must_change_password'
+            'full_name', 'gender', 'role', 'region', 'mobile_number', 'national_id', 'address',
+            'organization_name', 'organization_type', 'technology_types',
+            'registration_certificate_name', 'tax_id', 'device_id',
+            'tier_assignment', 'verification_zone',
+            'status', 'must_change_password'
         )}),
     )

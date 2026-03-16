@@ -22,6 +22,15 @@ export enum TenderStatus {
   CLOSED = "Closed",
 }
 
+export enum BidStatus {
+  DRAFT = "Draft",
+  SUBMITTED = "Submitted",
+  UNDER_REVIEW = "Under Review",
+  ACCEPTED = "Accepted",
+  REJECTED = "Rejected",
+  WITHDRAWN = "Withdrawn",
+}
+
 export enum ProjectStatus {
   PRE_QUALIFICATION = "Pre-Qualification",
   SITE_SPECIFIC = "Site-Specific Proposal",
@@ -63,16 +72,92 @@ export interface Tender {
   targetSiteType?: "Household" | "Business" | "School" | "Clinic";
   isVerified?: boolean;
   fundingSource?: string;
+  scheduleFile?: string;
+  rfpDocumentsFile?: string;
+  milestonePaymentScheduleFile?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  publishedAt?: string;
+  verifiedAt?: string;
+  awardedAt?: string;
+  closedAt?: string;
+  awardedVendorName?: string;
+  awardedVendorId?: string;
+  bidCount?: number;
+}
+
+export interface TenderBidSite {
+  id?: string;
+  siteName: string;
+  district?: string;
+  latitude?: number;
+  longitude?: number;
+  systemConfiguration?: Record<string, any>;
+  boqItems?: Array<Record<string, any>>;
+  notes?: string;
+}
+
+export interface TenderBid {
+  id: string;
+  tender: string;
+  tender_reference?: string;
+  tender_name?: string;
+  vendor_id: string;
+  vendor_name: string;
+  vendor_email?: string;
+  bid_amount?: number;
+  stage?: string;
+  concept_note?: string;
+  technical_proposal?: string;
+  financial_proposal?: string;
+  technical_proposal_file?: string;
+  financial_proposal_file?: string;
+  boq_file?: string;
+  gender_action_plan_file?: string;
+  implementation_plan_file?: string;
+  status: BidStatus;
+  version_number: number;
+  submitted_at?: string;
+  reviewed_at?: string;
+  reviewed_by?: string;
+  rejection_reason?: string;
+  sites?: TenderBidSite[];
 }
 
 export interface Project {
   id: string;
+  tenderId?: string;
+  projectTitle?: string;
+  projectReference?: string;
+  tenderReferenceNumber?: string;
+  tenderName?: string;
+  tenderBudget?: number;
+  tenderDeadline?: string;
+  tenderAwardedAt?: string;
+  tenderStatus?: string;
+  contractReference?: string;
+  contractStatus?: string;
+  contractSignedFile?: string;
+  milestoneTotalAmount?: number;
+  milestoneCount?: number;
+  milestonePlanId?: string;
   vendorId: string;
   vendorName: string;
   techType: string;
   region: string;
+  district?: string;
   status: ProjectStatus;
   progress: number;
+  startDate?: string;
+  endDate?: string;
+  budget?: number;
+  targetInstallations?: number;
+  targetFemalePct?: number;
+  targetVulnerablePct?: number;
+  targetBeneficiaries?: number;
+  deploymentTeamRoster?: string;
+  deploymentEquipmentPlan?: string;
+  deploymentWorkSchedule?: string;
   energyOutput: number; // kWh
   uptime: number; // %
   genderImpact: number; // % female beneficiaries
@@ -85,11 +170,61 @@ export interface User {
   role: UserRole;
   gender: "Male" | "Female" | "Other";
   region?: string;
+  mobileNumber?: string;
+  nationalId?: string;
+  address?: string;
   organizationName?: string;
   organizationType?: string;
   technologyTypes?: string[];
+  registrationCertificateName?: string;
+  taxId?: string;
+  deviceId?: string;
+  tierAssignment?: string;
+  verificationZone?: string;
   status: "Active" | "Pending" | "Inactive";
   mustChangePassword?: boolean;
+  vendorTag?: string | null;
+}
+
+export interface TenderBidEvaluation {
+  id: string;
+  bid: string;
+  evaluator?: string;
+  evaluatorUsername?: string;
+  status: "Pending" | "Scored";
+  technicalScore: number;
+  financialScore: number;
+  feasibilityScore: number;
+  kpiScore: number;
+  genderScore: number;
+  environmentalScore: number;
+  omScore: number;
+  inclusivityScore: number;
+  totalScore: number;
+  comments?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface TenderContract {
+  id: string;
+  tender: string;
+  bid?: string;
+  vendorId: string;
+  vendorName: string;
+  vendorEmail?: string;
+  referenceNumber: string;
+  templateName?: string;
+  status: "Generated" | "Submitted" | "Signed" | "Approved" | "Rejected";
+  signedFile?: string;
+  signedAt?: string;
+  approvedAt?: string;
+  approvedBy?: string;
+  rejectionReason?: string;
+  milestonePlanId?: string;
+  projectId?: string;
+  generatedAt?: string;
+  updatedAt?: string;
 }
 
 export interface Milestone {
@@ -99,6 +234,26 @@ export interface Milestone {
   percentage: number;
   status: "Pending" | "Submitted" | "Verified" | "Paid";
   amount: number;
+}
+
+export interface ProjectUpdate {
+  id: string;
+  projectId: string;
+  title?: string;
+  body: string;
+  author?: string;
+  authorUsername?: string;
+  createdAt: string;
+}
+
+export interface ProjectDocument {
+  id: string;
+  projectId: string;
+  title?: string;
+  file: string;
+  uploadedBy?: string;
+  uploadedByUsername?: string;
+  uploadedAt: string;
 }
 
 export enum NotificationChannel {
@@ -144,6 +299,11 @@ export interface VendorPrequalification {
   hqAddress?: string;
   technologyTypes: string[];
   registrationCertificateName?: string;
+  tradingLicense?: string; // File URL
+  registrationCertificate?: string; // File URL
+  taxComplianceCertificate?: string; // File URL
+  authorizedSignatoryId?: string; // File URL
+  experienceFinancialProof?: string; // File URL
   techTier?: string;
   yearsExperience: number;
   priorProjects: number;
@@ -151,6 +311,11 @@ export interface VendorPrequalification {
   districtsCovered: number;
   femaleBeneficiaryTarget: number;
   vulnerableGroupTarget: number;
+  bankAccountName?: string;
+  bankAccountNumber?: string;
+  contactNumber?: string;
+  email?: string;
+  genderOfFocalPerson?: string;
   declarationAccepted: boolean;
   reviewerComments?: string;
   status: PrequalificationStatus;
@@ -167,6 +332,11 @@ export interface VendorPrequalificationSubmission {
   hqAddress?: string;
   technologyTypes: string[];
   registrationCertificateName?: string;
+  tradingLicense?: File;
+  registrationCertificate?: File;
+  taxComplianceCertificate?: File;
+  authorizedSignatoryId?: File;
+  experienceFinancialProof?: File;
   techTier?: string;
   yearsExperience?: number;
   priorProjects?: number;
@@ -174,6 +344,11 @@ export interface VendorPrequalificationSubmission {
   districtsCovered?: number;
   femaleBeneficiaryTarget?: number;
   vulnerableGroupTarget?: number;
+  bankAccountName?: string;
+  bankAccountNumber?: string;
+  contactNumber?: string;
+  email?: string;
+  genderOfFocalPerson?: string;
   declarationAccepted: boolean;
 }
 

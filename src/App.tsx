@@ -24,9 +24,12 @@ import {
   CheckCircle2,
   AlertCircle,
   Clock,
+  HelpCircle,
   UserCircle,
+  Loader2,
   Menu,
   X,
+  XCircle,
   Mail,
   Lock,
   ShieldCheck,
@@ -65,17 +68,26 @@ import {
   Tender,
   Project,
   Milestone,
+  ProjectUpdate,
+  ProjectDocument,
   PaymentClaim,
   VendorPrequalification,
   Notification,
   NotificationChannel,
   NotificationStatus,
   User,
+  BidStatus,
+  TenderBid,
+  TenderBidSite,
+  TenderBidEvaluation,
+  TenderContract,
 } from "./types";
 import { MOCK_TENDERS, MOCK_NOTIFICATIONS } from "./constants";
 import {
   fetchTenders,
+  fetchTender,
   createTender,
+  updateTender,
   verifyTender,
   publishTender,
   awardTender,
@@ -87,6 +99,8 @@ import {
   fetchCurrentUser,
   requestRegistrationOtp,
   verifyRegistrationOtp,
+  updateUserPassword,
+  createOfficialAccount,
   fetchVendorPrequalifications,
   submitVendorPrequalification,
   startVendorPrequalificationReview,
@@ -99,6 +113,24 @@ import {
   payPaymentClaim,
   fetchProjects,
   fetchMilestones,
+  createMilestone,
+  fetchProjectUpdates,
+  createProjectUpdate,
+  fetchProjectDocuments,
+  uploadProjectDocument,
+  fetchTenderBids,
+  submitTenderBid,
+  updateTenderBid,
+  reviewTenderBid,
+  fetchBidEvaluations,
+  createBidEvaluation,
+  updateBidEvaluation,
+  fetchTenderContracts,
+  generateTenderContract,
+  signTenderContract,
+  approveTenderContract,
+  rejectTenderContract,
+  updateProject,
   API_BASE,
 } from "./api";
 
@@ -110,7 +142,7 @@ const SidebarItem = ({ icon: Icon, label, active, onClick, badge }: any) => (
     className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${
       active 
         ? "bg-emerald-600 text-white shadow-lg shadow-emerald-600/20" 
-        : "text-slate-500 hover:bg-slate-100 hover:text-slate-900"
+        : "text-blue-200 hover:bg-slate-700/40 hover:text-white"
     }`}
   >
     <Icon size={20} />
@@ -343,22 +375,42 @@ const Register = ({
     techTypes: [] as string[],
     address: "",
     taxId: "",
+    region: "Maseru",
+    deviceId: "",
   });
 
   const techOptions = ["SHS", "ICS", "Mini-grid", "SWP", "PUE"];
+  const districts = ["Maseru", "Leribe", "Berea", "Mafeteng", "Mohale's Hoek", "Quthing", "Qacha's Nek", "Mokhotlong", "Thaba-Tseka", "Butha-Buthe"];
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
+    const normalizedEmail = formData.email.trim().toLowerCase();
 
     if (step < 3) {
+      if (step === 1) {
+        const digits = formData.mobile.replace(/\D/g, "");
+        if (!/^\d{8,15}$/.test(digits)) {
+          setError("Mobile number must be 8-15 digits.");
+          return;
+        }
+      }
       if (step === 2) {
+        if (formData.techTypes.length === 0) {
+          setError("Please select at least one technology type.");
+          return;
+        }
+        if (!registrationCertName) {
+          setError("Please upload your registration certificate.");
+          return;
+        }
         try {
           setIsSubmitting(true);
-          const otpResp = await requestRegistrationOtp(formData.email.trim());
+          const otpResp = await requestRegistrationOtp(normalizedEmail);
           const debugNote = otpResp.debugOtp ? ` Debug OTP: ${otpResp.debugOtp}` : "";
           const emailWarn = otpResp.emailError ? " (email delivery failed, using debug OTP)" : "";
-          setOtpInfo(`OTP sent to ${formData.email.trim()}${emailWarn}.${debugNote}`);
+          setOtp("");
+          setOtpInfo(`OTP sent to ${normalizedEmail}${emailWarn}.${debugNote}`);
         } catch (err: any) {
           const raw = String(err?.message || "");
           const lower = raw.toLowerCase();
@@ -386,17 +438,23 @@ const Register = ({
 
     try {
       setIsSubmitting(true);
-      await verifyRegistrationOtp(formData.email.trim(), otp.trim());
+      await verifyRegistrationOtp(normalizedEmail, otp.trim());
       await registerVendor({
         username: formData.username.trim(),
         password: formData.password,
         fullName: formData.fullName,
-        email: formData.email,
+        email: normalizedEmail,
         gender: formData.gender as "Male" | "Female" | "Other",
+        mobileNumber: formData.mobile.replace(/\D/g, ""),
+        nationalId: formData.nationalId,
+        address: formData.address,
         organizationName: formData.orgName,
         organizationType: formData.orgType,
         technologyTypes: formData.techTypes,
-        region: "Maseru",
+        registrationCertificateName: registrationCertName,
+        taxId: formData.taxId,
+        deviceId: formData.deviceId || undefined,
+        region: formData.region,
       });
       onRegisterSuccess(formData.username.trim());
     } catch (err: any) {
@@ -468,7 +526,11 @@ const Register = ({
                   required
                   type="email"
                   value={formData.email}
-                  onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+                  onChange={(e) => {
+                    setFormData({ ...formData, email: e.target.value });
+                    setOtp("");
+                    setOtpInfo("");
+                  }}
                   className="input-field"
                   placeholder="john@example.com"
                 />
@@ -491,9 +553,13 @@ const Register = ({
                   required
                   type="tel"
                   value={formData.mobile}
-                  onChange={(e) => setFormData({ ...formData, mobile: e.target.value })}
+                  onChange={(e) => setFormData({ ...formData, mobile: e.target.value.replace(/\D/g, "") })}
                   className="input-field"
-                  placeholder="+266 ..."
+                  inputMode="numeric"
+                  pattern="[0-9]{8,15}"
+                  minLength={8}
+                  maxLength={15}
+                  placeholder="Digits only"
                 />
               </div>
               <div className="space-y-1">
@@ -524,6 +590,19 @@ const Register = ({
           ) : step === 2 ? (
             <div className="space-y-6">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="space-y-1">
+                  <label className="text-sm font-bold text-slate-700 ml-1">Assigned District/Region *</label>
+                  <select
+                    value={formData.region}
+                    onChange={(e) => setFormData({ ...formData, region: e.target.value })}
+                    className="input-field"
+                    required
+                  >
+                    {districts.map((district) => (
+                      <option key={district} value={district}>{district}</option>
+                    ))}
+                  </select>
+                </div>
                 <div className="space-y-1">
                   <label className="text-sm font-bold text-slate-700 ml-1">Organization Name *</label>
                   <input
@@ -568,6 +647,16 @@ const Register = ({
                     onChange={(e) => setFormData({ ...formData, address: e.target.value })}
                     className="input-field"
                     placeholder="Physical Address"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-sm font-bold text-slate-700 ml-1">Device ID (IMEI/MAC) (Optional)</label>
+                  <input
+                    type="text"
+                    value={formData.deviceId}
+                    onChange={(e) => setFormData({ ...formData, deviceId: e.target.value })}
+                    className="input-field"
+                    placeholder="Optional device identifier"
                   />
                 </div>
               </div>
@@ -650,10 +739,12 @@ const Register = ({
                     onClick={async () => {
                       try {
                         setIsSubmitting(true);
-                        const otpResp = await requestRegistrationOtp(formData.email.trim());
+                        const normalizedEmail = formData.email.trim().toLowerCase();
+                        const otpResp = await requestRegistrationOtp(normalizedEmail);
                         const debugNote = otpResp.debugOtp ? ` Debug OTP: ${otpResp.debugOtp}` : "";
                         const emailWarn = otpResp.emailError ? " (email delivery failed, using debug OTP)" : "";
-                        setOtpInfo(`OTP resent to ${formData.email.trim()}${emailWarn}.${debugNote}`);
+                        setOtp("");
+                        setOtpInfo(`OTP resent to ${normalizedEmail}${emailWarn}.${debugNote}`);
                         setError("");
                       } catch (err: any) {
                         const raw = String(err?.message || "");
@@ -698,6 +789,99 @@ const Register = ({
           </div>
         </form>
       </motion.div>
+    </div>
+  );
+};
+
+const ForcePasswordReset = ({
+  user,
+  onComplete,
+  onLogout,
+}: {
+  user: User;
+  onComplete: (user: User) => void;
+  onLogout: () => void;
+}) => {
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [error, setError] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError("");
+    if (!password || password.length < 8) {
+      setError("Password must be at least 8 characters.");
+      return;
+    }
+    if (password !== confirm) {
+      setError("Passwords do not match.");
+      return;
+    }
+    try {
+      setIsSubmitting(true);
+      const updated = await updateUserPassword(user.id, password);
+      onComplete(updated);
+    } catch (err: any) {
+      const friendly = toFriendlyApiMessage(String(err?.message || ""));
+      setError(friendly || "Unable to update password. Please try again.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+      <div className="max-w-md w-full bg-white rounded-3xl shadow-xl p-8 border border-slate-100">
+        <div className="text-center mb-6">
+          <div className="w-14 h-14 rounded-2xl bg-emerald-600 flex items-center justify-center text-white font-bold text-2xl mx-auto mb-4 shadow-lg shadow-emerald-600/20">
+            R
+          </div>
+          <h2 className="text-2xl font-bold text-slate-900">Set a New Password</h2>
+          <p className="text-slate-500">You must change your temporary password before continuing.</p>
+        </div>
+
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div className="space-y-1">
+            <label className="text-sm font-bold text-slate-700 ml-1">New Password</label>
+            <input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className="input-field"
+              placeholder="At least 8 characters"
+              minLength={8}
+              required
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="text-sm font-bold text-slate-700 ml-1">Confirm Password</label>
+            <input
+              type="password"
+              value={confirm}
+              onChange={(e) => setConfirm(e.target.value)}
+              className="input-field"
+              placeholder="Re-enter password"
+              minLength={8}
+              required
+            />
+          </div>
+          {error && <p className="text-rose-600 text-xs font-medium ml-1">{error}</p>}
+          <button
+            type="submit"
+            disabled={isSubmitting}
+            className="w-full btn-primary py-3 rounded-xl shadow-lg shadow-emerald-600/20 disabled:opacity-60 disabled:cursor-not-allowed"
+          >
+            {isSubmitting ? "Updating..." : "Update Password"}
+          </button>
+        </form>
+
+        <div className="mt-6 text-center">
+          <button onClick={onLogout} className="text-xs font-bold text-slate-500 hover:text-slate-700">
+            Sign out
+          </button>
+        </div>
+      </div>
     </div>
   );
 };
@@ -803,29 +987,65 @@ const Dashboard = ({ role, onNewTender }: { role: UserRole, onNewTender: () => v
   );
 };
 
-const Tenders = ({ initialView = "list" }: { initialView?: "list" | "create" | "details" | "verify" | "publish" | "award" | "security" | "edit" }) => {
+const Tenders = ({
+  initialView = "list",
+  initialTenderId,
+  onTenderOpened,
+}: {
+  initialView?: "list" | "create" | "details" | "verify" | "publish" | "award" | "security" | "edit";
+  initialTenderId?: string | null;
+  onTenderOpened?: () => void;
+}) => {
   const [view, setView] = useState<"list" | "create" | "details" | "verify" | "publish" | "award" | "security" | "edit">(initialView);
   const [selectedTender, setSelectedTender] = useState<Tender | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
   const [tenders, setTenders] = useState<Tender[]>([]);
   const [notification, setNotification] = useState<string | null>(null);
+  const [tenderError, setTenderError] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("All Categories");
-  const [awardWinner, setAwardWinner] = useState("SolarLease Ltd");
-  const [notifySMS, setNotifySMS] = useState(true);
+  const [selectedDepartment, setSelectedDepartment] = useState("All Departments");
+  const [selectedProcurement, setSelectedProcurement] = useState("All Methods");
+  const [sortBy, setSortBy] = useState<"created_at" | "deadline" | "published_at">("created_at");
+  const [awardWinner, setAwardWinner] = useState("");
+  const [awardWinnerId, setAwardWinnerId] = useState("");
+  const [awardBids, setAwardBids] = useState<TenderBid[]>([]);
+  const [awardBidId, setAwardBidId] = useState("");
+  const [awardBidLoading, setAwardBidLoading] = useState(false);
   const [notifyEmail, setNotifyEmail] = useState(true);
   const [isActioning, setIsActioning] = useState(false);
+  const [tenderContracts, setTenderContracts] = useState<TenderContract[]>([]);
+  const [contractMessage, setContractMessage] = useState<string | null>(null);
+  const [contractRejectionReason, setContractRejectionReason] = useState("");
+  const [milestoneDrafts, setMilestoneDrafts] = useState([
+    { name: "Mobilization", percentage: 20, amount: 0 },
+    { name: "Installation", percentage: 60, amount: 0 },
+    { name: "Commissioning", percentage: 20, amount: 0 },
+  ]);
+
+  const activeContract = useMemo(() => {
+    if (!tenderContracts.length) return null;
+    const awardedId = selectedTender?.awardedVendorId;
+    if (awardedId) {
+      const match = tenderContracts.find(item => String(item.vendorId) === String(awardedId));
+      if (match) return match;
+    }
+    return tenderContracts[0];
+  }, [tenderContracts, selectedTender]);
 
   // Form State
-  const [formData, setFormData] = useState<Partial<Tender>>({
+  const defaultFormData: Partial<Tender> = {
     name: "",
     department: "",
     applicationType: "Access Window",
     stageType: "Pre-Qualification",
-    procurementMethod: "",
+    procurementMethod: "Open Competitive",
     biddingCurrency: "LSL (Maloti)",
     category: "SHS",
     budget: 0,
     deadline: "",
+    lastDateSubmission: "",
     lastDateSecurity: "",
     dateOpening: "",
     technologyTypes: [],
@@ -833,8 +1053,17 @@ const Tenders = ({ initialView = "list" }: { initialView?: "list" | "create" | "
     biddersEligibility: "",
     instruction: "",
     contactDetails: "",
-    fundingSource: ""
-  });
+    fundingSource: "",
+    addressForDocument: "",
+    addressForSecurity: "",
+    placeForOpening: "",
+    invitedBy: "",
+    timeForCompletion: ""
+  };
+  const [formData, setFormData] = useState<Partial<Tender>>(defaultFormData);
+  const [scheduleFile, setScheduleFile] = useState<File | null>(null);
+  const [rfpDocumentsFile, setRfpDocumentsFile] = useState<File | null>(null);
+  const [milestonePaymentScheduleFile, setMilestonePaymentScheduleFile] = useState<File | null>(null);
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
     const { name, value } = e.target;
@@ -851,48 +1080,194 @@ const Tenders = ({ initialView = "list" }: { initialView?: "list" | "create" | "
     });
   };
 
-  React.useEffect(() => {
-    // Preload data from API with fallback to mocks
-    (async () => {
-      try {
-        const tnds = await fetchTenders().catch(() => MOCK_TENDERS);
-        setTenders(tnds);
-      } catch {
-        setTenders(MOCK_TENDERS);
-      }
-    })();
+  const toFormDataFromTender = (tender: Tender): Partial<Tender> => ({
+    ...defaultFormData,
+    id: tender.id,
+    referenceNumber: tender.referenceNumber,
+    name: tender.name ?? "",
+    department: tender.department ?? "",
+    applicationType: tender.applicationType ?? defaultFormData.applicationType,
+    stageType: tender.stageType ?? defaultFormData.stageType,
+    procurementMethod: tender.procurementMethod ?? defaultFormData.procurementMethod,
+    biddingCurrency: tender.biddingCurrency ?? defaultFormData.biddingCurrency,
+    category: tender.category ?? defaultFormData.category,
+    budget: tender.budget ?? 0,
+    deadline: tender.deadline ?? "",
+    lastDateSubmission: tender.lastDateSubmission ?? tender.deadline ?? "",
+    lastDateSecurity: tender.lastDateSecurity ?? "",
+    dateOpening: tender.dateOpening ?? "",
+    technologyTypes: tender.technologyTypes ?? [],
+    targetSiteType: tender.targetSiteType ?? defaultFormData.targetSiteType,
+    biddersEligibility: tender.biddersEligibility ?? "",
+    instruction: tender.instruction ?? "",
+    contactDetails: tender.contactDetails ?? "",
+    fundingSource: tender.fundingSource ?? "",
+    addressForDocument: tender.addressForDocument ?? "",
+    addressForSecurity: tender.addressForSecurity ?? "",
+    placeForOpening: tender.placeForOpening ?? "",
+    invitedBy: tender.invitedBy ?? "",
+    timeForCompletion: tender.timeForCompletion ?? "",
+    biddersSchedulePurchase: tender.biddersSchedulePurchase ?? false,
+    tenderSecurityRequired: tender.tenderSecurityRequired ?? false,
+  });
+
+  const loadTenders = React.useCallback(async () => {
+    try {
+      const tnds = await fetchTenders().catch(() => MOCK_TENDERS);
+      setTenders(tnds);
+    } catch {
+      setTenders(MOCK_TENDERS);
+    }
   }, []);
 
+  React.useEffect(() => {
+    void loadTenders();
+  }, [loadTenders]);
+
+  React.useEffect(() => {
+    const id = setInterval(() => {
+      void loadTenders();
+    }, 20000);
+    return () => clearInterval(id);
+  }, [loadTenders]);
+
   const filteredTenders = useMemo(() => {
-    return tenders.filter(tender => {
+    const list = tenders.filter(tender => {
       const matchesSearch = tender.name.toLowerCase().includes(searchQuery.toLowerCase()) || 
                             tender.referenceNumber.toLowerCase().includes(searchQuery.toLowerCase());
       const matchesCategory = selectedCategory === "All Categories" || tender.category === selectedCategory;
-      return matchesSearch && matchesCategory;
+      const matchesDept = selectedDepartment === "All Departments" || tender.department === selectedDepartment;
+      const matchesProc = selectedProcurement === "All Methods" || tender.procurementMethod === selectedProcurement;
+      return matchesSearch && matchesCategory && matchesDept && matchesProc;
     });
-  }, [tenders, searchQuery, selectedCategory]);
+    return list.sort((a, b) => {
+      if (sortBy === "deadline") return new Date(a.deadline).getTime() - new Date(b.deadline).getTime();
+      if (sortBy === "published_at") return new Date(b.publishedAt || 0).getTime() - new Date(a.publishedAt || 0).getTime();
+      return new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime();
+    });
+  }, [tenders, searchQuery, selectedCategory, selectedDepartment, selectedProcurement, sortBy]);
 
   // Sync view with initialView prop when it changes
   React.useEffect(() => {
     setView(initialView);
+    if (initialView === "create") {
+      setSelectedTender(null);
+      setFormData(defaultFormData);
+      setScheduleFile(null);
+      setRfpDocumentsFile(null);
+      setMilestonePaymentScheduleFile(null);
+      setTenderError(null);
+    }
   }, [initialView]);
+
+  React.useEffect(() => {
+    if (!initialTenderId) return;
+    void openTenderView(initialTenderId, "details")
+      .catch(() => null)
+      .finally(() => onTenderOpened?.());
+  }, [initialTenderId]);
 
   const showNotification = (msg: string) => {
     setNotification(msg);
     setTimeout(() => setNotification(null), 3000);
   };
 
-  const downloadTenderDocument = (docName: string) => {
-    const tenderRef = selectedTender?.referenceNumber ?? "N/A";
-    const content = [
-      `Document: ${docName}`,
-      `Tender: ${tenderRef}`,
-      `Generated: ${new Date().toISOString()}`,
-      "",
-      "This is a generated placeholder document for testing workflow actions.",
-    ].join("\n");
-    triggerDownload(`${docName.replace(/[^a-z0-9]+/gi, "_").toLowerCase()}.txt`, content);
-    showNotification(`Downloaded: ${docName}`);
+  const NotificationToast = () => (
+    <AnimatePresence>
+      {notification && (
+        <motion.div 
+          initial={{ opacity: 0, y: -20 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -20 }}
+          className="fixed top-24 right-8 z-[200] bg-emerald-600 text-white px-6 py-3 rounded-xl shadow-xl flex items-center gap-3"
+        >
+          <CheckCircle2 size={20} />
+          <span className="font-medium">{notification}</span>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
+
+  const startCreateTender = () => {
+    setSelectedTender(null);
+    setFormData(defaultFormData);
+    setScheduleFile(null);
+    setRfpDocumentsFile(null);
+    setMilestonePaymentScheduleFile(null);
+    setTenderError(null);
+    setView("create");
+  };
+
+  const openTenderView = async (tenderId: string, nextView: typeof view) => {
+    try {
+      setIsActioning(true);
+      const full = await fetchTender(tenderId);
+      setSelectedTender(full);
+      if (nextView === "edit") {
+        setFormData(toFormDataFromTender(full));
+        setScheduleFile(null);
+        setRfpDocumentsFile(null);
+        setMilestonePaymentScheduleFile(null);
+      }
+      if (nextView === "award") {
+        const contracts = await fetchTenderContracts({ tenderId });
+        setTenderContracts(contracts);
+        setContractMessage(null);
+        setContractRejectionReason("");
+        setAwardBidLoading(true);
+        try {
+          const [bids, evals] = await Promise.all([
+            fetchTenderBids(tenderId),
+            fetchBidEvaluations(),
+          ]);
+          const scoredBidIds = new Set(
+            evals.filter(ev => ev.status === "Scored" && (ev.totalScore ?? 0) >= 71).map(ev => ev.bid)
+          );
+          const eligible = bids.filter(b => scoredBidIds.has(b.id));
+          setAwardBids(eligible);
+          let selected = eligible.find(b => full.awardedVendorId && b.vendor_id === full.awardedVendorId)
+            || eligible.find(b => full.awardedVendorName && b.vendor_name === full.awardedVendorName);
+          if (!selected && eligible.length === 1) selected = eligible[0];
+          setAwardBidId(selected?.id || "");
+          setAwardWinner(selected?.vendor_name || full.awardedVendorName || "");
+          setAwardWinnerId(selected?.vendor_id || full.awardedVendorId || "");
+        } catch {
+          setAwardBids([]);
+          setAwardBidId("");
+          setAwardWinner(full.awardedVendorName || "");
+          setAwardWinnerId(full.awardedVendorId || "");
+        } finally {
+          setAwardBidLoading(false);
+        }
+        setMilestoneDrafts([
+          { name: "Mobilization", percentage: 20, amount: 0 },
+          { name: "Installation", percentage: 60, amount: 0 },
+          { name: "Commissioning", percentage: 20, amount: 0 },
+        ]);
+      }
+      setView(nextView);
+    } catch (err: any) {
+      showNotification(toActionError(err, "Failed to load tender details."));
+    } finally {
+      setIsActioning(false);
+    }
+  };
+
+  const toFileUrl = (raw?: string | null) => {
+    if (!raw) return null;
+    if (/^https?:\/\//i.test(raw)) return raw;
+    const base = API_BASE.replace(/\/api$/i, "").replace(/\/$/, "");
+    const path = raw.startsWith("/") ? raw : `/${raw}`;
+    return `${base}${path}`;
+  };
+
+  const downloadTenderDocument = (docName: string, url?: string | null) => {
+    if (!url) {
+      showNotification(`No file uploaded for ${docName}.`);
+      return;
+    }
+    window.open(url, "_blank", "noopener,noreferrer");
+    showNotification(`Opening: ${docName}`);
   };
 
   const exportBidList = () => {
@@ -940,9 +1315,26 @@ const Tenders = ({ initialView = "list" }: { initialView?: "list" | "create" | "
   const handlePublish = async (tenderId: string) => {
     try {
       setIsActioning(true);
-      const updated = await publishTender(tenderId);
-      upsertTender(updated);
-      showNotification("Tender published and bidders notified successfully!");
+      const result = await publishTender(tenderId, {
+        sendEmail: notifyEmail,
+        notifyAllBidders: true,
+      });
+      upsertTender(result.tender);
+      await loadTenders();
+      const summary = result.summary;
+      if (summary) {
+        if (!summary.email_enabled) {
+          showNotification("Tender published. Email is disabled in backend settings.");
+        } else if (summary.email_error) {
+          showNotification(`Tender published. Email failed: ${summary.email_error}`);
+        } else {
+          showNotification(
+            `Tender published. Notifications: ${summary.recipient_count ?? 0}. Emails sent: ${summary.email_recipient_count ?? 0}.`
+          );
+        }
+      } else {
+        showNotification("Tender published and bidders notified successfully!");
+      }
       setView("list");
     } catch (err: any) {
       showNotification(toActionError(err, "Failed to publish tender."));
@@ -952,25 +1344,67 @@ const Tenders = ({ initialView = "list" }: { initialView?: "list" | "create" | "
   };
 
   const handleSaveTender = async (tenderData: any) => {
+    const payload = { ...tenderData };
+    const isEditing = view === "edit" && Boolean(selectedTender);
+    const hasExistingSchedule = Boolean(selectedTender?.scheduleFile);
+    const hasRfp = Boolean(rfpDocumentsFile) || Boolean(selectedTender?.rfpDocumentsFile);
+    const hasMilestoneSchedule =
+      Boolean(milestonePaymentScheduleFile) || Boolean(selectedTender?.milestonePaymentScheduleFile);
+
+    const requiredFields = [
+      'name','department','applicationType','stageType','procurementMethod',
+      'addressForDocument','addressForSecurity','placeForOpening',
+      'biddersEligibility','invitedBy','biddingCurrency','timeForCompletion',
+      'instruction','contactDetails','category','targetSiteType',
+      'lastDateSecurity','lastDateSubmission','dateOpening'
+    ];
+    const missing = requiredFields.filter(f => !payload[f] || payload[f]?.length === 0);
+    if (missing.length) {
+      setTenderError(`Fill required fields: ${missing.join(', ')}`);
+      return;
+    }
+    // Align backend mandatory deadline with the document submission deadline provided by user
+    payload.deadline = payload.lastDateSubmission;
+    if (!payload.technologyTypes || payload.technologyTypes.length === 0) {
+      setTenderError("Select at least one Technology Type.");
+      return;
+    }
+    if (!payload.scheduleFile && !(isEditing && hasExistingSchedule)) {
+      setTenderError("Upload the tender schedule (PDF/DOC/DOCX).");
+      return;
+    }
+    if (!hasRfp || !hasMilestoneSchedule) {
+      setTenderError("Upload the RFP/Subsidy Framework and the Milestone Payment Schedule.");
+      return;
+    }
     try {
-      const created = await createTender({
-        ...tenderData,
-        status: TenderStatus.DRAFT,
-      });
-      setTenders([created, ...tenders]);
-      showNotification("Tender saved successfully.");
+      setTenderError(null);
+      setIsSaving(true);
+      if (isEditing && selectedTender) {
+        const updated = await updateTender(selectedTender.id, {
+          ...payload,
+          status: selectedTender.status,
+          rfpDocumentsFile,
+          milestonePaymentScheduleFile,
+        });
+        upsertTender(updated);
+      } else {
+        const created = await createTender({
+          ...payload,
+          status: TenderStatus.DRAFT,
+          rfpDocumentsFile,
+          milestonePaymentScheduleFile,
+        });
+        setTenders([created, ...tenders]);
+      }
+      await loadTenders();
+      showNotification(isEditing ? "Tender updated successfully." : "Tender saved successfully.");
       setView("list");
-    } catch (e) {
-      // Fallback to local optimistic add if API fails
-      const newTender: Tender = {
-        id: "T-" + Math.floor(Math.random() * 10000),
-        referenceNumber: "REF-" + Math.floor(Math.random() * 1000000),
-        status: TenderStatus.DRAFT,
-        ...tenderData
-      };
-      setTenders([newTender, ...tenders]);
-      showNotification("Tender saved locally (offline mode).");
-      setView("list");
+    } catch (e: any) {
+      const raw = String(e?.message || e);
+      setTenderError(toFriendlyApiMessage(raw) || "Failed to save tender. Please review fields and try again.");
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -979,6 +1413,7 @@ const Tenders = ({ initialView = "list" }: { initialView?: "list" | "create" | "
       setIsActioning(true);
       const updated = await verifyTender(tenderId);
       upsertTender(updated);
+      await loadTenders();
       showNotification("Tender information verified successfully.");
       setView("list");
     } catch (err: any) {
@@ -989,13 +1424,30 @@ const Tenders = ({ initialView = "list" }: { initialView?: "list" | "create" | "
   };
 
   const handleAward = async (tenderId: string) => {
+    if (!awardBidId.trim()) {
+      showNotification("Select a submitted bid to issue the award.");
+      return;
+    }
+    if (!awardWinner.trim() || !awardWinnerId.trim()) {
+      showNotification("Winning Vendor Name and Vendor ID are required to issue the award.");
+      return;
+    }
     try {
       setIsActioning(true);
-      const updated = await awardTender(tenderId, { awardedVendorName: awardWinner });
+      const updated = await awardTender(tenderId, {
+        bidId: awardBidId,
+        awardedVendorId: awardWinnerId || undefined,
+        awardedVendorName: awardWinner,
+        sendEmail: notifyEmail,
+      });
+      if (selectedTender?.id === tenderId) {
+        setSelectedTender(updated);
+      }
       upsertTender(updated);
-      const channels = [notifySMS ? "SMS" : null, notifyEmail ? "Email" : null].filter(Boolean).join(" & ");
+      await loadTenders();
+      const channels = [notifyEmail ? "Email" : null].filter(Boolean).join(" & ");
       showNotification(`Tender awarded to ${awardWinner}. Winner notified via ${channels || "System"}.`);
-      setView("list");
+      setContractMessage("Award confirmed. You can now generate the contract.");
     } catch (err: any) {
       showNotification(toActionError(err, "Failed to award tender."));
     } finally {
@@ -1003,15 +1455,81 @@ const Tenders = ({ initialView = "list" }: { initialView?: "list" | "create" | "
     }
   };
 
-  if (view === "create") {
+  const handleGenerateContract = async () => {
+    if (!selectedTender) return;
+    if (selectedTender.status !== TenderStatus.AWARDED) {
+      setContractMessage("Please confirm the award before generating a contract.");
+      return;
+    }
+    const vendorId = selectedTender.awardedVendorId || awardWinnerId;
+    if (!vendorId) {
+      setContractMessage("Provide a Winning Vendor ID before generating a contract.");
+      return;
+    }
+    try {
+      setIsActioning(true);
+      const contract = await generateTenderContract({
+        tenderId: selectedTender.id,
+        vendorId,
+        bidId: awardBidId || undefined,
+      });
+      setTenderContracts(prev => [contract, ...prev.filter(item => item.id !== contract.id)]);
+      setContractMessage("Contract generated and sent to vendor.");
+    } catch (err: any) {
+      setContractMessage(toActionError(err, "Failed to generate contract."));
+    } finally {
+      setIsActioning(false);
+    }
+  };
+
+  const handleApproveContract = async (contractId: string) => {
+    try {
+      setIsActioning(true);
+      const updated = await approveTenderContract(contractId, milestoneDrafts);
+      setTenderContracts(prev => prev.map(item => item.id === updated.id ? updated : item));
+      setContractMessage("Contract approved. Project and milestones created.");
+    } catch (err: any) {
+      setContractMessage(toActionError(err, "Failed to approve contract."));
+    } finally {
+      setIsActioning(false);
+    }
+  };
+
+  const handleRejectContract = async (contractId: string) => {
+    if (!contractRejectionReason.trim()) {
+      setContractMessage("Please provide a rejection reason.");
+      return;
+    }
+    try {
+      setIsActioning(true);
+      const updated = await rejectTenderContract(contractId, contractRejectionReason.trim());
+      setTenderContracts(prev => prev.map(item => item.id === updated.id ? updated : item));
+      setContractMessage("Contract rejected.");
+    } catch (err: any) {
+      setContractMessage(toActionError(err, "Failed to reject contract."));
+    } finally {
+      setIsActioning(false);
+    }
+  };
+
+  if (view === "create" || view === "edit") {
+    const isEditing = view === "edit";
     return (
       <div className="space-y-6 max-w-5xl mx-auto">
+        <NotificationToast />
         <div className="flex items-center gap-4 mb-8">
           <button onClick={() => setView("list")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
             <X size={20} />
           </button>
-          <h1 className="text-2xl font-bold text-slate-900">Add New Tender</h1>
+          <h1 className="text-2xl font-bold text-slate-900">
+            {isEditing ? `Edit Tender: ${selectedTender?.name ?? ""}` : "Add New Tender"}
+          </h1>
         </div>
+        {tenderError && (
+          <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 font-medium">
+            {tenderError}
+          </div>
+        )}
 
         <div className="card p-8 space-y-8">
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
@@ -1113,6 +1631,9 @@ const Tenders = ({ initialView = "list" }: { initialView?: "list" | "create" | "
               <label className="text-sm font-bold text-slate-700">Name & Address for Tender Document *</label>
               <input 
                 type="text" 
+                name="addressForDocument"
+                value={formData.addressForDocument}
+                onChange={handleInputChange}
                 placeholder="Address" 
                 className="input-field" 
               />
@@ -1121,6 +1642,9 @@ const Tenders = ({ initialView = "list" }: { initialView?: "list" | "create" | "
               <label className="text-sm font-bold text-slate-700">Name & Address for Tender Security *</label>
               <input 
                 type="text" 
+                name="addressForSecurity"
+                value={formData.addressForSecurity}
+                onChange={handleInputChange}
                 placeholder="Address" 
                 className="input-field" 
               />
@@ -1129,6 +1653,9 @@ const Tenders = ({ initialView = "list" }: { initialView?: "list" | "create" | "
               <label className="text-sm font-bold text-slate-700">Place for Tender Opening *</label>
               <input 
                 type="text" 
+                name="placeForOpening"
+                value={formData.placeForOpening}
+                onChange={handleInputChange}
                 placeholder="Opening Location" 
                 className="input-field" 
               />
@@ -1137,50 +1664,112 @@ const Tenders = ({ initialView = "list" }: { initialView?: "list" | "create" | "
               <label className="text-sm font-bold text-slate-700">Tender Invited By *</label>
               <input 
                 type="text" 
+                name="invitedBy"
+                value={formData.invitedBy}
+                onChange={handleInputChange}
                 placeholder="Official Name" 
                 className="input-field" 
               />
             </div>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-            <div className="space-y-2">
-              <label className="text-sm font-bold text-slate-700">Security Submission Deadline *</label>
-              <div className="relative">
-                <Clock className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-                <input 
-                  type="datetime-local" 
-                  name="lastDateSecurity"
-                  value={formData.lastDateSecurity}
-                  onChange={handleInputChange}
-                  className="input-field pl-10" 
-                />
+          <div className="space-y-6">
+            {/* Security Submission Deadline */}
+            <div>
+              <label className="text-sm font-bold text-slate-700 mb-2">Security Submission Deadline *</label>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div className="relative">
+                  <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+                  <input 
+                    type="date" 
+                    placeholder="Date"
+                    value={formData.lastDateSecurity ? formData.lastDateSecurity.split('T')[0] : ""}
+                    onChange={(e) => {
+                      const currentTime = formData.lastDateSecurity?.split('T')[1] || '09:00';
+                      setFormData(prev => ({ ...prev, lastDateSecurity: `${e.target.value}T${currentTime}` }));
+                    }}
+                    className="input-field pl-10" 
+                  />
+                </div>
+                <div className="relative">
+                  <Clock className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+                  <input 
+                    type="time" 
+                    placeholder="Time"
+                    value={formData.lastDateSecurity ? formData.lastDateSecurity.split('T')[1] : '09:00'}
+                    onChange={(e) => {
+                      const currentDate = formData.lastDateSecurity?.split('T')[0] || new Date().toISOString().split('T')[0];
+                      setFormData(prev => ({ ...prev, lastDateSecurity: `${currentDate}T${e.target.value}` }));
+                    }}
+                    className="input-field pl-10" 
+                  />
+                </div>
               </div>
             </div>
-            <div className="space-y-2">
-              <label className="text-sm font-bold text-slate-700">Document Submission Deadline *</label>
-              <div className="relative">
-                <FileText className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-                <input 
-                  type="datetime-local" 
-                  name="deadline"
-                  value={formData.deadline}
-                  onChange={handleInputChange}
-                  className="input-field pl-10" 
-                />
+
+            {/* Document Submission Deadline */}
+            <div>
+              <label className="text-sm font-bold text-slate-700 mb-2">Document Submission Deadline *</label>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div className="relative">
+                  <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+                  <input 
+                    type="date" 
+                    placeholder="Date"
+                    value={formData.lastDateSubmission ? formData.lastDateSubmission.split('T')[0] : ""}
+                    onChange={(e) => {
+                      const currentTime = formData.lastDateSubmission?.split('T')[1] || '14:00';
+                      setFormData(prev => ({ ...prev, lastDateSubmission: `${e.target.value}T${currentTime}` }));
+                    }}
+                    className="input-field pl-10" 
+                  />
+                </div>
+                <div className="relative">
+                  <Clock className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+                  <input 
+                    type="time" 
+                    placeholder="Time"
+                    value={formData.lastDateSubmission ? formData.lastDateSubmission.split('T')[1] : '14:00'}
+                    onChange={(e) => {
+                      const currentDate = formData.lastDateSubmission?.split('T')[0] || new Date().toISOString().split('T')[0];
+                      setFormData(prev => ({ ...prev, lastDateSubmission: `${currentDate}T${e.target.value}` }));
+                    }}
+                    className="input-field pl-10" 
+                  />
+                </div>
               </div>
             </div>
-            <div className="space-y-2">
-              <label className="text-sm font-bold text-slate-700">Tender Opening Date & Time *</label>
-              <div className="relative">
-                <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-                <input 
-                  type="datetime-local" 
-                  name="dateOpening"
-                  value={formData.dateOpening}
-                  onChange={handleInputChange}
-                  className="input-field pl-10" 
-                />
+
+            {/* Tender Opening Date & Time */}
+            <div>
+              <label className="text-sm font-bold text-slate-700 mb-2">Tender Opening Date & Time *</label>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div className="relative">
+                  <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+                  <input 
+                    type="date" 
+                    placeholder="Date"
+                    value={formData.dateOpening ? formData.dateOpening.split('T')[0] : ""}
+                    onChange={(e) => {
+                      const currentTime = formData.dateOpening?.split('T')[1] || '10:00';
+                      setFormData(prev => ({ ...prev, dateOpening: `${e.target.value}T${currentTime}` }));
+                    }}
+                    className="input-field pl-10" 
+                  />
+                </div>
+                <div className="relative">
+                  <Clock className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+                  <input 
+                    type="time" 
+                    placeholder="Time"
+                    value={formData.dateOpening ? formData.dateOpening.split('T')[1] : '10:00'}
+                    onChange={(e) => {
+                      const currentDate = formData.dateOpening?.split('T')[0] || new Date().toISOString().split('T')[0];
+                      setFormData(prev => ({ ...prev, dateOpening: `${currentDate}T${e.target.value}` }));
+                    }}
+                    className="input-field pl-10" 
+                  />
+                </div>
               </div>
             </div>
           </div>
@@ -1245,6 +1834,18 @@ const Tenders = ({ initialView = "list" }: { initialView?: "list" | "create" | "
             ></textarea>
           </div>
 
+          <div className="space-y-2">
+            <label className="text-sm font-bold text-slate-700">Time for Completion *</label>
+            <input
+              type="text"
+              name="timeForCompletion"
+              value={formData.timeForCompletion}
+              onChange={handleInputChange}
+              placeholder="e.g., 60 days"
+              className="input-field"
+            />
+          </div>
+
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div className="space-y-4">
               <label className="flex items-center gap-3 cursor-pointer">
@@ -1279,19 +1880,110 @@ const Tenders = ({ initialView = "list" }: { initialView?: "list" | "create" | "
             </div>
           </div>
 
-          <div className="space-y-2">
-            <label className="text-sm font-bold text-slate-700">Upload Schedule * (PDF/DOCX)</label>
-            <div className="border-2 border-dashed border-slate-200 rounded-xl p-8 text-center hover:border-emerald-500 transition-colors cursor-pointer bg-slate-50">
-              <Download size={32} className="mx-auto text-slate-400 mb-2" />
-              <p className="text-sm text-slate-600 font-medium">Click to upload or drag and drop</p>
-              <p className="text-xs text-slate-400 mt-1">Maximum file size: 10MB</p>
+          <div className="space-y-4">
+            <label className="text-sm font-bold text-slate-700">Governing Documents *</label>
+            <p className="text-xs text-slate-500">Upload the core tender documents that define rules, eligibility, and payment terms.</p>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {[
+                {
+                  label: "Tender Schedule",
+                  hint: "Key dates and procurement timeline",
+                  file: scheduleFile,
+                  existing: selectedTender?.scheduleFile,
+                  setter: setScheduleFile,
+                },
+                {
+                  label: "RFP / Subsidy Framework",
+                  hint: "Eligibility, evaluation criteria, technical standards",
+                  file: rfpDocumentsFile,
+                  existing: selectedTender?.rfpDocumentsFile,
+                  setter: setRfpDocumentsFile,
+                },
+                {
+                  label: "Milestone Payment Schedule",
+                  hint: "Payment terms for this window",
+                  file: milestonePaymentScheduleFile,
+                  existing: selectedTender?.milestonePaymentScheduleFile,
+                  setter: setMilestonePaymentScheduleFile,
+                },
+              ].map((doc, idx) => (
+                <div key={doc.label} className="p-4 border-2 border-dashed border-slate-200 rounded-xl text-center bg-slate-50">
+                  <label htmlFor={`docUpload-${idx}`} className="cursor-pointer block">
+                    <FileText size={22} className="mx-auto text-slate-400 mb-2" />
+                    <p className="text-xs font-bold text-slate-700">{doc.label}</p>
+                    <p className="text-[10px] text-slate-400 mt-1">{doc.hint}</p>
+                    <p className="text-[10px] text-slate-400 mt-1">
+                      {doc.file
+                        ? doc.file.name
+                        : doc.existing
+                          ? "Existing file attached (upload to replace)"
+                          : "Click to upload"}
+                    </p>
+                  </label>
+                  <input
+                    id={`docUpload-${idx}`}
+                    type="file"
+                    accept=".pdf,.doc,.docx,.xls,.xlsx"
+                    className="hidden"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      doc.setter(file || null);
+                    }}
+                  />
+                </div>
+              ))}
             </div>
           </div>
 
           <div className="flex justify-end gap-3 pt-6 border-t border-slate-100">
             <button onClick={() => setView("list")} className="btn-secondary">Cancel</button>
-            <button onClick={() => handleSaveTender(formData)} className="btn-secondary border-emerald-200 text-emerald-700 hover:bg-emerald-50">Save as Draft</button>
-            <button onClick={() => handleSaveTender(formData)} className="btn-primary">Save Tender</button>
+            {isEditing ? (
+              <button
+                onClick={() =>
+                  handleSaveTender({
+                    ...formData,
+                    scheduleFile,
+                    rfpDocumentsFile,
+                    milestonePaymentScheduleFile,
+                  })
+                }
+                className="btn-primary disabled:opacity-60"
+                disabled={isSaving}
+              >
+                {isSaving ? "Saving..." : "Save Changes"}
+              </button>
+            ) : (
+              <>
+                <button
+                  onClick={() =>
+                    handleSaveTender({
+                      ...formData,
+                      scheduleFile,
+                      rfpDocumentsFile,
+                      milestonePaymentScheduleFile,
+                    })
+                  }
+                  className="btn-secondary border-emerald-200 text-emerald-700 hover:bg-emerald-50 disabled:opacity-60"
+                  disabled={isSaving}
+                >
+                  {isSaving ? "Saving..." : "Save as Draft"}
+                </button>
+                <button
+                  onClick={() =>
+                    handleSaveTender({
+                      ...formData,
+                      scheduleFile,
+                      rfpDocumentsFile,
+                      milestonePaymentScheduleFile,
+                    })
+                  }
+                  className="btn-primary disabled:opacity-60"
+                  disabled={isSaving}
+                >
+                  {isSaving ? "Saving..." : "Save Tender"}
+                </button>
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -1299,8 +1991,18 @@ const Tenders = ({ initialView = "list" }: { initialView?: "list" | "create" | "
   }
 
   if (view === "details" && selectedTender) {
+    const formatDateTime = (value?: string | null) => {
+      if (!value) return "N/A";
+      const ts = Date.parse(value);
+      if (Number.isNaN(ts)) return value;
+      const date = new Date(ts).toLocaleDateString();
+      const time = new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      return `${date} • ${time}`;
+    };
+
     return (
       <div className="space-y-6 max-w-5xl mx-auto pb-12">
+        <NotificationToast />
         <div className="flex items-center justify-between mb-8">
           <div className="flex items-center gap-4">
             <button onClick={() => setView("list")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
@@ -1312,9 +2014,11 @@ const Tenders = ({ initialView = "list" }: { initialView?: "list" | "create" | "
             </div>
           </div>
           <div className="flex gap-3">
-            <button onClick={() => setView("edit")} className="btn-secondary flex items-center gap-2">
-              <FileText size={18} /> Edit Tender
-            </button>
+            {selectedTender.status === TenderStatus.DRAFT && (
+              <button onClick={() => openTenderView(selectedTender.id, "edit")} className="btn-secondary flex items-center gap-2">
+                <FileText size={18} /> Edit Tender
+              </button>
+            )}
             {!selectedTender.isVerified && (
               <button 
                 onClick={() => setView("verify")}
@@ -1336,54 +2040,84 @@ const Tenders = ({ initialView = "list" }: { initialView?: "list" | "create" | "
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2 space-y-6">
+            <div className="card p-6">
+              <div className="flex flex-wrap items-center gap-3">
+                <span className={`badge ${
+                  selectedTender.status === TenderStatus.PUBLISHED ? 'bg-emerald-100 text-emerald-700' :
+                  selectedTender.status === TenderStatus.EVALUATION ? 'bg-blue-100 text-blue-700' :
+                  selectedTender.status === TenderStatus.AWARDED ? 'bg-purple-100 text-purple-700' :
+                  'bg-amber-100 text-amber-700'
+                }`}>
+                  {selectedTender.status}
+                </span>
+                <span className={`text-xs font-bold ${selectedTender.isVerified ? 'text-emerald-600' : 'text-amber-600'}`}>
+                  {selectedTender.isVerified ? 'Verified' : 'Pending Verification'}
+                </span>
+                <span className="text-xs text-slate-400">•</span>
+                <span className="text-xs text-slate-500">Dept: {selectedTender.department}</span>
+                <span className="text-xs text-slate-400">•</span>
+                <span className="text-xs text-slate-500">Category: {selectedTender.category}</span>
+                {selectedTender.budget != null && (
+                  <>
+                    <span className="text-xs text-slate-400">•</span>
+                    <span className="text-xs text-slate-500">Budget: M {selectedTender.budget.toLocaleString()}</span>
+                  </>
+                )}
+              </div>
+            </div>
+
             <div className="card p-8 space-y-8">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
                 <div className="space-y-4">
-                  <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Tender Information</h3>
-                  <div className="grid grid-cols-2 gap-4">
+                  <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Overview</h3>
+                  <div className="grid grid-cols-2 gap-4 text-sm">
                     <div className="space-y-1">
-                      <p className="text-xs font-bold text-slate-500">Status</p>
-                      <span className={`badge ${
-                        selectedTender.status === TenderStatus.PUBLISHED ? 'bg-emerald-100 text-emerald-700' :
-                        selectedTender.status === TenderStatus.EVALUATION ? 'bg-blue-100 text-blue-700' :
-                        'bg-amber-100 text-amber-700'
-                      }`}>
-                        {selectedTender.status}
-                      </span>
+                      <p className="text-xs font-bold text-slate-500">Application Type</p>
+                      <p className="font-medium">{selectedTender.applicationType || "N/A"}</p>
                     </div>
                     <div className="space-y-1">
-                      <p className="text-xs font-bold text-slate-500">Verification</p>
-                      <span className={`text-sm font-bold ${selectedTender.isVerified ? 'text-emerald-600' : 'text-amber-600'}`}>
-                        {selectedTender.isVerified ? 'Verified' : 'Pending'}
-                      </span>
+                      <p className="text-xs font-bold text-slate-500">Stage Type</p>
+                      <p className="font-medium">{selectedTender.stageType || "N/A"}</p>
                     </div>
                     <div className="space-y-1">
-                      <p className="text-xs font-bold text-slate-500">Department</p>
-                      <p className="text-sm font-medium">{selectedTender.department}</p>
+                      <p className="text-xs font-bold text-slate-500">Procurement Method</p>
+                      <p className="font-medium">{selectedTender.procurementMethod || "N/A"}</p>
                     </div>
                     <div className="space-y-1">
-                      <p className="text-xs font-bold text-slate-500">Category</p>
-                      <p className="text-sm font-medium">{selectedTender.category}</p>
+                      <p className="text-xs font-bold text-slate-500">Invited By</p>
+                      <p className="font-medium">{selectedTender.invitedBy || "N/A"}</p>
+                    </div>
+                    <div className="space-y-1">
+                      <p className="text-xs font-bold text-slate-500">Time for Completion</p>
+                      <p className="font-medium">{selectedTender.timeForCompletion || "N/A"}</p>
+                    </div>
+                    <div className="space-y-1">
+                      <p className="text-xs font-bold text-slate-500">Funding Source</p>
+                      <p className="font-medium">{selectedTender.fundingSource || "N/A"}</p>
                     </div>
                   </div>
                 </div>
 
                 <div className="space-y-4">
-                  <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Financials</h3>
-                  <div className="space-y-1">
-                    <p className="text-xs font-bold text-slate-500">Budget Estimate</p>
-                    <p className="text-lg font-bold text-slate-900">M {selectedTender.budget?.toLocaleString()}</p>
-                  </div>
-                  <div className="space-y-1">
-                    <p className="text-xs font-bold text-slate-500">Bidding Currency</p>
-                    <p className="text-sm font-medium">{selectedTender.biddingCurrency || "LSL (Maloti)"}</p>
-                  </div>
-                  {selectedTender.fundingSource && (
+                  <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Financials & Security</h3>
+                  <div className="grid grid-cols-2 gap-4 text-sm">
                     <div className="space-y-1">
-                      <p className="text-xs font-bold text-slate-500">Funding Source</p>
-                      <p className="text-sm font-medium">{selectedTender.fundingSource}</p>
+                      <p className="text-xs font-bold text-slate-500">Budget Estimate</p>
+                      <p className="text-lg font-bold text-slate-900">M {selectedTender.budget?.toLocaleString() ?? "N/A"}</p>
                     </div>
-                  )}
+                    <div className="space-y-1">
+                      <p className="text-xs font-bold text-slate-500">Bidding Currency</p>
+                      <p className="font-medium">{selectedTender.biddingCurrency || "LSL (Maloti)"}</p>
+                    </div>
+                    <div className="space-y-1">
+                      <p className="text-xs font-bold text-slate-500">Schedule Purchase</p>
+                      <p className="font-medium">{selectedTender.biddersSchedulePurchase ? "Required" : "Not Required"}</p>
+                    </div>
+                    <div className="space-y-1">
+                      <p className="text-xs font-bold text-slate-500">Tender Security</p>
+                      <p className="font-medium">{selectedTender.tenderSecurityRequired ? "Required" : "Not Required"}</p>
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -1393,61 +2127,82 @@ const Tenders = ({ initialView = "list" }: { initialView?: "list" | "create" | "
                   <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
                     <Clock size={16} className="text-slate-400 mb-2" />
                     <p className="text-xs font-bold text-slate-500">Submission Deadline</p>
-                    <p className="text-sm font-bold text-slate-900">{selectedTender.deadline}</p>
+                    <p className="text-sm font-bold text-slate-900">{formatDateTime(selectedTender.lastDateSubmission || selectedTender.deadline)}</p>
                   </div>
                   <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
                     <ShieldCheck size={16} className="text-slate-400 mb-2" />
                     <p className="text-xs font-bold text-slate-500">Security Deadline</p>
-                    <p className="text-sm font-bold text-slate-900">{selectedTender.lastDateSecurity || "2025-06-10"}</p>
+                    <p className="text-sm font-bold text-slate-900">{formatDateTime(selectedTender.lastDateSecurity)}</p>
                   </div>
                   <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
                     <Eye size={16} className="text-slate-400 mb-2" />
                     <p className="text-xs font-bold text-slate-500">Opening Date</p>
-                    <p className="text-sm font-bold text-slate-900">{selectedTender.dateOpening || "2025-06-16"}</p>
+                    <p className="text-sm font-bold text-slate-900">{formatDateTime(selectedTender.dateOpening)}</p>
                   </div>
                 </div>
               </div>
 
               <div className="space-y-4 pt-6 border-t border-slate-100">
                 <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Technical Requirements</h3>
-                <div className="grid grid-cols-2 gap-6">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                   <div className="space-y-2">
                     <p className="text-xs font-bold text-slate-500">Technology Types</p>
                     <div className="flex flex-wrap gap-2">
-                      {(selectedTender.technologyTypes || ["SHS", "Mini-Grid"]).map(tech => (
+                      {(selectedTender.technologyTypes || []).length ? (selectedTender.technologyTypes || []).map(tech => (
                         <span key={tech} className="px-2 py-1 bg-emerald-50 text-emerald-700 rounded text-[10px] font-bold uppercase tracking-wider">{tech}</span>
-                      ))}
+                      )) : (
+                        <span className="text-xs text-slate-500">N/A</span>
+                      )}
                     </div>
                   </div>
                   <div className="space-y-2">
                     <p className="text-xs font-bold text-slate-500">Target Site Type</p>
-                    <p className="text-sm font-medium">{selectedTender.targetSiteType || "Household"}</p>
+                    <p className="text-sm font-medium">{selectedTender.targetSiteType || "N/A"}</p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-4 pt-6 border-t border-slate-100">
+                <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Eligibility & Instructions</h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+                  <div className="p-3 bg-slate-50 rounded-lg border border-slate-100">
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Eligibility</p>
+                    <p className="text-slate-700">{selectedTender.biddersEligibility || "Not specified"}</p>
+                  </div>
+                  <div className="p-3 bg-slate-50 rounded-lg border border-slate-100">
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Instructions</p>
+                    <p className="text-slate-700">{selectedTender.instruction || "Not specified"}</p>
+                  </div>
+                  <div className="p-3 bg-slate-50 rounded-lg border border-slate-100 md:col-span-2">
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Pre‑Tender Meeting</p>
+                    <p className="text-slate-700">{selectedTender.preTenderMeetingInfo || "Not specified"}</p>
                   </div>
                 </div>
               </div>
 
               <div className="space-y-4 pt-6 border-t border-slate-100">
                 <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Required Documents</h3>
-                <div className="space-y-3">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                   {[
-                    "Tender Schedule (Technical & Financial)",
-                    "Valid Trading License",
-                    "Tax Clearance Certificate",
-                    "Company Registration Documents",
-                    "Relevant Experience Portfolio"
+                    { label: "Tender Schedule", url: toFileUrl(selectedTender.scheduleFile) },
+                    { label: "RFP / Subsidy Framework", url: toFileUrl(selectedTender.rfpDocumentsFile) },
+                    { label: "Milestone Payment Schedule", url: toFileUrl(selectedTender.milestonePaymentScheduleFile) },
                   ].map((doc, i) => (
-                    <div key={i} className="flex items-center justify-between p-3 bg-slate-50 rounded-lg border border-slate-100">
-                      <div className="flex items-center gap-3">
+                    <div key={i} className="p-4 border-2 border-dashed border-slate-200 rounded-xl bg-slate-50">
+                      <div className="flex items-center gap-2">
                         <FileText size={18} className="text-slate-400" />
-                        <span className="text-sm font-medium text-slate-700">{doc}</span>
+                        <span className="text-xs font-bold text-slate-700">{doc.label}</span>
                       </div>
-                      <button
-                        onClick={() => downloadTenderDocument(doc)}
-                        className="text-emerald-600 hover:text-emerald-700"
-                        title={`Download ${doc}`}
-                      >
-                        <Download size={16} />
-                      </button>
+                      <div className="mt-3">
+                        <button
+                          onClick={() => downloadTenderDocument(doc.label, doc.url)}
+                          className={`text-emerald-600 hover:text-emerald-700 text-xs font-bold ${doc.url ? "" : "opacity-40 cursor-not-allowed"}`}
+                          title={doc.url ? `Download ${doc.label}` : "No file uploaded"}
+                          disabled={!doc.url}
+                        >
+                          {doc.url ? "Download →" : "Not provided"}
+                        </button>
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -1456,6 +2211,27 @@ const Tenders = ({ initialView = "list" }: { initialView?: "list" | "create" | "
           </div>
 
           <div className="space-y-6">
+            <div className="card p-6">
+              <h3 className="font-bold text-slate-900 mb-3">Contact</h3>
+              <p className="text-sm text-slate-600">{selectedTender.contactDetails || "Not provided"}</p>
+            </div>
+            <div className="card p-6">
+              <h3 className="font-bold text-slate-900 mb-3">Logistics & Locations</h3>
+              <div className="space-y-3 text-sm">
+                <div className="p-3 bg-slate-50 rounded-lg border border-slate-100">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Document Address</p>
+                  <p className="text-slate-700">{selectedTender.addressForDocument || "Not specified"}</p>
+                </div>
+                <div className="p-3 bg-slate-50 rounded-lg border border-slate-100">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Security Address</p>
+                  <p className="text-slate-700">{selectedTender.addressForSecurity || "Not specified"}</p>
+                </div>
+                <div className="p-3 bg-slate-50 rounded-lg border border-slate-100">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Opening Venue</p>
+                  <p className="text-slate-700">{selectedTender.placeForOpening || "Not specified"}</p>
+                </div>
+              </div>
+            </div>
             <div className="card p-6 space-y-4">
               <h3 className="font-bold text-slate-900">Submission Stats</h3>
               <div className="space-y-4">
@@ -1495,30 +2271,10 @@ const Tenders = ({ initialView = "list" }: { initialView?: "list" | "create" | "
     );
   }
 
-  if (view === "edit" && selectedTender) {
-    return (
-      <div className="space-y-6 max-w-5xl mx-auto">
-        <div className="flex items-center gap-4 mb-8">
-          <button onClick={() => setView("details")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
-            <X size={20} />
-          </button>
-          <h1 className="text-2xl font-bold text-slate-900">Edit Tender: {selectedTender.name}</h1>
-        </div>
-        <div className="card p-8">
-          <p className="text-slate-500 mb-8">Update the tender details below. Some fields may be locked if the tender is already published.</p>
-          {/* Reuse create form logic here or similar */}
-          <div className="flex justify-end gap-3 pt-6 border-t border-slate-100">
-            <button onClick={() => setView("details")} className="btn-secondary">Cancel</button>
-            <button onClick={() => { showNotification("Tender updated successfully"); setView("details"); }} className="btn-primary">Save Changes</button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
   if (view === "publish" && selectedTender) {
     return (
       <div className="space-y-6 max-w-2xl mx-auto">
+        <NotificationToast />
         <div className="flex items-center gap-4 mb-8">
           <button onClick={() => setView("list")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
             <ChevronRight className="rotate-180" size={20} />
@@ -1533,29 +2289,22 @@ const Tenders = ({ initialView = "list" }: { initialView?: "list" | "create" | "
           </div>
 
           <div className="space-y-6">
-            <div className="space-y-3">
-              <label className="text-sm font-bold text-slate-700">Target Bidders *</label>
-              <div className="flex gap-6">
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input type="radio" name="bidders" className="w-4 h-4 text-emerald-600" defaultChecked />
-                  <span className="text-sm font-medium">All Pre-qualified Bidders</span>
-                </label>
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input type="radio" name="bidders" className="w-4 h-4 text-emerald-600" />
-                  <span className="text-sm font-medium">Category-specific Bidders</span>
-                </label>
-              </div>
+            <div className="p-4 bg-slate-50 rounded-xl border border-slate-200">
+              <p className="text-sm text-slate-700 font-medium">
+                All pre-qualified vendors will be notified when this tender is published.
+              </p>
             </div>
 
             <div className="space-y-3">
               <label className="text-sm font-bold text-slate-700">Notification Channels</label>
               <div className="space-y-2">
                 <label className="flex items-center gap-3 cursor-pointer">
-                  <input type="checkbox" className="w-5 h-5 rounded border-slate-300 text-emerald-600" defaultChecked />
-                  <span className="text-sm font-medium text-slate-700">Send SMS Notification</span>
-                </label>
-                <label className="flex items-center gap-3 cursor-pointer">
-                  <input type="checkbox" className="w-5 h-5 rounded border-slate-300 text-emerald-600" defaultChecked />
+                  <input
+                    type="checkbox"
+                    className="w-5 h-5 rounded border-slate-300 text-emerald-600"
+                    checked={notifyEmail}
+                    onChange={(e) => setNotifyEmail(e.target.checked)}
+                  />
                   <span className="text-sm font-medium text-slate-700">Send Email Notification</span>
                 </label>
               </div>
@@ -1576,6 +2325,7 @@ const Tenders = ({ initialView = "list" }: { initialView?: "list" | "create" | "
   if (view === "verify" && selectedTender) {
     return (
       <div className="space-y-6 max-w-5xl mx-auto">
+        <NotificationToast />
         <div className="flex items-center gap-4 mb-8">
           <button onClick={() => setView("list")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
             <ChevronRight className="rotate-180" size={20} />
@@ -1683,6 +2433,7 @@ const Tenders = ({ initialView = "list" }: { initialView?: "list" | "create" | "
   if (view === "security") {
     return (
       <div className="space-y-6">
+        <NotificationToast />
         <div className="flex items-center gap-4">
           <button onClick={() => setView("list")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
             <ChevronRight className="rotate-180" size={20} />
@@ -1719,6 +2470,7 @@ const Tenders = ({ initialView = "list" }: { initialView?: "list" | "create" | "
           <table className="w-full text-left">
             <thead>
               <tr className="bg-slate-50 border-b border-slate-100">
+                <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">ID</th>
                 <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Tender ID</th>
                 <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Vendor</th>
                 <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Amount</th>
@@ -1732,6 +2484,7 @@ const Tenders = ({ initialView = "list" }: { initialView?: "list" | "create" | "
                 { id: "T-002", vendor: "EcoGrid Solutions", amount: "M 60,000", status: "Verified" },
               ].map((item, i) => (
                 <tr key={i} className="hover:bg-slate-50">
+                  <td className="px-6 py-4 font-mono text-xs text-slate-500">{`SEC-${String(i + 1).padStart(3, "0")}`}</td>
                   <td className="px-6 py-4 font-mono text-sm">{item.id}</td>
                   <td className="px-6 py-4 text-sm font-medium">{item.vendor}</td>
                   <td className="px-6 py-4 text-sm font-bold">{item.amount}</td>
@@ -1754,34 +2507,25 @@ const Tenders = ({ initialView = "list" }: { initialView?: "list" | "create" | "
 
   return (
     <div className="space-y-6">
-      <AnimatePresence>
-        {notification && (
-          <motion.div 
-            initial={{ opacity: 0, y: -20 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -20 }}
-            className="fixed top-24 right-8 z-[200] bg-emerald-600 text-white px-6 py-3 rounded-xl shadow-xl flex items-center gap-3"
-          >
-            <CheckCircle2 size={20} />
-            <span className="font-medium">{notification}</span>
-          </motion.div>
-        )}
-      </AnimatePresence>
+      <NotificationToast />
 
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold text-slate-900">Tender Management</h1>
+        <div className="flex items-center gap-3">
+          <h1 className="text-2xl font-bold text-slate-900">Tender Management</h1>
+          <span className="text-xs font-bold text-slate-400 uppercase tracking-widest">Stage 1 & 2</span>
+        </div>
         <div className="flex gap-3">
           <button onClick={() => setView("security")} className="btn-secondary flex items-center gap-2">
             <ShieldCheck size={18} /> Verify Security
           </button>
-          <button onClick={() => setView("create")} className="btn-primary flex items-center gap-2">
+          <button onClick={startCreateTender} className="btn-primary flex items-center gap-2">
             <Plus size={18} /> Add Tender
           </button>
         </div>
       </div>
 
       <div className="card p-6 space-y-6">
-        <div className="grid grid-cols-1 md:grid-cols-4 lg:grid-cols-6 gap-4 items-end">
+        <div className="grid grid-cols-1 md:grid-cols-5 lg:grid-cols-7 gap-4 items-end">
           <div className="space-y-1 md:col-span-2">
             <label className="text-[10px] font-bold text-slate-400 uppercase">Search Key</label>
             <div className="relative">
@@ -1797,10 +2541,14 @@ const Tenders = ({ initialView = "list" }: { initialView?: "list" | "create" | "
           </div>
           <div className="space-y-1">
             <label className="text-[10px] font-bold text-slate-400 uppercase">Department</label>
-            <select className="input-field py-2 text-sm">
-              <option>All Entities</option>
-              <option>DoE</option>
-              <option>UNDP</option>
+            <select 
+              className="input-field py-2 text-sm"
+              value={selectedDepartment}
+              onChange={(e) => setSelectedDepartment(e.target.value)}
+            >
+              <option>All Departments</option>
+              <option>Department of Energy</option>
+              <option>UNDP Lesotho</option>
             </select>
           </div>
           <div className="space-y-1">
@@ -1820,10 +2568,27 @@ const Tenders = ({ initialView = "list" }: { initialView?: "list" | "create" | "
           </div>
           <div className="space-y-1">
             <label className="text-[10px] font-bold text-slate-400 uppercase">Procurement</label>
-            <select className="input-field py-2 text-sm">
+            <select 
+              className="input-field py-2 text-sm"
+              value={selectedProcurement}
+              onChange={(e) => setSelectedProcurement(e.target.value)}
+            >
               <option>All Methods</option>
-              <option>Open</option>
-              <option>Restricted</option>
+              <option>Open Competitive</option>
+              <option>Selective</option>
+              <option>Direct</option>
+            </select>
+          </div>
+          <div className="space-y-1">
+            <label className="text-[10px] font-bold text-slate-400 uppercase">Sort By</label>
+            <select 
+              className="input-field py-2 text-sm"
+              value={sortBy}
+              onChange={(e) => setSortBy(e.target.value as any)}
+            >
+              <option value="created_at">Recent</option>
+              <option value="deadline">Deadline</option>
+              <option value="published_at">Published</option>
             </select>
           </div>
           <button onClick={runTenderSearch} className="btn-primary py-2 flex items-center justify-center gap-2">
@@ -1836,6 +2601,7 @@ const Tenders = ({ initialView = "list" }: { initialView?: "list" | "create" | "
         <table className="w-full text-left border-collapse">
           <thead>
             <tr className="bg-slate-50 border-bottom border-slate-200">
+              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">ID</th>
               <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Reference</th>
               <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Tender Name</th>
               <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Category</th>
@@ -1847,6 +2613,7 @@ const Tenders = ({ initialView = "list" }: { initialView?: "list" | "create" | "
           <tbody className="divide-y divide-slate-200">
             {filteredTenders.map((tender) => (
               <tr key={tender.id} className="hover:bg-slate-50 transition-colors">
+                <td className="px-6 py-4 font-mono text-xs text-slate-500">{tender.id}</td>
                 <td className="px-6 py-4 font-mono text-sm text-slate-600">{tender.referenceNumber}</td>
                 <td className="px-6 py-4 font-medium text-slate-900">{tender.name}</td>
                 <td className="px-6 py-4 text-sm text-slate-600">{tender.category}</td>
@@ -1872,14 +2639,14 @@ const Tenders = ({ initialView = "list" }: { initialView?: "list" | "create" | "
                 <td className="px-6 py-4">
                   <div className="flex items-center gap-4">
                     <button 
-                      onClick={() => { setSelectedTender(tender); setView("details"); }}
+                      onClick={() => void openTenderView(tender.id, "details")}
                       className="text-emerald-600 hover:text-emerald-700 font-medium text-sm"
                     >
                       View
                     </button>
                     {!tender.isVerified && (
                       <button 
-                        onClick={() => { setSelectedTender(tender); setView("verify"); }}
+                        onClick={() => void openTenderView(tender.id, "verify")}
                         className="text-blue-600 hover:text-blue-700 font-medium text-sm"
                       >
                         Verify
@@ -1887,18 +2654,18 @@ const Tenders = ({ initialView = "list" }: { initialView?: "list" | "create" | "
                     )}
                     {tender.isVerified && tender.status === TenderStatus.DRAFT && (
                       <button 
-                        onClick={() => { setSelectedTender(tender); setView("publish"); }}
+                        onClick={() => void openTenderView(tender.id, "publish")}
                         className="text-emerald-600 hover:text-emerald-700 font-medium text-sm"
                       >
                         Publish
                       </button>
                     )}
-                    {(tender.status === TenderStatus.EVALUATION || tender.status === TenderStatus.PUBLISHED) && (
+                    {(tender.status === TenderStatus.EVALUATION || tender.status === TenderStatus.PUBLISHED || tender.status === TenderStatus.AWARDED) && (
                       <button 
-                        onClick={() => { setSelectedTender(tender); setView("award"); }}
+                        onClick={() => void openTenderView(tender.id, "award")}
                         className="text-purple-600 hover:text-purple-700 font-medium text-sm"
                       >
-                        Award
+                        {tender.status === TenderStatus.AWARDED ? "Manage Award" : "Award"}
                       </button>
                     )}
                   </div>
@@ -1917,42 +2684,74 @@ const Tenders = ({ initialView = "list" }: { initialView?: "list" | "create" | "
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             className="fixed inset-0 z-[100] bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4"
+            onClick={() => setView("list")}
           >
             <motion.div 
               initial={{ scale: 0.95, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.95, opacity: 0 }}
               className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-8 space-y-6"
+              onClick={(e) => e.stopPropagation()}
             >
               <h2 className="text-xl font-bold text-slate-900">Issue Award Notification</h2>
               <p className="text-sm text-slate-500">Select the winning bidder and notification options for {selectedTender.name}.</p>
               
               <div className="space-y-4">
                 <div className="space-y-2">
-                  <label className="text-sm font-bold text-slate-700">Winning Bidder</label>
-                  <select 
+                  <label className="text-sm font-bold text-slate-700">Winning Bid</label>
+                  {awardBidLoading ? (
+                    <div className="text-xs text-slate-500">Loading submitted bids...</div>
+                  ) : (
+                    <select
+                      className="input-field"
+                      value={awardBidId}
+                      onChange={(e) => {
+                        const nextId = e.target.value;
+                        setAwardBidId(nextId);
+                        const match = awardBids.find(b => b.id === nextId);
+                        if (match) {
+                          setAwardWinner(match.vendor_name || "");
+                          setAwardWinnerId(match.vendor_id || "");
+                        }
+                      }}
+                    >
+                      <option value="">Select a submitted bid</option>
+                      {awardBids.map(bid => (
+                        <option key={bid.id} value={bid.id}>
+                          {bid.vendor_name} • Vendor {bid.vendor_id} • Version {bid.version_number ?? 1}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                  {!awardBidLoading && awardBids.length === 0 && (
+                    <p className="text-xs text-amber-700">No TAC‑scored bids found for this tender.</p>
+                  )}
+                  {!awardBidLoading && awardBids.length > 0 && (
+                    <p className="text-[10px] text-slate-400">Only TAC‑scored bids with total score ≥ 71 are available for award.</p>
+                  )}
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-bold text-slate-700">Winning Vendor ID</label>
+                  <input
+                    className="input-field"
+                    value={awardWinnerId}
+                    onChange={(e) => setAwardWinnerId(e.target.value)}
+                    placeholder="Vendor user ID (e.g., 12)"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-bold text-slate-700">Winning Vendor Name</label>
+                  <input
                     className="input-field"
                     value={awardWinner}
                     onChange={(e) => setAwardWinner(e.target.value)}
-                  >
-                    <option>SolarLease Ltd</option>
-                    <option>EcoGrid Solutions</option>
-                    <option>Mountain Power</option>
-                  </select>
+                    placeholder="Vendor legal name"
+                  />
                 </div>
 
                 <div className="space-y-2">
                   <label className="text-sm font-bold text-slate-700">Notification Options</label>
                   <div className="space-y-2">
-                    <label className="flex items-center gap-3 cursor-pointer">
-                      <input 
-                        type="checkbox" 
-                        className="w-5 h-5 rounded border-slate-300 text-emerald-600" 
-                        checked={notifySMS}
-                        onChange={(e) => setNotifySMS(e.target.checked)}
-                      />
-                      <span className="text-sm font-medium text-slate-700">Send SMS Notification</span>
-                    </label>
                     <label className="flex items-center gap-3 cursor-pointer">
                       <input 
                         type="checkbox" 
@@ -1966,11 +2765,104 @@ const Tenders = ({ initialView = "list" }: { initialView?: "list" | "create" | "
                 </div>
               </div>
 
+              <div className="space-y-4 border-t border-slate-100 pt-4">
+                <h3 className="text-sm font-bold text-slate-700">Contract & Milestones</h3>
+                {tenderContracts.length === 0 && (
+                  <button
+                    onClick={handleGenerateContract}
+                    disabled={isActioning || !awardWinnerId.trim() || selectedTender.status !== TenderStatus.AWARDED}
+                    className="btn-secondary w-full"
+                  >
+                    {isActioning ? "Generating..." : "Generate Contract"}
+                  </button>
+                )}
+                {activeContract && (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="font-medium text-slate-700">{activeContract.referenceNumber}</span>
+                      <span className="badge bg-slate-100 text-slate-700">{activeContract.status}</span>
+                    </div>
+                    {activeContract && (
+                      <div className="space-y-3">
+                        <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+                          <p className="font-semibold text-slate-700">Signed Contract Review</p>
+                          {activeContract.signedFile ? (
+                            <a
+                              href={activeContract.signedFile}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-emerald-700 hover:text-emerald-800 underline"
+                            >
+                              View uploaded contract
+                            </a>
+                          ) : (
+                            <p className="text-rose-600">No signed file uploaded yet.</p>
+                          )}
+                          <p className="text-[10px] text-slate-400 mt-2">
+                            Status: {activeContract.status}
+                          </p>
+                        </div>
+                        <p className="text-xs text-slate-500">Configure milestones before approval.</p>
+                        {milestoneDrafts.map((m, idx) => (
+                          <div key={`${m.name}-${idx}`} className="grid grid-cols-3 gap-2">
+                            <input
+                              className="input-field"
+                              value={m.name}
+                              onChange={(e) => setMilestoneDrafts(prev => prev.map((item, i) => i === idx ? { ...item, name: e.target.value } : item))}
+                              placeholder="Milestone name"
+                            />
+                            <input
+                              className="input-field"
+                              type="number"
+                              value={m.percentage}
+                              onChange={(e) => setMilestoneDrafts(prev => prev.map((item, i) => i === idx ? { ...item, percentage: Number(e.target.value) } : item))}
+                              placeholder="%"
+                            />
+                            <input
+                              className="input-field"
+                              type="number"
+                              value={m.amount}
+                              onChange={(e) => setMilestoneDrafts(prev => prev.map((item, i) => i === idx ? { ...item, amount: Number(e.target.value) } : item))}
+                              placeholder="Amount"
+                            />
+                          </div>
+                        ))}
+                        <button
+                          onClick={() => handleApproveContract(activeContract.id)}
+                          disabled={isActioning}
+                          className="btn-primary w-full"
+                        >
+                          {isActioning ? "Approving..." : "Approve Contract"}
+                        </button>
+                        <div className="space-y-2">
+                          <input
+                            className="input-field"
+                            value={contractRejectionReason}
+                            onChange={(e) => setContractRejectionReason(e.target.value)}
+                            placeholder="Rejection reason (optional)"
+                          />
+                          <button
+                            onClick={() => handleRejectContract(activeContract.id)}
+                            disabled={isActioning}
+                            className="btn-secondary w-full"
+                          >
+                            Reject Contract
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+                {contractMessage && <p className="text-xs text-slate-600">{contractMessage}</p>}
+              </div>
+
               <div className="flex gap-3 pt-4">
                 <button onClick={() => setView("list")} className="btn-secondary flex-1">Cancel</button>
-                <button onClick={() => handleAward(selectedTender.id)} disabled={isActioning} className="btn-primary flex-1 bg-purple-600 hover:bg-purple-700 disabled:opacity-60">
-                  {isActioning ? "Awarding..." : "Confirm Award"}
-                </button>
+                {selectedTender.status !== TenderStatus.AWARDED && (
+                  <button onClick={() => handleAward(selectedTender.id)} disabled={isActioning} className="btn-primary flex-1 bg-purple-600 hover:bg-purple-700 disabled:opacity-60">
+                    {isActioning ? "Awarding..." : "Confirm Award"}
+                  </button>
+                )}
               </div>
             </motion.div>
           </motion.div>
@@ -2515,6 +3407,7 @@ const Monitoring = () => {
         <table className="w-full text-left">
           <thead>
             <tr className="bg-slate-50 border-b border-slate-100">
+              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">ID</th>
               <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Meter ID</th>
               <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Project / Vendor</th>
               <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">kWh Gen.</th>
@@ -2524,8 +3417,9 @@ const Monitoring = () => {
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {smartMeterData.map((meter) => (
+            {smartMeterData.map((meter, idx) => (
               <tr key={meter.id} className="hover:bg-slate-50 transition-colors">
+                <td className="px-6 py-4 font-mono text-xs text-slate-500">{`SM-${String(idx + 1).padStart(3, "0")}`}</td>
                 <td className="px-6 py-4 font-mono text-xs font-bold text-blue-600">{meter.id}</td>
                 <td className="px-6 py-4">
                   <div className="text-sm font-bold text-slate-900">{meter.project}</div>
@@ -2618,6 +3512,7 @@ const Monitoring = () => {
         <table className="w-full text-left">
           <thead>
             <tr className="bg-slate-50 border-b border-slate-100">
+              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">ID</th>
               <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Ranking</th>
               <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Vendor</th>
               <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Total kWh</th>
@@ -2627,8 +3522,9 @@ const Monitoring = () => {
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {vendorReports.map((report) => (
+            {vendorReports.map((report, idx) => (
               <tr key={report.vendor} className="hover:bg-slate-50 transition-colors">
+                <td className="px-6 py-4 font-mono text-xs text-slate-500">{`RPT-${String(idx + 1).padStart(3, "0")}`}</td>
                 <td className="px-6 py-4">
                   <div className={`w-8 h-8 rounded-full flex items-center justify-center font-bold text-sm ${
                     report.ranking === 1 ? 'bg-amber-100 text-amber-700' : 
@@ -2753,6 +3649,7 @@ const Monitoring = () => {
           <table className="w-full text-left">
             <thead>
               <tr className="bg-slate-50 border-b border-slate-100">
+                <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">ID</th>
                 <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Survey ID</th>
                 <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Household / District</th>
                 <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Field Officer</th>
@@ -2761,8 +3658,9 @@ const Monitoring = () => {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {verificationQueue.map((audit) => (
+              {verificationQueue.map((audit, idx) => (
                 <tr key={audit.id} className="hover:bg-slate-50 transition-colors">
+                  <td className="px-6 py-4 font-mono text-xs text-slate-500">{`SVY-${String(idx + 1).padStart(3, "0")}`}</td>
                   <td className="px-6 py-4 font-mono text-xs font-bold text-blue-600">{audit.id}</td>
                   <td className="px-6 py-4">
                     <div className="text-sm font-bold text-slate-900">{audit.householdId}</div>
@@ -2959,6 +3857,32 @@ const PreQualification = () => {
   const [loading, setLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  const toFileUrl = (raw?: string | null) => {
+    if (!raw) return null;
+    if (/^https?:\/\//i.test(raw)) return raw;
+    const base = API_BASE.replace(/\/api$/i, "").replace(/\/$/, "");
+    const path = raw.startsWith("/") ? raw : `/${raw}`;
+    return `${base}${path}`;
+  };
+
+  const renderDocLink = (label: string, url?: string | null) => (
+    <div className="flex items-center justify-between text-sm">
+      <span className="text-slate-500">{label}</span>
+      {url ? (
+        <a
+          href={url}
+          target="_blank"
+          rel="noreferrer"
+          className="text-emerald-600 hover:underline flex items-center gap-1"
+        >
+          <Download size={14} /> View Document
+        </a>
+      ) : (
+        <span className="text-xs text-slate-400">Not provided</span>
+      )}
+    </div>
+  );
+
   const showNotification = (msg: string) => {
     setNotification(msg);
     setTimeout(() => setNotification(null), 3000);
@@ -2985,6 +3909,13 @@ const PreQualification = () => {
     void loadPrequalifications();
   }, [loadPrequalifications]);
 
+  React.useEffect(() => {
+    const id = setInterval(() => {
+      void loadPrequalifications();
+    }, 20000);
+    return () => clearInterval(id);
+  }, [loadPrequalifications]);
+
   const updateVendorStatus = async (
     vendor: VendorPrequalification,
     newStatus: VendorPrequalification["status"]
@@ -3003,6 +3934,7 @@ const PreQualification = () => {
       }
 
       setVendors(prev => prev.map(item => item.id === updated.id ? updated : item));
+      await loadPrequalifications();
       setSelectedVendor(null);
       setReviewerComments("");
       showNotification(`Vendor application ${newStatus.toLowerCase()} successfully.`);
@@ -3047,6 +3979,7 @@ const PreQualification = () => {
         <table className="w-full text-left">
           <thead>
             <tr className="bg-slate-50">
+              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">ID</th>
               <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Vendor Name</th>
               <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Type</th>
               <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Technologies</th>
@@ -3058,6 +3991,7 @@ const PreQualification = () => {
           <tbody className="divide-y divide-slate-100">
             {!loading && vendors.map(vendor => (
               <tr key={vendor.id} className="hover:bg-slate-50 transition-colors">
+                <td className="px-6 py-4 font-mono text-xs text-slate-500">{vendor.id}</td>
                 <td className="px-6 py-4">
                   <div className="font-medium text-slate-900">{vendor.companyName}</div>
                   <div className="text-xs text-slate-500 font-mono">{vendor.vendorUsername || `ID-${vendor.id}`}</div>
@@ -3091,14 +4025,14 @@ const PreQualification = () => {
             ))}
             {!loading && vendors.length === 0 && (
               <tr>
-                <td colSpan={6} className="px-6 py-12 text-center text-sm text-slate-500">
+                <td colSpan={7} className="px-6 py-12 text-center text-sm text-slate-500">
                   No pre-qualification submissions found.
                 </td>
               </tr>
             )}
             {loading && (
               <tr>
-                <td colSpan={6} className="px-6 py-12 text-center text-sm text-slate-500">
+                <td colSpan={7} className="px-6 py-12 text-center text-sm text-slate-500">
                   Loading pre-qualification submissions...
                 </td>
               </tr>
@@ -3114,12 +4048,14 @@ const PreQualification = () => {
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             className="fixed inset-0 z-[100] bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4"
+            onClick={() => setSelectedVendor(null)}
           >
             <motion.div 
               initial={{ scale: 0.95, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.95, opacity: 0 }}
               className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] overflow-hidden flex flex-col"
+              onClick={(e) => e.stopPropagation()}
             >
               <div className="p-6 border-b border-slate-100 flex items-center justify-between">
                 <h2 className="text-xl font-bold text-slate-900">Vendor Profile Review: {selectedVendor.companyName}</h2>
@@ -3132,41 +4068,21 @@ const PreQualification = () => {
                   <div className="space-y-6">
                     <h3 className="font-bold text-slate-900 border-b border-slate-100 pb-2">Legal & Administrative</h3>
                     <div className="space-y-4">
+                      {renderDocLink("Company Registration", toFileUrl(selectedVendor.registrationCertificate))}
+                      {renderDocLink("Tax Clearance Certificate", toFileUrl(selectedVendor.taxComplianceCertificate))}
+                      {renderDocLink("Valid Trading License", toFileUrl(selectedVendor.tradingLicense))}
+                      {renderDocLink("Experience & Financial Proof", toFileUrl(selectedVendor.experienceFinancialProof))}
                       <div className="flex items-center justify-between text-sm">
-                        <span className="text-slate-500">Certificate of Incorporation</span>
-                        <button
-                          onClick={() => {
-                            triggerDownload("certificate_of_incorporation.txt", `Certificate of Incorporation\n${selectedVendor.registrationCertificateName || "No file provided"}`);
-                            showNotification("Opened Certificate of Incorporation.");
-                          }}
-                          className="text-emerald-600 hover:underline flex items-center gap-1"
-                        >
-                          <Download size={14} /> View Document
-                        </button>
+                        <span className="text-slate-500">Organization Type</span>
+                        <span className="text-slate-900 font-medium">{selectedVendor.organizationType || "N/A"}</span>
                       </div>
                       <div className="flex items-center justify-between text-sm">
-                        <span className="text-slate-500">Tax Clearance Certificate</span>
-                        <button
-                          onClick={() => {
-                            triggerDownload("tax_clearance_certificate.txt", "Tax Clearance Certificate\nSample document preview.");
-                            showNotification("Opened Tax Clearance Certificate.");
-                          }}
-                          className="text-emerald-600 hover:underline flex items-center gap-1"
-                        >
-                          <Download size={14} /> View Document
-                        </button>
+                        <span className="text-slate-500">Tax ID</span>
+                        <span className="text-slate-900 font-medium">{selectedVendor.taxId || "N/A"}</span>
                       </div>
                       <div className="flex items-center justify-between text-sm">
-                        <span className="text-slate-500">Trade License</span>
-                        <button
-                          onClick={() => {
-                            triggerDownload("trade_license.txt", "Trade License\nSample document preview.");
-                            showNotification("Opened Trade License.");
-                          }}
-                          className="text-emerald-600 hover:underline flex items-center gap-1"
-                        >
-                          <Download size={14} /> View Document
-                        </button>
+                        <span className="text-slate-500">HQ Address</span>
+                        <span className="text-slate-900 font-medium">{selectedVendor.hqAddress || "N/A"}</span>
                       </div>
                     </div>
                   </div>
@@ -3216,15 +4132,23 @@ const PreQualification = () => {
                     <div className="space-y-3">
                       <div className="flex items-center justify-between text-sm">
                         <span className="text-slate-500">Bank Account</span>
-                        <span className="text-slate-900 font-medium">Standard Lesotho Bank</span>
+                        <span className="text-slate-900 font-medium">
+                          {selectedVendor.bankAccountName || "N/A"} {selectedVendor.bankAccountNumber ? `• ${selectedVendor.bankAccountNumber}` : ""}
+                        </span>
                       </div>
                       <div className="flex items-center justify-between text-sm">
                         <span className="text-slate-500">Focal Person</span>
-                        <span className="text-slate-900 font-medium">Jane Doe (Female)</span>
+                        <span className="text-slate-900 font-medium">
+                          {selectedVendor.genderOfFocalPerson || "N/A"}
+                        </span>
                       </div>
                       <div className="flex items-center justify-between text-sm">
                         <span className="text-slate-500">Contact</span>
-                        <span className="text-slate-900 font-medium">+266 5812 3456</span>
+                        <span className="text-slate-900 font-medium">{selectedVendor.contactNumber || "N/A"}</span>
+                      </div>
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="text-slate-500">Email</span>
+                        <span className="text-slate-900 font-medium">{selectedVendor.email || "N/A"}</span>
                       </div>
                     </div>
                   </div>
@@ -3325,6 +4249,13 @@ const Disbursements = () => {
     void loadClaims();
   }, [loadClaims]);
 
+  React.useEffect(() => {
+    const id = setInterval(() => {
+      void loadClaims();
+    }, 20000);
+    return () => clearInterval(id);
+  }, [loadClaims]);
+
   const exportPaymentSchedule = () => {
     const csv = [
       "claim_id,vendor,project,milestone,amount,status",
@@ -3346,6 +4277,7 @@ const Disbursements = () => {
       }
       const paid = await payPaymentClaim(claim.id, undefined, "Processed from disbursement dashboard.");
       setClaims(prev => prev.map(item => item.id === claim.id ? paid : item));
+      await loadClaims();
       showNotification(`Claim ${claim.id} processed and marked as Paid.`);
     } catch (err: any) {
       const raw = String(err?.message || "");
@@ -3409,6 +4341,7 @@ const Disbursements = () => {
         <table className="w-full text-left">
           <thead>
             <tr className="bg-slate-50">
+              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">ID</th>
               <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Claim ID</th>
               <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Vendor & Project</th>
               <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Milestone</th>
@@ -3420,6 +4353,7 @@ const Disbursements = () => {
           <tbody className="divide-y divide-slate-100">
             {!loading && claims.map(claim => (
               <tr key={claim.id} className="hover:bg-slate-50 transition-colors">
+                <td className="px-6 py-4 font-mono text-xs text-slate-500">{claim.id}</td>
                 <td className="px-6 py-4 font-mono text-sm text-slate-600">CLM-{String(claim.id).padStart(3, "0")}</td>
                 <td className="px-6 py-4">
                   <div className="font-medium text-slate-900">{claim.vendorUsername || `Vendor ${claim.vendorId}`}</div>
@@ -3449,14 +4383,14 @@ const Disbursements = () => {
             ))}
             {!loading && claims.length === 0 && (
               <tr>
-                <td colSpan={6} className="px-6 py-12 text-center text-sm text-slate-500">
+                <td colSpan={7} className="px-6 py-12 text-center text-sm text-slate-500">
                   No payment claims found.
                 </td>
               </tr>
             )}
             {loading && (
               <tr>
-                <td colSpan={6} className="px-6 py-12 text-center text-sm text-slate-500">
+                <td colSpan={7} className="px-6 py-12 text-center text-sm text-slate-500">
                   Loading payment claims...
                 </td>
               </tr>
@@ -3633,6 +4567,7 @@ const Reports = () => {
           <table className="w-full text-left">
             <thead>
               <tr className="border-b border-slate-100">
+                <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest">ID</th>
                 <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest">District</th>
                 <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest">Project Type</th>
                 <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest">Installed Capacity</th>
@@ -3648,6 +4583,7 @@ const Reports = () => {
                 { district: 'Berea', type: 'Cook Stove', capacity: '210 kW', output: '150 kWh', gender: '52%', status: 'Pending' },
               ].map((row, i) => (
                 <tr key={i} className="hover:bg-slate-50/50 transition-colors">
+                  <td className="px-6 py-4 font-mono text-xs text-slate-500">{`RG-${String(i + 1).padStart(3, "0")}`}</td>
                   <td className="px-6 py-4 font-bold text-slate-900">{row.district}</td>
                   <td className="px-6 py-4 text-sm text-slate-600">{row.type}</td>
                   <td className="px-6 py-4 text-sm text-slate-600">{row.capacity}</td>
@@ -3750,10 +4686,12 @@ const NotificationCenter = ({
   notifications,
   onClose,
   onViewAll,
+  onSelect,
 }: {
   notifications: Notification[];
   onClose: () => void;
   onViewAll: () => void;
+  onSelect?: (notification: Notification) => void;
 }) => {
   return (
     <motion.div 
@@ -3775,7 +4713,19 @@ const NotificationCenter = ({
         {notifications.length > 0 ? (
           <div className="divide-y divide-slate-50">
             {notifications.map((n) => (
-              <div key={n.id} className={`p-4 hover:bg-slate-50 transition-colors cursor-pointer ${n.status === NotificationStatus.SENT ? 'bg-emerald-50/30' : ''}`}>
+              <div
+                key={n.id}
+                role="button"
+                tabIndex={0}
+                onClick={() => onSelect?.(n)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    onSelect?.(n);
+                  }
+                }}
+                className={`p-4 hover:bg-slate-50 transition-colors cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400 ${n.status === NotificationStatus.SENT ? 'bg-emerald-50/30' : ''}`}
+              >
                 <div className="flex gap-3">
                   <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
                     n.type === NotificationChannel.EMAIL ? 'bg-blue-50 text-blue-600' :
@@ -3815,7 +4765,13 @@ const NotificationCenter = ({
   );
 };
 
-const NotificationLogs = ({ logs }: { logs: Notification[] }) => {
+const NotificationLogs = ({
+  logs,
+  onSelect,
+}: {
+  logs: Notification[];
+  onSelect?: (notification: Notification) => void;
+}) => {
   const [statusFilter, setStatusFilter] = useState<"All" | NotificationStatus>("All");
   const [message, setMessage] = useState<string | null>(null);
 
@@ -3878,6 +4834,7 @@ const NotificationLogs = ({ logs }: { logs: Notification[] }) => {
         <table className="w-full text-left">
           <thead>
             <tr className="border-b border-slate-100 bg-slate-50/50">
+              <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest">ID</th>
               <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest">Recipient</th>
               <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest">Channel</th>
               <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest">Event</th>
@@ -3888,7 +4845,13 @@ const NotificationLogs = ({ logs }: { logs: Notification[] }) => {
           </thead>
           <tbody className="divide-y divide-slate-50">
             {visibleLogs.map((log) => (
-              <tr key={log.id} className="hover:bg-slate-50/50 transition-colors">
+              <tr
+                key={log.id}
+                className="hover:bg-slate-50/50 transition-colors cursor-pointer"
+                onClick={() => onSelect?.(log)}
+                title="View related section"
+              >
+                <td className="px-6 py-4 font-mono text-[10px] text-slate-500">{log.id}</td>
                 <td className="px-6 py-4">
                   <p className="text-sm font-bold text-slate-900">{log.recipientName}</p>
                   <p className="text-[10px] text-slate-400">{log.recipientId}</p>
@@ -3917,7 +4880,10 @@ const NotificationLogs = ({ logs }: { logs: Notification[] }) => {
                 </td>
                 <td className="px-6 py-4 text-right">
                   <button 
-                    onClick={() => handleResend(log.id)}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      handleResend(log.id);
+                    }}
                     className="p-2 hover:bg-emerald-50 rounded-lg text-emerald-600 transition-colors"
                     title="Resend"
                   >
@@ -3928,7 +4894,7 @@ const NotificationLogs = ({ logs }: { logs: Notification[] }) => {
             ))}
             {visibleLogs.length === 0 && (
               <tr>
-                <td colSpan={6} className="px-6 py-12 text-center text-sm text-slate-500">
+                <td colSpan={7} className="px-6 py-12 text-center text-sm text-slate-500">
                   No logs match the selected filter.
                 </td>
               </tr>
@@ -3940,8 +4906,30 @@ const NotificationLogs = ({ logs }: { logs: Notification[] }) => {
   );
 };
 
+const getLatestPrequalification = (items: VendorPrequalification[]) => {
+  if (!items.length) return null;
+  const sorted = [...items].sort((a, b) => {
+    const aSubmitted = Date.parse(a.submittedAt || "");
+    const bSubmitted = Date.parse(b.submittedAt || "");
+    if (!Number.isNaN(aSubmitted) || !Number.isNaN(bSubmitted)) {
+      return (Number.isNaN(bSubmitted) ? 0 : bSubmitted) - (Number.isNaN(aSubmitted) ? 0 : aSubmitted);
+    }
+    const aReviewed = Date.parse(a.reviewedAt || "");
+    const bReviewed = Date.parse(b.reviewedAt || "");
+    if (!Number.isNaN(aReviewed) || !Number.isNaN(bReviewed)) {
+      return (Number.isNaN(bReviewed) ? 0 : bReviewed) - (Number.isNaN(aReviewed) ? 0 : aReviewed);
+    }
+    const aId = Number(a.id);
+    const bId = Number(b.id);
+    return (Number.isNaN(bId) ? 0 : bId) - (Number.isNaN(aId) ? 0 : aId);
+  });
+  return sorted[0] ?? null;
+};
+
 const PreQualificationSubmission = () => {
   const [step, setStep] = useState(1);
+  const [prequals, setPrequals] = useState<VendorPrequalification[]>([]);
+  const [loadingStatus, setLoadingStatus] = useState(true);
   const [formData, setFormData] = useState({
     companyName: "",
     yearsOfExperience: "",
@@ -3959,12 +4947,41 @@ const PreQualificationSubmission = () => {
     techTier: "Level 1",
     declaration: false
   });
+  const [docFiles, setDocFiles] = useState<{
+    tradingLicense: File | null;
+    registrationCertificate: File | null;
+    taxComplianceCertificate: File | null;
+    experienceFinancialProof: File | null;
+  }>({
+    tradingLicense: null,
+    registrationCertificate: null,
+    taxComplianceCertificate: null,
+    experienceFinancialProof: null,
+  });
   const [submitted, setSubmitted] = useState(false);
   const [submissionId, setSubmissionId] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string>("");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const techSectors = ["SHS", "ICS", "GMG", "SAS", "PUE", "SWP"];
+
+  // Load vendor's existing pre-qualification status
+  React.useEffect(() => {
+    const loadStatus = async () => {
+      try {
+        const data = await fetchVendorPrequalifications();
+        setPrequals(data);
+      } catch (err) {
+        console.error('Failed to load pre-qualification status:', err);
+      } finally {
+        setLoadingStatus(false);
+      }
+    };
+    loadStatus();
+  }, []);
+
+  // Show current status if vendor has already submitted
+  const latestPrequal = getLatestPrequalification(prequals);
 
   const handleTechToggle = (tech: string) => {
     setFormData(prev => ({
@@ -3985,6 +5002,10 @@ const PreQualificationSubmission = () => {
         setSubmitError("Please select at least one technology type.");
         return;
       }
+      if (!docFiles.tradingLicense || !docFiles.taxComplianceCertificate || !docFiles.registrationCertificate || !docFiles.experienceFinancialProof) {
+        setSubmitError("Please upload all required legal and financial documents.");
+        return;
+      }
       try {
         setIsSubmitting(true);
         const created = await submitVendorPrequalification({
@@ -3994,6 +5015,10 @@ const PreQualificationSubmission = () => {
           hqAddress: "",
           technologyTypes: formData.sectorFocus,
           registrationCertificateName: "",
+          tradingLicense: docFiles.tradingLicense || undefined,
+          registrationCertificate: docFiles.registrationCertificate || undefined,
+          taxComplianceCertificate: docFiles.taxComplianceCertificate || undefined,
+          experienceFinancialProof: docFiles.experienceFinancialProof || undefined,
           techTier: formData.techTier,
           yearsExperience: Number(formData.yearsOfExperience || 0),
           priorProjects: Number(formData.priorProjects || 0),
@@ -4001,6 +5026,11 @@ const PreQualificationSubmission = () => {
           districtsCovered: Number(formData.districtsCovered || 0),
           femaleBeneficiaryTarget: formData.femaleCommitment,
           vulnerableGroupTarget: formData.vulnerableInclusion,
+          bankAccountName: formData.bankAccountName,
+          bankAccountNumber: formData.bankAccountNumber,
+          contactNumber: formData.contactNumber,
+          email: formData.emailAddress,
+          genderOfFocalPerson: formData.focalPersonGender,
           declarationAccepted: formData.declaration,
         });
         setSubmissionId(created.id);
@@ -4018,6 +5048,240 @@ const PreQualificationSubmission = () => {
     }
   };
 
+  const getStatusColor = (status: string) => {
+    switch (status) {
+      case 'Approved': return 'bg-emerald-100 text-emerald-700 border-emerald-300';
+      case 'Under Review': return 'bg-blue-100 text-blue-700 border-blue-300';
+      case 'Pending': return 'bg-amber-100 text-amber-700 border-amber-300';
+      case 'Clarification Requested': return 'bg-orange-100 text-orange-700 border-orange-300';
+      case 'Rejected': return 'bg-rose-100 text-rose-700 border-rose-300';
+      default: return 'bg-slate-100 text-slate-700 border-slate-300';
+    }
+  };
+
+  const getStatusIcon = (status: string) => {
+    switch (status) {
+      case 'Approved': return <CheckCircle2 className="text-emerald-600" size={32} />;
+      case 'Under Review': return <Clock className="text-blue-600" size={32} />;
+      case 'Pending': return <Clock className="text-amber-600" size={32} />;
+      case 'Clarification Requested': return <AlertCircle className="text-orange-600" size={32} />;
+      case 'Rejected': return <XCircle className="text-rose-600" size={32} />;
+      default: return <HelpCircle className="text-slate-600" size={32} />;
+    }
+  };
+
+  const toFileUrl = (raw?: string | null) => {
+    if (!raw) return null;
+    if (/^https?:\/\//i.test(raw)) return raw;
+    const base = API_BASE.replace(/\/api$/i, "").replace(/\/$/, "");
+    const path = raw.startsWith("/") ? raw : `/${raw}`;
+    return `${base}${path}`;
+  };
+
+  const renderDocLink = (label: string, url?: string | null) => (
+    <div className="flex items-center justify-between text-sm">
+      <span className="text-slate-500">{label}</span>
+      {url ? (
+        <a
+          href={url}
+          target="_blank"
+          rel="noreferrer"
+          className="text-emerald-600 hover:underline flex items-center gap-1"
+        >
+          <Download size={14} /> View Document
+        </a>
+      ) : (
+        <span className="text-xs text-slate-400">Not provided</span>
+      )}
+    </div>
+  );
+
+  if (loadingStatus) {
+    return (
+      <div className="flex items-center justify-center py-12">
+        <Loader2 className="animate-spin text-emerald-600" size={32} />
+        <p className="ml-3 text-slate-600">Loading your pre-qualification status...</p>
+      </div>
+    );
+  }
+
+  // Show status if vendor has submitted
+  if (latestPrequal) {
+    return (
+      <div className="max-w-3xl mx-auto space-y-6">
+        <div className="card p-8">
+          <div className="flex items-start gap-6">
+            <div className="flex-shrink-0">
+              {getStatusIcon(latestPrequal.status)}
+            </div>
+            <div className="flex-1">
+              <h2 className="text-2xl font-bold text-slate-900 mb-2">Pre-Qualification Status</h2>
+              <p className="text-slate-600 mb-4">Here's the current status of your pre-qualification submission:</p>
+              
+              <div className={`px-4 py-3 rounded-xl border-2 inline-block font-bold text-lg ${getStatusColor(latestPrequal.status)}`}>
+                {latestPrequal.status}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Status Details */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="card p-6">
+            <h3 className="font-bold text-slate-900 mb-3">Submission Details</h3>
+            <div className="space-y-3 text-sm">
+              <div>
+                <p className="text-slate-500">Company Name</p>
+                <p className="font-medium text-slate-900">{latestPrequal.companyName}</p>
+              </div>
+              <div>
+                <p className="text-slate-500">Technology Types</p>
+                <div className="flex flex-wrap gap-2 mt-1">
+                  {latestPrequal.technologyTypes.map(tech => (
+                    <span key={tech} className="px-2 py-1 bg-emerald-100 text-emerald-700 rounded text-xs font-bold">
+                      {tech}
+                    </span>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <p className="text-slate-500">Submitted At</p>
+                <p className="font-medium text-slate-900">{new Date(latestPrequal.submittedAt).toLocaleDateString()}</p>
+              </div>
+            </div>
+          </div>
+
+          <div className="card p-6">
+            <h3 className="font-bold text-slate-900 mb-3">Targets & Commitments</h3>
+            <div className="space-y-3 text-sm">
+              <div>
+                <p className="text-slate-500">Female-Beneficiary Target</p>
+                <p className="font-medium text-slate-900">{latestPrequal.femaleBeneficiaryTarget}%</p>
+              </div>
+              <div>
+                <p className="text-slate-500">Vulnerable Group Target</p>
+                <p className="font-medium text-slate-900">{latestPrequal.vulnerableGroupTarget}%</p>
+              </div>
+              <div>
+                <p className="text-slate-500">Tech Tier</p>
+                <p className="font-medium text-slate-900">{latestPrequal.techTier || 'Not specified'}</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Status-specific information */}
+        {latestPrequal.status === 'Approved' && (
+          <div className="card p-6 border-2 border-emerald-200 bg-emerald-50">
+            <h3 className="font-bold text-emerald-900 mb-2 flex items-center gap-2">
+              <CheckCircle2 size={20} /> Congratulations!
+            </h3>
+            <p className="text-emerald-800">
+              Your pre-qualification has been approved! You can now access bidding opportunities and submit applications for active tenders.
+            </p>
+          </div>
+        )}
+
+        {latestPrequal.status === 'Under Review' && (
+          <div className="card p-6 border-2 border-blue-200 bg-blue-50">
+            <h3 className="font-bold text-blue-900 mb-2 flex items-center gap-2">
+              <Clock size={20} /> Under Review
+            </h3>
+            <p className="text-blue-800">
+              Your submission is currently being reviewed by RBF and UNDP officials. You will receive an email notification once the review is complete (typically within 5-10 business days).
+            </p>
+          </div>
+        )}
+
+        {latestPrequal.status === 'Pending' && (
+          <div className="card p-6 border-2 border-amber-200 bg-amber-50">
+            <h3 className="font-bold text-amber-900 mb-2 flex items-center gap-2">
+              <Clock size={20} /> Pending Review
+            </h3>
+            <p className="text-amber-800">
+              Your submission has been received and is waiting to be picked up for review. You will receive an email notification soon.
+            </p>
+          </div>
+        )}
+
+        {latestPrequal.status === 'Clarification Requested' && (
+          <div className="card p-6 border-2 border-orange-200 bg-orange-50">
+            <h3 className="font-bold text-orange-900 mb-2 flex items-center gap-2">
+              <AlertCircle size={20} /> Clarification Needed
+            </h3>
+            <p className="text-orange-800 mb-3">
+              The review team needs more information to process your application. Please review the comments below and resubmit.
+            </p>
+            {latestPrequal.reviewerComments && (
+              <div className="p-4 bg-white rounded border border-orange-300">
+                <p className="text-sm font-medium text-slate-700 mb-1">Reviewer Comments:</p>
+                <p className="text-sm text-slate-600">{latestPrequal.reviewerComments}</p>
+              </div>
+            )}
+            <button 
+              onClick={() => {
+                setPrequals([]);
+                setSubmitted(false);
+                setStep(1);
+              }}
+              className="btn-primary mt-4"
+            >
+              Resubmit Pre-Qualification
+            </button>
+          </div>
+        )}
+
+        {latestPrequal.status === 'Rejected' && (
+          <div className="card p-6 border-2 border-rose-200 bg-rose-50">
+            <h3 className="font-bold text-rose-900 mb-2 flex items-center gap-2">
+              <XCircle size={20} /> Application Rejected
+            </h3>
+            <p className="text-rose-800 mb-3">
+              Your pre-qualification application was not approved. Please review the feedback below.
+            </p>
+            {latestPrequal.reviewerComments && (
+              <div className="p-4 bg-white rounded border border-rose-300 mb-4">
+                <p className="text-sm font-medium text-slate-700 mb-1">Reviewer Feedback:</p>
+                <p className="text-sm text-slate-600">{latestPrequal.reviewerComments}</p>
+              </div>
+            )}
+            <p className="text-sm text-rose-800 mb-4">
+              If you would like to appeal this decision or have questions, please contact RBF support.
+            </p>
+            <button 
+              onClick={() => {
+                setPrequals([]);
+                setSubmitted(false);
+                setStep(1);
+              }}
+              className="btn-secondary"
+            >
+              Submit New Application
+            </button>
+          </div>
+        )}
+
+        {/* Review Information */}
+        {latestPrequal.reviewedBy && (
+          <div className="card p-6 bg-slate-50">
+            <p className="text-xs text-slate-500 uppercase font-bold mb-1">Review Information</p>
+            <div className="grid grid-cols-2 gap-4 text-sm">
+              <div>
+                <p className="text-slate-600">Reviewed By</p>
+                <p className="font-medium">{latestPrequal.reviewedByUsername || 'RBF Official'}</p>
+              </div>
+              <div>
+                <p className="text-slate-600">Reviewed At</p>
+                <p className="font-medium">{latestPrequal.reviewedAt ? new Date(latestPrequal.reviewedAt).toLocaleDateString() : '-'}</p>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // Show form if no pre-qualification exists
   if (submitted) {
     return (
       <div className="max-w-2xl mx-auto text-center space-y-6 py-12">
@@ -4057,10 +5321,20 @@ const PreQualificationSubmission = () => {
             setSubmitted(false);
             setSubmissionId(null);
             setStep(1);
+            // Reload status
+            const loadStatus = async () => {
+              try {
+                const data = await fetchVendorPrequalifications();
+                setPrequals(data);
+              } catch (err) {
+                console.error('Failed to load pre-qualification status:', err);
+              }
+            };
+            loadStatus();
           }} 
           className="btn-primary px-8 py-3 rounded-xl"
         >
-          Return to Dashboard
+          Check Status
         </button>
       </div>
     );
@@ -4124,16 +5398,31 @@ const PreQualificationSubmission = () => {
 
               <div className="space-y-4 pt-4">
                 <label className="text-sm font-bold text-slate-700 ml-1">Required Documentation (Max 5MB per file)</label>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   {[
-                    { label: "Registration Certificate", icon: FileText },
-                    { label: "Tax Compliance Cert", icon: ShieldCheck },
-                    { label: "Authorized Signatory ID", icon: UserCircle }
+                    { key: "tradingLicense", label: "Valid Trading License", icon: FileText },
+                    { key: "taxComplianceCertificate", label: "Tax Clearance Certificate", icon: ShieldCheck },
+                    { key: "registrationCertificate", label: "Company Registration", icon: FileText },
+                    { key: "experienceFinancialProof", label: "Experience & Financial Stability", icon: UserCircle },
                   ].map((doc, i) => (
-                    <div key={i} className="p-4 border-2 border-dashed border-slate-200 rounded-xl text-center hover:border-emerald-500 transition-colors cursor-pointer bg-slate-50">
-                      <doc.icon className="mx-auto text-slate-400 mb-2" size={24} />
-                      <p className="text-[10px] font-bold text-slate-600 uppercase tracking-wider">{doc.label}</p>
-                      <p className="text-[8px] text-slate-400 mt-1">PDF/DOCX only</p>
+                    <div key={i} className="p-4 border-2 border-dashed border-slate-200 rounded-xl text-center bg-slate-50">
+                      <label htmlFor={`prequal-doc-${doc.key}`} className="cursor-pointer block">
+                        <doc.icon className="mx-auto text-slate-400 mb-2" size={24} />
+                        <p className="text-[10px] font-bold text-slate-600 uppercase tracking-wider">{doc.label}</p>
+                        <p className="text-[8px] text-slate-400 mt-1">
+                          {(docFiles as any)[doc.key]?.name || "PDF/DOCX only"}
+                        </p>
+                      </label>
+                      <input
+                        id={`prequal-doc-${doc.key}`}
+                        type="file"
+                        accept=".pdf,.doc,.docx"
+                        className="hidden"
+                        onChange={(e) => {
+                          const file = e.target.files?.[0] || null;
+                          setDocFiles(prev => ({ ...prev, [doc.key]: file }));
+                        }}
+                      />
                     </div>
                   ))}
                 </div>
@@ -4302,12 +5591,950 @@ const PreQualificationSubmission = () => {
   );
 };
 
-const VendorDashboard = ({ onGoToPrequal }: { onGoToPrequal?: () => void }) => {
-  const [view, setView] = useState<"dashboard" | "new-application" | "new-claim" | "details">("dashboard");
+const VendorTenders = ({ onSubmitTender }: { onSubmitTender?: (tenderId: string) => void }) => {
+  const [tenders, setTenders] = useState<Tender[]>([]);
+  const [selectedTender, setSelectedTender] = useState<Tender | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [selectedCategory, setSelectedCategory] = useState("All Categories");
+  const [selectedStage, setSelectedStage] = useState("All Stages");
+  const [selectedTech, setSelectedTech] = useState("All Technologies");
+  const [sortBy, setSortBy] = useState<"deadline" | "recent">("deadline");
+
+  const loadPublishedTenders = React.useCallback(async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      const rows = await fetchTenders();
+      setTenders(rows.filter(t => t.status === TenderStatus.PUBLISHED));
+    } catch (err: any) {
+      const raw = String(err?.message || "");
+      setError(isConnectivityError(raw) ? `Cannot connect to backend (${API_BASE}).` : (toFriendlyApiMessage(raw) || "Failed to load tenders."));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    void loadPublishedTenders();
+  }, [loadPublishedTenders]);
+
+  const categories = useMemo(() => {
+    const set = new Set<string>();
+    tenders.forEach(t => t.category && set.add(t.category));
+    return ["All Categories", ...Array.from(set).sort()];
+  }, [tenders]);
+  const stages = useMemo(() => {
+    const set = new Set<string>();
+    tenders.forEach(t => t.stageType && set.add(t.stageType));
+    return ["All Stages", ...Array.from(set).sort()];
+  }, [tenders]);
+  const technologies = useMemo(() => {
+    const set = new Set<string>();
+    tenders.forEach(t => (t.technologyTypes || []).forEach(tech => set.add(tech)));
+    return ["All Technologies", ...Array.from(set).sort()];
+  }, [tenders]);
+
+  const filteredTenders = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return tenders
+      .filter(t => t.status === TenderStatus.PUBLISHED)
+      .filter(t => {
+        if (!q) return true;
+        return (
+          t.name.toLowerCase().includes(q) ||
+          t.referenceNumber.toLowerCase().includes(q) ||
+          t.category.toLowerCase().includes(q)
+        );
+      })
+      .filter(t => selectedCategory === "All Categories" || t.category === selectedCategory)
+      .filter(t => selectedStage === "All Stages" || t.stageType === selectedStage)
+      .filter(t => selectedTech === "All Technologies" || (t.technologyTypes || []).includes(selectedTech))
+      .sort((a, b) => {
+        if (sortBy === "recent") {
+          return new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime();
+        }
+        return new Date(a.deadline || 0).getTime() - new Date(b.deadline || 0).getTime();
+      });
+  }, [tenders, searchQuery, selectedCategory, selectedStage, selectedTech, sortBy]);
+
+  const publishedCount = useMemo(() => tenders.filter(t => t.status === TenderStatus.PUBLISHED).length, [tenders]);
+  const closingSoonCount = useMemo(() => {
+    const now = Date.now();
+    return tenders.filter(t => {
+      if (t.status !== TenderStatus.PUBLISHED) return false;
+      const deadline = Date.parse(t.lastDateSubmission || t.deadline || "");
+      if (Number.isNaN(deadline)) return false;
+      const days = Math.ceil((deadline - now) / (1000 * 60 * 60 * 24));
+      return days >= 0 && days <= 7;
+    }).length;
+  }, [tenders]);
+  const newestTender = useMemo(() => {
+    const list = tenders.filter(t => t.status === TenderStatus.PUBLISHED);
+    return list.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime())[0];
+  }, [tenders]);
+
+  const openTenderDetails = async (tender: Tender) => {
+    try {
+      setDetailLoading(true);
+      const full = await fetchTender(tender.id);
+      setSelectedTender(full);
+    } catch (err: any) {
+      const raw = String(err?.message || "");
+      setError(isConnectivityError(raw) ? `Cannot connect to backend (${API_BASE}).` : (toFriendlyApiMessage(raw) || "Failed to load tender details."));
+    } finally {
+      setDetailLoading(false);
+    }
+  };
+
+  if (selectedTender) {
+    const scheduleUrl = (() => {
+      const raw = selectedTender.scheduleFile;
+      if (!raw) return null;
+      if (/^https?:\/\//i.test(raw)) return raw;
+      const base = API_BASE.replace(/\/api$/i, "").replace(/\/$/, "");
+      const path = raw.startsWith("/") ? raw : `/${raw}`;
+      return `${base}${path}`;
+    })();
+
+    const toFileUrl = (raw?: string | null) => {
+      if (!raw) return null;
+      if (/^https?:\/\//i.test(raw)) return raw;
+      const base = API_BASE.replace(/\/api$/i, "").replace(/\/$/, "");
+      const path = raw.startsWith("/") ? raw : `/${raw}`;
+      return `${base}${path}`;
+    };
+    const fileNameFromUrl = (url?: string | null) => {
+      if (!url) return undefined;
+      try {
+        const clean = url.split("?")[0];
+        return clean.split("/").pop() || undefined;
+      } catch {
+        return undefined;
+      }
+    };
+    const requiredDocs = [
+      { label: "Tender Schedule", url: scheduleUrl },
+      { label: "RFP / Subsidy Framework", url: toFileUrl(selectedTender.rfpDocumentsFile) },
+      { label: "Milestone Payment Schedule", url: toFileUrl(selectedTender.milestonePaymentScheduleFile) },
+    ];
+    const deadlineValue = selectedTender.lastDateSubmission || selectedTender.deadline;
+    const deadlineMs = deadlineValue ? Date.parse(deadlineValue) : NaN;
+    const daysLeft = Number.isNaN(deadlineMs) ? null : Math.ceil((deadlineMs - Date.now()) / (1000 * 60 * 60 * 24));
+
+    return (
+      <div className="space-y-6 max-w-5xl mx-auto pb-12">
+        <div className="flex items-center gap-4 mb-6">
+          <button onClick={() => setSelectedTender(null)} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
+            <ChevronRight className="rotate-180" size={20} />
+          </button>
+          <div>
+            <h1 className="text-2xl font-bold text-slate-900">{selectedTender.name}</h1>
+            <p className="text-sm text-slate-500 font-mono">{selectedTender.referenceNumber}</p>
+          </div>
+          {onSubmitTender && (
+            <div className="ml-auto">
+              <button
+                onClick={() => onSubmitTender(selectedTender.id)}
+                className="btn-primary"
+              >
+                Submit Proposal
+              </button>
+            </div>
+          )}
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="card p-5">
+            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Deadline</p>
+            <p className="text-lg font-bold text-slate-900 mt-2">
+              {selectedTender.lastDateSubmission || selectedTender.deadline || "N/A"}
+            </p>
+            <p className="text-xs text-slate-500 mt-1">Submission cutoff</p>
+          </div>
+          <div className="card p-5">
+            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Stage</p>
+            <p className="text-lg font-bold text-slate-900 mt-2">{selectedTender.stageType || "N/A"}</p>
+            <p className="text-xs text-slate-500 mt-1">Procurement stage</p>
+          </div>
+          <div className="card p-5">
+            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Budget</p>
+            <p className="text-lg font-bold text-slate-900 mt-2">
+              {selectedTender.budget != null ? `M ${selectedTender.budget.toLocaleString()}` : "N/A"}
+            </p>
+            <p className="text-xs text-slate-500 mt-1">Estimated value</p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div className="lg:col-span-2 space-y-6">
+            <div className="card p-8 space-y-8">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                <div className="space-y-4">
+                  <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Tender Information</h3>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-1">
+                      <p className="text-xs font-bold text-slate-500">Status</p>
+                      <span className="badge bg-emerald-100 text-emerald-700">{selectedTender.status}</span>
+                    </div>
+                    <div className="space-y-1">
+                      <p className="text-xs font-bold text-slate-500">Verification</p>
+                      <span className={`text-sm font-bold ${selectedTender.isVerified ? 'text-emerald-600' : 'text-amber-600'}`}>
+                        {selectedTender.isVerified ? 'Verified' : 'Pending'}
+                      </span>
+                    </div>
+                    <div className="space-y-1">
+                      <p className="text-xs font-bold text-slate-500">Department</p>
+                      <p className="text-sm font-medium">{selectedTender.department}</p>
+                    </div>
+                    <div className="space-y-1">
+                      <p className="text-xs font-bold text-slate-500">Category</p>
+                      <p className="text-sm font-medium">{selectedTender.category}</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Financials</h3>
+                  <div className="space-y-1">
+                    <p className="text-xs font-bold text-slate-500">Budget Estimate</p>
+                    <p className="text-lg font-bold text-slate-900">M {selectedTender.budget?.toLocaleString() ?? "N/A"}</p>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-xs font-bold text-slate-500">Bidding Currency</p>
+                    <p className="text-sm font-medium">{selectedTender.biddingCurrency || "N/A"}</p>
+                  </div>
+                  {selectedTender.fundingSource && (
+                    <div className="space-y-1">
+                      <p className="text-xs font-bold text-slate-500">Funding Source</p>
+                      <p className="text-sm font-medium">{selectedTender.fundingSource}</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="space-y-4 pt-6 border-t border-slate-100">
+                <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Deadlines & Schedule</h3>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                  <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
+                    <Clock size={16} className="text-slate-400 mb-2" />
+                    <p className="text-xs font-bold text-slate-500">Submission Deadline</p>
+                    <p className="text-sm font-bold text-slate-900">{selectedTender.lastDateSubmission || selectedTender.deadline || "N/A"}</p>
+                  </div>
+                  <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
+                    <ShieldCheck size={16} className="text-slate-400 mb-2" />
+                    <p className="text-xs font-bold text-slate-500">Security Deadline</p>
+                    <p className="text-sm font-bold text-slate-900">{selectedTender.lastDateSecurity || "N/A"}</p>
+                  </div>
+                  <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
+                    <Eye size={16} className="text-slate-400 mb-2" />
+                    <p className="text-xs font-bold text-slate-500">Opening Date</p>
+                    <p className="text-sm font-bold text-slate-900">{selectedTender.dateOpening || "N/A"}</p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-4 pt-6 border-t border-slate-100">
+                <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Technical Requirements</h3>
+                <div className="grid grid-cols-2 gap-6">
+                  <div className="space-y-2">
+                    <p className="text-xs font-bold text-slate-500">Technology Types</p>
+                    <div className="flex flex-wrap gap-2">
+                      {(selectedTender.technologyTypes || []).length ? (selectedTender.technologyTypes || []).map(tech => (
+                        <span key={tech} className="px-2 py-1 bg-emerald-50 text-emerald-700 rounded text-[10px] font-bold uppercase tracking-wider">{tech}</span>
+                      )) : (
+                        <span className="text-xs text-slate-500">N/A</span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <p className="text-xs font-bold text-slate-500">Target Site Type</p>
+                    <p className="text-sm font-medium">{selectedTender.targetSiteType || "N/A"}</p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-4 pt-6 border-t border-slate-100">
+                <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Bid Decision Aids</h3>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
+                  <div className="p-3 bg-slate-50 rounded-lg border border-slate-100">
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Eligibility</p>
+                    <p className="text-slate-700">{selectedTender.biddersEligibility || "Not specified"}</p>
+                  </div>
+                  <div className="p-3 bg-slate-50 rounded-lg border border-slate-100">
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Instructions</p>
+                    <p className="text-slate-700">{selectedTender.instruction || "Not specified"}</p>
+                  </div>
+                  <div className="p-3 bg-slate-50 rounded-lg border border-slate-100">
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Pre‑Tender Meeting</p>
+                    <p className="text-slate-700">{selectedTender.preTenderMeetingInfo || "Not specified"}</p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-4 pt-6 border-t border-slate-100">
+                <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Required Documents</h3>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  {requiredDocs.map((doc) => (
+                    <div key={doc.label} className="p-4 border-2 border-dashed border-slate-200 rounded-xl bg-slate-50">
+                      <div className="flex items-center gap-2">
+                        <FileText size={18} className="text-slate-400" />
+                        <span className="text-xs font-bold text-slate-700">{doc.label}</span>
+                      </div>
+                      <div className="mt-3">
+                        {doc.url ? (
+                          <a
+                            href={doc.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            download={fileNameFromUrl(doc.url)}
+                            className="text-emerald-600 hover:text-emerald-700 text-xs font-bold"
+                          >
+                            Download →
+                          </a>
+                        ) : (
+                          <span className="text-xs text-slate-400">Not provided</span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-6">
+            <div className="card p-6">
+              <h3 className="font-bold text-slate-900 mb-3">Contact</h3>
+              <p className="text-sm text-slate-600">{selectedTender.contactDetails || "Not provided"}</p>
+            </div>
+            <div className="card p-6">
+              <h3 className="font-bold text-slate-900 mb-3">Tender Info</h3>
+              <div className="grid grid-cols-1 gap-3 text-sm">
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-500">Application Type</span>
+                  <span className="text-slate-700 font-medium">{selectedTender.applicationType || "N/A"}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-500">Stage Type</span>
+                  <span className="text-slate-700 font-medium">{selectedTender.stageType || "N/A"}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-500">Procurement Method</span>
+                  <span className="text-slate-700 font-medium">{selectedTender.procurementMethod || "N/A"}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-500">Invited By</span>
+                  <span className="text-slate-700 font-medium">{selectedTender.invitedBy || "N/A"}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-500">Time for Completion</span>
+                  <span className="text-slate-700 font-medium">{selectedTender.timeForCompletion || "N/A"}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-500">Schedule Purchase</span>
+                  <span className="text-slate-700 font-medium">{selectedTender.biddersSchedulePurchase ? "Required" : "Not Required"}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-500">Tender Security</span>
+                  <span className="text-slate-700 font-medium">{selectedTender.tenderSecurityRequired ? "Required" : "Not Required"}</span>
+                </div>
+                {daysLeft != null && (
+                  <div className={`flex items-center justify-between ${daysLeft < 0 ? "text-rose-600" : daysLeft <= 7 ? "text-amber-600" : "text-slate-600"}`}>
+                    <span className="text-slate-500">Days Left</span>
+                    <span className="font-semibold">D-{daysLeft}</span>
+                  </div>
+                )}
+              </div>
+            </div>
+            <div className="card p-6">
+              <h3 className="font-bold text-slate-900 mb-3">Logistics & Locations</h3>
+              <div className="space-y-3 text-sm">
+                <div className="p-3 bg-slate-50 rounded-lg border border-slate-100">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Document Address</p>
+                  <p className="text-slate-700">{selectedTender.addressForDocument || "Not specified"}</p>
+                </div>
+                <div className="p-3 bg-slate-50 rounded-lg border border-slate-100">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Security Address</p>
+                  <p className="text-slate-700">{selectedTender.addressForSecurity || "Not specified"}</p>
+                </div>
+                <div className="p-3 bg-slate-50 rounded-lg border border-slate-100">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Opening Venue</p>
+                  <p className="text-slate-700">{selectedTender.placeForOpening || "Not specified"}</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-900">Published Tenders</h1>
+          <p className="text-slate-500">Calls for Proposals open to pre-qualified vendors</p>
+        </div>
+        <button onClick={loadPublishedTenders} className="btn-secondary text-sm">Refresh</button>
+      </div>
+
+      {error && (
+        <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 font-medium">
+          {error}
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="card p-5">
+          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Published</p>
+          <p className="text-2xl font-bold text-slate-900 mt-2">{publishedCount}</p>
+          <p className="text-xs text-slate-500 mt-1">Active tenders available to vendors</p>
+        </div>
+        <div className="card p-5">
+          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Closing Soon</p>
+          <p className="text-2xl font-bold text-amber-600 mt-2">{closingSoonCount}</p>
+          <p className="text-xs text-slate-500 mt-1">Deadlines within the next 7 days</p>
+        </div>
+        <div className="card p-5">
+          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Newest Tender</p>
+          <p className="text-lg font-bold text-slate-900 mt-2">{newestTender?.name || "N/A"}</p>
+          <p className="text-xs text-slate-500 mt-1">{newestTender?.referenceNumber || "—"}</p>
+        </div>
+      </div>
+
+      <div className="card p-6 space-y-5">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-lg font-bold text-slate-900">Filter Published Tenders</h3>
+            <p className="text-xs text-slate-500">Find open opportunities by category, stage, and technology.</p>
+          </div>
+          <button
+            onClick={() => {
+              setSearchQuery("");
+              setSelectedCategory("All Categories");
+              setSelectedStage("All Stages");
+              setSelectedTech("All Technologies");
+              setSortBy("deadline");
+            }}
+            className="btn-secondary text-sm"
+          >
+            Reset Filters
+          </button>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-4 lg:grid-cols-6 gap-4 items-end">
+          <div className="md:col-span-2 space-y-1">
+            <label className="text-[10px] font-bold text-slate-400 uppercase">Search</label>
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+              <input
+                className="input-field py-2 pl-9 text-sm"
+              placeholder="Search by name, reference, category..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              />
+            </div>
+          </div>
+          <div className="space-y-1">
+            <label className="text-[10px] font-bold text-slate-400 uppercase">Category</label>
+            <select
+              className="input-field py-2 text-sm"
+              value={selectedCategory}
+              onChange={(e) => setSelectedCategory(e.target.value)}
+            >
+              {categories.map(c => <option key={c}>{c}</option>)}
+            </select>
+          </div>
+          <div className="space-y-1">
+            <label className="text-[10px] font-bold text-slate-400 uppercase">Stage</label>
+            <select
+              className="input-field py-2 text-sm"
+              value={selectedStage}
+              onChange={(e) => setSelectedStage(e.target.value)}
+            >
+              {stages.map(s => <option key={s}>{s}</option>)}
+            </select>
+          </div>
+          <div className="space-y-1">
+            <label className="text-[10px] font-bold text-slate-400 uppercase">Technology</label>
+            <select
+              className="input-field py-2 text-sm"
+              value={selectedTech}
+              onChange={(e) => setSelectedTech(e.target.value)}
+            >
+              {technologies.map(t => <option key={t}>{t}</option>)}
+            </select>
+          </div>
+          <div className="space-y-1">
+            <label className="text-[10px] font-bold text-slate-400 uppercase">Sort By</label>
+            <select
+              className="input-field py-2 text-sm"
+              value={sortBy}
+              onChange={(e) => setSortBy(e.target.value as any)}
+            >
+              <option value="deadline">Deadline</option>
+              <option value="recent">Recently Added</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div className="card overflow-x-auto">
+        <table className="w-full text-left border-collapse">
+          <thead>
+            <tr className="bg-slate-50 border-bottom border-slate-200">
+              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">ID</th>
+              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Reference</th>
+              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Tender</th>
+              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Stage</th>
+              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Category</th>
+              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Deadline</th>
+              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-200">
+            {loading && (
+              <tr>
+                <td colSpan={7} className="px-6 py-6 text-sm text-slate-500">Loading published tenders...</td>
+              </tr>
+            )}
+            {!loading && filteredTenders.length === 0 && (
+              <tr>
+                <td colSpan={7} className="px-6 py-10 text-sm text-slate-500 text-center">
+                  No published tenders match your filters.
+                </td>
+              </tr>
+            )}
+            {!loading && filteredTenders.map((tender) => (
+              <tr key={tender.id} className="hover:bg-slate-50 transition-colors">
+                <td className="px-6 py-4 font-mono text-xs text-slate-500">{tender.id}</td>
+                <td className="px-6 py-4 font-mono text-sm text-slate-600">{tender.referenceNumber}</td>
+                <td className="px-6 py-4">
+                  <p className="font-medium text-slate-900">{tender.name}</p>
+                  <div className="flex flex-wrap gap-2 mt-1">
+                    <span className="text-[10px] font-bold text-slate-400 uppercase">{tender.department}</span>
+                    {(tender.technologyTypes || []).slice(0, 3).map((tech) => (
+                      <span key={tech} className="px-2 py-0.5 bg-emerald-50 text-emerald-700 rounded text-[10px] font-bold uppercase tracking-wider">
+                        {tech}
+                      </span>
+                    ))}
+                  </div>
+                </td>
+                <td className="px-6 py-4">
+                  <span className="badge bg-slate-100 text-slate-600">
+                    {tender.stageType || "N/A"}
+                  </span>
+                </td>
+                <td className="px-6 py-4 text-sm text-slate-600">{tender.category}</td>
+                <td className="px-6 py-4 text-sm">
+                  {(() => {
+                    const deadline = tender.lastDateSubmission || tender.deadline;
+                    const ts = Date.parse(deadline || "");
+                    if (Number.isNaN(ts)) return <span className="text-slate-600">N/A</span>;
+                    const days = Math.ceil((ts - Date.now()) / (1000 * 60 * 60 * 24));
+                    const color =
+                      days < 0 ? "text-rose-600" : days <= 7 ? "text-amber-600" : "text-slate-600";
+                    const dateStr = new Date(ts).toLocaleDateString();
+                    const timeStr = new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+                    return (
+                      <div className={color}>
+                        <div className="font-medium">{dateStr}</div>
+                        <div className="text-[10px] uppercase tracking-widest opacity-70">{timeStr}</div>
+                        {days >= 0 && !Number.isNaN(days) && (
+                          <div className="text-[10px] font-bold">(D-{days})</div>
+                        )}
+                      </div>
+                    );
+                  })()}
+                </td>
+                <td className="px-6 py-4 text-right">
+                  <button
+                    onClick={() => void openTenderDetails(tender)}
+                    className="text-emerald-600 hover:text-emerald-700 font-medium text-sm"
+                    disabled={detailLoading}
+                  >
+                    {detailLoading ? "Loading..." : "View Details"}
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+};
+
+const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
+  const [bids, setBids] = useState<TenderBid[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [viewBid, setViewBid] = useState<TenderBid | null>(null);
+  const [viewBidVersions, setViewBidVersions] = useState<TenderBid[]>([]);
+  const [viewBidLoading, setViewBidLoading] = useState(false);
+
+  const loadBids = React.useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await fetchTenderBids();
+      setBids(data);
+    } catch {
+      setBids([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    void loadBids();
+  }, [loadBids]);
+
+  React.useEffect(() => {
+    const handler = () => void loadBids();
+    window.addEventListener("rbf-bid-updated", handler);
+    return () => window.removeEventListener("rbf-bid-updated", handler);
+  }, [loadBids]);
+
+  const grouped = useMemo(() => {
+    const byTender = new Map<string, TenderBid[]>();
+    bids.forEach(bid => {
+      const key = bid.tender;
+      const list = byTender.get(key) || [];
+      list.push(bid);
+      byTender.set(key, list);
+    });
+    return Array.from(byTender.entries()).map(([tenderId, items]) => {
+      const sorted = items.slice().sort((a, b) => (b.version_number || 0) - (a.version_number || 0));
+      return { tenderId, latest: sorted[0], versions: sorted };
+    }).sort((a, b) => (b.latest.submitted_at || "").localeCompare(a.latest.submitted_at || ""));
+  }, [bids]);
+
+  const openViewBid = async (bid: TenderBid) => {
+    setViewBid(bid);
+    setViewBidVersions([]);
+    setViewBidLoading(true);
+    try {
+      const versions = await fetchTenderBids(bid.tender);
+      setViewBidVersions(versions.sort((a, b) => (b.version_number || 0) - (a.version_number || 0)));
+    } catch {
+      setViewBidVersions([]);
+    } finally {
+      setViewBidLoading(false);
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-2xl font-bold text-slate-900">My Bids</h1>
+        <p className="text-slate-500">Track your submissions and individual bid status</p>
+      </div>
+
+      <div className="card">
+        <div className="p-6 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+          <div>
+            <h3 className="text-lg font-bold">Submitted Bids</h3>
+            <p className="text-xs text-slate-500">Latest updates across all your tenders</p>
+          </div>
+          <button onClick={loadBids} className="btn-secondary text-sm">Refresh</button>
+        </div>
+        <div className="p-6 space-y-4">
+          {loading && <p className="text-sm text-slate-500">Loading bids...</p>}
+          {!loading && grouped.length === 0 && (
+            <p className="text-sm text-slate-500">No bids submitted yet.</p>
+          )}
+          {!loading && grouped.map(({ latest, versions }) => {
+            const statusColor =
+              latest.status === BidStatus.SUBMITTED ? "bg-blue-100 text-blue-700" :
+              latest.status === BidStatus.UNDER_REVIEW ? "bg-amber-100 text-amber-700" :
+              latest.status === BidStatus.ACCEPTED ? "bg-emerald-100 text-emerald-700" :
+              latest.status === BidStatus.REJECTED ? "bg-rose-100 text-rose-700" :
+              "bg-slate-100 text-slate-700";
+            return (
+              <div key={latest.id} className="border border-slate-100 rounded-2xl p-5 hover:border-emerald-200 transition-colors">
+                <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+                  <div className="space-y-1">
+                    <p className="text-sm font-bold text-slate-900">
+                      {latest.tender_name || `Tender ${latest.tender_reference || latest.tender}`}
+                    </p>
+                    <p className="text-xs text-slate-500">
+                      Ref: {latest.tender_reference || "N/A"} • Latest Version {latest.version_number}
+                    </p>
+                    <div className="flex flex-wrap gap-3 text-[11px] text-slate-500">
+                      <span>Amount: {latest.bid_amount != null ? `M ${Number(latest.bid_amount).toLocaleString()}` : "N/A"}</span>
+                      <span>Submitted: {latest.submitted_at ? new Date(latest.submitted_at).toLocaleString() : "Draft"}</span>
+                      <span>Versions: {versions.length}</span>
+                    </div>
+                    {latest.rejection_reason && (
+                      <div className="text-xs text-rose-600">Rejection: {latest.rejection_reason}</div>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <span className={`badge ${statusColor}`}>{latest.status}</span>
+                    <button onClick={() => openViewBid(latest)} className="btn-secondary text-xs">View</button>
+                    {(latest.status === BidStatus.DRAFT || latest.status === BidStatus.SUBMITTED) && (
+                      <button onClick={() => onOpenBid(latest)} className="btn-primary text-xs">Edit</button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      <AnimatePresence>
+        {viewBid && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[120] bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4"
+            onClick={() => setViewBid(null)}
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl p-6 space-y-5 max-h-[85vh] overflow-y-auto"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <h2 className="text-xl font-bold text-slate-900">Bid Details</h2>
+                  <p className="text-sm text-slate-500">
+                    {viewBid.tender_name || `Tender ${viewBid.tender_reference || viewBid.tender}`}
+                  </p>
+                </div>
+                <button onClick={() => setViewBid(null)} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
+                  <X size={18} />
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div className="card p-4">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Status</p>
+                  <p className="text-base font-bold text-slate-900 mt-2">{viewBid.status}</p>
+                  <p className="text-xs text-slate-500 mt-1">Current processing stage</p>
+                </div>
+                <div className="card p-4">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Bid Amount</p>
+                  <p className="text-base font-bold text-slate-900 mt-2">
+                    {viewBid.bid_amount != null ? `M ${Number(viewBid.bid_amount).toLocaleString()}` : "N/A"}
+                  </p>
+                  <p className="text-xs text-slate-500 mt-1">Submitted amount</p>
+                </div>
+                <div className="card p-4">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Version</p>
+                  <p className="text-base font-bold text-slate-900 mt-2">{viewBid.version_number}</p>
+                  <p className="text-xs text-slate-500 mt-1">Submission version</p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <div className="space-y-4">
+                  <div className="card p-6 space-y-5">
+                    <div className="space-y-3">
+                      <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Bid Information</h3>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+                        <div>
+                          <p className="text-xs font-bold text-slate-500">Reference</p>
+                          <p className="text-sm font-medium">{viewBid.tender_reference || "N/A"}</p>
+                        </div>
+                        <div>
+                          <p className="text-xs font-bold text-slate-500">Stage</p>
+                          <p className="text-sm font-medium">{viewBid.stage || "N/A"}</p>
+                        </div>
+                        <div>
+                          <p className="text-xs font-bold text-slate-500">Submitted</p>
+                          <p className="text-sm font-medium">{viewBid.submitted_at ? new Date(viewBid.submitted_at).toLocaleString() : "Draft"}</p>
+                        </div>
+                        <div>
+                          <p className="text-xs font-bold text-slate-500">Reviewed</p>
+                          <p className="text-sm font-medium">{viewBid.reviewed_at ? new Date(viewBid.reviewed_at).toLocaleString() : "Pending"}</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="space-y-3 pt-4 border-t border-slate-100">
+                      <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Sites Summary</h3>
+                      {(viewBid.sites || []).length === 0 && (
+                        <p className="text-sm text-slate-500">No sites provided for this bid.</p>
+                      )}
+                      {(viewBid.sites || []).length > 0 && (
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm text-slate-600">
+                          {(viewBid.sites || []).map((site, idx) => (
+                            <div key={`${site.siteName}-${idx}`} className="rounded-lg border border-slate-100 bg-white px-3 py-2">
+                              <p className="font-medium text-slate-900">{site.siteName}</p>
+                              <p className="text-xs text-slate-500">{site.district || "District N/A"}</p>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="card p-6">
+                    <h3 className="text-sm font-bold text-slate-400 uppercase mb-4">Bid Versions</h3>
+                    {viewBidLoading && <p className="text-sm text-slate-500">Loading versions...</p>}
+                    {!viewBidLoading && viewBidVersions.length === 0 && (
+                      <p className="text-sm text-slate-500">No versions available.</p>
+                    )}
+                    {!viewBidLoading && viewBidVersions.length > 0 && (
+                      <div className="space-y-3">
+                        {viewBidVersions.map((version) => (
+                          <div key={version.id} className="flex items-center justify-between rounded-lg border border-slate-100 bg-slate-50 px-3 py-2">
+                            <div>
+                              <p className="text-sm font-medium text-slate-900">Version {version.version_number}</p>
+                              <p className="text-xs text-slate-500">{version.submitted_at ? new Date(version.submitted_at).toLocaleString() : "Draft"}</p>
+                            </div>
+                            <span className="badge bg-slate-100 text-slate-700">{version.status}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  <div className="card p-6">
+                    <h3 className="text-sm font-bold text-slate-400 uppercase mb-4">Narratives</h3>
+                    <div className="space-y-3 text-sm">
+                      <details className="rounded-xl border border-slate-100 bg-slate-50 px-4 py-3">
+                        <summary className="cursor-pointer text-sm font-bold text-slate-700">Concept Note</summary>
+                        <div className="mt-2 text-sm text-slate-700 whitespace-pre-wrap">
+                          {viewBid.concept_note || "N/A"}
+                        </div>
+                      </details>
+                      <details className="rounded-xl border border-slate-100 bg-slate-50 px-4 py-3">
+                        <summary className="cursor-pointer text-sm font-bold text-slate-700">Technical Proposal</summary>
+                        <div className="mt-2 text-sm text-slate-700 whitespace-pre-wrap">
+                          {viewBid.technical_proposal || "N/A"}
+                        </div>
+                      </details>
+                      <details className="rounded-xl border border-slate-100 bg-slate-50 px-4 py-3">
+                        <summary className="cursor-pointer text-sm font-bold text-slate-700">Financial Proposal</summary>
+                        <div className="mt-2 text-sm text-slate-700 whitespace-pre-wrap">
+                          {viewBid.financial_proposal || "N/A"}
+                        </div>
+                      </details>
+                    </div>
+                  </div>
+
+                  <div className="card p-6">
+                    <h3 className="text-sm font-bold text-slate-400 uppercase mb-4">Documents</h3>
+                    <div className="space-y-3">
+                      {[
+                        { label: "Technical Proposal", url: viewBid.technical_proposal_file },
+                        { label: "Financial Proposal", url: viewBid.financial_proposal_file },
+                        { label: "BOQ", url: viewBid.boq_file },
+                        { label: "Gender Action Plan", url: viewBid.gender_action_plan_file },
+                        { label: "Implementation Plan", url: viewBid.implementation_plan_file },
+                      ]
+                        .filter(doc => Boolean(doc.url))
+                        .map(doc => (
+                          <a
+                            key={doc.label}
+                            href={String(doc.url)}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-slate-50 border border-transparent hover:border-slate-100 transition-all text-left group"
+                          >
+                            <div className="p-2 rounded-lg bg-slate-100 text-slate-400 group-hover:bg-emerald-50 group-hover:text-emerald-600">
+                              <FileText size={18} />
+                            </div>
+                            <span className="text-xs font-medium text-slate-600 truncate">{doc.label}</span>
+                          </a>
+                        ))}
+                      {[
+                        viewBid.technical_proposal_file,
+                        viewBid.financial_proposal_file,
+                        viewBid.boq_file,
+                        viewBid.gender_action_plan_file,
+                        viewBid.implementation_plan_file,
+                      ].every(item => !item) && (
+                        <p className="text-xs text-slate-500">No documents uploaded for this bid.</p>
+                      )}
+                    </div>
+                  </div>
+
+                  {viewBid.rejection_reason && (
+                    <div className="card p-6 border border-rose-100 bg-rose-50">
+                      <h3 className="text-sm font-bold text-rose-700 uppercase mb-2">Rejection Reason</h3>
+                      <p className="text-sm text-rose-700">{viewBid.rejection_reason}</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex justify-end">
+                <button onClick={() => setViewBid(null)} className="btn-secondary">Close</button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+};
+
+const VendorDashboard = ({
+  onGoToPrequal,
+  pendingBidTenderId,
+  pendingBidId,
+  onBidOpened,
+  initialSection,
+  showOnlyContracting,
+}: {
+  onGoToPrequal?: () => void;
+  pendingBidTenderId?: string | null;
+  pendingBidId?: string | null;
+  onBidOpened?: () => void;
+  initialSection?: "contracting" | null;
+  showOnlyContracting?: boolean;
+}) => {
+  const [view, setView] = useState<"dashboard" | "new-application" | "new-claim" | "details" | "bid">("dashboard");
   const [isPreQualified, setIsPreQualified] = useState(false);
   const [selectedMilestone, setSelectedMilestone] = useState<(Milestone & { projectName?: string }) | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [milestones, setMilestones] = useState<Milestone[]>([]);
+  const [activeTenders, setActiveTenders] = useState<Tender[]>([]);
+  const [bidTender, setBidTender] = useState<Tender | null>(null);
+  const [bidVersions, setBidVersions] = useState<TenderBid[]>([]);
+  const [bidMessage, setBidMessage] = useState<string | null>(null);
+  const [editingBidId, setEditingBidId] = useState<string | null>(null);
+  const [editingBidStatus, setEditingBidStatus] = useState<BidStatus | null>(null);
+  const [bidHistory, setBidHistory] = useState<TenderBid[]>([]);
+  const [contracts, setContracts] = useState<TenderContract[]>([]);
+  const [contractFiles, setContractFiles] = useState<Record<string, File | null>>({});
+  const [contractMessage, setContractMessage] = useState<string | null>(null);
+  const [isContractSubmitting, setIsContractSubmitting] = useState(false);
+  const [isBidSubmitting, setIsBidSubmitting] = useState(false);
+  const [bidForm, setBidForm] = useState({
+    bidAmount: "",
+    stage: "Pre-Qualification",
+    conceptNote: "",
+    technicalProposal: "",
+    financialProposal: "",
+  });
+  const [bidFiles, setBidFiles] = useState<{
+    technicalProposal: File | null;
+    financialProposal: File | null;
+    boq: File | null;
+    genderActionPlan: File | null;
+    implementationPlan: File | null;
+  }>({
+    technicalProposal: null,
+    financialProposal: null,
+    boq: null,
+    genderActionPlan: null,
+    implementationPlan: null,
+  });
+  const [bidSites, setBidSites] = useState<TenderBidSite[]>([
+    { siteName: "", district: "", latitude: undefined, longitude: undefined, systemConfiguration: {}, boqItems: [], notes: "" },
+  ]);
   const [applicationStep, setApplicationStep] = useState(1);
   const [claimStep, setClaimStep] = useState(1);
   const [isClaimSubmitting, setIsClaimSubmitting] = useState(false);
@@ -4330,28 +6557,63 @@ const VendorDashboard = ({ onGoToPrequal }: { onGoToPrequal?: () => void }) => {
     actualFemaleBeneficiaries: "",
     notes: "",
   });
+  const contractingRef = React.useRef<HTMLDivElement | null>(null);
 
   const districts = ["Maseru", "Leribe", "Berea", "Mafeteng", "Mohale's Hoek", "Quthing", "Qacha's Nek", "Mokhotlong", "Thaba-Tseka", "Butha-Buthe"];
   const techTypes = ["SHS", "ICS", "Mini-grid", "SWP", "PUE"];
 
-  React.useEffect(() => {
-    (async () => {
-      try {
-        const [prequals, projectRows, milestoneRows] = await Promise.all([
-          fetchVendorPrequalifications(),
-          fetchProjects(),
-          fetchMilestones(),
-        ]);
-        setIsPreQualified(prequals.some(item => item.status === "Approved"));
-        setProjects(projectRows);
-        const projectIds = new Set(projectRows.map(item => item.id));
-        setMilestones(milestoneRows.filter(item => projectIds.has(item.projectId)));
-      } catch {
-        setProjects([]);
-        setMilestones([]);
-      }
-    })();
+  const loadVendorData = React.useCallback(async () => {
+    try {
+      const [prequals, projectRows, milestoneRows, tenders, contractRows, bids] = await Promise.all([
+        fetchVendorPrequalifications(),
+        fetchProjects(),
+        fetchMilestones(),
+        fetchTenders(),
+        fetchTenderContracts(),
+        fetchTenderBids(),
+      ]);
+      const latestPrequal = getLatestPrequalification(prequals);
+      const anyApproved = prequals.some(item => String(item.status || "").toLowerCase() === "approved");
+      setIsPreQualified(anyApproved);
+      setProjects(projectRows);
+      setActiveTenders(tenders.filter(t => t.status === TenderStatus.PUBLISHED));
+      const projectIds = new Set(projectRows.map(item => item.id));
+      setMilestones(milestoneRows.filter(item => projectIds.has(item.projectId)));
+      setContracts(contractRows);
+      setBidHistory(bids);
+    } catch {
+      setProjects([]);
+      setMilestones([]);
+      setContracts([]);
+      setBidHistory([]);
+    }
   }, []);
+
+  React.useEffect(() => {
+    void loadVendorData();
+  }, [loadVendorData]);
+
+  React.useEffect(() => {
+    const id = setInterval(() => {
+      void loadVendorData();
+    }, 20000);
+    return () => clearInterval(id);
+  }, [loadVendorData]);
+
+  React.useEffect(() => {
+    const handler = () => void loadVendorData();
+    window.addEventListener("rbf-bid-updated", handler);
+    return () => window.removeEventListener("rbf-bid-updated", handler);
+  }, [loadVendorData]);
+
+  React.useEffect(() => {
+    if (initialSection !== "contracting") return;
+    setView("dashboard");
+    const id = window.setTimeout(() => {
+      contractingRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 0);
+    return () => window.clearTimeout(id);
+  }, [initialSection]);
 
   const projectById = useMemo(() => {
     const map = new Map<string, Project>();
@@ -4372,6 +6634,17 @@ const VendorDashboard = ({ onGoToPrequal }: { onGoToPrequal?: () => void }) => {
       }),
     [milestones, projectById]
   );
+  const sortedContracts = useMemo(() => {
+    if (!contracts.length) return [];
+    return [...contracts].sort((a, b) => (b.generatedAt || "").localeCompare(a.generatedAt || ""));
+  }, [contracts]);
+
+  const contractTone = (status: TenderContract["status"]) => {
+    if (status === "Approved") return "bg-emerald-100 text-emerald-800";
+    if (status === "Submitted") return "bg-amber-100 text-amber-800";
+    if (status === "Rejected") return "bg-rose-100 text-rose-700";
+    return "bg-slate-100 text-slate-700";
+  };
   const pendingClaimAmount = milestoneRows
     .filter(item => item.status !== "Paid")
     .reduce((sum, item) => sum + Number(item.amount || 0), 0);
@@ -4399,6 +6672,169 @@ const VendorDashboard = ({ onGoToPrequal }: { onGoToPrequal?: () => void }) => {
     });
     setView("new-claim");
     setClaimStep(1);
+  };
+
+  const resetBidForm = () => {
+    setBidForm({
+      bidAmount: "",
+      stage: "Pre-Qualification",
+      conceptNote: "",
+      technicalProposal: "",
+      financialProposal: "",
+    });
+    setEditingBidId(null);
+    setEditingBidStatus(null);
+    setBidSites([{ siteName: "", district: "", latitude: undefined, longitude: undefined, systemConfiguration: {}, boqItems: [], notes: "" }]);
+    setBidFiles({
+      technicalProposal: null,
+      financialProposal: null,
+      boq: null,
+      genderActionPlan: null,
+      implementationPlan: null,
+    });
+  };
+
+  const openBidForm = async (tender: Tender, selectedBidId?: string | null) => {
+    setBidTender(tender);
+    setBidMessage(null);
+    resetBidForm();
+    try {
+      const versions = await fetchTenderBids(tender.id);
+      setBidVersions(versions);
+      if (selectedBidId) {
+        const match = versions.find(v => v.id === selectedBidId);
+        if (match) {
+          useBidVersion(match);
+        }
+      }
+    } catch {
+      setBidVersions([]);
+    }
+    setView("bid");
+  };
+
+  React.useEffect(() => {
+    if (!pendingBidTenderId) return;
+    const match = activeTenders.find(t => t.id === pendingBidTenderId);
+    if (match) {
+      void openBidForm(match, pendingBidId);
+      if (onBidOpened) onBidOpened();
+    }
+  }, [pendingBidTenderId, pendingBidId, activeTenders]);
+
+  const useBidVersion = (version: TenderBid) => {
+    setEditingBidId(version.id);
+    setEditingBidStatus(version.status);
+    setBidForm({
+      bidAmount: version.bid_amount != null ? String(version.bid_amount) : "",
+      stage: version.stage ?? "Pre-Qualification",
+      conceptNote: version.concept_note ?? "",
+      technicalProposal: version.technical_proposal ?? "",
+      financialProposal: version.financial_proposal ?? "",
+    });
+    setBidFiles({
+      technicalProposal: null,
+      financialProposal: null,
+      boq: null,
+      genderActionPlan: null,
+      implementationPlan: null,
+    });
+    const sites = (version.sites || []).map(site => ({
+      siteName: site.siteName,
+      district: site.district,
+      latitude: site.latitude,
+      longitude: site.longitude,
+      systemConfiguration: site.systemConfiguration ?? {},
+      boqItems: site.boqItems ?? [],
+      notes: site.notes ?? "",
+    }));
+    setBidSites(sites.length ? sites : [{ siteName: "", district: "", latitude: undefined, longitude: undefined, systemConfiguration: {}, boqItems: [], notes: "" }]);
+  };
+
+  const updateBidSite = (index: number, patch: Partial<TenderBidSite>) => {
+    setBidSites(prev => prev.map((site, i) => (i === index ? { ...site, ...patch } : site)));
+  };
+
+  const addBidSite = () => {
+    setBidSites(prev => [...prev, { siteName: "", district: "", latitude: undefined, longitude: undefined, systemConfiguration: {}, boqItems: [], notes: "" }]);
+  };
+
+  const removeBidSite = (index: number) => {
+    setBidSites(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const submitBid = async (status: BidStatus) => {
+    if (!bidTender) return;
+    if (editingBidStatus && ![BidStatus.DRAFT, BidStatus.SUBMITTED].includes(editingBidStatus)) {
+      setBidMessage("This bid is under review or finalized and can no longer be edited.");
+      return;
+    }
+    if (!isPreQualified) {
+      setBidMessage("You must be pre-qualified before submitting bids.");
+      return;
+    }
+    if (!bidForm.bidAmount) {
+      setBidMessage("Bid amount is required.");
+      return;
+    }
+    if (bidForm.stage === "Site-Specific") {
+      if (!bidFiles.technicalProposal || !bidFiles.financialProposal) {
+        setBidMessage("Upload both technical and financial proposal documents for site-specific submissions.");
+        return;
+      }
+      if (!bidFiles.boq) {
+        setBidMessage("BOQ document is required for site-specific submissions.");
+        return;
+      }
+    }
+    if (bidSites.some(site => !site.siteName)) {
+      setBidMessage("All sites must have a name.");
+      return;
+    }
+    setIsBidSubmitting(true);
+    setBidMessage(null);
+    try {
+      const payload = {
+        tender: bidTender.id,
+        bid_amount: Number(bidForm.bidAmount),
+        stage: bidForm.stage,
+        concept_note: bidForm.conceptNote,
+        technical_proposal: bidForm.technicalProposal,
+        financial_proposal: bidForm.financialProposal,
+        technical_proposal_file: bidFiles.technicalProposal ?? undefined,
+        financial_proposal_file: bidFiles.financialProposal ?? undefined,
+        boq_file: bidFiles.boq ?? undefined,
+        gender_action_plan_file: bidFiles.genderActionPlan ?? undefined,
+        implementation_plan_file: bidFiles.implementationPlan ?? undefined,
+        status,
+        sites: bidSites,
+      };
+      const created = editingBidId
+        ? await updateTenderBid(editingBidId, payload)
+        : await submitTenderBid(payload);
+      setBidVersions(prev => {
+        const next = prev.filter(item => item.id !== created.id);
+        return [created, ...next];
+      });
+      setBidHistory(prev => {
+        const next = prev.filter(item => item.id !== created.id);
+        return [created, ...next];
+      });
+      window.dispatchEvent(new Event("rbf-bid-updated"));
+      window.dispatchEvent(new Event("rbf-notifications-refresh"));
+      resetBidForm();
+      if (status === BidStatus.DRAFT) {
+        setBidMessage("Draft saved as a new version.");
+      } else {
+        const submittedAt = created.submitted_at ? new Date(created.submitted_at).toLocaleString() : "now";
+        setBidMessage(`Bid submitted. Ref: ${bidTender.referenceNumber} • Version ${created.version_number} • ${submittedAt}.`);
+      }
+    } catch (err: any) {
+      const raw = String(err?.message || "");
+      setBidMessage(isConnectivityError(raw) ? `Cannot connect to backend (${API_BASE}).` : (toFriendlyApiMessage(raw) || "Failed to submit bid."));
+    } finally {
+      setIsBidSubmitting(false);
+    }
   };
 
   const handleSubmitApplication = (e: React.FormEvent) => {
@@ -4445,6 +6881,321 @@ const VendorDashboard = ({ onGoToPrequal }: { onGoToPrequal?: () => void }) => {
         .finally(() => setIsClaimSubmitting(false));
     }
   };
+
+  const handleSignContract = async (contractId: string) => {
+    const file = contractFiles[contractId];
+    if (!file) {
+      setContractMessage("Please select a signed contract file.");
+      return;
+    }
+    setIsContractSubmitting(true);
+    setContractMessage(null);
+    try {
+      const updated = await signTenderContract(contractId, file);
+      setContracts(prev => prev.map(item => item.id === updated.id ? updated : item));
+      setContractFiles(prev => ({ ...prev, [contractId]: null }));
+      setContractMessage("Signed contract uploaded successfully.");
+    } catch (err: any) {
+      const raw = String(err?.message || "");
+      setContractMessage(toFriendlyApiMessage(raw) || "Failed to upload signed contract.");
+    } finally {
+      setIsContractSubmitting(false);
+    }
+  };
+
+  if (view === "bid" && bidTender) {
+    const versionsSorted = [...bidVersions].sort((a, b) => (b.version_number || 0) - (a.version_number || 0));
+    const canEdit = !editingBidStatus || [BidStatus.DRAFT, BidStatus.SUBMITTED].includes(editingBidStatus);
+    const parseJsonInput = (value: string, fallbackKey: string) => {
+      try {
+        return JSON.parse(value);
+      } catch {
+        return { [fallbackKey]: value };
+      }
+    };
+    const parseBoqItems = (value: string) => {
+      const parsed = parseJsonInput(value, "items");
+      return Array.isArray(parsed) ? parsed : [parsed];
+    };
+
+    return (
+      <div className="space-y-6 max-w-5xl mx-auto pb-20">
+        <div className="flex items-center gap-4 mb-6">
+          <button onClick={() => setView("dashboard")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
+            <ChevronRight className="rotate-180" size={20} />
+          </button>
+          <div>
+            <h1 className="text-2xl font-bold text-slate-900">Submit Tender Proposal</h1>
+            <p className="text-slate-500">Tender: {bidTender.name} ({bidTender.referenceNumber})</p>
+          </div>
+        </div>
+
+        {editingBidStatus && ![BidStatus.DRAFT, BidStatus.SUBMITTED].includes(editingBidStatus) && (
+          <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700 font-medium">
+            This bid is under review or finalized and can no longer be edited.
+          </div>
+        )}
+        {bidMessage && (
+          <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 font-medium">
+            {bidMessage}
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div className="lg:col-span-2 space-y-6">
+            <div className="card p-6 space-y-6">
+              <h3 className="text-lg font-bold text-slate-900">Proposal Details</h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="space-y-1">
+                  <label className="text-sm font-bold text-slate-700 ml-1">Bid Amount (LSL) *</label>
+                  <input
+                    type="number"
+                    className="input-field"
+                    value={bidForm.bidAmount}
+                    onChange={(e) => setBidForm(prev => ({ ...prev, bidAmount: e.target.value }))}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-sm font-bold text-slate-700 ml-1">Stage</label>
+                  <select
+                    className="input-field"
+                    value={bidForm.stage}
+                    onChange={(e) => setBidForm(prev => ({ ...prev, stage: e.target.value }))}
+                  >
+                    <option>Pre-Qualification</option>
+                    <option>Site-Specific</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-bold text-slate-700 ml-1">Concept Note</label>
+                <textarea
+                  className="input-field min-h-[120px]"
+                  value={bidForm.conceptNote}
+                  onChange={(e) => setBidForm(prev => ({ ...prev, conceptNote: e.target.value }))}
+                />
+              </div>
+
+              <div className="space-y-3">
+                <label className="text-sm font-bold text-slate-700 ml-1">Proposal Documents (Stage 2)</label>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {[
+                    { key: "technicalProposal", label: "Technical Proposal", hint: "PDF/DOCX" },
+                    { key: "financialProposal", label: "Financial Proposal", hint: "PDF/DOCX/XLSX" },
+                    { key: "boq", label: "BOQ / Bill of Quantities", hint: "XLSX/PDF" },
+                    { key: "genderActionPlan", label: "Gender Action Plan", hint: "PDF/DOCX" },
+                    { key: "implementationPlan", label: "Implementation Plan", hint: "PDF/DOCX" },
+                  ].map((doc, idx) => (
+                    <div key={doc.key} className="p-4 border-2 border-dashed border-slate-200 rounded-xl text-center bg-slate-50">
+                      <label htmlFor={`bid-doc-${doc.key}-${idx}`} className="cursor-pointer block">
+                        <FileText size={22} className="mx-auto text-slate-400 mb-2" />
+                        <p className="text-xs font-bold text-slate-700">{doc.label}</p>
+                        <p className="text-[10px] text-slate-400 mt-1">{doc.hint}</p>
+                        <p className="text-[10px] text-slate-400 mt-1">
+                          {(bidFiles as any)[doc.key]?.name || "Click to upload"}
+                        </p>
+                      </label>
+                      <input
+                        id={`bid-doc-${doc.key}-${idx}`}
+                        type="file"
+                        accept=".pdf,.doc,.docx,.xls,.xlsx"
+                        className="hidden"
+                        onChange={(e) => {
+                          const file = e.target.files?.[0] || null;
+                          setBidFiles(prev => ({ ...prev, [doc.key]: file }));
+                        }}
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-bold text-slate-700 ml-1">Technical Summary (optional)</label>
+                <textarea
+                  className="input-field min-h-[140px]"
+                  value={bidForm.technicalProposal}
+                  onChange={(e) => setBidForm(prev => ({ ...prev, technicalProposal: e.target.value }))}
+                />
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-bold text-slate-700 ml-1">Financial Summary (optional)</label>
+                <textarea
+                  className="input-field min-h-[140px]"
+                  value={bidForm.financialProposal}
+                  onChange={(e) => setBidForm(prev => ({ ...prev, financialProposal: e.target.value }))}
+                />
+              </div>
+            </div>
+
+            <div className="card p-6 space-y-6">
+              <div className="flex items-center justify-between">
+                <h3 className="text-lg font-bold text-slate-900">Project Sites</h3>
+                <button onClick={addBidSite} className="btn-secondary text-sm">Add Site</button>
+              </div>
+
+              {bidSites.map((site, index) => (
+                <div key={index} className="border border-slate-200 rounded-xl p-4 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <h4 className="font-bold text-slate-900">Site {index + 1}</h4>
+                    {bidSites.length > 1 && (
+                      <button onClick={() => removeBidSite(index)} className="text-rose-600 text-sm">Remove</button>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="space-y-1">
+                      <label className="text-sm font-bold text-slate-700 ml-1">Site Name *</label>
+                      <input
+                        className="input-field"
+                        value={site.siteName}
+                        onChange={(e) => updateBidSite(index, { siteName: e.target.value })}
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-sm font-bold text-slate-700 ml-1">District</label>
+                      <input
+                        className="input-field"
+                        value={site.district || ""}
+                        onChange={(e) => updateBidSite(index, { district: e.target.value })}
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-sm font-bold text-slate-700 ml-1">Latitude</label>
+                      <input
+                        className="input-field"
+                        value={site.latitude ?? ""}
+                        onChange={(e) => updateBidSite(index, { latitude: e.target.value === "" ? undefined : Number(e.target.value) })}
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-sm font-bold text-slate-700 ml-1">Longitude</label>
+                      <input
+                        className="input-field"
+                        value={site.longitude ?? ""}
+                        onChange={(e) => updateBidSite(index, { longitude: e.target.value === "" ? undefined : Number(e.target.value) })}
+                      />
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-bold text-slate-700 ml-1">System Configuration (JSON)</label>
+                    <textarea
+                      className="input-field min-h-[90px] font-mono text-xs"
+                      value={JSON.stringify(site.systemConfiguration ?? {}, null, 2)}
+                      onChange={(e) => updateBidSite(index, { systemConfiguration: parseJsonInput(e.target.value, "raw") })}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-bold text-slate-700 ml-1">BOQ Items (JSON Array)</label>
+                    <textarea
+                      className="input-field min-h-[90px] font-mono text-xs"
+                      value={JSON.stringify(site.boqItems ?? [], null, 2)}
+                      onChange={(e) => updateBidSite(index, { boqItems: parseBoqItems(e.target.value) })}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-bold text-slate-700 ml-1">Notes</label>
+                    <textarea
+                      className="input-field min-h-[70px]"
+                      value={site.notes || ""}
+                      onChange={(e) => updateBidSite(index, { notes: e.target.value })}
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                onClick={() => submitBid(BidStatus.DRAFT)}
+                disabled={isBidSubmitting || !canEdit}
+                className="btn-secondary flex-1 disabled:opacity-60"
+              >
+                {isBidSubmitting ? "Saving..." : "Save Draft Version"}
+              </button>
+              <button
+                onClick={() => submitBid(BidStatus.SUBMITTED)}
+                disabled={isBidSubmitting || !canEdit}
+                className="btn-primary flex-1 disabled:opacity-60"
+              >
+                {isBidSubmitting ? "Submitting..." : "Submit Final Proposal"}
+              </button>
+            </div>
+          </div>
+
+          <div className="space-y-6">
+            <div className="card p-6">
+              <h3 className="font-bold text-slate-900 mb-4">Version History</h3>
+              {versionsSorted.length === 0 && (
+                <p className="text-sm text-slate-500">No versions yet.</p>
+              )}
+              <div className="space-y-3">
+                {versionsSorted.map((version) => (
+                  <div key={version.id} className="p-3 border border-slate-200 rounded-lg">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-sm font-bold text-slate-900">Version {version.version_number}</p>
+                        <p className="text-xs text-slate-500">{version.status}</p>
+                      </div>
+                      <button
+                        onClick={() => useBidVersion(version)}
+                        className="text-emerald-600 text-xs font-bold"
+                      >
+                        Use Version
+                      </button>
+                    </div>
+                    {version.submitted_at && (
+                      <p className="text-[10px] text-slate-400 mt-2">
+                        Submitted: {new Date(version.submitted_at).toLocaleString()}
+                      </p>
+                    )}
+                    <div className="mt-3 space-y-1 text-[11px]">
+                      {[
+                        { label: "Technical Proposal", url: version.technical_proposal_file },
+                        { label: "Financial Proposal", url: version.financial_proposal_file },
+                        { label: "BOQ", url: version.boq_file },
+                        { label: "Gender Action Plan", url: version.gender_action_plan_file },
+                        { label: "Implementation Plan", url: version.implementation_plan_file },
+                      ].filter(doc => Boolean(doc.url)).length === 0 ? (
+                        <p className="text-slate-400">No documents uploaded.</p>
+                      ) : (
+                        <div className="flex flex-wrap gap-2">
+                          {[
+                            { label: "Technical Proposal", url: version.technical_proposal_file },
+                            { label: "Financial Proposal", url: version.financial_proposal_file },
+                            { label: "BOQ", url: version.boq_file },
+                            { label: "Gender Action Plan", url: version.gender_action_plan_file },
+                            { label: "Implementation Plan", url: version.implementation_plan_file },
+                          ]
+                            .filter(doc => Boolean(doc.url))
+                            .map(doc => (
+                              <a
+                                key={doc.label}
+                                href={doc.url as string}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="px-2 py-1 rounded-full bg-slate-100 text-slate-600 hover:text-emerald-700 hover:bg-emerald-50"
+                              >
+                                {doc.label}
+                              </a>
+                            ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="card p-6">
+              <h3 className="font-bold text-slate-900 mb-3">Tender Deadline</h3>
+              <p className="text-sm text-slate-600">{bidTender.lastDateSubmission || bidTender.deadline}</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (view === "new-claim") {
     return (
@@ -4764,6 +7515,139 @@ const VendorDashboard = ({ onGoToPrequal }: { onGoToPrequal?: () => void }) => {
     );
   }
 
+  const contractingSection = (
+      <section
+        className="rounded-3xl border border-slate-200/80 bg-[linear-gradient(135deg,#ffffff_0%,#f8fafc_55%,#eef2ff_100%)] shadow-[0_18px_50px_-32px_rgba(15,23,42,0.7)]"
+        ref={contractingRef}
+        id="vendor-contracting"
+      >
+        <div className="p-6 border-b border-slate-200/80">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-400">Contract Workflow</p>
+              <h3 className="text-2xl font-bold text-slate-900 mt-2">Contracting & Project Setup</h3>
+              <p className="text-sm text-slate-500">Upload signed agreements, track review, and move into implementation.</p>
+            </div>
+            <div className="flex flex-wrap gap-2 text-[11px]">
+              <span className="badge bg-slate-100 text-slate-700">Generated</span>
+              <span className="badge bg-amber-100 text-amber-800">Submitted</span>
+              <span className="badge bg-emerald-100 text-emerald-800">Approved</span>
+              <span className="badge bg-rose-100 text-rose-700">Rejected</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="p-6">
+          {sortedContracts.length === 0 && (
+            <div className="rounded-2xl border border-dashed border-slate-200 bg-white/70 p-8 text-sm text-slate-500">
+              No contracts available yet. You will be notified after award.
+            </div>
+          )}
+
+          {sortedContracts.length > 0 && (
+            <div className="grid grid-cols-1 gap-5 xl:grid-cols-2">
+              {sortedContracts.map((contract) => (
+                <div key={contract.id} className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-[0_12px_30px_-24px_rgba(15,23,42,0.5)]">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <p className="text-xs font-semibold text-slate-400">Contract Reference</p>
+                      <p className="text-base font-bold text-slate-900">{contract.referenceNumber}</p>
+                      <p className="text-xs text-slate-500 mt-1">Status: {contract.status}</p>
+                    </div>
+                    <span className={`badge ${contractTone(contract.status)}`}>{contract.status}</span>
+                  </div>
+
+                  <div className="mt-4 grid grid-cols-4 gap-2 text-[10px] font-semibold text-slate-500">
+                    {["Generated", "Submitted", "Approved", "Rejected"].map((label) => (
+                      <div
+                        key={label}
+                        className={`rounded-full px-3 py-1 text-center ${
+                          label === contract.status ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-500"
+                        }`}
+                      >
+                        {label}
+                      </div>
+                    ))}
+                  </div>
+
+                  {contract.status === "Generated" && (
+                    <div className="mt-5 space-y-3">
+                      <label className="text-xs font-semibold text-slate-600">Upload signed agreement</label>
+                      <div className="flex flex-col gap-3 sm:flex-row">
+                        <input
+                          type="file"
+                          accept=".pdf,.doc,.docx"
+                          onChange={(e) => {
+                            const file = e.target.files?.[0] || null;
+                            setContractFiles(prev => ({ ...prev, [contract.id]: file }));
+                          }}
+                          className="input-field"
+                        />
+                        <button
+                          onClick={() => handleSignContract(contract.id)}
+                          disabled={isContractSubmitting}
+                          className="btn-primary px-6 disabled:opacity-60"
+                        >
+                          {isContractSubmitting ? "Uploading..." : "Upload Signed Contract"}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {contract.status === "Submitted" && (
+                    <p className="mt-5 text-xs text-amber-700">Signed contract uploaded. Awaiting admin approval.</p>
+                  )}
+                  {contract.status === "Approved" && (
+                    <p className="mt-5 text-xs text-emerald-700">Contract approved. Project and milestones are now active.</p>
+                  )}
+                  {contract.status === "Rejected" && (
+                    <p className="mt-5 text-xs text-rose-600">Rejected: {contract.rejectionReason || "Please contact admin."}</p>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {contractMessage && <p className="mt-4 text-xs text-emerald-700">{contractMessage}</p>}
+        </div>
+      </section>
+  );
+
+  if (showOnlyContracting) {
+    return (
+      <div className="space-y-6">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-900">Contracting</h1>
+          <p className="text-slate-500">Review and sign contracts for awarded tenders</p>
+        </div>
+        {contractingSection}
+        <div className="card">
+          <div className="p-6 border-b border-slate-100">
+            <h3 className="text-lg font-bold">Ongoing Projects</h3>
+            <p className="text-sm text-slate-500">Active implementations linked to your awarded tenders</p>
+          </div>
+          <div className="p-6 space-y-4">
+            {projects.length === 0 && (
+              <p className="text-sm text-slate-500">No ongoing projects yet.</p>
+            )}
+            {projects.map(project => (
+              <div key={project.id} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 rounded-xl border border-slate-100 p-4">
+                <div>
+                  <p className="text-sm font-bold text-slate-900">{project.projectReference || `Project ${project.id}`}</p>
+                  <p className="text-xs text-slate-500">{project.techType} • {project.region}</p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className="badge bg-slate-100 text-slate-700">{project.status}</span>
+                  <span className="text-xs text-slate-500">Progress {project.progress}%</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-8">
       {!isPreQualified && (
@@ -4810,15 +7694,133 @@ const VendorDashboard = ({ onGoToPrequal }: { onGoToPrequal?: () => void }) => {
       </div>
 
       <div className="card">
+        <div className="p-6 border-b border-slate-100 flex items-center justify-between">
+          <div>
+            <h3 className="text-lg font-bold">Calls for Proposals</h3>
+            <p className="text-sm text-slate-500">Published tenders available for bid submission</p>
+          </div>
+          <button
+            onClick={() => {
+              if (!isPreQualified) {
+                alert("You must be pre-qualified to submit bids.");
+                return;
+              }
+              if (activeTenders.length > 0) {
+                void openBidForm(activeTenders[0]);
+              }
+            }}
+            className="btn-secondary text-sm"
+          >
+            Open Latest
+          </button>
+        </div>
+        <div className="divide-y divide-slate-100">
+          {activeTenders.map((tender) => (
+            <div key={tender.id} className="p-6 flex items-center justify-between hover:bg-slate-50 transition-colors">
+              <div>
+                <p className="font-bold text-slate-900">{tender.name}</p>
+                <p className="text-xs text-slate-500">{tender.referenceNumber} • Deadline: {tender.lastDateSubmission || tender.deadline}</p>
+              </div>
+              <button
+                onClick={() => openBidForm(tender)}
+                disabled={!isPreQualified}
+                className="btn-primary py-1.5 px-4 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Submit Proposal
+              </button>
+            </div>
+          ))}
+          {activeTenders.length === 0 && (
+            <div className="p-6 text-sm text-slate-500">No published tenders available right now.</div>
+          )}
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="p-6 border-b border-slate-100">
+          <h3 className="text-lg font-bold">My Bids</h3>
+          <p className="text-sm text-slate-500">Track your submissions and status updates</p>
+        </div>
+        <div className="p-6 space-y-4">
+          {bidHistory.length === 0 && (
+            <p className="text-sm text-slate-500">No bids submitted yet.</p>
+          )}
+          {bidHistory
+            .slice()
+            .sort((a, b) => (b.submitted_at || b.reviewed_at || "").localeCompare(a.submitted_at || a.reviewed_at || ""))
+            .slice(0, 8)
+            .map((bid) => {
+              const statusColor =
+                bid.status === BidStatus.SUBMITTED ? "bg-blue-100 text-blue-700" :
+                bid.status === BidStatus.UNDER_REVIEW ? "bg-amber-100 text-amber-700" :
+                bid.status === BidStatus.ACCEPTED ? "bg-emerald-100 text-emerald-700" :
+                bid.status === BidStatus.REJECTED ? "bg-rose-100 text-rose-700" :
+                "bg-slate-100 text-slate-700";
+              return (
+                <div key={bid.id} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border border-slate-100 rounded-xl p-4">
+                  <div>
+                    <p className="text-sm font-bold text-slate-900">
+                      {bid.tender_name || `Tender ${bid.tender_reference || bid.tender}`}
+                    </p>
+                    <p className="text-xs text-slate-500">
+                      Ref: {bid.tender_reference || "N/A"} • Version {bid.version_number}
+                    </p>
+                    <p className="text-xs text-slate-400">
+                      Submitted: {bid.submitted_at ? new Date(bid.submitted_at).toLocaleString() : "Draft"}
+                    </p>
+                  </div>
+                  <div className="text-right">
+                    <span className={`badge ${statusColor}`}>{bid.status}</span>
+                    <div className="text-xs text-slate-500 mt-2">
+                      Amount: {bid.bid_amount != null ? `M ${Number(bid.bid_amount).toLocaleString()}` : "N/A"}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+        </div>
+      </div>
+
+      {contractingSection}
+
+      <div className="card">
+        <div className="p-6 border-b border-slate-100">
+          <h3 className="text-lg font-bold">Ongoing Projects</h3>
+          <p className="text-sm text-slate-500">View active implementations linked to your awarded tenders</p>
+        </div>
+        <div className="p-6 space-y-4">
+          {projects.length === 0 && (
+            <p className="text-sm text-slate-500">No ongoing projects yet.</p>
+          )}
+          {projects.map(project => (
+            <div key={project.id} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 rounded-xl border border-slate-100 p-4">
+              <div>
+                <p className="text-sm font-bold text-slate-900">{project.projectReference || `Project ${project.id}`}</p>
+                <p className="text-xs text-slate-500">{project.techType} • {project.region}</p>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="badge bg-slate-100 text-slate-700">{project.status}</span>
+                <span className="text-xs text-slate-500">Progress {project.progress}%</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="card">
         <div className="p-6 border-b border-slate-100">
           <h3 className="text-lg font-bold">My Project Milestones</h3>
         </div>
         <div className="p-6 space-y-6">
-          {milestoneRows.map((p) => (
-            <div key={p.id} className="flex items-center gap-6">
+          {[
+            { name: "Thaba-Tseka SHS Phase 1", progress: 100, status: "Verified", amount: "M 45,000" },
+            { name: "Thaba-Tseka SHS Phase 2", progress: 45, status: "In Progress", amount: "M 60,000" },
+            { name: "Maseru Mini-Grid Expansion", progress: 10, status: "Contracting", amount: "M 250,000" },
+          ].map((p, i) => (
+            <div key={i} className="flex items-center gap-6">
               <div className="flex-1">
                 <div className="flex justify-between mb-2">
-                  <span className="font-medium text-slate-900">{p.name} ({p.projectName})</span>
+                  <span className="font-medium text-slate-900">{p.name}</span>
                   <span className="text-sm font-bold text-slate-500">{p.progress}%</span>
                 </div>
                 <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
@@ -4826,35 +7828,846 @@ const VendorDashboard = ({ onGoToPrequal }: { onGoToPrequal?: () => void }) => {
                 </div>
               </div>
               <div className="text-right min-w-[100px]">
-                <div className="text-sm font-bold text-slate-900">M {Number(p.amount || 0).toLocaleString()}</div>
+                <div className="text-sm font-bold text-slate-900">{p.amount}</div>
                 <div className={`text-[10px] font-bold uppercase ${p.status === 'Verified' ? 'text-emerald-600' : 'text-amber-600'}`}>{p.status}</div>
               </div>
               <button 
                 onClick={() => handleStartClaim(p)}
-                disabled={!isPreQualified}
-                className="btn-secondary py-1 px-3 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+                className="btn-secondary py-1 px-3 text-xs"
               >
                 Claim
               </button>
             </div>
           ))}
-          {milestoneRows.length === 0 && (
-            <p className="text-sm text-slate-500">No project milestones available yet.</p>
-          )}
         </div>
       </div>
     </div>
   );
 };
 
+const VendorProjectsHub = () => {
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [milestones, setMilestones] = useState<Milestone[]>([]);
+  const [claims, setClaims] = useState<PaymentClaim[]>([]);
+  const [contracts, setContracts] = useState<TenderContract[]>([]);
+  const [projectUpdates, setProjectUpdates] = useState<ProjectUpdate[]>([]);
+  const [projectDocuments, setProjectDocuments] = useState<ProjectDocument[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [search, setSearch] = useState("");
+  const [techFilter, setTechFilter] = useState("All");
+  const [statusFilter, setStatusFilter] = useState("All");
+  const [selectedProject, setSelectedProject] = useState<Project | null>(null);
+  const [projectTab, setProjectTab] = useState<"overview" | "milestones" | "planning" | "payments" | "documents" | "updates">("overview");
+  const [deploymentPlan, setDeploymentPlan] = useState({
+    teamRoster: "",
+    equipmentPlan: "",
+    workSchedule: "",
+  });
+  const [planSaving, setPlanSaving] = useState(false);
+  const [planMessage, setPlanMessage] = useState<string | null>(null);
+  const [milestoneDraft, setMilestoneDraft] = useState({ name: "", percentage: "", amount: "" });
+  const [milestoneSaving, setMilestoneSaving] = useState(false);
+  const [milestoneMessage, setMilestoneMessage] = useState<string | null>(null);
+  const [updateDraft, setUpdateDraft] = useState({ title: "", body: "" });
+  const [updateSaving, setUpdateSaving] = useState(false);
+  const [updateMessage, setUpdateMessage] = useState<string | null>(null);
+  const [documentTitle, setDocumentTitle] = useState("");
+  const [documentFile, setDocumentFile] = useState<File | null>(null);
+  const [documentUploading, setDocumentUploading] = useState(false);
+  const [documentMessage, setDocumentMessage] = useState<string | null>(null);
+
+  const loadData = React.useCallback(async () => {
+    setLoading(true);
+    try {
+      const [projectRows, milestoneRows, claimRows, contractRows, updateRows] = await Promise.all([
+        fetchProjects(),
+        fetchMilestones(),
+        fetchPaymentClaims(),
+        fetchTenderContracts(),
+        fetchProjectUpdates(),
+      ]);
+      setProjects(projectRows);
+      setMilestones(milestoneRows);
+      setClaims(claimRows);
+      setContracts(contractRows);
+      setProjectUpdates(updateRows);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    void loadData();
+  }, [loadData]);
+
+  React.useEffect(() => {
+    if (!selectedProject) {
+      setProjectDocuments([]);
+      return;
+    }
+    setDeploymentPlan({
+      teamRoster: selectedProject.deploymentTeamRoster || "",
+      equipmentPlan: selectedProject.deploymentEquipmentPlan || "",
+      workSchedule: selectedProject.deploymentWorkSchedule || "",
+    });
+    setPlanMessage(null);
+    setMilestoneDraft({ name: "", percentage: "", amount: "" });
+    setMilestoneMessage(null);
+    setUpdateDraft({ title: "", body: "" });
+    setUpdateMessage(null);
+    setDocumentTitle("");
+    setDocumentFile(null);
+    setDocumentMessage(null);
+  }, [selectedProject]);
+
+  React.useEffect(() => {
+    if (!selectedProject) return;
+    let active = true;
+    (async () => {
+      try {
+        const docs = await fetchProjectDocuments(selectedProject.id);
+        if (active) setProjectDocuments(docs);
+      } catch {
+        if (active) setProjectDocuments([]);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [selectedProject]);
+
+
+  const techOptions = useMemo(
+    () => ["All", ...Array.from(new Set(projects.map(p => p.techType).filter(Boolean)))],
+    [projects]
+  );
+  const activeProjects = useMemo(
+    () => projects.filter(p => [ProjectStatus.INSTALLATION, ProjectStatus.VERIFICATION].includes(p.status)),
+    [projects]
+  );
+  const completedProjects = useMemo(
+    () => projects.filter(p => p.status === ProjectStatus.COMPLETED),
+    [projects]
+  );
+  const pendingProjects = useMemo(
+    () => projects.filter(p => p.status === ProjectStatus.CONTRACTING),
+    [projects]
+  );
+  const contractValueByProject = useMemo(() => {
+    const map = new Map<string, number>();
+    milestones.forEach(m => {
+      const total = map.get(m.projectId) ?? 0;
+      map.set(m.projectId, total + Number(m.amount || 0));
+    });
+    return map;
+  }, [milestones]);
+  const totalContractValue = useMemo(
+    () => Array.from(contractValueByProject.values()).reduce((sum, val) => sum + val, 0),
+    [contractValueByProject]
+  );
+  const filteredProjects = useMemo(() => {
+    return projects.filter(project => {
+      const matchesSearch = !search || `${project.projectReference || ""} ${project.techType} ${project.region}`.toLowerCase().includes(search.toLowerCase());
+      const matchesTech = techFilter === "All" || project.techType === techFilter;
+      const matchesStatus =
+        statusFilter === "All" ||
+        (statusFilter === "Active" && activeProjects.some(p => p.id === project.id)) ||
+        (statusFilter === "Completed" && completedProjects.some(p => p.id === project.id)) ||
+        (statusFilter === "Pending" && pendingProjects.some(p => p.id === project.id));
+      return matchesSearch && matchesTech && matchesStatus;
+    });
+  }, [projects, search, techFilter, statusFilter, activeProjects, completedProjects, pendingProjects]);
+
+  const milestonesForProject = (projectId: string) => milestones.filter(m => m.projectId === projectId);
+  const claimsForProject = (projectId: string) => claims.filter(c => c.projectId === projectId);
+  const contractForProject = (projectId: string) => contracts.find(c => c.projectId === projectId);
+  const updatesForProject = (projectId: string) => projectUpdates
+    .filter(u => u.projectId === projectId)
+    .slice()
+    .sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
+  const documentsForProject = (projectId: string) => projectDocuments
+    .filter(d => d.projectId === projectId)
+    .slice()
+    .sort((a, b) => (b.uploadedAt || "").localeCompare(a.uploadedAt || ""));
+  const formatDate = (value?: string) => {
+    if (!value) return "N/A";
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return "N/A";
+    return parsed.toLocaleDateString();
+  };
+  const toFileUrl = (raw?: string | null) => {
+    if (!raw) return null;
+    if (/^https?:\/\//i.test(raw)) return raw;
+    const base = API_BASE.replace(/\/api$/i, "").replace(/\/$/, "");
+    const path = raw.startsWith("/") ? raw : `/${raw}`;
+    return `${base}${path}`;
+  };
+  const budgetForProject = (project: Project) => {
+    if (typeof project.budget === "number") {
+      return project.budget;
+    }
+    if (typeof project.tenderBudget === "number") {
+      return project.tenderBudget;
+    }
+    if (typeof project.milestoneTotalAmount === "number" && project.milestoneTotalAmount > 0) {
+      return project.milestoneTotalAmount;
+    }
+    const fromMilestones = contractValueByProject.get(project.id);
+    return typeof fromMilestones === "number" && fromMilestones > 0 ? fromMilestones : null;
+  };
+  const startDateForProject = (project: Project) => project.startDate || project.tenderAwardedAt;
+  const endDateForProject = (project: Project) => project.endDate || project.tenderDeadline;
+
+  const handleSaveDeploymentPlan = async () => {
+    if (!selectedProject) return;
+    setPlanSaving(true);
+    setPlanMessage(null);
+    try {
+      const updated = await updateProject(selectedProject.id, {
+        deploymentTeamRoster: deploymentPlan.teamRoster,
+        deploymentEquipmentPlan: deploymentPlan.equipmentPlan,
+        deploymentWorkSchedule: deploymentPlan.workSchedule,
+      });
+      setSelectedProject(updated);
+      setProjects(prev => prev.map(p => (p.id === updated.id ? updated : p)));
+      setPlanMessage("Deployment plan saved.");
+    } catch (err: any) {
+      const raw = String(err?.message || "");
+      setPlanMessage(toFriendlyApiMessage(raw) || "Unable to save deployment plan.");
+    } finally {
+      setPlanSaving(false);
+    }
+  };
+
+  const handleAddMilestone = async () => {
+    if (!selectedProject) return;
+    const name = milestoneDraft.name.trim();
+    const percentageValue = Number(milestoneDraft.percentage);
+    const amountValue = Number(milestoneDraft.amount);
+    if (!name) {
+      setMilestoneMessage("Please provide a milestone name.");
+      return;
+    }
+    if (!Number.isFinite(percentageValue) || percentageValue <= 0 || percentageValue > 100) {
+      setMilestoneMessage("Please provide a milestone percentage between 1 and 100.");
+      return;
+    }
+    if (!Number.isFinite(amountValue) || amountValue <= 0) {
+      setMilestoneMessage("Please provide a valid milestone amount.");
+      return;
+    }
+    setMilestoneSaving(true);
+    setMilestoneMessage(null);
+    try {
+      const created = await createMilestone({
+        projectId: selectedProject.id,
+        name,
+        percentage: percentageValue,
+        amount: amountValue,
+      });
+      setMilestones(prev => [...prev, created]);
+      setMilestoneDraft({ name: "", percentage: "", amount: "" });
+      setMilestoneMessage("Milestone added.");
+    } catch (err: any) {
+      const raw = String(err?.message || "");
+      setMilestoneMessage(toFriendlyApiMessage(raw) || "Unable to add milestone.");
+    } finally {
+      setMilestoneSaving(false);
+    }
+  };
+
+  const handleAddUpdate = async () => {
+    if (!selectedProject) return;
+    const body = updateDraft.body.trim();
+    if (!body) {
+      setUpdateMessage("Please add update details before saving.");
+      return;
+    }
+    setUpdateSaving(true);
+    setUpdateMessage(null);
+    try {
+      const created = await createProjectUpdate({
+        projectId: selectedProject.id,
+        title: updateDraft.title.trim(),
+        body,
+      });
+      setProjectUpdates(prev => [created, ...prev]);
+      setUpdateDraft({ title: "", body: "" });
+      setUpdateMessage("Update posted.");
+    } catch (err: any) {
+      const raw = String(err?.message || "");
+      setUpdateMessage(toFriendlyApiMessage(raw) || "Unable to post update.");
+    } finally {
+      setUpdateSaving(false);
+    }
+  };
+
+  const handleUploadDocument = async () => {
+    if (!selectedProject) return;
+    if (!documentFile) {
+      setDocumentMessage("Please choose a file to upload.");
+      return;
+    }
+    setDocumentUploading(true);
+    setDocumentMessage(null);
+    try {
+      const uploaded = await uploadProjectDocument({
+        projectId: selectedProject.id,
+        title: documentTitle.trim(),
+        file: documentFile,
+      });
+      setProjectDocuments(prev => [uploaded, ...prev]);
+      setDocumentTitle("");
+      setDocumentFile(null);
+      setDocumentMessage("Document uploaded.");
+    } catch (err: any) {
+      const raw = String(err?.message || "");
+      setDocumentMessage(toFriendlyApiMessage(raw) || "Unable to upload document.");
+    } finally {
+      setDocumentUploading(false);
+    }
+  };
+
+  const renderProjectDetail = (project: Project) => (
+    <div className="mt-5 rounded-3xl border border-slate-100 bg-white shadow-[0_30px_70px_-55px_rgba(15,23,42,0.7)] overflow-hidden">
+      <div className="p-5 border-b border-slate-100 bg-[linear-gradient(120deg,#f8fafc_0%,#f1f5f9_45%,#ffffff_100%)] space-y-4">
+        <div>
+          <p className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Project Details</p>
+          <p className="text-sm text-slate-600 mt-1">
+            Choose a section below to add or view information for this project.
+          </p>
+        </div>
+        <div className="flex items-center gap-2 overflow-x-auto pb-1">
+          {["overview", "milestones", "planning", "payments", "documents", "updates"].map(tab => (
+            <button
+              key={tab}
+              onClick={() => setProjectTab(tab as typeof projectTab)}
+              className={`text-xs font-semibold rounded-full px-4 py-2 border transition whitespace-nowrap ${
+                projectTab === tab
+                  ? "bg-emerald-600 text-white border-emerald-600 shadow-sm"
+                  : "bg-white text-slate-600 border-slate-200 hover:border-slate-300"
+              }`}
+            >
+              {tab.charAt(0).toUpperCase() + tab.slice(1)}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="px-6 pt-5">
+        <div className="grid grid-cols-2 gap-3 text-[11px] text-slate-500 sm:grid-cols-4">
+          <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
+            <p className="uppercase tracking-wider text-slate-400">Contract Ref</p>
+            <p className="font-semibold text-slate-700">{project.contractReference || "N/A"}</p>
+          </div>
+          <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
+            <p className="uppercase tracking-wider text-slate-400">Tender Status</p>
+            <p className="font-semibold text-slate-700">{project.tenderStatus || "N/A"}</p>
+          </div>
+          <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
+            <p className="uppercase tracking-wider text-slate-400">Start Date</p>
+            <p className="font-semibold text-slate-700">{formatDate(startDateForProject(project))}</p>
+          </div>
+          <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
+            <p className="uppercase tracking-wider text-slate-400">End Date</p>
+            <p className="font-semibold text-slate-700">{formatDate(endDateForProject(project))}</p>
+          </div>
+        </div>
+      </div>
+      <div className="p-6 space-y-4">
+        {projectTab === "overview" && (
+          <div className="space-y-4">
+            <div>
+              <h4 className="text-sm font-semibold text-slate-800">Overview</h4>
+              <p className="text-xs text-slate-500">Quick snapshot of targets and progress.</p>
+            </div>
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+              <div className="card p-4">
+                <p className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">Target Metrics</p>
+                <p className="text-sm text-slate-700 mt-2">
+                  Installations: {project.targetInstallations ?? "N/A"} • Beneficiaries: {project.targetBeneficiaries ?? "N/A"}
+                </p>
+                <p className="text-xs text-slate-500 mt-1">
+                  Female ≥{project.targetFemalePct ?? 50}% • Vulnerable ≥{project.targetVulnerablePct ?? 30}%
+                </p>
+              </div>
+              <div className="card p-4">
+                <p className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">Verification Mode</p>
+                <p className="text-sm text-slate-700 mt-2">Manual (ODK/KoboToolbox)</p>
+              </div>
+              <div className="card p-4">
+                <p className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">Next Milestone</p>
+                <p className="text-sm text-slate-700 mt-2">
+                  {milestonesForProject(project.id).find(m => !["Verified", "Paid"].includes(m.status))?.name || "All milestones completed"}
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+        {projectTab === "planning" && (
+          <div className="space-y-4">
+            <div>
+              <h4 className="text-sm font-semibold text-slate-800">Deployment Planning</h4>
+              <p className="text-xs text-slate-500">Provide team, equipment, and schedule details.</p>
+            </div>
+            <div className="space-y-6">
+              <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
+                <p className="text-xs text-slate-500">
+                  Core project parameters are locked because they are inherited from the awarded bid and tender.
+                  Use this section to provide your deployment-level planning.
+                </p>
+              </div>
+              <div className="grid grid-cols-1 gap-4">
+                <div className="space-y-2">
+                  <label className="text-sm font-semibold text-slate-700">Field Team Roster</label>
+                  <textarea
+                    className="input-field min-h-[90px]"
+                    placeholder="List roles, headcount, and deployment leads"
+                    value={deploymentPlan.teamRoster}
+                    onChange={(e) => setDeploymentPlan(prev => ({ ...prev, teamRoster: e.target.value }))}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-semibold text-slate-700">Equipment Sourcing Plan</label>
+                  <textarea
+                    className="input-field min-h-[90px]"
+                    placeholder="Describe suppliers, lead times, and logistics"
+                    value={deploymentPlan.equipmentPlan}
+                    onChange={(e) => setDeploymentPlan(prev => ({ ...prev, equipmentPlan: e.target.value }))}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-semibold text-slate-700">Work Schedule</label>
+                  <textarea
+                    className="input-field min-h-[90px]"
+                    placeholder="Phases, timelines, and key milestones"
+                    value={deploymentPlan.workSchedule}
+                    onChange={(e) => setDeploymentPlan(prev => ({ ...prev, workSchedule: e.target.value }))}
+                  />
+                </div>
+              </div>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={handleSaveDeploymentPlan}
+                  className="btn-primary px-6"
+                  disabled={planSaving}
+                >
+                  {planSaving ? "Saving..." : "Save Deployment Plan"}
+                </button>
+                {planMessage && <span className="text-sm text-slate-500">{planMessage}</span>}
+              </div>
+            </div>
+          </div>
+        )}
+        {projectTab === "milestones" && (
+          <div className="space-y-4">
+            <div>
+              <h4 className="text-sm font-semibold text-slate-800">Milestones</h4>
+              <p className="text-xs text-slate-500">Add new tranches or review existing milestones.</p>
+            </div>
+            <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-semibold text-slate-700">Add Milestone</p>
+                <span className="text-[11px] text-slate-400">Fields marked * are required</span>
+              </div>
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                <div className="space-y-1">
+                  <label className="text-xs font-semibold text-slate-600">Milestone Name *</label>
+                  <input
+                    className="input-field"
+                    placeholder="e.g. Equipment Delivery"
+                    value={milestoneDraft.name}
+                    onChange={(e) => setMilestoneDraft(prev => ({ ...prev, name: e.target.value }))}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-semibold text-slate-600">Percentage *</label>
+                  <input
+                    className="input-field"
+                    type="number"
+                    min={1}
+                    max={100}
+                    placeholder="10"
+                    value={milestoneDraft.percentage}
+                    onChange={(e) => setMilestoneDraft(prev => ({ ...prev, percentage: e.target.value }))}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-semibold text-slate-600">Amount (M) *</label>
+                  <input
+                    className="input-field"
+                    type="number"
+                    min={0}
+                    placeholder="50000"
+                    value={milestoneDraft.amount}
+                    onChange={(e) => setMilestoneDraft(prev => ({ ...prev, amount: e.target.value }))}
+                  />
+                </div>
+              </div>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={handleAddMilestone}
+                  className="btn-primary text-xs"
+                  disabled={milestoneSaving}
+                >
+                  {milestoneSaving ? "Saving..." : "Add Milestone"}
+                </button>
+                {milestoneMessage && <span className="text-xs text-slate-500">{milestoneMessage}</span>}
+              </div>
+            </div>
+            <div className="space-y-3">
+              {milestonesForProject(project.id).length === 0 && (
+                <p className="text-sm text-slate-500">No milestones added yet.</p>
+              )}
+              {milestonesForProject(project.id).map(m => (
+                <div key={m.id} className="rounded-xl border border-slate-100 p-4 flex items-center justify-between">
+                  <div>
+                    <p className="font-semibold text-slate-900">{m.name}</p>
+                    <p className="text-xs text-slate-500">{m.percentage}% • M {Number(m.amount || 0).toLocaleString()}</p>
+                  </div>
+                  <span className="badge bg-slate-100 text-slate-700">{m.status}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        {projectTab === "payments" && (
+          <div className="space-y-4">
+            <div>
+              <h4 className="text-sm font-semibold text-slate-800">Payments</h4>
+              <p className="text-xs text-slate-500">Track claims and disbursement status.</p>
+            </div>
+            <div className="space-y-3">
+              {claimsForProject(project.id).length === 0 && (
+                <p className="text-sm text-slate-500">No payment requests logged yet.</p>
+              )}
+              {claimsForProject(project.id).map(claim => (
+                <div key={claim.id} className="rounded-xl border border-slate-100 p-4 flex items-center justify-between">
+                  <div>
+                    <p className="font-semibold text-slate-900">{claim.milestoneName || "Payment Tranche"}</p>
+                    <p className="text-xs text-slate-500">Amount: M {Number(claim.claimAmount || 0).toLocaleString()}</p>
+                  </div>
+                  <span className="badge bg-slate-100 text-slate-700">{claim.status}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        {projectTab === "documents" && (
+          <div className="space-y-4">
+            <div>
+              <h4 className="text-sm font-semibold text-slate-800">Documents</h4>
+              <p className="text-xs text-slate-500">Upload project files or download existing ones.</p>
+            </div>
+            <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-semibold text-slate-700">Upload Document</p>
+                <span className="text-[11px] text-slate-400">PDF, XLS, DOC, images</span>
+              </div>
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                <input
+                  className="input-field"
+                  placeholder="Document title (optional)"
+                  value={documentTitle}
+                  onChange={(e) => setDocumentTitle(e.target.value)}
+                />
+                <input
+                  className="input-field"
+                  type="file"
+                  onChange={(e) => setDocumentFile(e.target.files?.[0] || null)}
+                />
+              </div>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={handleUploadDocument}
+                  className="btn-primary text-xs"
+                  disabled={documentUploading}
+                >
+                  {documentUploading ? "Uploading..." : "Upload Document"}
+                </button>
+                {documentMessage && <span className="text-xs text-slate-500">{documentMessage}</span>}
+              </div>
+            </div>
+            <div className="space-y-3">
+              {contractForProject(project.id)?.signedFile && (
+                <a
+                  href={toFileUrl(contractForProject(project.id)?.signedFile)}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-emerald-700 underline"
+                >
+                  Signed Performance-Based Agreement
+                </a>
+              )}
+              {documentsForProject(project.id).length === 0 && !contractForProject(project.id)?.signedFile && (
+                <p className="text-sm text-slate-500">No documents uploaded yet.</p>
+              )}
+              {documentsForProject(project.id).map(doc => {
+                const label = doc.title || doc.file.split("/").pop() || "Project Document";
+                return (
+                  <div key={doc.id} className="rounded-xl border border-slate-100 p-4 flex items-center justify-between">
+                    <div>
+                      <p className="font-semibold text-slate-900">{label}</p>
+                      <p className="text-xs text-slate-500">
+                        Uploaded {doc.uploadedAt ? new Date(doc.uploadedAt).toLocaleString() : "N/A"}
+                        {doc.uploadedByUsername ? ` • ${doc.uploadedByUsername}` : ""}
+                      </p>
+                    </div>
+                    <a
+                      href={toFileUrl(doc.file) ?? "#"}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-emerald-700 underline text-xs"
+                    >
+                      View
+                    </a>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+        {projectTab === "updates" && (
+          <div className="space-y-4">
+            <div>
+              <h4 className="text-sm font-semibold text-slate-800">Updates</h4>
+              <p className="text-xs text-slate-500">Post progress updates or review recent notes.</p>
+            </div>
+            <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-semibold text-slate-700">Add Update</p>
+                <span className="text-[11px] text-slate-400">Visible to your project team</span>
+              </div>
+              <input
+                className="input-field"
+                placeholder="Update title (optional)"
+                value={updateDraft.title}
+                onChange={(e) => setUpdateDraft(prev => ({ ...prev, title: e.target.value }))}
+              />
+              <textarea
+                className="input-field min-h-[110px]"
+                placeholder="Share progress, risks, or milestones achieved..."
+                value={updateDraft.body}
+                onChange={(e) => setUpdateDraft(prev => ({ ...prev, body: e.target.value }))}
+              />
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={handleAddUpdate}
+                  className="btn-primary text-xs"
+                  disabled={updateSaving}
+                >
+                  {updateSaving ? "Posting..." : "Add Update"}
+                </button>
+                {updateMessage && <span className="text-xs text-slate-500">{updateMessage}</span>}
+              </div>
+            </div>
+            <div className="space-y-3">
+              {updatesForProject(project.id).length === 0 && (
+                <p className="text-sm text-slate-500">No recent updates yet.</p>
+              )}
+              {updatesForProject(project.id).map(update => (
+                <div key={update.id} className="rounded-xl border border-slate-100 p-4 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <p className="font-semibold text-slate-900">{update.title || "Project Update"}</p>
+                    <span className="text-xs text-slate-400">
+                      {update.createdAt ? new Date(update.createdAt).toLocaleString() : "N/A"}
+                    </span>
+                  </div>
+                  <p className="text-sm text-slate-600">{update.body}</p>
+                  {update.authorUsername && (
+                    <p className="text-xs text-slate-400">Posted by {update.authorUsername}</p>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="space-y-8">
+      <div className="rounded-[32px] border border-slate-200/80 bg-[radial-gradient(circle_at_top_left,#16a34a22,transparent_45%),radial-gradient(circle_at_top_right,#0ea5e922,transparent_40%),linear-gradient(125deg,#0f172a_0%,#0b1530_45%,#111827_100%)] text-white shadow-[0_35px_80px_-40px_rgba(15,23,42,0.95)]">
+        <div className="p-8 lg:p-10">
+          <div className="flex flex-col gap-8 lg:flex-row lg:items-start lg:justify-between">
+            <div className="max-w-2xl">
+              <div className="inline-flex items-center gap-2 rounded-full border border-emerald-400/30 bg-emerald-500/10 px-3 py-1 text-[11px] uppercase tracking-[0.35em] text-emerald-200/80">
+                Project Intelligence Hub
+              </div>
+              <h1 className="text-3xl font-semibold mt-4">Projects Hub</h1>
+              <p className="text-sm text-slate-200/90 mt-2">
+                A unified command center for implementation health, contract readiness, and disbursement momentum.
+              </p>
+              <div className="mt-5 flex flex-wrap gap-2 text-[11px] text-slate-200/80">
+                <span className="rounded-full border border-white/15 bg-white/10 px-3 py-1">Realtime Milestone Visibility</span>
+                <span className="rounded-full border border-white/15 bg-white/10 px-3 py-1">Claims & Payments Tracker</span>
+                <span className="rounded-full border border-white/15 bg-white/10 px-3 py-1">Project Documents Vault</span>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+              <div className="rounded-2xl border border-white/10 bg-white/10 px-4 py-3">
+                <p className="text-[10px] uppercase tracking-wider text-white/60 font-semibold">Total Projects</p>
+                <p className="text-xl font-semibold">{projects.length}</p>
+              </div>
+              <div className="rounded-2xl border border-white/10 bg-white/10 px-4 py-3">
+                <p className="text-[10px] uppercase tracking-wider text-white/60 font-semibold">Active</p>
+                <p className="text-xl font-semibold">{activeProjects.length}</p>
+              </div>
+              <div className="rounded-2xl border border-white/10 bg-white/10 px-4 py-3">
+                <p className="text-[10px] uppercase tracking-wider text-white/60 font-semibold">Completed</p>
+                <p className="text-xl font-semibold">{completedProjects.length}</p>
+              </div>
+              <div className="rounded-2xl border border-white/10 bg-white/10 px-4 py-3">
+                <p className="text-[10px] uppercase tracking-wider text-white/60 font-semibold">Contract Value</p>
+                <p className="text-xl font-semibold">M {totalContractValue.toLocaleString()}</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="p-6 border-b border-slate-100 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <h3 className="text-lg font-bold">Project Portfolio</h3>
+            <p className="text-sm text-slate-500">Curated overview with smart filters and at-a-glance health</p>
+          </div>
+          <div className="flex flex-wrap gap-3">
+            <div className="relative">
+              <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input
+                className="input-field pl-9"
+                placeholder="Search by ID, technology, region"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+            </div>
+            <select className="input-field" value={techFilter} onChange={(e) => setTechFilter(e.target.value)}>
+              {techOptions.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+            </select>
+            <select className="input-field" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+              <option value="All">All Status</option>
+              <option value="Active">Active</option>
+              <option value="Completed">Completed</option>
+              <option value="Pending">Pending</option>
+            </select>
+          </div>
+        </div>
+        <div className="p-6 space-y-4">
+          {loading && <p className="text-sm text-slate-500">Loading projects...</p>}
+          {!loading && filteredProjects.length === 0 && (
+            <div className="rounded-2xl border border-dashed border-slate-200 p-6 text-sm text-slate-500">
+              No projects found for the selected filters.
+            </div>
+          )}
+          {!loading && filteredProjects.map(project => (
+            <div key={project.id} className="rounded-3xl border border-slate-100 bg-white p-5 shadow-[0_24px_60px_-46px_rgba(15,23,42,0.55)] space-y-4 relative overflow-hidden">
+              <div className="absolute left-0 top-0 h-full w-1.5 bg-[linear-gradient(180deg,#22c55e_0%,#0ea5e9_60%,#1e293b_100%)]" />
+              <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                <div className="pl-2">
+                  <p className="text-base font-semibold text-slate-900">
+                    {project.projectTitle || project.tenderName || "Project Title Pending"}
+                  </p>
+                  <p className="text-xs text-slate-500 mt-1">
+                    {project.projectReference || `Project ${project.id}`}
+                  </p>
+                  <p className="text-xs text-slate-500 mt-1">{project.techType} • {project.region}</p>
+                  <div className="flex flex-wrap gap-2 mt-3 text-[11px]">
+                    <span className="badge bg-slate-100 text-slate-700">Progress {project.progress}%</span>
+                    {project.status && <span className="badge bg-emerald-50 text-emerald-700">{project.status}</span>}
+                    {project.contractStatus && <span className="badge bg-blue-50 text-blue-700">{project.contractStatus}</span>}
+                  </div>
+                </div>
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => {
+                      setSelectedProject(prev => (prev?.id === project.id ? null : project));
+                      setProjectTab("overview");
+                    }}
+                    className="btn-primary text-xs"
+                  >
+                    {selectedProject?.id === project.id ? "Close Project" : "Open Project"}
+                  </button>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3 text-[11px] text-slate-500 sm:grid-cols-6">
+                <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
+                  <p className="uppercase tracking-wider text-slate-400">Start</p>
+                  <p className="font-semibold text-slate-700">{formatDate(startDateForProject(project))}</p>
+                </div>
+                <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
+                  <p className="uppercase tracking-wider text-slate-400">End</p>
+                  <p className="font-semibold text-slate-700">{formatDate(endDateForProject(project))}</p>
+                </div>
+                <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
+                  <p className="uppercase tracking-wider text-slate-400">District</p>
+                  <p className="font-semibold text-slate-700">{project.district || project.region || "N/A"}</p>
+                </div>
+                <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
+                  <p className="uppercase tracking-wider text-slate-400">Budget</p>
+                  <p className="font-semibold text-slate-700">
+                    {budgetForProject(project) != null ? `M ${Number(budgetForProject(project)).toLocaleString()}` : "N/A"}
+                  </p>
+                </div>
+                <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
+                  <p className="uppercase tracking-wider text-slate-400">Tender</p>
+                  <p className="font-semibold text-slate-700">{project.tenderReferenceNumber || "N/A"}</p>
+                </div>
+                <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
+                  <p className="uppercase tracking-wider text-slate-400">Value</p>
+                  <p className="font-semibold text-slate-700">
+                    M {Number(project.milestoneTotalAmount ?? contractValueByProject.get(project.id) ?? 0).toLocaleString()}
+                  </p>
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-3 text-[11px] text-slate-500">
+                <span className="rounded-full bg-slate-100 px-3 py-1">
+                  Milestones: {project.milestoneCount ?? milestonesForProject(project.id).length}
+                </span>
+                <span className="rounded-full bg-slate-100 px-3 py-1">
+                  Overall Progress: {project.progress}%
+                </span>
+                <span className="rounded-full bg-slate-100 px-3 py-1">
+                  Claims: {claimsForProject(project.id).length}
+                </span>
+              </div>
+              <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
+                <div className="bg-gradient-to-r from-emerald-500 via-teal-400 to-sky-500 h-full" style={{ width: `${project.progress}%` }} />
+              </div>
+              {selectedProject?.id === project.id && (
+                <div className="pt-2">
+                  {renderProjectDetail(project)}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+
+    </div>
+  );
+};
+
 const TACView = () => {
   const [view, setView] = useState<"list" | "evaluate">("list");
-  const [selectedEval, setSelectedEval] = useState<any>(null);
-  const [evaluations, setEvaluations] = useState([
-    { id: 1, vendor: "SolarLease Ltd", tender: "RL-2025-SHS-01", score: 0, status: "Pending", criteria: { technical: 0, financial: 0, experience: 0 } },
-    { id: 2, vendor: "EcoGrid Solutions", tender: "RL-2025-MG-04", score: 88, status: "Scored", criteria: { technical: 90, financial: 85, experience: 90 } },
-    { id: 3, vendor: "Basotho Energy", tender: "RL-2025-SHS-01", score: 0, status: "Pending", criteria: { technical: 0, financial: 0, experience: 0 } },
-  ]);
+  const [selectedEval, setSelectedEval] = useState<{
+    bid: TenderBid;
+    evaluationId?: string;
+    comments: string;
+    criteria: {
+      technical: number;
+      financial: number;
+      feasibility: number;
+      kpi: number;
+      gender: number;
+      environmental: number;
+      om: number;
+      inclusivity: number;
+    };
+  } | null>(null);
+  const [bidQueue, setBidQueue] = useState<TenderBid[]>([]);
+  const [evaluations, setEvaluations] = useState<TenderBidEvaluation[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
   const [notification, setNotification] = useState<string | null>(null);
 
   const showNotification = (msg: string) => {
@@ -4862,23 +8675,98 @@ const TACView = () => {
     setTimeout(() => setNotification(null), 3000);
   };
 
-  const handleStartEvaluation = (item: any) => {
-    setSelectedEval({ ...item });
+  const loadEvaluations = React.useCallback(async () => {
+    setIsLoading(true);
+    try {
+      const [bids, evals] = await Promise.all([
+        fetchTenderBids(),
+        fetchBidEvaluations(),
+      ]);
+      setBidQueue(bids.filter(b => [BidStatus.SUBMITTED, BidStatus.UNDER_REVIEW].includes(b.status)));
+      setEvaluations(evals);
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    void loadEvaluations();
+  }, [loadEvaluations]);
+
+  const evaluationsByBid = useMemo(() => {
+    const map = new Map<string, TenderBidEvaluation>();
+    evaluations.forEach(ev => map.set(ev.bid, ev));
+    return map;
+  }, [evaluations]);
+
+  const handleStartEvaluation = (bid: TenderBid) => {
+    const existing = evaluationsByBid.get(bid.id);
+    setSelectedEval({
+      bid,
+      evaluationId: existing?.id,
+      comments: existing?.comments ?? "",
+      criteria: {
+        technical: existing?.technicalScore ?? 0,
+        financial: existing?.financialScore ?? 0,
+        feasibility: existing?.feasibilityScore ?? 0,
+        kpi: existing?.kpiScore ?? 0,
+        gender: existing?.genderScore ?? 0,
+        environmental: existing?.environmentalScore ?? 0,
+        om: existing?.omScore ?? 0,
+        inclusivity: existing?.inclusivityScore ?? 0,
+      },
+    });
     setView("evaluate");
   };
 
-  const handleSaveScore = () => {
-    const totalScore = Math.round((selectedEval.criteria.technical + selectedEval.criteria.financial + selectedEval.criteria.experience) / 3);
-    setEvaluations(prev => prev.map(ev => 
-      ev.id === selectedEval.id 
-        ? { ...selectedEval, score: totalScore, status: "Scored" } 
-        : ev
-    ));
-    setView("list");
-    showNotification(`Evaluation for ${selectedEval.vendor} saved successfully!`);
+  const handleSaveScore = async () => {
+    if (!selectedEval) return;
+    const payload = {
+      bid: selectedEval.bid.id,
+      technicalScore: selectedEval.criteria.technical,
+      financialScore: selectedEval.criteria.financial,
+      feasibilityScore: selectedEval.criteria.feasibility,
+      kpiScore: selectedEval.criteria.kpi,
+      genderScore: selectedEval.criteria.gender,
+      environmentalScore: selectedEval.criteria.environmental,
+      omScore: selectedEval.criteria.om,
+      inclusivityScore: selectedEval.criteria.inclusivity,
+      comments: selectedEval.comments,
+    };
+    try {
+      await reviewTenderBid(selectedEval.bid.id);
+    } catch {
+      // ignore review update errors
+    }
+    try {
+      const saved = selectedEval.evaluationId
+        ? await updateBidEvaluation(selectedEval.evaluationId, payload)
+        : await createBidEvaluation(payload);
+      setEvaluations(prev => {
+        const next = prev.filter(ev => ev.id !== saved.id);
+        next.push(saved);
+        return next;
+      });
+      setView("list");
+      showNotification(`Evaluation saved for ${selectedEval.bid.vendor_name}.`);
+    } catch (err: any) {
+      const raw = String(err?.message || "");
+      showNotification(toFriendlyApiMessage(raw) || "Failed to save evaluation.");
+    }
   };
 
   if (view === "evaluate" && selectedEval) {
+    const totalScore = Math.round((
+      selectedEval.criteria.technical +
+      selectedEval.criteria.financial +
+      selectedEval.criteria.feasibility +
+      selectedEval.criteria.kpi +
+      selectedEval.criteria.gender +
+      selectedEval.criteria.environmental +
+      selectedEval.criteria.om +
+      selectedEval.criteria.inclusivity
+    ) / 8);
+
     return (
       <div className="space-y-6 max-w-4xl mx-auto">
         <div className="flex items-center gap-4 mb-8">
@@ -4887,7 +8775,7 @@ const TACView = () => {
           </button>
           <div>
             <h1 className="text-2xl font-bold text-slate-900">Technical Evaluation</h1>
-            <p className="text-slate-500">{selectedEval.vendor} • {selectedEval.tender}</p>
+            <p className="text-slate-500">{selectedEval.bid.vendor_name} • {selectedEval.bid.tender}</p>
           </div>
         </div>
 
@@ -4926,14 +8814,79 @@ const TACView = () => {
 
                   <div className="space-y-2">
                     <div className="flex justify-between items-center">
-                      <label className="text-sm font-bold text-slate-700">Experience & Track Record (0-100)</label>
-                      <span className="text-sm font-bold text-emerald-600">{selectedEval.criteria.experience}</span>
+                      <label className="text-sm font-bold text-slate-700">Technical Feasibility (0-100)</label>
+                      <span className="text-sm font-bold text-emerald-600">{selectedEval.criteria.feasibility}</span>
                     </div>
                     <input 
                       type="range" min="0" max="100" 
-                      value={selectedEval.criteria.experience}
-                      onChange={(e) => setSelectedEval({...selectedEval, criteria: {...selectedEval.criteria, experience: parseInt(e.target.value)}})}
+                      value={selectedEval.criteria.feasibility}
+                      onChange={(e) => setSelectedEval({...selectedEval, criteria: {...selectedEval.criteria, feasibility: parseInt(e.target.value)}})}
                       className="w-full h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-emerald-600" 
+                    />
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="flex justify-between items-center">
+                      <label className="text-sm font-bold text-slate-700">Technology KPIs (0-100)</label>
+                      <span className="text-sm font-bold text-emerald-600">{selectedEval.criteria.kpi}</span>
+                    </div>
+                    <input
+                      type="range" min="0" max="100"
+                      value={selectedEval.criteria.kpi}
+                      onChange={(e) => setSelectedEval({...selectedEval, criteria: {...selectedEval.criteria, kpi: parseInt(e.target.value)}})}
+                      className="w-full h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-emerald-600"
+                    />
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="flex justify-between items-center">
+                      <label className="text-sm font-bold text-slate-700">Gender Action Plan (0-100)</label>
+                      <span className="text-sm font-bold text-emerald-600">{selectedEval.criteria.gender}</span>
+                    </div>
+                    <input
+                      type="range" min="0" max="100"
+                      value={selectedEval.criteria.gender}
+                      onChange={(e) => setSelectedEval({...selectedEval, criteria: {...selectedEval.criteria, gender: parseInt(e.target.value)}})}
+                      className="w-full h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-emerald-600"
+                    />
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="flex justify-between items-center">
+                      <label className="text-sm font-bold text-slate-700">Environmental Compliance (0-100)</label>
+                      <span className="text-sm font-bold text-emerald-600">{selectedEval.criteria.environmental}</span>
+                    </div>
+                    <input
+                      type="range" min="0" max="100"
+                      value={selectedEval.criteria.environmental}
+                      onChange={(e) => setSelectedEval({...selectedEval, criteria: {...selectedEval.criteria, environmental: parseInt(e.target.value)}})}
+                      className="w-full h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-emerald-600"
+                    />
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="flex justify-between items-center">
+                      <label className="text-sm font-bold text-slate-700">O&M Strategy (0-100)</label>
+                      <span className="text-sm font-bold text-emerald-600">{selectedEval.criteria.om}</span>
+                    </div>
+                    <input
+                      type="range" min="0" max="100"
+                      value={selectedEval.criteria.om}
+                      onChange={(e) => setSelectedEval({...selectedEval, criteria: {...selectedEval.criteria, om: parseInt(e.target.value)}})}
+                      className="w-full h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-emerald-600"
+                    />
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="flex justify-between items-center">
+                      <label className="text-sm font-bold text-slate-700">Inclusivity Targets (0-100)</label>
+                      <span className="text-sm font-bold text-emerald-600">{selectedEval.criteria.inclusivity}</span>
+                    </div>
+                    <input
+                      type="range" min="0" max="100"
+                      value={selectedEval.criteria.inclusivity}
+                      onChange={(e) => setSelectedEval({...selectedEval, criteria: {...selectedEval.criteria, inclusivity: parseInt(e.target.value)}})}
+                      className="w-full h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-emerald-600"
                     />
                   </div>
                 </div>
@@ -4945,7 +8898,9 @@ const TACView = () => {
                   rows={4} 
                   placeholder="Provide detailed reasoning for the assigned scores..." 
                   className="input-field"
-                ></textarea>
+                  value={selectedEval.comments}
+                  onChange={(e) => setSelectedEval({ ...selectedEval, comments: e.target.value })}
+                />
               </div>
 
               <div className="flex justify-end gap-3 pt-6 border-t border-slate-100">
@@ -4959,21 +8914,37 @@ const TACView = () => {
             <div className="card p-6">
               <h3 className="text-sm font-bold text-slate-400 uppercase mb-4">Proposal Documents</h3>
               <div className="space-y-3">
-                {['Technical_Proposal.pdf', 'Financial_Model.xlsx', 'Project_Timeline.pdf'].map(doc => (
-                  <button
-                    key={doc}
-                    onClick={() => {
-                      triggerDownload(doc.replace(/\s+/g, "_"), `${doc}\nTechnical document preview.`);
-                      showNotification(`Opened ${doc}.`);
-                    }}
-                    className="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-slate-50 border border-transparent hover:border-slate-100 transition-all text-left group"
-                  >
-                    <div className="p-2 rounded-lg bg-slate-100 text-slate-400 group-hover:bg-emerald-50 group-hover:text-emerald-600">
-                      <FileText size={18} />
-                    </div>
-                    <span className="text-xs font-medium text-slate-600 truncate">{doc}</span>
-                  </button>
-                ))}
+                {[
+                  { label: "Technical Proposal", url: selectedEval.bid.technical_proposal_file },
+                  { label: "Financial Proposal", url: selectedEval.bid.financial_proposal_file },
+                  { label: "BOQ", url: selectedEval.bid.boq_file },
+                  { label: "Gender Action Plan", url: selectedEval.bid.gender_action_plan_file },
+                  { label: "Implementation Plan", url: selectedEval.bid.implementation_plan_file },
+                ]
+                  .filter(doc => Boolean(doc.url))
+                  .map(doc => (
+                    <a
+                      key={doc.label}
+                      href={String(doc.url)}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-slate-50 border border-transparent hover:border-slate-100 transition-all text-left group"
+                    >
+                      <div className="p-2 rounded-lg bg-slate-100 text-slate-400 group-hover:bg-emerald-50 group-hover:text-emerald-600">
+                        <FileText size={18} />
+                      </div>
+                      <span className="text-xs font-medium text-slate-600 truncate">{doc.label}</span>
+                    </a>
+                  ))}
+                {[
+                  selectedEval.bid.technical_proposal_file,
+                  selectedEval.bid.financial_proposal_file,
+                  selectedEval.bid.boq_file,
+                  selectedEval.bid.gender_action_plan_file,
+                  selectedEval.bid.implementation_plan_file,
+                ].every(item => !item) && (
+                  <p className="text-xs text-slate-500">No documents uploaded for this bid.</p>
+                )}
               </div>
             </div>
 
@@ -4981,7 +8952,7 @@ const TACView = () => {
               <h3 className="text-sm font-bold text-slate-400 uppercase mb-4">Aggregate Score</h3>
               <div className="text-center py-4">
                 <p className="text-5xl font-bold text-emerald-400">
-                  {Math.round((selectedEval.criteria.technical + selectedEval.criteria.financial + selectedEval.criteria.experience) / 3)}
+                  {totalScore}
                 </p>
                 <p className="text-xs text-slate-400 mt-2 uppercase tracking-widest">Weighted Average</p>
               </div>
@@ -5019,37 +8990,45 @@ const TACView = () => {
         <div className="p-6 border-b border-slate-100 flex items-center justify-between">
           <h3 className="text-lg font-bold">Evaluation Queue</h3>
           <span className="badge bg-rose-100 text-rose-700">
-            {evaluations.filter(e => e.status === 'Pending').length} Pending Reviews
+            {bidQueue.filter(item => !evaluationsByBid.get(item.id)).length} Pending Reviews
           </span>
         </div>
         <div className="divide-y divide-slate-100">
-          {evaluations.map((item) => (
+          {isLoading && (
+            <div className="p-6 text-sm text-slate-500">Loading evaluations...</div>
+          )}
+          {!isLoading && bidQueue.map((item) => {
+            const existing = evaluationsByBid.get(item.id);
+            return (
             <div key={item.id} className="p-6 flex items-center justify-between hover:bg-slate-50 transition-colors">
               <div className="flex gap-4 items-center">
                 <div className="w-12 h-12 rounded-xl bg-slate-100 flex items-center justify-center text-slate-400">
                   <FileText size={24} />
                 </div>
                 <div>
-                  <p className="font-bold text-slate-900">{item.vendor}</p>
+                  <p className="font-bold text-slate-900">{item.vendor_name}</p>
                   <p className="text-xs text-slate-500">Tender: {item.tender}</p>
                 </div>
               </div>
               <div className="flex items-center gap-6">
-                {item.score > 0 && (
+                {existing && existing.totalScore > 0 && (
                   <div className="text-right">
                     <p className="text-xs font-bold text-slate-400 uppercase">Score</p>
-                    <p className="text-lg font-bold text-emerald-600">{item.score}/100</p>
+                    <p className="text-lg font-bold text-emerald-600">{existing.totalScore}/100</p>
                   </div>
                 )}
                 <button 
                   onClick={() => handleStartEvaluation(item)}
                   className="btn-primary py-1.5 px-4 text-sm"
                 >
-                  {item.status === 'Pending' ? 'Start Evaluation' : 'Edit Score'}
+                  {existing ? 'Edit Score' : 'Start Evaluation'}
                 </button>
               </div>
             </div>
-          ))}
+          )})}
+          {!isLoading && bidQueue.length === 0 && (
+            <div className="p-6 text-sm text-slate-500">No submitted bids awaiting evaluation.</div>
+          )}
         </div>
       </div>
     </div>
@@ -5410,25 +9389,98 @@ const AdminView = () => {
     { id: "USR-002", fullName: "M. Paiira", email: "m.paiira@rbf.ls", role: UserRole.RBF_OFFICIAL, status: "Active", region: "Maseru" },
     { id: "USR-003", fullName: "T. Molapo", email: "t.molapo@doe.ls", role: UserRole.DOE_OFFICER, status: "Active", region: "Leribe" },
   ]);
+  const [createError, setCreateError] = useState("");
+  const [createInfo, setCreateInfo] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const [newUser, setNewUser] = useState({
     fullName: "",
+    username: "",
     email: "",
     role: UserRole.RBF_OFFICIAL,
     region: "Maseru",
-    gender: "Male"
+    gender: "Male",
+    mobileNumber: "",
+    tierAssignment: "",
+    verificationZone: "",
   });
+  const districts = ["All", "Maseru", "Leribe", "Berea", "Mafeteng", "Mohale's Hoek", "Quthing", "Qacha's Nek", "Mokhotlong", "Thaba-Tseka", "Butha-Buthe"];
 
-  const handleCreateUser = (e: React.FormEvent) => {
+  const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
-    const user = {
-      ...newUser,
-      id: "USR-" + Math.floor(Math.random() * 1000).toString().padStart(3, '0'),
-      status: "Active"
-    };
-    setUsers([user, ...users]);
-    setView("dashboard");
-    // In real app, send email with temp password
+    setCreateError("");
+    setCreateInfo("");
+    if (!newUser.fullName.trim()) {
+      setCreateError("full_name: This field is required.");
+      return;
+    }
+    if (!newUser.username.trim()) {
+      setCreateError("username: This field is required.");
+      return;
+    }
+    if (!newUser.email.trim()) {
+      setCreateError("email: This field is required.");
+      return;
+    }
+    if (!newUser.mobileNumber.trim()) {
+      setCreateError("mobile_number: This field is required.");
+      return;
+    }
+    if (!/^\d{10,15}$/.test(newUser.mobileNumber.trim())) {
+      setCreateError("mobile_number: Must be 10-15 digits.");
+      return;
+    }
+    if (!newUser.region) {
+      setCreateError("region: This field is required.");
+      return;
+    }
+    if (!newUser.gender) {
+      setCreateError("gender: This field is required.");
+      return;
+    }
+    if (newUser.role === UserRole.FIELD_VERIFIER && !newUser.verificationZone.trim()) {
+      setCreateError("verification_zone: This field is required for Field Verifiers.");
+      return;
+    }
+    try {
+      setIsSubmitting(true);
+      const result = await createOfficialAccount({
+        username: newUser.username.trim(),
+        fullName: newUser.fullName.trim(),
+        email: newUser.email.trim(),
+        gender: newUser.gender as any,
+        role: newUser.role,
+        region: newUser.region,
+        mobileNumber: newUser.mobileNumber.trim(),
+        tierAssignment: newUser.tierAssignment.trim() || undefined,
+        verificationZone: newUser.verificationZone.trim() || undefined,
+      });
+      const user = result.user;
+      setUsers([
+        {
+          id: user.id,
+          fullName: user.fullName,
+          email: user.email,
+          role: user.role,
+          status: user.status,
+          region: user.region || "N/A",
+        },
+        ...users,
+      ]);
+      if (result.initialPassword) {
+        setCreateInfo(`Temporary password generated: ${result.initialPassword}`);
+      } else if (result.emailError) {
+        setCreateInfo(`Account created, but email delivery failed: ${result.emailError}`);
+      } else {
+        setCreateInfo("Account created and credentials sent to email.");
+      }
+      setView("dashboard");
+    } catch (err: any) {
+      const friendly = toFriendlyApiMessage(String(err?.message || ""));
+      setCreateError(friendly || "Unable to create account. Please verify the details.");
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   if (view === "create") {
@@ -5459,6 +9511,17 @@ const AdminView = () => {
                 />
               </div>
               <div className="space-y-1">
+                <label className="text-sm font-bold text-slate-700 ml-1">Username *</label>
+                <input 
+                  required
+                  type="text" 
+                  value={newUser.username}
+                  onChange={(e) => setNewUser({...newUser, username: e.target.value.replace(/\\s/g, "")})}
+                  className="input-field" 
+                  placeholder="official_username" 
+                />
+              </div>
+              <div className="space-y-1">
                 <label className="text-sm font-bold text-slate-700 ml-1">Email Address *</label>
                 <input 
                   required
@@ -5470,11 +9533,25 @@ const AdminView = () => {
                 />
               </div>
               <div className="space-y-1">
+                <label className="text-sm font-bold text-slate-700 ml-1">Mobile Number *</label>
+                <input 
+                  required
+                  type="tel" 
+                  value={newUser.mobileNumber}
+                  onChange={(e) => setNewUser({...newUser, mobileNumber: e.target.value.replace(/\\D/g, "")})}
+                  className="input-field" 
+                  inputMode="numeric"
+                  placeholder="Digits only"
+                  pattern="[0-9]{10,15}"
+                />
+              </div>
+              <div className="space-y-1">
                 <label className="text-sm font-bold text-slate-700 ml-1">System Role *</label>
                 <select 
                   value={newUser.role}
                   onChange={(e) => setNewUser({...newUser, role: e.target.value as UserRole})}
                   className="input-field"
+                  required
                 >
                   <option value={UserRole.RBF_OFFICIAL}>RBF Official</option>
                   <option value={UserRole.DOE_OFFICER}>DoE Officer</option>
@@ -5489,13 +9566,13 @@ const AdminView = () => {
                   value={newUser.region}
                   onChange={(e) => setNewUser({...newUser, region: e.target.value})}
                   className="input-field"
+                  required
                 >
-                  <option value="All">All Regions</option>
-                  <option value="Maseru">Maseru</option>
-                  <option value="Leribe">Leribe</option>
-                  <option value="Mafeteng">Mafeteng</option>
-                  <option value="Mokhotlong">Mokhotlong</option>
-                  <option value="Qacha's Nek">Qacha's Nek</option>
+                  {districts.map((district) => (
+                    <option key={district} value={district}>
+                      {district === "All" ? "All Regions" : district}
+                    </option>
+                  ))}
                 </select>
               </div>
               <div className="space-y-1">
@@ -5504,13 +9581,41 @@ const AdminView = () => {
                   value={newUser.gender}
                   onChange={(e) => setNewUser({...newUser, gender: e.target.value as any})}
                   className="input-field"
+                  required
                 >
                   <option value="Male">Male</option>
                   <option value="Female">Female</option>
                   <option value="Other">Other</option>
                 </select>
               </div>
+              <div className="space-y-1">
+                <label className="text-sm font-bold text-slate-700 ml-1">Tier Assignment (Optional)</label>
+                <input 
+                  type="text" 
+                  value={newUser.tierAssignment}
+                  onChange={(e) => setNewUser({...newUser, tierAssignment: e.target.value})}
+                  className="input-field" 
+                  placeholder="e.g., evaluator, verifier"
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-sm font-bold text-slate-700 ml-1">
+                  Verification Zone {newUser.role === UserRole.FIELD_VERIFIER ? "*" : "(Optional)"}
+                </label>
+                <input 
+                  required={newUser.role === UserRole.FIELD_VERIFIER}
+                  type="text" 
+                  value={newUser.verificationZone}
+                  onChange={(e) => setNewUser({...newUser, verificationZone: e.target.value})}
+                  className="input-field" 
+                  placeholder="Assigned zone"
+                />
+              </div>
             </div>
+
+            {createError && (
+              <p className="text-rose-600 text-xs font-medium">{createError}</p>
+            )}
 
             <div className="bg-blue-50 p-4 rounded-xl border border-blue-100 flex gap-3">
               <AlertCircle className="text-blue-600 shrink-0" size={20} />
@@ -5522,7 +9627,9 @@ const AdminView = () => {
 
             <div className="flex justify-end gap-3 pt-4 border-t border-slate-100">
               <button type="button" onClick={() => setView("dashboard")} className="btn-secondary">Cancel</button>
-              <button type="submit" className="btn-primary px-8">Create Account</button>
+              <button type="submit" disabled={isSubmitting} className="btn-primary px-8">
+                {isSubmitting ? "Creating..." : "Create Account"}
+              </button>
             </div>
           </form>
         </div>
@@ -5546,6 +9653,12 @@ const AdminView = () => {
           </button>
         </div>
       </div>
+
+      {createInfo && (
+        <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs font-medium text-emerald-700">
+          {createInfo}
+        </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         <div className="card p-6">
@@ -5594,6 +9707,7 @@ const AdminView = () => {
           <table className="w-full text-left border-collapse">
             <thead>
               <tr className="bg-slate-50 border-b border-slate-100">
+                <th className="p-4 text-xs font-bold text-slate-500 uppercase">ID</th>
                 <th className="p-4 text-xs font-bold text-slate-500 uppercase">User</th>
                 <th className="p-4 text-xs font-bold text-slate-500 uppercase">Role</th>
                 <th className="p-4 text-xs font-bold text-slate-500 uppercase">Region</th>
@@ -5604,6 +9718,7 @@ const AdminView = () => {
             <tbody className="divide-y divide-slate-100">
               {users.map((user) => (
                 <tr key={user.id} className="hover:bg-slate-50 transition-colors">
+                  <td className="p-4 font-mono text-xs text-slate-500">{user.id}</td>
                   <td className="p-4">
                     <div className="flex items-center gap-3">
                       <div className="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-slate-500 text-xs font-bold">
@@ -6546,16 +10661,39 @@ export default function App() {
   const [authView, setAuthView] = useState<"login" | "register">("login");
   const [activeTab, setActiveTab] = useState("dashboard");
   const [tenderView, setTenderView] = useState<"list" | "create" | "details">("list");
+  const [pendingTenderId, setPendingTenderId] = useState<string | null>(null);
+  const [pendingBidTenderId, setPendingBidTenderId] = useState<string | null>(null);
+  const [pendingBidId, setPendingBidId] = useState<string | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [showNotifications, setShowNotifications] = useState(false);
   const [notifications, setNotifications] = useState<Notification[]>(MOCK_NOTIFICATIONS);
   const [authMessage, setAuthMessage] = useState<string | null>(null);
 
-  React.useEffect(() => {
-    fetchNotifications()
-      .then(setNotifications)
-      .catch(() => setNotifications(MOCK_NOTIFICATIONS));
+  const loadNotifications = React.useCallback(async () => {
+    try {
+      const data = await fetchNotifications();
+      setNotifications(data);
+    } catch {
+      setNotifications((prev) => (prev.length ? prev : MOCK_NOTIFICATIONS));
+    }
   }, []);
+
+  React.useEffect(() => {
+    void loadNotifications();
+  }, [loadNotifications]);
+
+  React.useEffect(() => {
+    const id = setInterval(() => {
+      void loadNotifications();
+    }, 20000);
+    return () => clearInterval(id);
+  }, [loadNotifications]);
+
+  React.useEffect(() => {
+    const handler = () => void loadNotifications();
+    window.addEventListener("rbf-notifications-refresh", handler);
+    return () => window.removeEventListener("rbf-notifications-refresh", handler);
+  }, [loadNotifications]);
 
   React.useEffect(() => {
     const cachedUser = getStoredUser();
@@ -6585,16 +10723,97 @@ export default function App() {
     setAuthView("login");
     setShowNotifications(false);
     setActiveTab("dashboard");
+    setPendingBidTenderId(null);
+    setPendingBidId(null);
+    setPendingTenderId(null);
   };
 
   const handleRegisterSuccess = (username: string) => {
     setAuthView("login");
-    setAuthMessage(`Registration submitted for "${username}". Your account is pending approval.`);
+    setAuthMessage(`Account created for "${username}". Log in now; complete pre-qualification before submitting applications.`);
   };
 
   const handleNewTender = () => {
     setTenderView("create");
     setActiveTab("tenders");
+  };
+
+  const resolveNotificationTarget = (note: Notification) => {
+    const event = (note.event || "").toLowerCase();
+    const linkedId = (note.linkedEntityId || "").trim();
+    const linkedUpper = linkedId.toUpperCase();
+    const isTender = linkedUpper.startsWith("T-") || event.includes("tender") || event.includes("bid");
+    const isProject = linkedUpper.startsWith("P-") || event.includes("project") || event.includes("milestone") || event.includes("verification");
+    const isReport = event.includes("briefing") || event.includes("summary") || event.includes("report");
+    const isPrequal = event.includes("pre-qualification") || event.includes("prequalification");
+    const isBidId = linkedUpper.startsWith("BID-") || linkedUpper.startsWith("B-");
+
+    if (role === UserRole.VENDOR) {
+      if (isTender && linkedId && !isBidId) {
+        return { tab: "dashboard", pendingBidTenderId: linkedId };
+      }
+      if (isBidId) {
+        return { tab: "my_bids" };
+      }
+      if (isProject) {
+        return { tab: "projects" };
+      }
+      return { tab: "dashboard" };
+    }
+
+    if (role === UserRole.FIELD_VERIFIER) {
+      if (event.includes("survey") || event.includes("verification")) return { tab: "inspections" };
+      if (event.includes("gis") || event.includes("map")) return { tab: "gis" };
+      return { tab: "dashboard" };
+    }
+
+    if (role === UserRole.ADMIN || role === UserRole.RBF_OFFICIAL) {
+      if (isTender && linkedId) return { tab: "tenders", tenderId: linkedId };
+      if (isPrequal) return { tab: "prequal" };
+      if (isProject) return { tab: "monitoring" };
+      if (isReport) return { tab: "reports" };
+      return { tab: "dashboard" };
+    }
+
+    if (role === UserRole.DOE_OFFICER) {
+      if (isProject) return { tab: "regional" };
+      if (isReport) return { tab: "kpis" };
+      return { tab: "dashboard" };
+    }
+
+    if (role === UserRole.UNDP_DONOR) {
+      if (isReport) return { tab: "reports" };
+      if (isProject) return { tab: "impact" };
+      return { tab: "dashboard" };
+    }
+
+    if (role === UserRole.AUDITOR) {
+      if (isProject) return { tab: "verification" };
+      if (isReport) return { tab: "audit_trail" };
+      return { tab: "dashboard" };
+    }
+
+    return { tab: "dashboard" };
+  };
+
+  const handleNotificationSelect = (note: Notification) => {
+    const target = resolveNotificationTarget(note);
+    const allowedTabs = new Set(getSidebarItems().map(item => item.id));
+    const nextTab = allowedTabs.has(target.tab) ? target.tab : (allowedTabs.has("notifications") ? "notifications" : "dashboard");
+
+    setShowNotifications(false);
+    setActiveTab(nextTab);
+
+    if (target.tenderId) {
+      setTenderView("details");
+      setPendingTenderId(target.tenderId);
+    }
+
+    if (target.pendingBidTenderId) {
+      setPendingBidTenderId(target.pendingBidTenderId);
+      setPendingBidId(null);
+    }
+
   };
 
   if (showPublicPortal) {
@@ -6617,21 +10836,71 @@ export default function App() {
     );
   }
 
+  if (currentUser.mustChangePassword) {
+    return (
+      <ForcePasswordReset
+        user={currentUser}
+        onComplete={(updated) => setCurrentUser(updated)}
+        onLogout={handleLogout}
+      />
+    );
+  }
+
   const renderContent = () => {
     // Shared tabs across roles (if they have them in sidebar)
     if (activeTab === "monitoring") return <Monitoring />;
     if (activeTab === "gis") return <GISMap />;
     if (activeTab === "reports") return <Reports />;
-    if (activeTab === "notifications") return <NotificationLogs logs={notifications} />;
+    if (activeTab === "notifications") return <NotificationLogs logs={notifications} onSelect={handleNotificationSelect} />;
 
     // Role-based content filtering
     if (role === UserRole.VENDOR) {
       switch (activeTab) {
-        case "dashboard": return <VendorDashboard onGoToPrequal={() => setActiveTab("prequal")} />;
+        case "dashboard": return (
+          <VendorDashboard
+            onGoToPrequal={() => setActiveTab("prequal")}
+            pendingBidTenderId={pendingBidTenderId}
+            pendingBidId={pendingBidId}
+            onBidOpened={() => {
+              setPendingBidTenderId(null);
+              setPendingBidId(null);
+            }}
+          />
+        );
+        case "contracting": return (
+          <VendorDashboard
+            initialSection="contracting"
+            showOnlyContracting
+            onGoToPrequal={() => setActiveTab("prequal")}
+            pendingBidTenderId={pendingBidTenderId}
+            pendingBidId={pendingBidId}
+            onBidOpened={() => {
+              setPendingBidTenderId(null);
+              setPendingBidId(null);
+            }}
+          />
+        );
         case "prequal": return <PreQualificationSubmission />;
-        case "tenders": return <Tenders initialView="list" />;
+        case "tenders": return (
+          <VendorTenders
+            onSubmitTender={(tenderId) => {
+              setPendingBidTenderId(tenderId);
+              setPendingBidId(null);
+              setActiveTab("dashboard");
+            }}
+          />
+        );
         case "applications": return <PreQualificationSubmission />;
-        case "projects": return <Monitoring />;
+        case "my_bids": return (
+          <VendorBids
+            onOpenBid={(bid) => {
+              setPendingBidTenderId(bid.tender);
+              setPendingBidId(bid.id);
+              setActiveTab("dashboard");
+            }}
+          />
+        );
+        case "projects_hub": return <VendorProjectsHub />;
         case "claims": return <Disbursements />;
         default: return <VendorDashboard />;
       }
@@ -6659,6 +10928,14 @@ export default function App() {
     if (role === UserRole.ADMIN) {
       switch (activeTab) {
         case "dashboard":
+        case "tenders":
+          return (
+            <Tenders
+              initialView={tenderView}
+              initialTenderId={pendingTenderId}
+              onTenderOpened={() => setPendingTenderId(null)}
+            />
+          );
         case "users":
         case "roles":
         case "logs":
@@ -6703,7 +10980,13 @@ export default function App() {
     // Default RBF Official view
     switch (activeTab) {
       case "dashboard": return <Dashboard role={role} onNewTender={handleNewTender} />;
-      case "tenders": return <Tenders initialView={tenderView} />;
+      case "tenders": return (
+        <Tenders
+          initialView={tenderView}
+          initialTenderId={pendingTenderId}
+          onTenderOpened={() => setPendingTenderId(null)}
+        />
+      );
       case "prequal": return <PreQualification />;
       case "payments": return <Disbursements />;
       default: return <Dashboard role={role} onNewTender={handleNewTender} />;
@@ -6719,9 +11002,11 @@ export default function App() {
       return [
         ...common,
         { id: "prequal", icon: ClipboardCheck, label: "Pre-Qualification", badge: "Required" },
-        { id: "tenders", icon: FileText, label: "Active Tenders" },
+        { id: "tenders", icon: FileText, label: "Published Tenders" },
+        { id: "my_bids", icon: FileSearch, label: "My Bids" },
+        { id: "contracting", icon: FileText, label: "Contracting" },
         { id: "applications", icon: ClipboardCheck, label: "My Applications" },
-        { id: "projects", icon: Activity, label: "My Projects" },
+        { id: "projects_hub", icon: BarChart3, label: "Projects Hub" },
         { id: "claims", icon: CreditCard, label: "Payment Claims" },
       ];
     }
@@ -6747,6 +11032,7 @@ export default function App() {
     if (role === UserRole.ADMIN) {
       return [
         ...common,
+        { id: "tenders", icon: FileText, label: "Tender Management" },
         { id: "users", icon: Users, label: "User Management" },
         { id: "roles", icon: Settings, label: "Role Config" },
         { id: "notifications", icon: Bell, label: "Notification Logs" },
@@ -6800,21 +11086,21 @@ export default function App() {
       <motion.aside 
         initial={false}
         animate={{ width: isSidebarOpen ? 280 : 0, opacity: isSidebarOpen ? 1 : 0 }}
-        className="bg-white border-r border-slate-200 flex flex-col z-50"
+        className="bg-[#0b1530] border-r border-[#17305a] flex flex-col z-50"
       >
         <div className="p-6 flex items-center gap-3">
           <div className="w-10 h-10 rounded-xl bg-emerald-600 flex items-center justify-center text-white font-bold text-xl">
             R
           </div>
           <div className="overflow-hidden whitespace-nowrap">
-            <h2 className="font-bold text-slate-900 leading-tight">Renewable Lesotho</h2>
-            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">RBF Platform</p>
+            <h2 className="font-bold text-slate-100 leading-tight">Renewable Lesotho</h2>
+            <p className="text-[10px] font-bold text-blue-200 uppercase tracking-widest">RBF Platform</p>
           </div>
         </div>
 
         <nav className="flex-1 px-4 space-y-1 overflow-y-auto">
           <div className="py-4">
-            <p className="px-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Menu</p>
+            <p className="px-4 text-[10px] font-bold text-blue-200/80 uppercase tracking-widest mb-2">Menu</p>
             {getSidebarItems().map(item => (
               <SidebarItem 
                 key={item.id}
@@ -6831,18 +11117,18 @@ export default function App() {
           </div>
         </nav>
 
-        <div className="p-4 border-t border-slate-100">
-          <div className="bg-slate-50 rounded-xl p-4 flex items-center gap-3">
-            <div className="w-10 h-10 rounded-full bg-slate-200 flex items-center justify-center text-slate-500">
+        <div className="p-4 border-t border-[#17305a]">
+          <div className="bg-[#17284c] rounded-xl p-4 flex items-center gap-3 ring-1 ring-[#243b66]">
+            <div className="w-10 h-10 rounded-full bg-[#243b66] flex items-center justify-center text-blue-100">
               <UserCircle size={24} />
             </div>
             <div className="flex-1 overflow-hidden">
-              <p className="text-sm font-bold text-slate-900 truncate">{currentUser.fullName}</p>
-              <p className="text-xs text-slate-500 truncate">{role}</p>
+              <p className="text-sm font-bold text-blue-50 truncate">{currentUser.fullName}</p>
+              <p className="text-xs text-blue-200 truncate">{role}</p>
             </div>
             <button 
               onClick={handleLogout}
-              className="text-slate-400 hover:text-rose-600 transition-colors"
+              className="text-blue-200 hover:text-rose-300 transition-colors"
             >
               <LogOut size={18} />
             </button>
@@ -6890,6 +11176,7 @@ export default function App() {
                       setShowNotifications(false);
                       setActiveTab("notifications");
                     }}
+                    onSelect={handleNotificationSelect}
                   />
                 )}
               </AnimatePresence>
@@ -6922,5 +11209,3 @@ export default function App() {
     </div>
   );
 }
-
-

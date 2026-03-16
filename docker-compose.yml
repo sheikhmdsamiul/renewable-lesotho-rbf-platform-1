@@ -7,7 +7,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-rbf_user}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rbf_pass}
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -20,7 +20,7 @@ services:
     image: redis:7-alpine
     container_name: rbf_redis
     ports:
-      - "6379:6379"
+      - "6380:6379"
 
   web:
     build:
@@ -30,11 +30,13 @@ services:
     command: sh -c "python manage.py migrate --noinput && python manage.py seed_demo_users && python manage.py collectstatic --noinput && gunicorn core.wsgi:application --bind 0.0.0.0:8000 --workers ${GUNICORN_WORKERS:-3} --timeout ${GUNICORN_TIMEOUT:-60}"
     volumes:
       - ./backend:/app
+    env_file:
+      - ./backend/.env
     environment:
       DJANGO_SETTINGS_MODULE: core.settings
       DJANGO_DEBUG: ${DJANGO_DEBUG:-1}
       SECRET_KEY: ${SECRET_KEY:-dev-secret-key-dev-secret-key-dev-secret-key}
-      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-localhost,127.0.0.1}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-localhost,127.0.0.1,192.168.68.140}
       API_REQUIRE_AUTH: ${API_REQUIRE_AUTH:-0}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       DATABASE_URL: postgresql://${POSTGRES_USER:-rbf_user}:${POSTGRES_PASSWORD:-rbf_pass}@db:5432/${POSTGRES_DB:-rbf}
@@ -44,8 +46,8 @@ services:
       API_THROTTLE_ANON: ${API_THROTTLE_ANON:-120/hour}
       API_THROTTLE_USER: ${API_THROTTLE_USER:-600/hour}
       CORS_ALLOW_ALL_ORIGINS: ${CORS_ALLOW_ALL_ORIGINS:-1}
-      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3000}
-      CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:-http://localhost:3000}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3000,http://192.168.68.140:5174}
+      CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:-http://localhost:3000,http://192.168.68.140:5174}
       SECURE_SSL_REDIRECT: ${SECURE_SSL_REDIRECT:-0}
       SECURE_HSTS_SECONDS: ${SECURE_HSTS_SECONDS:-31536000}
       SECURE_HSTS_INCLUDE_SUBDOMAINS: ${SECURE_HSTS_INCLUDE_SUBDOMAINS:-1}
