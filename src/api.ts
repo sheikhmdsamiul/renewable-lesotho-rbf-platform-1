@@ -21,6 +21,8 @@ import {
   TenderBidEvaluation,
   TenderContract,
   TenderAwardRankingRow,
+  VendorBlacklistCase,
+  BlacklistAppeal,
 } from "./types";
 
 const env = (import.meta as any)?.env ?? {};
@@ -263,6 +265,7 @@ function mapUserFromApi(api: any): User {
     status: api.status ?? "Active",
     mustChangePassword: api.must_change_password ?? false,
     vendorTag: api.vendor_tag ?? undefined,
+    blacklistSummary: api.blacklist_summary ?? undefined,
   };
 }
 
@@ -522,6 +525,53 @@ function mapNotificationFromApi(api: any): Notification {
     status: api.status ?? "Sent",
     timestamp: api.timestamp ?? new Date().toISOString(),
     linkedEntityId: api.linked_entity_id ?? undefined,
+  };
+}
+
+function mapVendorBlacklistCaseFromApi(api: any): VendorBlacklistCase {
+  return {
+    id: String(api.id ?? ""),
+    vendor: String(api.vendor ?? ""),
+    vendorUsername: api.vendor_username ?? undefined,
+    reason: api.reason ?? "",
+    description: api.description ?? undefined,
+    justificationDocument: normalizeFileUrl(api.justification_document ?? undefined),
+    status: api.status ?? "",
+    initiatedBy: api.initiated_by != null ? String(api.initiated_by) : undefined,
+    initiatedByUsername: api.initiated_by_username ?? undefined,
+    initiatedAt: api.initiated_at ?? undefined,
+    noticeSentAt: api.notice_sent_at ?? undefined,
+    coolingOffUntil: api.cooling_off_until ?? undefined,
+    reviewedBy: api.reviewed_by != null ? String(api.reviewed_by) : undefined,
+    reviewedByUsername: api.reviewed_by_username ?? undefined,
+    reviewedAt: api.reviewed_at ?? undefined,
+    reviewNotes: api.review_notes ?? undefined,
+    confirmedBy: api.confirmed_by != null ? String(api.confirmed_by) : undefined,
+    confirmedByUsername: api.confirmed_by_username ?? undefined,
+    confirmedAt: api.confirmed_at ?? undefined,
+    finalDecisionNotes: api.final_decision_notes ?? undefined,
+    isPermanent: Boolean(api.is_permanent),
+    expiryDate: api.expiry_date ?? undefined,
+    reinstatedAt: api.reinstated_at ?? undefined,
+    reinstatedBy: api.reinstated_by != null ? String(api.reinstated_by) : undefined,
+    reinstatedByUsername: api.reinstated_by_username ?? undefined,
+  };
+}
+
+function mapBlacklistAppealFromApi(api: any): BlacklistAppeal {
+  return {
+    id: String(api.id ?? ""),
+    case: String(api.case ?? ""),
+    vendor: String(api.vendor ?? ""),
+    vendorUsername: api.vendor_username ?? undefined,
+    rebuttalText: api.rebuttal_text ?? undefined,
+    rebuttalDocument: normalizeFileUrl(api.rebuttal_document ?? undefined),
+    status: api.status ?? "",
+    submittedAt: api.submitted_at ?? undefined,
+    reviewedBy: api.reviewed_by != null ? String(api.reviewed_by) : undefined,
+    reviewedByUsername: api.reviewed_by_username ?? undefined,
+    reviewedAt: api.reviewed_at ?? undefined,
+    resolutionNotes: api.resolution_notes ?? undefined,
   };
 }
 
@@ -1366,6 +1416,101 @@ export async function fetchNotifications(): Promise<Notification[]> {
 export async function fetchVendorPrequalifications(): Promise<VendorPrequalification[]> {
   const data = await http<any>(`/api/users/prequalifications/`);
   return unwrapListResponse<any>(data).map(mapVendorPrequalificationFromApi);
+}
+
+export async function fetchBlacklistCases(): Promise<VendorBlacklistCase[]> {
+  const data = await http<any>(`/api/users/blacklisting-cases/`);
+  return unwrapListResponse<any>(data).map(mapVendorBlacklistCaseFromApi);
+}
+
+export async function fetchBlacklistAppeals(): Promise<BlacklistAppeal[]> {
+  const data = await http<any>(`/api/users/blacklisting-appeals/`);
+  return unwrapListResponse<any>(data).map(mapBlacklistAppealFromApi);
+}
+
+export async function initiateVendorBlacklisting(payload: {
+  vendorId: string;
+  reason: string;
+  description?: string;
+  coolingOffDays?: number;
+  expiryDate?: string;
+  isPermanent?: boolean;
+  justificationDocument?: File | null;
+}): Promise<VendorBlacklistCase> {
+  const form = new FormData();
+  form.append("reason", payload.reason);
+  form.append("description", payload.description ?? "");
+  form.append("cooling_off_days", String(payload.coolingOffDays ?? 14));
+  form.append("is_permanent", String(Boolean(payload.isPermanent)));
+  if (payload.expiryDate) form.append("expiry_date", payload.expiryDate);
+  if (payload.justificationDocument instanceof File) {
+    form.append("justification_document", payload.justificationDocument);
+  }
+  const data = await http<any>(`/api/users/${payload.vendorId}/initiate_blacklisting/`, {
+    method: "POST",
+    body: form,
+  });
+  return mapVendorBlacklistCaseFromApi(data);
+}
+
+async function postBlacklistCaseAction(
+  caseId: string,
+  action: "review" | "confirm" | "reject" | "reinstate" | "appeal",
+  payload?: Record<string, any> | FormData
+): Promise<VendorBlacklistCase | BlacklistAppeal> {
+  const data = await http<any>(`/api/users/blacklisting-cases/${caseId}/${action}/`, {
+    method: "POST",
+    body: payload instanceof FormData ? payload : JSON.stringify(payload ?? {}),
+  });
+  return action === "appeal" ? mapBlacklistAppealFromApi(data) : mapVendorBlacklistCaseFromApi(data);
+}
+
+export async function reviewBlacklistCase(caseId: string, reviewNotes?: string): Promise<VendorBlacklistCase> {
+  return postBlacklistCaseAction(caseId, "review", { review_notes: reviewNotes ?? "" }) as Promise<VendorBlacklistCase>;
+}
+
+export async function confirmBlacklistCase(caseId: string, payload?: {
+  finalDecisionNotes?: string;
+  expiryDate?: string;
+  isPermanent?: boolean;
+}): Promise<VendorBlacklistCase> {
+  return postBlacklistCaseAction(caseId, "confirm", {
+    final_decision_notes: payload?.finalDecisionNotes ?? "",
+    expiry_date: payload?.expiryDate ?? "",
+    is_permanent: payload?.isPermanent ?? false,
+  }) as Promise<VendorBlacklistCase>;
+}
+
+export async function rejectBlacklistCase(caseId: string, finalDecisionNotes?: string): Promise<VendorBlacklistCase> {
+  return postBlacklistCaseAction(caseId, "reject", {
+    final_decision_notes: finalDecisionNotes ?? "",
+  }) as Promise<VendorBlacklistCase>;
+}
+
+export async function reinstateBlacklistCase(caseId: string): Promise<VendorBlacklistCase> {
+  return postBlacklistCaseAction(caseId, "reinstate", {}) as Promise<VendorBlacklistCase>;
+}
+
+export async function submitBlacklistAppeal(caseId: string, payload: {
+  rebuttalText?: string;
+  rebuttalDocument?: File | null;
+}): Promise<BlacklistAppeal> {
+  const form = new FormData();
+  form.append("rebuttal_text", payload.rebuttalText ?? "");
+  if (payload.rebuttalDocument instanceof File) {
+    form.append("rebuttal_document", payload.rebuttalDocument);
+  }
+  return postBlacklistCaseAction(caseId, "appeal", form) as Promise<BlacklistAppeal>;
+}
+
+export async function reviewBlacklistAppeal(appealId: string, resolutionNotes?: string): Promise<BlacklistAppeal> {
+  const data = await http<any>(`/api/users/blacklisting-appeals/${appealId}/review/`, {
+    method: "POST",
+    body: JSON.stringify({
+      resolution_notes: resolutionNotes ?? "",
+    }),
+  });
+  return mapBlacklistAppealFromApi(data);
 }
 
 export async function submitVendorPrequalification(

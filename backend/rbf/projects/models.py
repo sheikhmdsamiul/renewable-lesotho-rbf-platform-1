@@ -9,6 +9,7 @@ class ProjectStatus(models.TextChoices):
     INSTALLATION = 'Installation'
     VERIFICATION = 'Field Verification'
     DISBURSEMENT = 'Disbursement'
+    HALTED = 'Halted'
     COMPLETED = 'Completed'
 
 
@@ -116,6 +117,7 @@ class PaymentClaimStatus(models.TextChoices):
     PENDING = 'Pending'
     VERIFIED = 'Verified'
     APPROVED = 'Approved'
+    HELD_AUDIT = 'Held/Audit'
     PAID = 'Paid'
     REJECTED = 'Rejected'
 
@@ -161,6 +163,7 @@ class PaymentClaim(models.Model):
 
 class DisbursementStatus(models.TextChoices):
     INITIATED = 'Initiated'
+    HELD_AUDIT = 'Held/Audit'
     COMPLETED = 'Completed'
     FAILED = 'Failed'
 

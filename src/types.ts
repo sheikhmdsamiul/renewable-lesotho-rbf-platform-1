@@ -39,7 +39,64 @@ export enum ProjectStatus {
   INSTALLATION = "Installation",
   VERIFICATION = "Field Verification",
   DISBURSEMENT = "Disbursement",
+  HALTED = "Halted",
   COMPLETED = "Completed",
+}
+
+export type UserStatus = "Active" | "Pending" | "Inactive" | "Registered" | "Suspended" | "Blacklisted";
+
+export interface BlacklistSummary {
+  case_id: string;
+  status: string;
+  reason: string;
+  expiry_date?: string | null;
+  cooling_off_until?: string | null;
+  is_permanent?: boolean;
+  banner: string;
+  appeal_allowed?: boolean;
+}
+
+export interface VendorBlacklistCase {
+  id: string;
+  vendor: string;
+  vendorUsername?: string;
+  reason: string;
+  description?: string;
+  justificationDocument?: string;
+  status: string;
+  initiatedBy?: string;
+  initiatedByUsername?: string;
+  initiatedAt?: string;
+  noticeSentAt?: string;
+  coolingOffUntil?: string | null;
+  reviewedBy?: string;
+  reviewedByUsername?: string;
+  reviewedAt?: string;
+  reviewNotes?: string;
+  confirmedBy?: string;
+  confirmedByUsername?: string;
+  confirmedAt?: string;
+  finalDecisionNotes?: string;
+  isPermanent?: boolean;
+  expiryDate?: string | null;
+  reinstatedAt?: string | null;
+  reinstatedBy?: string;
+  reinstatedByUsername?: string;
+}
+
+export interface BlacklistAppeal {
+  id: string;
+  case: string;
+  vendor: string;
+  vendorUsername?: string;
+  rebuttalText?: string;
+  rebuttalDocument?: string;
+  status: string;
+  submittedAt?: string;
+  reviewedBy?: string;
+  reviewedByUsername?: string;
+  reviewedAt?: string;
+  resolutionNotes?: string;
 }
 
 export interface Tender {
@@ -190,9 +247,10 @@ export interface User {
   deviceId?: string;
   tierAssignment?: string;
   verificationZone?: string;
-  status: "Active" | "Pending" | "Inactive";
+  status: UserStatus;
   mustChangePassword?: boolean;
   vendorTag?: string | null;
+  blacklistSummary?: BlacklistSummary | null;
 }
 
 export interface TenderBidEvaluation {

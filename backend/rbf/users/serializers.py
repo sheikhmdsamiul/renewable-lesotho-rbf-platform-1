@@ -1,15 +1,30 @@
 import re
 
 from django.contrib.auth.password_validation import validate_password
+from django.db.models import Q
 from rest_framework import serializers
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from .models import User, UserRole, VendorPrequalification, PrequalificationStatus
+from .blacklisting import get_active_blacklist_case, normalize_identifier
+from .models import (
+    BlacklistedIdentifier,
+    BlacklistAppeal,
+    BlacklistAppealStatus,
+    BlacklistCaseStatus,
+    BlacklistReason,
+    User,
+    UserRole,
+    UserStatus,
+    VendorBlacklistCase,
+    VendorPrequalification,
+    PrequalificationStatus,
+)
 
 
 class UserSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, required=False, min_length=8)
     vendor_tag = serializers.SerializerMethodField(read_only=True)
+    blacklist_summary = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = User
@@ -19,7 +34,7 @@ class UserSerializer(serializers.ModelSerializer):
             'organization_name', 'organization_type', 'technology_types',
             'registration_certificate_name', 'tax_id', 'device_id',
             'tier_assignment', 'verification_zone',
-            'status', 'must_change_password', 'password', 'vendor_tag'
+            'status', 'must_change_password', 'password', 'vendor_tag', 'blacklist_summary'
         ]
         read_only_fields = ['id']
 
@@ -89,6 +104,21 @@ class UserSerializer(serializers.ModelSerializer):
                 missing['tax_id'] = 'Tax ID is required for vendors.'
             if missing:
                 raise serializers.ValidationError(missing)
+            normalized_org = normalize_identifier(org_name)
+            normalized_tax = normalize_identifier(tax_id)
+            identifier_filter = Q()
+            if normalized_org:
+                identifier_filter |= Q(normalized_organization_name=normalized_org)
+            if normalized_tax:
+                identifier_filter |= Q(normalized_tax_id=normalized_tax)
+            identifier_qs = BlacklistedIdentifier.objects.filter(active=True).filter(identifier_filter) if identifier_filter else BlacklistedIdentifier.objects.none()
+            if self.instance is not None:
+                identifier_qs = identifier_qs.exclude(vendor=self.instance)
+            if identifier_qs.exists():
+                raise serializers.ValidationError({
+                    'organization_name': 'This vendor identity is blacklisted and cannot be re-registered.',
+                    'tax_id': 'This vendor identity is blacklisted and cannot be re-registered.',
+                })
         else:
             verification_zone = attrs.get('verification_zone') or getattr(self.instance, 'verification_zone', None)
             if role == UserRole.FIELD_VERIFIER and not verification_zone:
@@ -146,6 +176,31 @@ class UserSerializer(serializers.ModelSerializer):
         tech = obj.technology_types[0] if obj.technology_types else 'GEN'
         org = (obj.organization_type or 'Type').replace(' ', '')
         return f"Vendor_{org}_{tech}"
+
+    def get_blacklist_summary(self, obj):
+        if obj.role != UserRole.VENDOR:
+            return None
+        case = get_active_blacklist_case(obj)
+        if not case:
+            return None
+        return {
+            'case_id': str(case.id),
+            'status': case.status,
+            'reason': case.reason,
+            'expiry_date': case.expiry_date.isoformat() if case.expiry_date else None,
+            'cooling_off_until': case.cooling_off_until.isoformat() if case.cooling_off_until else None,
+            'is_permanent': case.is_permanent,
+            'banner': (
+                'This account has been blacklisted. Access to new features is restricted.'
+                if obj.status == UserStatus.BLACKLISTED
+                else 'This account is suspended pending blacklisting review. Access to new features is restricted.'
+            ),
+            'appeal_allowed': case.status in {
+                BlacklistCaseStatus.INITIATED,
+                BlacklistCaseStatus.UNDER_REVIEW,
+                BlacklistCaseStatus.BLACKLISTED,
+            },
+        }
 
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
@@ -265,3 +320,90 @@ class VendorPrequalificationSerializer(serializers.ModelSerializer):
         validate_file('experience_financial_proof')
         
         return attrs
+
+
+class VendorBlacklistCaseSerializer(serializers.ModelSerializer):
+    vendor_username = serializers.CharField(source='vendor.username', read_only=True)
+    initiated_by_username = serializers.CharField(source='initiated_by.username', read_only=True)
+    reviewed_by_username = serializers.CharField(source='reviewed_by.username', read_only=True)
+    confirmed_by_username = serializers.CharField(source='confirmed_by.username', read_only=True)
+    reinstated_by_username = serializers.CharField(source='reinstated_by.username', read_only=True)
+
+    class Meta:
+        model = VendorBlacklistCase
+        fields = [
+            'id',
+            'vendor',
+            'vendor_username',
+            'reason',
+            'description',
+            'justification_document',
+            'status',
+            'initiated_by',
+            'initiated_by_username',
+            'initiated_at',
+            'notice_sent_at',
+            'cooling_off_until',
+            'reviewed_by',
+            'reviewed_by_username',
+            'reviewed_at',
+            'review_notes',
+            'confirmed_by',
+            'confirmed_by_username',
+            'confirmed_at',
+            'final_decision_notes',
+            'is_permanent',
+            'expiry_date',
+            'reinstated_at',
+            'reinstated_by',
+            'reinstated_by_username',
+        ]
+        read_only_fields = [
+            'id',
+            'status',
+            'initiated_by',
+            'initiated_by_username',
+            'initiated_at',
+            'notice_sent_at',
+            'reviewed_by',
+            'reviewed_by_username',
+            'reviewed_at',
+            'confirmed_by',
+            'confirmed_by_username',
+            'confirmed_at',
+            'reinstated_at',
+            'reinstated_by',
+            'reinstated_by_username',
+        ]
+
+
+class BlacklistAppealSerializer(serializers.ModelSerializer):
+    vendor_username = serializers.CharField(source='vendor.username', read_only=True)
+    reviewed_by_username = serializers.CharField(source='reviewed_by.username', read_only=True)
+
+    class Meta:
+        model = BlacklistAppeal
+        fields = [
+            'id',
+            'case',
+            'vendor',
+            'vendor_username',
+            'rebuttal_text',
+            'rebuttal_document',
+            'status',
+            'submitted_at',
+            'reviewed_by',
+            'reviewed_by_username',
+            'reviewed_at',
+            'resolution_notes',
+        ]
+        read_only_fields = [
+            'id',
+            'vendor',
+            'vendor_username',
+            'status',
+            'submitted_at',
+            'reviewed_by',
+            'reviewed_by_username',
+            'reviewed_at',
+        ]

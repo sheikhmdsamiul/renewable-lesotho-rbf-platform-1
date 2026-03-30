@@ -1,6 +1,7 @@
 import random
 import string
 import time
+from datetime import timedelta
 
 from django.conf import settings
 from django.core.cache import cache
@@ -18,12 +19,34 @@ from django.utils import timezone
 from drf_spectacular.utils import extend_schema
 from rest_framework.exceptions import APIException
 from rest_framework_simplejwt.views import TokenObtainPairView
-from .models import User, UserRole, VendorPrequalification, PrequalificationStatus
+from .blacklisting import (
+    apply_blacklist_confirmation,
+    apply_blacklist_initiation,
+    get_active_blacklist_case,
+    release_blacklist_case,
+)
+from .models import (
+    BlacklistAppeal,
+    BlacklistAppealStatus,
+    BlacklistCaseStatus,
+    User,
+    UserRole,
+    UserStatus,
+    VendorBlacklistCase,
+    VendorPrequalification,
+    PrequalificationStatus,
+)
 
 # Simple in-process OTP fallback store for dev/local environments.
 # Key: cache key, Value: (otp, expires_at_epoch)
 _OTP_FALLBACK = {}
-from .serializers import UserSerializer, CustomTokenObtainPairSerializer, VendorPrequalificationSerializer
+from .serializers import (
+    BlacklistAppealSerializer,
+    CustomTokenObtainPairSerializer,
+    UserSerializer,
+    VendorBlacklistCaseSerializer,
+    VendorPrequalificationSerializer,
+)
 from rbf.projects.audit import log_audit
 
 
@@ -44,6 +67,36 @@ class IsReviewerRole:
             user
             and user.is_authenticated
             and user.role in {UserRole.ADMIN, UserRole.RBF_OFFICIAL, UserRole.AUDITOR}
+        )
+
+
+class IsBlacklistInitiatorRole:
+    @staticmethod
+    def check(user):
+        return bool(
+            user
+            and user.is_authenticated
+            and user.role in {UserRole.RBF_OFFICIAL, UserRole.AUDITOR}
+        )
+
+
+class IsBlacklistReviewerRole:
+    @staticmethod
+    def check(user):
+        return bool(
+            user
+            and user.is_authenticated
+            and user.role in {UserRole.TAC, UserRole.DOE_OFFICER, UserRole.AUDITOR}
+        )
+
+
+class IsBlacklistConfirmerRole:
+    @staticmethod
+    def check(user):
+        return bool(
+            user
+            and user.is_authenticated
+            and user.role in {UserRole.ADMIN, UserRole.DOE_OFFICER}
         )
 
 
@@ -153,6 +206,35 @@ class UserViewSet(viewsets.ModelViewSet):
         log_audit(request.user, 'vendor_account_approved', user, {'username': user.username})
         return Response(UserSerializer(user).data, status=status.HTTP_200_OK)
 
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated], parser_classes=[MultiPartParser, FormParser])
+    def initiate_blacklisting(self, request, pk=None):
+        if not IsBlacklistInitiatorRole.check(request.user):
+            raise PermissionDenied('Only RBF Officials or Auditors can initiate blacklisting.')
+        vendor = self.get_object()
+        if vendor.role != UserRole.VENDOR:
+            return Response({'detail': 'Only vendor accounts can be blacklisted.'}, status=status.HTTP_400_BAD_REQUEST)
+        open_case = get_active_blacklist_case(vendor)
+        if open_case:
+            return Response({'detail': 'This vendor already has an active blacklisting case.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        reason = (request.data.get('reason') or '').strip()
+        if not reason:
+            return Response({'detail': 'A blacklist reason is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        cooling_off_days = max(1, int(request.data.get('cooling_off_days') or 14))
+        case = VendorBlacklistCase.objects.create(
+            vendor=vendor,
+            reason=reason,
+            description=request.data.get('description', ''),
+            justification_document=request.data.get('justification_document'),
+            initiated_by=request.user,
+            cooling_off_until=timezone.now() + timedelta(days=cooling_off_days),
+            is_permanent=str(request.data.get('is_permanent', '')).lower() in {'1', 'true', 'yes'},
+            expiry_date=request.data.get('expiry_date') or None,
+        )
+        apply_blacklist_initiation(case, request.user)
+        return Response(VendorBlacklistCaseSerializer(case).data, status=status.HTTP_201_CREATED)
+
 
 class VendorPrequalificationViewSet(viewsets.ModelViewSet):
     queryset = VendorPrequalification.objects.select_related('vendor', 'reviewed_by').all()
@@ -236,6 +318,129 @@ class VendorPrequalificationViewSet(viewsets.ModelViewSet):
         preq.save(update_fields=['status', 'reviewed_by', 'reviewed_at', 'reviewer_comments'])
         log_audit(request.user, 'prequalification_rejected', preq, {'vendor_id': preq.vendor_id})
         return Response(self.get_serializer(preq).data, status=status.HTTP_200_OK)
+
+
+class VendorBlacklistCaseViewSet(viewsets.ModelViewSet):
+    queryset = VendorBlacklistCase.objects.select_related(
+        'vendor', 'initiated_by', 'reviewed_by', 'confirmed_by', 'reinstated_by'
+    ).all()
+    serializer_class = VendorBlacklistCaseSerializer
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser, *viewsets.ModelViewSet.parser_classes]
+
+    def get_queryset(self):
+        qs = self.queryset.order_by('-initiated_at', '-id')
+        user = self.request.user
+        if user.role == UserRole.VENDOR:
+            return qs.filter(vendor=user)
+        if user.role in {UserRole.ADMIN, UserRole.RBF_OFFICIAL, UserRole.AUDITOR, UserRole.TAC, UserRole.DOE_OFFICER}:
+            return qs
+        return qs.none()
+
+    def create(self, request, *args, **kwargs):
+        raise PermissionDenied('Use the initiate_blacklisting vendor action.')
+
+    @action(detail=True, methods=['post'])
+    def review(self, request, pk=None):
+        if not IsBlacklistReviewerRole.check(request.user):
+            raise PermissionDenied('Only TAC, Auditor, or DoE Officer can review blacklisting cases.')
+        case = self.get_object()
+        if case.initiated_by_id == request.user.id:
+            raise PermissionDenied('Four-eyes control: the initiator cannot review the same blacklisting case.')
+        case.status = BlacklistCaseStatus.UNDER_REVIEW
+        case.reviewed_by = request.user
+        case.reviewed_at = timezone.now()
+        case.review_notes = request.data.get('review_notes', case.review_notes)
+        case.save(update_fields=['status', 'reviewed_by', 'reviewed_at', 'review_notes'])
+        log_audit(request.user, 'vendor_blacklisting_reviewed', case, {'vendor_id': str(case.vendor_id)})
+        return Response(self.get_serializer(case).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def confirm(self, request, pk=None):
+        if not IsBlacklistConfirmerRole.check(request.user):
+            raise PermissionDenied('Only Digital Admin or DoE Officer can confirm blacklisting.')
+        case = self.get_object()
+        if case.status not in {BlacklistCaseStatus.INITIATED, BlacklistCaseStatus.UNDER_REVIEW}:
+            return Response({'detail': 'Only initiated or under-review cases can be confirmed.'}, status=status.HTTP_400_BAD_REQUEST)
+        if case.initiated_by_id == request.user.id or case.reviewed_by_id == request.user.id:
+            raise PermissionDenied('Four-eyes control: the confirmer must be different from the initiator and reviewer.')
+        if case.cooling_off_until and timezone.now() < case.cooling_off_until:
+            return Response({'detail': 'Cooling-off period is still active.'}, status=status.HTTP_400_BAD_REQUEST)
+        case.confirmed_by = request.user
+        case.final_decision_notes = request.data.get('final_decision_notes', case.final_decision_notes)
+        if request.data.get('expiry_date'):
+            case.expiry_date = request.data.get('expiry_date')
+        if 'is_permanent' in request.data:
+            case.is_permanent = str(request.data.get('is_permanent', '')).lower() in {'1', 'true', 'yes'}
+        case.save(update_fields=['confirmed_by', 'final_decision_notes', 'expiry_date', 'is_permanent'])
+        apply_blacklist_confirmation(case, request.user)
+        return Response(self.get_serializer(case).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def reject(self, request, pk=None):
+        if not (IsBlacklistReviewerRole.check(request.user) or IsBlacklistConfirmerRole.check(request.user)):
+            raise PermissionDenied('Only reviewer or confirmer roles can reject blacklisting cases.')
+        case = self.get_object()
+        case.status = BlacklistCaseStatus.REJECTED
+        case.final_decision_notes = request.data.get('final_decision_notes', case.final_decision_notes)
+        case.save(update_fields=['status', 'final_decision_notes'])
+        case.vendor.status = UserStatus.ACTIVE
+        case.vendor.save(update_fields=['status'])
+        log_audit(request.user, 'vendor_blacklisting_rejected', case, {'vendor_id': str(case.vendor_id)})
+        return Response(self.get_serializer(case).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def reinstate(self, request, pk=None):
+        if not IsBlacklistConfirmerRole.check(request.user):
+            raise PermissionDenied('Only Digital Admin or DoE Officer can reinstate a vendor.')
+        case = self.get_object()
+        if case.status != BlacklistCaseStatus.BLACKLISTED:
+            return Response({'detail': 'Only blacklisted cases can be reinstated.'}, status=status.HTTP_400_BAD_REQUEST)
+        release_blacklist_case(case, request.user, expired=False)
+        return Response(self.get_serializer(case).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], parser_classes=[MultiPartParser, FormParser])
+    def appeal(self, request, pk=None):
+        case = self.get_object()
+        if request.user.role != UserRole.VENDOR or case.vendor_id != request.user.id:
+            raise PermissionDenied('Only the affected vendor can submit an appeal.')
+        appeal = BlacklistAppeal.objects.create(
+            case=case,
+            vendor=request.user,
+            rebuttal_text=request.data.get('rebuttal_text', ''),
+            rebuttal_document=request.data.get('rebuttal_document'),
+            status=BlacklistAppealStatus.SUBMITTED,
+        )
+        log_audit(request.user, 'vendor_blacklisting_appealed', appeal, {'case_id': str(case.id)})
+        return Response(BlacklistAppealSerializer(appeal).data, status=status.HTTP_201_CREATED)
+
+
+class BlacklistAppealViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = BlacklistAppeal.objects.select_related('case', 'vendor', 'reviewed_by').all()
+    serializer_class = BlacklistAppealSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        qs = self.queryset.order_by('-submitted_at', '-id')
+        user = self.request.user
+        if user.role == UserRole.VENDOR:
+            return qs.filter(vendor=user)
+        if user.role in {UserRole.ADMIN, UserRole.AUDITOR, UserRole.RBF_OFFICIAL, UserRole.TAC, UserRole.DOE_OFFICER}:
+            return qs
+        return qs.none()
+
+    @action(detail=True, methods=['post'])
+    def review(self, request, pk=None):
+        if request.user.role not in {UserRole.AUDITOR, UserRole.ADMIN}:
+            raise PermissionDenied('Only Auditor or Digital Admin can review appeals.')
+        appeal = self.get_object()
+        appeal.status = BlacklistAppealStatus.RESOLVED
+        appeal.reviewed_by = request.user
+        appeal.reviewed_at = timezone.now()
+        appeal.resolution_notes = request.data.get('resolution_notes', appeal.resolution_notes)
+        appeal.save(update_fields=['status', 'reviewed_by', 'reviewed_at', 'resolution_notes'])
+        log_audit(request.user, 'vendor_blacklisting_appeal_reviewed', appeal, {'case_id': str(appeal.case_id)})
+        return Response(self.get_serializer(appeal).data, status=status.HTTP_200_OK)
 
 
 class LoginView(TokenObtainPairView):

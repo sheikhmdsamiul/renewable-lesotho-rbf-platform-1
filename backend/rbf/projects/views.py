@@ -38,6 +38,7 @@ from .serializers import (
 )
 from rbf.users.models import UserRole
 from rbf.users.models import User
+from rbf.users.blacklisting import is_vendor_restricted
 from .audit import log_audit
 from rbf.notifications.models import Notification, NotificationChannel, NotificationStatus
 
@@ -58,6 +59,11 @@ def create_project_activity_update(project: Project, author, title: str, body: s
         title=title,
         body=body,
     )
+
+
+def assert_user_not_blacklisted_for_writes(user: User, message: str):
+    if is_vendor_restricted(user):
+        raise PermissionDenied(message)
 
 
 class ProjectViewSet(viewsets.ModelViewSet):
@@ -82,6 +88,8 @@ class ProjectViewSet(viewsets.ModelViewSet):
         user = self.request.user
         if user.role not in self.WRITE_ROLES:
             raise PermissionDenied('You do not have permission to modify projects.')
+        if user.role == UserRole.VENDOR:
+            assert_user_not_blacklisted_for_writes(user, 'Your vendor account is suspended or blacklisted. Project updates are restricted.')
 
     def _enforce_vendor_locked_fields(self, data):
         allowed = {
@@ -160,6 +168,8 @@ class MilestoneViewSet(viewsets.ModelViewSet):
         user = self.request.user
         if user.role not in self.WRITE_ROLES:
             raise PermissionDenied('You do not have permission to modify milestones.')
+        if user.role == UserRole.VENDOR:
+            assert_user_not_blacklisted_for_writes(user, 'Your vendor account is suspended or blacklisted. Milestone changes are restricted.')
 
     def create(self, request, *args, **kwargs):
         self._assert_write_permission()
@@ -236,6 +246,8 @@ class ProjectUpdateViewSet(viewsets.ModelViewSet):
         user = self.request.user
         if user.role not in self.WRITE_ROLES:
             raise PermissionDenied('You do not have permission to modify project updates.')
+        if user.role == UserRole.VENDOR:
+            assert_user_not_blacklisted_for_writes(user, 'Your vendor account is suspended or blacklisted. Project updates are restricted.')
 
     def _assert_project_access(self, project_id: str):
         if not project_id:
@@ -288,6 +300,8 @@ class ProjectDocumentViewSet(viewsets.ModelViewSet):
         user = self.request.user
         if user.role not in self.WRITE_ROLES:
             raise PermissionDenied('You do not have permission to modify project documents.')
+        if user.role == UserRole.VENDOR:
+            assert_user_not_blacklisted_for_writes(user, 'Your vendor account is suspended or blacklisted. Project documents are restricted.')
 
     def _assert_project_access(self, project_id: str):
         if not project_id:
@@ -347,6 +361,11 @@ class PaymentClaimViewSet(viewsets.ModelViewSet):
     def _assert_write_permission(self):
         if self.request.user.role not in self.WRITE_ROLES:
             raise PermissionDenied('You do not have permission to modify claims.')
+        if self.request.user.role == UserRole.VENDOR:
+            assert_user_not_blacklisted_for_writes(
+                self.request.user,
+                'Your vendor account is suspended or blacklisted. Payment claims are on hold for audit.',
+            )
 
     def create(self, request, *args, **kwargs):
         self._assert_write_permission()
@@ -391,6 +410,8 @@ class PaymentClaimViewSet(viewsets.ModelViewSet):
         if request.user.role not in self.VERIFY_ROLES:
             raise PermissionDenied('You do not have permission to verify claims.')
         claim = self.get_object()
+        if is_vendor_restricted(claim.vendor):
+            return Response({'detail': 'This vendor is suspended or blacklisted. Claim remains on Held/Audit.'}, status=status.HTTP_400_BAD_REQUEST)
         if claim.status not in {PaymentClaimStatus.PENDING, PaymentClaimStatus.VERIFIED}:
             return Response({'detail': 'Only pending claims can be verified.'}, status=status.HTTP_400_BAD_REQUEST)
         claim.status = PaymentClaimStatus.VERIFIED
@@ -412,6 +433,8 @@ class PaymentClaimViewSet(viewsets.ModelViewSet):
         if request.user.role not in self.APPROVE_ROLES:
             raise PermissionDenied('You do not have permission to approve claims.')
         claim = self.get_object()
+        if is_vendor_restricted(claim.vendor):
+            return Response({'detail': 'This vendor is suspended or blacklisted. Claim remains on Held/Audit.'}, status=status.HTTP_400_BAD_REQUEST)
         if claim.status not in {PaymentClaimStatus.VERIFIED, PaymentClaimStatus.PENDING}:
             return Response({'detail': 'Claim cannot be approved in its current status.'}, status=status.HTTP_400_BAD_REQUEST)
         claim.status = PaymentClaimStatus.APPROVED
@@ -453,6 +476,8 @@ class PaymentClaimViewSet(viewsets.ModelViewSet):
         if request.user.role not in self.APPROVE_ROLES:
             raise PermissionDenied('You do not have permission to process disbursements.')
         claim = self.get_object()
+        if is_vendor_restricted(claim.vendor):
+            return Response({'detail': 'This vendor is suspended or blacklisted. New disbursements are frozen.'}, status=status.HTTP_400_BAD_REQUEST)
         if claim.status not in {PaymentClaimStatus.APPROVED, PaymentClaimStatus.PAID}:
             return Response({'detail': 'Claim must be approved before payment.'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -529,6 +554,11 @@ class InstallationReportViewSet(viewsets.ModelViewSet):
     def _assert_write_permission(self):
         if self.request.user.role not in self.WRITE_ROLES:
             raise PermissionDenied('You do not have permission to submit installation reports.')
+        if self.request.user.role == UserRole.VENDOR:
+            assert_user_not_blacklisted_for_writes(
+                self.request.user,
+                'Your vendor account is suspended or blacklisted. Installation reporting is restricted.',
+            )
 
     def _assert_project_access(self, project_id: str):
         if not project_id:

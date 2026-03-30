@@ -2,17 +2,21 @@ from django.urls import path
 from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenRefreshView
 from .views import (
+    BlacklistAppealViewSet,
     UserViewSet,
     LoginView,
     CurrentUserView,
     RequestRegistrationOtpView,
     VerifyRegistrationOtpView,
     BootstrapDemoUsersView,
+    VendorBlacklistCaseViewSet,
     VendorPrequalificationViewSet,
 )
 
 router = DefaultRouter()
 router.register(r'prequalifications', VendorPrequalificationViewSet, basename='vendor-prequalification')
+router.register(r'blacklisting-cases', VendorBlacklistCaseViewSet, basename='vendor-blacklisting-case')
+router.register(r'blacklisting-appeals', BlacklistAppealViewSet, basename='vendor-blacklisting-appeal')
 router.register(r'', UserViewSet, basename='user')
 
 urlpatterns = [

@@ -23,6 +23,7 @@ import {
   Download,
   CheckCircle2,
   AlertCircle,
+  AlertTriangle,
   Clock,
   HelpCircle,
   UserCircle,
@@ -83,6 +84,8 @@ import {
   TenderBidEvaluation,
   TenderContract,
   TenderAwardRankingRow,
+  VendorBlacklistCase,
+  BlacklistAppeal,
 } from "./types";
 import { MOCK_TENDERS, MOCK_NOTIFICATIONS } from "./constants";
 import {
@@ -104,11 +107,20 @@ import {
   updateUserPassword,
   createOfficialAccount,
   fetchVendorPrequalifications,
+  fetchBlacklistCases,
+  fetchBlacklistAppeals,
   submitVendorPrequalification,
   startVendorPrequalificationReview,
   approveVendorPrequalification,
   requestVendorPrequalificationClarification,
   rejectVendorPrequalification,
+  initiateVendorBlacklisting,
+  reviewBlacklistCase,
+  confirmBlacklistCase,
+  rejectBlacklistCase,
+  reinstateBlacklistCase,
+  submitBlacklistAppeal,
+  reviewBlacklistAppeal,
   fetchPaymentClaims,
   submitPaymentClaim,
   approvePaymentClaim,
@@ -4371,6 +4383,437 @@ const PreQualification = () => {
   );
 };
 
+const Blacklisting = ({ currentUser }: { currentUser: User | null }) => {
+  const [cases, setCases] = useState<VendorBlacklistCase[]>([]);
+  const [appeals, setAppeals] = useState<BlacklistAppeal[]>([]);
+  const [vendors, setVendors] = useState<VendorPrequalification[]>([]);
+  const [selectedCase, setSelectedCase] = useState<VendorBlacklistCase | null>(null);
+  const [notification, setNotification] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [initiateForm, setInitiateForm] = useState({
+    vendorId: "",
+    reason: "Fraudulent Reporting",
+    description: "",
+    coolingOffDays: "14",
+    expiryDate: "",
+    isPermanent: false,
+  });
+  const [initiateFile, setInitiateFile] = useState<File | null>(null);
+  const [reviewNotes, setReviewNotes] = useState("");
+  const [decisionNotes, setDecisionNotes] = useState("");
+  const [appealNotes, setAppealNotes] = useState("");
+  const [appealResolution, setAppealResolution] = useState("");
+  const [appealFile, setAppealFile] = useState<File | null>(null);
+
+  const role = currentUser?.role;
+  const canInitiate = role === UserRole.RBF_OFFICIAL || role === UserRole.AUDITOR;
+  const canReview = role === UserRole.TAC || role === UserRole.DOE_OFFICER || role === UserRole.AUDITOR;
+  const canConfirm = role === UserRole.ADMIN || role === UserRole.DOE_OFFICER;
+  const canReviewAppeals = role === UserRole.AUDITOR || role === UserRole.ADMIN;
+  const canAppeal = role === UserRole.VENDOR;
+
+  const toFileUrl = (raw?: string | null) => {
+    if (!raw) return null;
+    if (/^https?:\/\//i.test(raw)) return raw;
+    const base = API_BASE.replace(/\/api$/i, "").replace(/\/$/, "");
+    const path = raw.startsWith("/") ? raw : `/${raw}`;
+    return `${base}${path}`;
+  };
+
+  const showNotification = (msg: string) => {
+    setNotification(msg);
+    setTimeout(() => setNotification(null), 3000);
+  };
+
+  const loadBlacklisting = React.useCallback(async () => {
+    setLoading(true);
+    try {
+      const [caseRows, appealRows, vendorRows] = await Promise.all([
+        fetchBlacklistCases(),
+        fetchBlacklistAppeals(),
+        (canInitiate ? fetchVendorPrequalifications() : Promise.resolve([])),
+      ]);
+      setCases(caseRows);
+      setAppeals(appealRows);
+      setVendors(vendorRows);
+      setSelectedCase(prev => caseRows.find(item => item.id === prev?.id) || caseRows[0] || null);
+    } catch (err: any) {
+      const raw = String(err?.message || "");
+      showNotification(isConnectivityError(raw) ? `Cannot connect to backend (${API_BASE}).` : (toFriendlyApiMessage(raw) || "Failed to load blacklisting records."));
+    } finally {
+      setLoading(false);
+    }
+  }, [canInitiate]);
+
+  React.useEffect(() => {
+    void loadBlacklisting();
+  }, [loadBlacklisting]);
+
+  const selectedVendorRecord = vendors.find(v => String(v.vendorId) === initiateForm.vendorId);
+  const activeCaseAppeals = appeals.filter(item => item.case === selectedCase?.id);
+
+  const handleInitiate = async () => {
+    if (!initiateForm.vendorId) {
+      showNotification("Select a vendor first.");
+      return;
+    }
+    try {
+      setIsSubmitting(true);
+      await initiateVendorBlacklisting({
+        vendorId: initiateForm.vendorId,
+        reason: initiateForm.reason,
+        description: initiateForm.description,
+        coolingOffDays: Number(initiateForm.coolingOffDays || 14),
+        expiryDate: initiateForm.expiryDate || undefined,
+        isPermanent: initiateForm.isPermanent,
+        justificationDocument: initiateFile,
+      });
+      setInitiateForm({
+        vendorId: "",
+        reason: "Fraudulent Reporting",
+        description: "",
+        coolingOffDays: "14",
+        expiryDate: "",
+        isPermanent: false,
+      });
+      setInitiateFile(null);
+      await loadBlacklisting();
+      showNotification("Blacklisting case initiated.");
+    } catch (err: any) {
+      const raw = String(err?.message || "");
+      showNotification(toFriendlyApiMessage(raw) || "Failed to initiate blacklisting.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleCaseAction = async (action: "review" | "confirm" | "reject" | "reinstate") => {
+    if (!selectedCase) return;
+    try {
+      setIsSubmitting(true);
+      if (action === "review") {
+        await reviewBlacklistCase(selectedCase.id, reviewNotes);
+      } else if (action === "confirm") {
+        await confirmBlacklistCase(selectedCase.id, {
+          finalDecisionNotes: decisionNotes,
+          expiryDate: initiateForm.expiryDate || selectedCase.expiryDate || undefined,
+          isPermanent: initiateForm.isPermanent || selectedCase.isPermanent,
+        });
+      } else if (action === "reject") {
+        await rejectBlacklistCase(selectedCase.id, decisionNotes);
+      } else {
+        await reinstateBlacklistCase(selectedCase.id);
+      }
+      await loadBlacklisting();
+      showNotification(`Case ${action} completed.`);
+    } catch (err: any) {
+      const raw = String(err?.message || "");
+      showNotification(toFriendlyApiMessage(raw) || `Failed to ${action} blacklist case.`);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleSubmitAppeal = async () => {
+    if (!selectedCase) return;
+    try {
+      setIsSubmitting(true);
+      await submitBlacklistAppeal(selectedCase.id, {
+        rebuttalText: appealNotes,
+        rebuttalDocument: appealFile,
+      });
+      setAppealNotes("");
+      setAppealFile(null);
+      await loadBlacklisting();
+      showNotification("Appeal submitted.");
+    } catch (err: any) {
+      const raw = String(err?.message || "");
+      showNotification(toFriendlyApiMessage(raw) || "Failed to submit appeal.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleReviewAppeal = async (appealId: string) => {
+    try {
+      setIsSubmitting(true);
+      await reviewBlacklistAppeal(appealId, appealResolution);
+      setAppealResolution("");
+      await loadBlacklisting();
+      showNotification("Appeal reviewed.");
+    } catch (err: any) {
+      const raw = String(err?.message || "");
+      showNotification(toFriendlyApiMessage(raw) || "Failed to review appeal.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const pendingCases = cases.filter(item => item.status === "Initiated" || item.status === "Under Review").length;
+
+  return (
+    <div className="space-y-6">
+      <AnimatePresence>
+        {notification && (
+          <motion.div
+            initial={{ opacity: 0, y: -20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -20 }}
+            className="fixed top-24 right-8 z-[200] bg-slate-900 text-white px-6 py-3 rounded-xl shadow-xl flex items-center gap-3"
+          >
+            <CheckCircle2 size={20} />
+            <span className="font-medium">{notification}</span>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-bold text-slate-900">Blacklisting</h1>
+        <div className="flex gap-2">
+          <span className="badge bg-rose-100 text-rose-700">{pendingCases} Active Cases</span>
+          <span className="badge bg-slate-100 text-slate-700">{appeals.length} Appeals</span>
+        </div>
+      </div>
+
+      {canInitiate && (
+        <div className="card p-6 space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-lg font-bold">Initiate Blacklisting</h3>
+              <p className="text-sm text-slate-500">Open a new four-eyes blacklisting case and suspend the vendor during cooling-off.</p>
+            </div>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            <div className="space-y-1">
+              <label className="text-[10px] font-bold text-slate-400 uppercase">Vendor</label>
+              <select
+                className="input-field py-2 text-sm"
+                value={initiateForm.vendorId}
+                onChange={(e) => setInitiateForm(prev => ({ ...prev, vendorId: e.target.value }))}
+              >
+                <option value="">Select vendor</option>
+                {vendors.map(vendor => (
+                  <option key={vendor.id} value={vendor.vendorId}>
+                    {vendor.companyName} ({vendor.vendorUsername})
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="space-y-1">
+              <label className="text-[10px] font-bold text-slate-400 uppercase">Reason</label>
+              <select
+                className="input-field py-2 text-sm"
+                value={initiateForm.reason}
+                onChange={(e) => setInitiateForm(prev => ({ ...prev, reason: e.target.value }))}
+              >
+                <option>Fraudulent Reporting</option>
+                <option>Integrity Breach</option>
+                <option>Persistent Non-Performance</option>
+                <option>External Legal Action</option>
+              </select>
+            </div>
+            <div className="space-y-1">
+              <label className="text-[10px] font-bold text-slate-400 uppercase">Cooling-Off Days</label>
+              <input
+                type="number"
+                min={1}
+                className="input-field py-2 text-sm"
+                value={initiateForm.coolingOffDays}
+                onChange={(e) => setInitiateForm(prev => ({ ...prev, coolingOffDays: e.target.value }))}
+              />
+            </div>
+            <div className="space-y-1">
+              <label className="text-[10px] font-bold text-slate-400 uppercase">Expiry Date</label>
+              <input
+                type="date"
+                className="input-field py-2 text-sm"
+                value={initiateForm.expiryDate}
+                onChange={(e) => setInitiateForm(prev => ({ ...prev, expiryDate: e.target.value }))}
+                disabled={initiateForm.isPermanent}
+              />
+            </div>
+            <label className="flex items-center gap-3 pt-6">
+              <input
+                type="checkbox"
+                checked={initiateForm.isPermanent}
+                onChange={(e) => setInitiateForm(prev => ({ ...prev, isPermanent: e.target.checked, expiryDate: e.target.checked ? "" : prev.expiryDate }))}
+              />
+              <span className="text-sm font-medium text-slate-700">Permanent blacklist</span>
+            </label>
+            <div className="space-y-1">
+              <label className="text-[10px] font-bold text-slate-400 uppercase">Justification Document</label>
+              <input type="file" className="input-field py-2 text-sm" onChange={(e) => setInitiateFile(e.target.files?.[0] ?? null)} />
+            </div>
+          </div>
+          <div className="space-y-1">
+            <label className="text-[10px] font-bold text-slate-400 uppercase">Description</label>
+            <textarea
+              className="input-field min-h-28 text-sm"
+              value={initiateForm.description}
+              onChange={(e) => setInitiateForm(prev => ({ ...prev, description: e.target.value }))}
+              placeholder="Summarize the triggering event, evidence, and risk to programme integrity."
+            />
+          </div>
+          {selectedVendorRecord && (
+            <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+              Vendor: <span className="font-semibold text-slate-900">{selectedVendorRecord.companyName}</span> • Tax ID: {selectedVendorRecord.taxId || "N/A"}
+            </div>
+          )}
+          <div className="flex justify-end">
+            <button onClick={handleInitiate} disabled={isSubmitting} className="btn-primary disabled:opacity-60">Initiate Blacklisting</button>
+          </div>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 xl:grid-cols-[1.2fr_0.8fr] gap-6">
+        <div className="card overflow-hidden">
+          <div className="p-6 border-b border-slate-100">
+            <h3 className="text-lg font-bold">Blacklist Cases</h3>
+            <p className="text-sm text-slate-500">Track suspension, review, confirmation, and reinstatement.</p>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left">
+              <thead>
+                <tr className="bg-slate-50">
+                  <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Vendor</th>
+                  <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Reason</th>
+                  <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Status</th>
+                  <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Cooling-Off</th>
+                  <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase text-right">Action</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {cases.map(item => (
+                  <tr key={item.id} className={`hover:bg-slate-50 ${selectedCase?.id === item.id ? "bg-slate-50" : ""}`}>
+                    <td className="px-6 py-4 text-sm font-medium text-slate-900">{item.vendorUsername || item.vendor}</td>
+                    <td className="px-6 py-4 text-sm text-slate-600">{item.reason}</td>
+                    <td className="px-6 py-4">
+                      <span className={`badge ${item.status === "Blacklisted" ? "bg-rose-100 text-rose-700" : item.status === "Under Review" ? "bg-amber-100 text-amber-700" : "bg-slate-100 text-slate-700"}`}>
+                        {item.status}
+                      </span>
+                    </td>
+                    <td className="px-6 py-4 text-sm text-slate-500">{item.coolingOffUntil ? new Date(item.coolingOffUntil).toLocaleString() : "N/A"}</td>
+                    <td className="px-6 py-4 text-right">
+                      <button onClick={() => setSelectedCase(item)} className="btn-secondary py-1 px-3 text-xs">Open</button>
+                    </td>
+                  </tr>
+                ))}
+                {!loading && cases.length === 0 && (
+                  <tr>
+                    <td colSpan={5} className="px-6 py-8 text-sm text-slate-500">No blacklist cases found.</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div className="card p-6 space-y-4">
+          <h3 className="text-lg font-bold">Case Details</h3>
+          {!selectedCase ? (
+            <p className="text-sm text-slate-500">Select a blacklist case to review actions and evidence.</p>
+          ) : (
+            <>
+              <div className="space-y-2 text-sm">
+                <p><span className="font-bold text-slate-700">Vendor:</span> {selectedCase.vendorUsername || selectedCase.vendor}</p>
+                <p><span className="font-bold text-slate-700">Reason:</span> {selectedCase.reason}</p>
+                <p><span className="font-bold text-slate-700">Status:</span> {selectedCase.status}</p>
+                <p><span className="font-bold text-slate-700">Initiated:</span> {selectedCase.initiatedAt ? new Date(selectedCase.initiatedAt).toLocaleString() : "N/A"}</p>
+                <p><span className="font-bold text-slate-700">Expiry:</span> {selectedCase.isPermanent ? "Permanent" : (selectedCase.expiryDate || "Not set")}</p>
+              </div>
+              {selectedCase.description && (
+                <div className="rounded-xl bg-slate-50 border border-slate-200 p-4 text-sm text-slate-600">
+                  {selectedCase.description}
+                </div>
+              )}
+              {selectedCase.justificationDocument && (
+                <a href={toFileUrl(selectedCase.justificationDocument) || undefined} target="_blank" rel="noreferrer" className="text-emerald-600 hover:underline text-sm inline-flex items-center gap-2">
+                  <Download size={16} /> View Justification Document
+                </a>
+              )}
+
+              {canReview && (
+                <div className="space-y-2 pt-2 border-t border-slate-100">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase">Review Notes</label>
+                  <textarea className="input-field min-h-24 text-sm" value={reviewNotes} onChange={(e) => setReviewNotes(e.target.value)} />
+                  <button onClick={() => handleCaseAction("review")} disabled={isSubmitting} className="btn-secondary w-full disabled:opacity-60">Mark Under Review</button>
+                </div>
+              )}
+
+              {canConfirm && (
+                <div className="space-y-2 pt-2 border-t border-slate-100">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase">Decision Notes</label>
+                  <textarea className="input-field min-h-24 text-sm" value={decisionNotes} onChange={(e) => setDecisionNotes(e.target.value)} />
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <button onClick={() => handleCaseAction("confirm")} disabled={isSubmitting} className="btn-primary disabled:opacity-60">Confirm Blacklist</button>
+                    <button onClick={() => handleCaseAction("reject")} disabled={isSubmitting} className="btn-secondary disabled:opacity-60">Reject Case</button>
+                  </div>
+                  {selectedCase.status === "Blacklisted" && (
+                    <button onClick={() => handleCaseAction("reinstate")} disabled={isSubmitting} className="btn-secondary w-full disabled:opacity-60">Reinstate Vendor</button>
+                  )}
+                </div>
+              )}
+
+              {canAppeal && currentUser?.blacklistSummary?.appeal_allowed && (
+                <div className="space-y-2 pt-2 border-t border-slate-100">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase">Appeal Statement</label>
+                  <textarea className="input-field min-h-24 text-sm" value={appealNotes} onChange={(e) => setAppealNotes(e.target.value)} />
+                  <input type="file" className="input-field py-2 text-sm" onChange={(e) => setAppealFile(e.target.files?.[0] ?? null)} />
+                  <button onClick={handleSubmitAppeal} disabled={isSubmitting} className="btn-primary w-full disabled:opacity-60">Submit Appeal</button>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+
+      <div className="card overflow-hidden">
+        <div className="p-6 border-b border-slate-100 flex items-center justify-between">
+          <div>
+            <h3 className="text-lg font-bold">Appeals</h3>
+            <p className="text-sm text-slate-500">Vendor rebuttals routed for audit/legal review.</p>
+          </div>
+        </div>
+        <div className="divide-y divide-slate-100">
+          {appeals.length === 0 && (
+            <div className="p-6 text-sm text-slate-500">No appeals submitted yet.</div>
+          )}
+          {appeals.map(item => (
+            <div key={item.id} className="p-6 space-y-3">
+              <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                <div>
+                  <p className="font-bold text-slate-900">{item.vendorUsername || item.vendor}</p>
+                  <p className="text-xs text-slate-500">Case {item.case} • Submitted {item.submittedAt ? new Date(item.submittedAt).toLocaleString() : "N/A"}</p>
+                </div>
+                <span className={`badge ${item.status === "Resolved" ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>{item.status}</span>
+              </div>
+              {item.rebuttalText && <p className="text-sm text-slate-600">{item.rebuttalText}</p>}
+              {item.rebuttalDocument && (
+                <a href={toFileUrl(item.rebuttalDocument) || undefined} target="_blank" rel="noreferrer" className="text-emerald-600 hover:underline text-sm inline-flex items-center gap-2">
+                  <Download size={16} /> View Appeal Document
+                </a>
+              )}
+              {canReviewAppeals && item.status !== "Resolved" && (
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <input
+                    type="text"
+                    className="input-field text-sm"
+                    value={appealResolution}
+                    onChange={(e) => setAppealResolution(e.target.value)}
+                    placeholder="Resolution notes"
+                  />
+                  <button onClick={() => handleReviewAppeal(item.id)} disabled={isSubmitting} className="btn-secondary disabled:opacity-60">Resolve Appeal</button>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const Disbursements = () => {
   const [claims, setClaims] = useState<PaymentClaim[]>([]);
   const [notification, setNotification] = useState<string | null>(null);
@@ -6640,6 +7083,7 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
 };
 
 const VendorDashboard = ({
+  currentUser,
   onGoToPrequal,
   pendingBidTenderId,
   pendingBidId,
@@ -6647,6 +7091,7 @@ const VendorDashboard = ({
   initialSection,
   showOnlyContracting,
 }: {
+  currentUser?: User | null;
   onGoToPrequal?: () => void;
   pendingBidTenderId?: string | null;
   pendingBidId?: string | null;
@@ -6710,6 +7155,8 @@ const VendorDashboard = ({
     beneficiaries: "",
     femaleBeneficiaries: "",
   });
+  const vendorRestricted = currentUser?.status === "Suspended" || currentUser?.status === "Blacklisted";
+  const vendorRestrictionMessage = currentUser?.blacklistSummary?.banner || "This account is restricted from new actions.";
 
   const [claimData, setClaimData] = useState({
     milestoneName: "",
@@ -6934,6 +7381,10 @@ const VendorDashboard = ({
     }
     if (!isPreQualified) {
       setBidMessage("You must be pre-qualified before submitting bids.");
+      return;
+    }
+    if (vendorRestricted) {
+      setBidMessage(vendorRestrictionMessage);
       return;
     }
     if (!bidForm.bidAmount) {
@@ -7881,6 +8332,16 @@ const VendorDashboard = ({
         </div>
       )}
 
+      {vendorRestricted && (
+        <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4 flex gap-3">
+          <AlertTriangle className="text-rose-600 mt-0.5" size={20} />
+          <div>
+            <h3 className="font-bold text-rose-900">Vendor Access Restricted</h3>
+            <p className="text-sm text-rose-700 mt-1">{vendorRestrictionMessage}</p>
+          </div>
+        </div>
+      )}
+
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-slate-900">Vendor Portal</h1>
@@ -7888,7 +8349,8 @@ const VendorDashboard = ({
         </div>
         <button 
           onClick={handleStartApplication} 
-          className={`btn-primary flex items-center gap-2 ${!isPreQualified ? "opacity-50 cursor-not-allowed" : ""}`}
+          disabled={!isPreQualified || vendorRestricted}
+          className={`btn-primary flex items-center gap-2 ${(!isPreQualified || vendorRestricted) ? "opacity-50 cursor-not-allowed" : ""}`}
         >
           <Plus size={18} /> New Application
         </button>
@@ -7912,6 +8374,10 @@ const VendorDashboard = ({
                 alert("You must be pre-qualified to submit bids.");
                 return;
               }
+              if (vendorRestricted) {
+                alert(vendorRestrictionMessage);
+                return;
+              }
               if (activeTenders.length > 0) {
                 const latest = activeTenders[0];
                 const deadline = latest.lastDateSubmission || latest.deadline;
@@ -7925,6 +8391,7 @@ const VendorDashboard = ({
               }
             }}
             className="btn-secondary text-sm"
+            disabled={vendorRestricted}
           >
             Open Latest
           </button>
@@ -7938,7 +8405,7 @@ const VendorDashboard = ({
               </div>
               <button
                 onClick={() => openBidForm(tender)}
-                disabled={!isPreQualified || (() => {
+                disabled={vendorRestricted || !isPreQualified || (() => {
                   const deadline = tender.lastDateSubmission || tender.deadline;
                   const deadlineOk = !deadline || new Date(deadline) > new Date();
                   const statusOk = tender.status === TenderStatus.PUBLISHED;
@@ -11656,6 +12123,7 @@ export default function App() {
         case "dashboard": return (
           <VendorDashboard
             onGoToPrequal={() => setActiveTab("prequal")}
+            currentUser={currentUser}
             pendingBidTenderId={pendingBidTenderId}
             pendingBidId={pendingBidId}
             onBidOpened={() => {
@@ -11669,6 +12137,7 @@ export default function App() {
             initialSection="contracting"
             showOnlyContracting
             onGoToPrequal={() => setActiveTab("prequal")}
+            currentUser={currentUser}
             pendingBidTenderId={pendingBidTenderId}
             pendingBidId={pendingBidId}
             onBidOpened={() => {
@@ -11678,6 +12147,7 @@ export default function App() {
           />
         );
         case "prequal": return <PreQualificationSubmission />;
+        case "blacklisting": return <Blacklisting currentUser={currentUser} />;
         case "tenders": return (
           <VendorTenders
             onSubmitTender={(tenderId) => {
@@ -11707,7 +12177,8 @@ export default function App() {
         case "dashboard":
         case "evaluations":
         case "scoring":
-          return <TACView />;
+        case "blacklisting":
+          return activeTab === "blacklisting" ? <Blacklisting currentUser={currentUser} /> : <TACView />;
         default:
           return <TACView />;
       }
@@ -11733,6 +12204,8 @@ export default function App() {
               onTenderOpened={() => setPendingTenderId(null)}
             />
           );
+        case "blacklisting":
+          return <Blacklisting currentUser={currentUser} />;
         case "users":
         case "roles":
         case "logs":
@@ -11747,7 +12220,8 @@ export default function App() {
         case "regional":
         case "endorsements":
         case "kpis":
-          return <DoEOfficerView />;
+        case "blacklisting":
+          return activeTab === "blacklisting" ? <Blacklisting currentUser={currentUser} /> : <DoEOfficerView />;
         default:
           return <DoEOfficerView />;
       }
@@ -11768,7 +12242,8 @@ export default function App() {
         case "audit_trail":
         case "verification":
         case "compliance":
-          return <AuditorView />;
+        case "blacklisting":
+          return activeTab === "blacklisting" ? <Blacklisting currentUser={currentUser} /> : <AuditorView />;
         default:
           return <AuditorView />;
       }
@@ -11785,6 +12260,7 @@ export default function App() {
         />
       );
       case "prequal": return <PreQualification />;
+      case "blacklisting": return <Blacklisting currentUser={currentUser} />;
       case "payments": return <Disbursements />;
       default: return <Dashboard role={role} onNewTender={handleNewTender} />;
     }
@@ -11805,6 +12281,7 @@ export default function App() {
         { id: "applications", icon: ClipboardCheck, label: "My Applications" },
         { id: "projects_hub", icon: BarChart3, label: "Projects Hub" },
         { id: "claims", icon: CreditCard, label: "Payment Claims" },
+        { id: "blacklisting", icon: FileWarning, label: "Blacklisting" },
       ];
     }
 
@@ -11813,6 +12290,7 @@ export default function App() {
         ...common,
         { id: "evaluations", icon: ClipboardCheck, label: "Evaluations", badge: "4" },
         { id: "scoring", icon: BarChart3, label: "Scoring Matrix" },
+        { id: "blacklisting", icon: FileWarning, label: "Blacklisting" },
       ];
     }
 
@@ -11830,6 +12308,7 @@ export default function App() {
       return [
         ...common,
         { id: "tenders", icon: FileText, label: "Tender Management" },
+        { id: "blacklisting", icon: FileWarning, label: "Blacklisting" },
         { id: "users", icon: Users, label: "User Management" },
         { id: "roles", icon: Settings, label: "Role Config" },
         { id: "notifications", icon: Bell, label: "Notification Logs" },
@@ -11844,6 +12323,7 @@ export default function App() {
         { id: "regional", icon: MapIcon, label: "Regional Monitoring" },
         { id: "endorsements", icon: CheckCircle2, label: "Endorsements" },
         { id: "kpis", icon: BarChart3, label: "KPI Review" },
+        { id: "blacklisting", icon: FileWarning, label: "Blacklisting" },
       ];
     }
 
@@ -11862,6 +12342,7 @@ export default function App() {
         { id: "audit_trail", icon: FileText, label: "Audit Trail" },
         { id: "verification", icon: ClipboardCheck, label: "Verification Docs" },
         { id: "compliance", icon: CheckCircle2, label: "Compliance Reports" },
+        { id: "blacklisting", icon: FileWarning, label: "Blacklisting" },
       ];
     }
 
@@ -11870,6 +12351,7 @@ export default function App() {
       ...common,
       { id: "tenders", icon: FileText, label: "Tender Management" },
       { id: "prequal", icon: ClipboardCheck, label: "Pre-Qualification" },
+      { id: "blacklisting", icon: FileWarning, label: "Blacklisting" },
       { id: "monitoring", icon: Activity, label: "Monitoring" },
       { id: "gis", icon: MapIcon, label: "GIS Mapping" },
       { id: "payments", icon: CreditCard, label: "Disbursements" },
@@ -11990,6 +12472,15 @@ export default function App() {
 
         {/* Content Area */}
         <div className="flex-1 overflow-y-auto p-8">
+          {currentUser.role === UserRole.VENDOR && currentUser.blacklistSummary?.banner && (
+            <div className="mb-6 rounded-2xl border border-rose-200 bg-rose-50 px-5 py-4 flex gap-3">
+              <AlertTriangle className="text-rose-600 mt-0.5" size={20} />
+              <div>
+                <p className="font-bold text-rose-900">Vendor Restriction Notice</p>
+                <p className="text-sm text-rose-700">{currentUser.blacklistSummary.banner}</p>
+              </div>
+            </div>
+          )}
           <AnimatePresence mode="wait">
             <motion.div
               key={`${role}-${activeTab}`}

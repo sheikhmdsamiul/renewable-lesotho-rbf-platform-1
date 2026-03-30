@@ -32,6 +32,7 @@ from .serializers import (
 from .pba_pdf import generate_contract_pdf
 from rbf.users.models import UserRole, VendorPrequalification, PrequalificationStatus
 from rbf.users.models import User
+from rbf.users.blacklisting import is_vendor_restricted
 from rbf.projects.models import Project, Milestone, ProjectStatus, PaymentClaim, PaymentClaimStatus
 from rbf.projects.audit import log_audit
 from rbf.projects.integrations import push_project_to_prospect
@@ -935,6 +936,8 @@ class TenderBidViewSet(viewsets.ModelViewSet):
 
         if request.user.role != UserRole.VENDOR:
             raise ValidationError({'detail': 'Only vendors can submit bids.'})
+        if is_vendor_restricted(request.user):
+            raise ValidationError({'detail': 'Your vendor account is suspended or blacklisted. Bid submission is disabled.'})
 
         # Only pre-qualified vendors can submit bids
         if not VendorPrequalification.objects.filter(
@@ -984,6 +987,8 @@ class TenderBidViewSet(viewsets.ModelViewSet):
         bid = self.get_object()
         if request.user.role != UserRole.VENDOR or bid.vendor_id != str(request.user.id):
             raise PermissionDenied('Only the submitting vendor can update this bid.')
+        if is_vendor_restricted(request.user):
+            raise ValidationError({'detail': 'Your vendor account is suspended or blacklisted. Bid submission is disabled.'})
         if bid.status not in {BidStatus.DRAFT, BidStatus.SUBMITTED}:
             raise ValidationError({'detail': 'Only draft or submitted bids can be updated.'})
 
@@ -1020,6 +1025,8 @@ class TenderBidViewSet(viewsets.ModelViewSet):
         bid = self.get_object()
         if request.user.role != UserRole.VENDOR or bid.vendor_id != str(request.user.id):
             raise PermissionDenied('Only the submitting vendor can update this bid.')
+        if is_vendor_restricted(request.user):
+            raise ValidationError({'detail': 'Your vendor account is suspended or blacklisted. Bid submission is disabled.'})
         if bid.status not in {BidStatus.DRAFT, BidStatus.SUBMITTED}:
             raise ValidationError({'detail': 'Only draft or submitted bids can be updated.'})
 
