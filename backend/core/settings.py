@@ -145,6 +145,8 @@ CSRF_TRUSTED_ORIGINS = env.list('CSRF_TRUSTED_ORIGINS', default=[])
 
 # Frontend URL for email notifications
 FRONTEND_URL = env('FRONTEND_URL', default='http://localhost:5173')
+PBA_RENDER_SCRIPT = env('PBA_RENDER_SCRIPT', default=str(BASE_DIR / 'scripts' / 'render_pdf.mjs'))
+PBA_CHROME_PATH = env('PBA_CHROME_PATH', default='')
 
 if DEBUG:
     SECURE_SSL_REDIRECT = False

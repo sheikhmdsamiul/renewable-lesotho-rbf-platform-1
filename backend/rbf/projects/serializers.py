@@ -4,6 +4,9 @@ from .models import (
     Milestone,
     ProjectUpdate,
     ProjectDocument,
+    InstallationReport,
+    VerificationTask,
+    SmartMeterReading,
     PaymentClaim,
     Disbursement,
     AuditLog,
@@ -12,6 +15,38 @@ from rbf.tenders.models import TenderContract
 
 
 class MilestoneSerializer(serializers.ModelSerializer):
+    target_date = serializers.DateField(
+        required=False,
+        allow_null=True,
+        input_formats=['%Y-%m-%d', '%m/%d/%Y', '%m/%d/%y'],
+    )
+    completed_date = serializers.DateField(
+        required=False,
+        allow_null=True,
+        input_formats=['%Y-%m-%d', '%m/%d/%Y', '%m/%d/%y'],
+    )
+
+    def validate(self, attrs):
+        instance = getattr(self, 'instance', None)
+        progress = attrs.get('progress_percentage')
+        completed_date = attrs.get('completed_date')
+
+        if instance is not None:
+            if progress is None:
+                progress = instance.progress_percentage
+            if 'completed_date' not in attrs:
+                completed_date = instance.completed_date
+
+        if completed_date:
+            attrs['progress_percentage'] = 100
+            progress = 100
+
+        progress = 0 if progress is None else progress
+        if progress < 0 or progress > 100:
+            raise serializers.ValidationError({'progress_percentage': 'Progress must be between 0 and 100.'})
+
+        return attrs
+
     class Meta:
         model = Milestone
         fields = '__all__'
@@ -115,6 +150,45 @@ class PaymentClaimSerializer(serializers.ModelSerializer):
             'vendor_username',
             'disbursement',
         ]
+
+
+class InstallationReportSerializer(serializers.ModelSerializer):
+    vendor_username = serializers.CharField(source='vendor.username', read_only=True)
+    receipt_file_url = serializers.SerializerMethodField()
+
+    def get_receipt_file_url(self, obj: InstallationReport):
+        if obj.receipt_file:
+            return obj.receipt_file.url
+        return None
+
+    class Meta:
+        model = InstallationReport
+        fields = '__all__'
+        read_only_fields = ['id', 'vendor', 'vendor_username', 'submitted_at', 'status', 'receipt_file_url']
+
+
+class VerificationTaskSerializer(serializers.ModelSerializer):
+    assigned_verifier_username = serializers.CharField(source='assigned_verifier.username', read_only=True)
+
+    class Meta:
+        model = VerificationTask
+        fields = '__all__'
+        read_only_fields = [
+            'id',
+            'assigned_verifier',
+            'assigned_verifier_username',
+            'distance_meters',
+            'anomaly_flag',
+            'created_at',
+            'updated_at',
+        ]
+
+
+class SmartMeterReadingSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SmartMeterReading
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at']
 
 
 class AuditLogSerializer(serializers.ModelSerializer):

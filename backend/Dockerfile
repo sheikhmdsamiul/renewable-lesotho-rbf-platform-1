@@ -3,18 +3,33 @@ FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    POETRY_VIRTUALENVS_CREATE=false
+    POETRY_VIRTUALENVS_CREATE=false \
+    PBA_RENDER_SCRIPT=/opt/pba-renderer/render_pdf.mjs \
+    PBA_CHROME_PATH=/usr/bin/chromium
 
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential libpq-dev curl && \
+    build-essential \
+    libpq-dev \
+    curl \
+    nodejs \
+    npm \
+    chromium \
+    ghostscript \
+    fonts-dejavu-core \
+    fonts-liberation \
+    fonts-noto-core && \
     rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /opt/pba-renderer && \
+    npm install --prefix /opt/pba-renderer puppeteer-core@^24.40.0
 
 COPY backend/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 COPY backend /app
+COPY backend/scripts/render_pdf.mjs /opt/pba-renderer/render_pdf.mjs
 RUN useradd --create-home appuser && chown -R appuser:appuser /app
 USER appuser
 

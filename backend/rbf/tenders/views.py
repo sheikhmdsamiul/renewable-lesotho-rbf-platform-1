@@ -4,9 +4,11 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.utils import timezone
-from datetime import date
+from datetime import date, timedelta
+from decimal import Decimal, ROUND_HALF_UP
 from django.conf import settings
 from django.core.mail import send_mail
+from django.db import transaction
 from rest_framework.parsers import MultiPartParser, FormParser
 from django_filters.rest_framework import DjangoFilterBackend
 from django_filters import FilterSet, DateFromToRangeFilter, RangeFilter, CharFilter, ChoiceFilter
@@ -27,11 +29,302 @@ from .serializers import (
     TenderBidEvaluationSerializer,
     TenderContractSerializer,
 )
+from .pba_pdf import generate_contract_pdf
 from rbf.users.models import UserRole, VendorPrequalification, PrequalificationStatus
 from rbf.users.models import User
-from rbf.projects.models import Project, Milestone, ProjectStatus
+from rbf.projects.models import Project, Milestone, ProjectStatus, PaymentClaim, PaymentClaimStatus
 from rbf.projects.audit import log_audit
+from rbf.projects.integrations import push_project_to_prospect
 from rbf.notifications.models import Notification, NotificationChannel, NotificationStatus
+
+
+CONTRACT_ANNEX_SPECS = (
+    (
+        'annex_a_file',
+        'Annex A',
+        'Results Framework',
+        'Gender Action Plan',
+        ('gender_action_plan_file',),
+    ),
+    (
+        'annex_b_file',
+        'Annex B',
+        'Implementation Schedule',
+        'Implementation Plan',
+        ('implementation_plan_file',),
+    ),
+    (
+        'annex_c_file',
+        'Annex C',
+        'Payment Terms',
+        'BOQ and Disbursement Table',
+        ('financial_proposal_file', 'boq_file'),
+    ),
+    (
+        'annex_d_file',
+        'Annex D',
+        'Reporting Formats',
+        'Standardized System Templates',
+        ('reporting_templates_file', 'milestone_payment_schedule_file', 'schedule_file'),
+    ),
+    (
+        'annex_e_file',
+        'Annex E',
+        'Technical Standards',
+        'Technical Proposal',
+        ('technical_proposal_file',),
+    ),
+)
+
+
+def _resolve_contract_source_file(tender: Tender, bid: TenderBid, source_fields):
+    for field_name in source_fields:
+        source = bid if bid is not None and hasattr(bid, field_name) else tender
+        file_obj = getattr(source, field_name, None)
+        if file_obj:
+            return file_obj.name
+    return None
+
+
+def _get_contract_bid(contract: TenderContract):
+    if contract.bid_id:
+        return contract.bid
+    return (
+        TenderBid.objects.filter(tender=contract.tender, vendor_id=contract.vendor_id)
+        .order_by('-version_number', '-submitted_at')
+        .first()
+    )
+
+
+def _attach_awarded_bid_annexes(contract: TenderContract, tender: Tender, bid: TenderBid):
+    for contract_field, _label, _title, _source_name, source_fields in CONTRACT_ANNEX_SPECS:
+        setattr(contract, contract_field, _resolve_contract_source_file(tender, bid, source_fields))
+
+
+def _missing_contract_annexes(contract: TenderContract):
+    bid = _get_contract_bid(contract)
+    missing = []
+    for contract_field, label, title, _source_name, source_fields in CONTRACT_ANNEX_SPECS:
+        if getattr(contract, contract_field) or _resolve_contract_source_file(contract.tender, bid, source_fields):
+            continue
+        missing.append(f'{label} ({title})')
+    return missing
+
+
+def _hydrate_contract_from_bid(contract: TenderContract):
+    bid = _get_contract_bid(contract)
+    if not bid:
+        return None
+    update_fields = []
+    if not contract.bid_id:
+        contract.bid = bid
+        update_fields.append('bid')
+    for contract_field, _label, _title, _source_name, source_fields in CONTRACT_ANNEX_SPECS:
+        if getattr(contract, contract_field):
+            continue
+        resolved_name = _resolve_contract_source_file(contract.tender, bid, source_fields)
+        if resolved_name:
+            setattr(contract, contract_field, resolved_name)
+            update_fields.append(contract_field)
+    if update_fields:
+        update_fields.append('updated_at')
+        contract.save(update_fields=update_fields)
+    return bid
+
+
+def _populate_generated_contract_package(contract: TenderContract, tender: Tender, bid: TenderBid, vendor: User):
+    _attach_awarded_bid_annexes(contract, tender, bid)
+    generate_contract_pdf(contract, tender, bid, vendor)
+
+
+def _round_score(value) -> float:
+    return float(Decimal(str(value or 0)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+
+def _latest_vendor_prequalification(vendor_id: str):
+    return (
+        VendorPrequalification.objects.filter(
+            vendor_id=vendor_id,
+            status=PrequalificationStatus.APPROVED,
+        )
+        .order_by('-submitted_at')
+        .first()
+    )
+
+
+def _build_award_ranking(tender: Tender):
+    bids = list(
+        TenderBid.objects.filter(
+            tender=tender,
+            status__in={BidStatus.SUBMITTED, BidStatus.UNDER_REVIEW, BidStatus.ACCEPTED, BidStatus.AWARDED},
+        )
+        .prefetch_related('evaluations')
+        .order_by('submitted_at', 'id')
+    )
+    technical_threshold = tender.technical_threshold or 70
+    technical_weight = Decimal(str(tender.technical_weight or 70)) / Decimal("100")
+    financial_weight = Decimal(str(tender.financial_weight or 30)) / Decimal("100")
+
+    ranking_rows = []
+    qualifying_rows = []
+
+    for bid in bids:
+        scored_evaluations = [ev for ev in bid.evaluations.all() if ev.status == EvaluationStatus.SCORED]
+        if not scored_evaluations:
+            ranking_rows.append({
+                'bid_id': str(bid.id),
+                'vendor_id': str(bid.vendor_id),
+                'vendor_name': bid.vendor_name,
+                'bid_amount': float(bid.bid_amount or 0),
+                'technical_score': None,
+                'financial_score': None,
+                'combined_score': None,
+                'gender_score': None,
+                'female_headed_household_target': 0,
+                'passed_technical_threshold': False,
+                'financial_opened': False,
+                'is_recommended_winner': False,
+                'disqualification_reason': 'No scored technical evaluation has been submitted yet.',
+            })
+            continue
+
+        technical_score = sum(Decimal(str(ev.total_score or 0)) for ev in scored_evaluations) / Decimal(len(scored_evaluations))
+        gender_score = sum(Decimal(str(ev.gender_score or 0)) for ev in scored_evaluations) / Decimal(len(scored_evaluations))
+        prequal = _latest_vendor_prequalification(str(bid.vendor_id))
+        female_target = prequal.female_beneficiary_target if prequal else 0
+
+        row = {
+            'bid_id': str(bid.id),
+            'vendor_id': str(bid.vendor_id),
+            'vendor_name': bid.vendor_name,
+            'bid_amount': float(bid.bid_amount or 0),
+            'technical_score': _round_score(technical_score),
+            'financial_score': None,
+            'combined_score': None,
+            'gender_score': _round_score(gender_score),
+            'female_headed_household_target': female_target,
+            'passed_technical_threshold': technical_score >= Decimal(str(technical_threshold)),
+            'financial_opened': False,
+            'is_recommended_winner': False,
+            'disqualification_reason': '',
+        }
+
+        if not row['passed_technical_threshold']:
+            row['disqualification_reason'] = f'Technical score below threshold ({technical_threshold}%).'
+            ranking_rows.append(row)
+            continue
+        if not bid.bid_amount or Decimal(str(bid.bid_amount or 0)) <= 0:
+            row['disqualification_reason'] = 'Financial proposal is missing or invalid.'
+            ranking_rows.append(row)
+            continue
+
+        qualifying_rows.append((bid, row))
+
+    if qualifying_rows:
+        lowest_bid_amount = min(Decimal(str(bid.bid_amount)) for bid, _row in qualifying_rows)
+        for bid, row in qualifying_rows:
+            vendor_price = Decimal(str(bid.bid_amount))
+            financial_score = (lowest_bid_amount / vendor_price) * Decimal("100")
+            combined_score = (
+                technical_weight * Decimal(str(row['technical_score']))
+                + financial_weight * financial_score
+            )
+            row['financial_opened'] = True
+            row['financial_score'] = _round_score(financial_score)
+            row['combined_score'] = _round_score(combined_score)
+            ranking_rows.append(row)
+
+        ranking_rows.sort(
+            key=lambda item: (
+                item['combined_score'] is None,
+                -(item['combined_score'] or 0),
+                -(item['female_headed_household_target'] or 0),
+                -(item['gender_score'] or 0),
+                item['bid_amount'] or 0,
+            )
+        )
+        recommended_bid_id = next((row['bid_id'] for row in ranking_rows if row['combined_score'] is not None), None)
+        for index, row in enumerate(ranking_rows, start=1):
+            row['rank'] = index
+            row['is_recommended_winner'] = row['bid_id'] == recommended_bid_id
+    else:
+        for index, row in enumerate(ranking_rows, start=1):
+            row['rank'] = index
+
+    recommended_row = next((row for row in ranking_rows if row.get('is_recommended_winner')), None)
+    return {
+        'technical_weight': tender.technical_weight,
+        'financial_weight': tender.financial_weight,
+        'technical_threshold': technical_threshold,
+        'cooling_off_days': tender.cooling_off_days,
+        'rows': ranking_rows,
+        'recommended': recommended_row,
+    }
+
+
+def _notify_intent_to_award(tender: Tender, ranking_payload: dict, send_email=True):
+    recommended = ranking_payload.get('recommended')
+    if not recommended:
+        return
+
+    bids_by_vendor = {row['vendor_id']: row for row in ranking_payload.get('rows', [])}
+    cooling_off_until = tender.cooling_off_until
+    cooling_date_text = cooling_off_until.strftime('%Y-%m-%d %H:%M:%S') if cooling_off_until else 'N/A'
+    email_enabled = send_email and bool(
+        (settings.EMAIL_HOST_USER and settings.EMAIL_HOST_PASSWORD)
+        or str(getattr(settings, 'EMAIL_HOST', '')).lower() in {'mailhog', 'localhost'}
+    )
+
+    vendors = User.objects.filter(id__in=list(bids_by_vendor.keys())).only('id', 'email', 'full_name', 'username')
+    for vendor in vendors:
+        row = bids_by_vendor.get(str(vendor.id))
+        if not row:
+            continue
+        is_winner = row['vendor_id'] == recommended['vendor_id']
+        title = (
+            f'Notice of Best Evaluated Bidder: {tender.reference_number}'
+            if is_winner
+            else f'Regret Letter: {tender.reference_number}'
+        )
+        body = (
+            f"Tender: {tender.name} ({tender.reference_number})\n"
+            f"Technical Score: {row['technical_score'] if row['technical_score'] is not None else 'N/A'}\n"
+            f"Financial Score: {row['financial_score'] if row['financial_score'] is not None else 'Not opened'}\n"
+            f"Combined Score: {row['combined_score'] if row['combined_score'] is not None else 'N/A'}\n"
+        )
+        if is_winner:
+            body += (
+                f"\nStatus: You are the Best Evaluated Bidder.\n"
+                f"Cooling-off period ends on: {cooling_date_text}\n"
+                f"The final award and PBA generation will only occur after the cooling-off period expires without a formal protest.\n"
+            )
+        else:
+            body += "\nStatus: Another vendor achieved the highest combined score under the weighted RBF evaluation.\n"
+            if row.get('disqualification_reason'):
+                body += f"Reason: {row['disqualification_reason']}\n"
+
+        Notification.objects.create(
+            recipient_id=str(vendor.id),
+            recipient_name=vendor.full_name or vendor.username or vendor.email,
+            type=NotificationChannel.EMAIL if email_enabled else NotificationChannel.IN_APP,
+            event='intent_to_award',
+            title=title,
+            body=body,
+            status=NotificationStatus.SENT,
+            linked_entity_id=str(tender.id),
+        )
+
+        if email_enabled and vendor.email:
+            try:
+                send_mail(
+                    subject=title,
+                    message=body,
+                    from_email=settings.DEFAULT_FROM_EMAIL,
+                    recipient_list=[vendor.email],
+                    fail_silently=True,
+                )
+            except Exception:
+                pass
 
 
 class IsRbfOfficialOrReadOnly(BasePermission):
@@ -265,9 +558,21 @@ class TenderViewSet(viewsets.ModelViewSet):
                 {'detail': 'Only submitted or under-review bids can be awarded.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        if not bid.evaluations.filter(status=EvaluationStatus.SCORED, total_score__gte=71).exists():
+        ranking_payload = _build_award_ranking(tender)
+        recommended = ranking_payload.get('recommended')
+        if not recommended:
             return Response(
-                {'detail': 'Bid must have a TAC score of at least 71 before it can be awarded.'},
+                {'detail': 'No qualifying bid passed the technical threshold for intent to award.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if str(recommended['bid_id']) != str(bid.id):
+            return Response(
+                {
+                    'detail': 'Intent to award can only be issued to the recommended winner with the highest combined score.',
+                    'recommended_bid_id': recommended['bid_id'],
+                    'recommended_vendor_id': recommended['vendor_id'],
+                    'recommended_vendor_name': recommended['vendor_name'],
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -291,16 +596,16 @@ class TenderViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        tender.status = TenderStatus.AWARDED
-        tender.awarded_vendor_id = awarded_vendor_id
-        tender.awarded_vendor_name = awarded_vendor_name
-        tender.awarded_at = timezone.now()
+        now = timezone.now()
+        tender.intent_to_award_bid = bid
+        tender.intent_to_award_at = now
+        cooling_off_days = tender.cooling_off_days if tender.cooling_off_days is not None else 7
+        tender.cooling_off_until = now + timedelta(days=cooling_off_days)
         tender.save(
             update_fields=[
-                'status',
-                'awarded_vendor_id',
-                'awarded_vendor_name',
-                'awarded_at',
+                'intent_to_award_bid',
+                'intent_to_award_at',
+                'cooling_off_until',
                 'updated_at',
             ]
         )
@@ -311,22 +616,96 @@ class TenderViewSet(viewsets.ModelViewSet):
             bid.save(update_fields=['status', 'reviewed_at', 'reviewed_by', 'updated_at'])
         log_audit(
             request.user,
-            'tender_awarded',
+            'intent_to_award_issued',
             tender,
             {
                 'reference_number': tender.reference_number,
                 'bid_id': bid_id,
-                'awarded_vendor_id': awarded_vendor_id,
-                'awarded_vendor_name': awarded_vendor_name,
+                'recommended_vendor_id': awarded_vendor_id,
+                'recommended_vendor_name': awarded_vendor_name,
+                'cooling_off_until': tender.cooling_off_until.isoformat() if tender.cooling_off_until else None,
             },
         )
 
-        # Send award notification
         send_email = request.data.get('send_email', True)
-        self._notify_award(tender, awarded_vendor_id, awarded_vendor_name, send_email)
-        self._ensure_award_contract(tender, bid, awarded_vendor_id)
+        _notify_intent_to_award(tender, ranking_payload, send_email)
 
-        return Response(TenderSerializer(tender).data, status=status.HTTP_200_OK)
+        data = TenderSerializer(tender).data
+        data['award_ranking'] = ranking_payload['rows']
+        data['recommended_bid_id'] = recommended['bid_id']
+        data['recommended_vendor_id'] = recommended['vendor_id']
+        data['recommended_vendor_name'] = recommended['vendor_name']
+        return Response(data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['get'])
+    def award_ranking(self, request, pk=None):
+        tender = self.get_object()
+        ranking_payload = _build_award_ranking(tender)
+        return Response(ranking_payload, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def confirm_award(self, request, pk=None):
+        self._assert_write_permission()
+        tender = self.get_object()
+        bid = tender.intent_to_award_bid
+        if bid is None:
+            return Response(
+                {'detail': 'Intent to award must be issued before confirming the final award.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if tender.cooling_off_until and timezone.now() < tender.cooling_off_until:
+            return Response(
+                {
+                    'detail': 'Cooling-off period has not yet expired.',
+                    'cooling_off_until': tender.cooling_off_until.isoformat(),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        with transaction.atomic():
+            tender.status = TenderStatus.AWARDED
+            tender.awarded_vendor_id = bid.vendor_id
+            tender.awarded_vendor_name = bid.vendor_name
+            tender.awarded_at = timezone.now()
+            tender.save(
+                update_fields=[
+                    'status',
+                    'awarded_vendor_id',
+                    'awarded_vendor_name',
+                    'awarded_at',
+                    'updated_at',
+                ]
+            )
+            if bid.status != BidStatus.AWARDED:
+                bid.status = BidStatus.AWARDED
+                bid.reviewed_at = bid.reviewed_at or timezone.now()
+                bid.reviewed_by = bid.reviewed_by or (request.user.full_name or request.user.username)
+                bid.save(update_fields=['status', 'reviewed_at', 'reviewed_by', 'updated_at'])
+
+            contract = self._ensure_award_contract(tender, bid, bid.vendor_id)
+
+            log_audit(
+                request.user,
+                'tender_awarded',
+                tender,
+                {
+                    'reference_number': tender.reference_number,
+                    'bid_id': str(bid.id),
+                    'awarded_vendor_id': bid.vendor_id,
+                    'awarded_vendor_name': bid.vendor_name,
+                    'contract_id': str(contract.id) if contract else None,
+                },
+            )
+
+        send_email = request.data.get('send_email', True)
+        self._notify_award(tender, bid.vendor_id, bid.vendor_name, send_email)
+        response_data = TenderSerializer(tender, context={'request': request}).data
+        if contract:
+            response_data['generated_contract'] = TenderContractSerializer(
+                contract,
+                context={'request': request},
+            ).data
+        return Response(response_data, status=status.HTTP_200_OK)
 
     def _notify_award(self, tender: Tender, vendor_id: str, vendor_name: str, send_email=True):
         """Send award notification to winning vendor"""
@@ -337,14 +716,14 @@ class TenderViewSet(viewsets.ModelViewSet):
         except User.DoesNotExist:
             return
 
-        email_subject = f"Tender Award Notification: {tender.name}"
+        email_subject = f"Congratulations! You have been awarded {tender.name}"
         email_body = (
-            f"Congratulations!\n\n"
-            f"You have been awarded the tender.\n\n"
+            f"Congratulations! You have been awarded {tender.name}.\n\n"
+            f"Please review and sign the Performance-Based Agreement to proceed.\n\n"
             f"Tender: {tender.name} ({tender.reference_number})\n"
             f"Department: {tender.department}\n"
             f"Awarded at: {timezone.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-            f"Please contact {tender.contact_details} for further details.\n"
+            f"Next step: Log in, open the Contracting tab, review the generated agreement package, and sign the Performance-Based Agreement.\n"
         )
 
         email_enabled = send_email and bool(
@@ -379,14 +758,27 @@ class TenderViewSet(viewsets.ModelViewSet):
 
     def _ensure_award_contract(self, tender: Tender, bid: TenderBid, vendor_id: str):
         """Create a generated contract on award if one doesn't exist."""
-        existing = TenderContract.objects.filter(tender=tender, vendor_id=vendor_id).first()
-        if existing:
-            return existing
-
         try:
             vendor = User.objects.get(id=vendor_id)
         except User.DoesNotExist:
             return None
+
+        existing = TenderContract.objects.filter(tender=tender, vendor_id=vendor_id).first()
+        if existing:
+            if bid and not existing.bid_id:
+                existing.bid = bid
+            _populate_generated_contract_package(existing, tender, bid, vendor)
+            existing.save(update_fields=[
+                'bid',
+                'generated_file',
+                'annex_a_file',
+                'annex_b_file',
+                'annex_c_file',
+                'annex_d_file',
+                'annex_e_file',
+                'updated_at',
+            ])
+            return existing
 
         reference_number = f"CTR-{tender.reference_number}-{vendor_id}"
         contract = TenderContract.objects.create(
@@ -399,14 +791,25 @@ class TenderViewSet(viewsets.ModelViewSet):
             template_name='Performance-Based Agreement',
             status=ContractStatus.GENERATED,
         )
-        log_audit(request.user, 'contract_generated', contract, {'tender_id': str(tender.id)})
+        _populate_generated_contract_package(contract, tender, bid, vendor)
+        contract.save(update_fields=[
+            'bid',
+            'generated_file',
+            'annex_a_file',
+            'annex_b_file',
+            'annex_c_file',
+            'annex_d_file',
+            'annex_e_file',
+            'updated_at',
+        ])
+        log_audit(self.request.user, 'contract_generated', contract, {'tender_id': str(tender.id)})
         Notification.objects.create(
             recipient_id=vendor_id,
             recipient_name=vendor.full_name or vendor.username,
             type=NotificationChannel.IN_APP,
             event='contract_generated',
-            title=f'Contract Ready: {tender.reference_number}',
-            body=f'A performance-based agreement is ready for signature (Ref: {reference_number}).',
+            title=f'Performance-Based Agreement Ready: {tender.reference_number}',
+            body=f'Congratulations! You have been awarded {tender.name}. Please review and sign the Performance-Based Agreement to proceed.',
             linked_entity_id=str(tender.id),
         )
         return contract
@@ -584,6 +987,8 @@ class TenderBidViewSet(viewsets.ModelViewSet):
         if bid.status not in {BidStatus.DRAFT, BidStatus.SUBMITTED}:
             raise ValidationError({'detail': 'Only draft or submitted bids can be updated.'})
 
+        if bid.tender.status in {TenderStatus.AWARDED, TenderStatus.CLOSED}:
+            raise ValidationError({'detail': 'Tender is closed for bidding.'})
         deadline = bid.tender.last_date_submission or bid.tender.deadline
         if deadline and timezone.now() > deadline:
             raise ValidationError({'detail': 'Bidding deadline has passed.'})
@@ -618,6 +1023,8 @@ class TenderBidViewSet(viewsets.ModelViewSet):
         if bid.status not in {BidStatus.DRAFT, BidStatus.SUBMITTED}:
             raise ValidationError({'detail': 'Only draft or submitted bids can be updated.'})
 
+        if bid.tender.status in {TenderStatus.AWARDED, TenderStatus.CLOSED}:
+            raise ValidationError({'detail': 'Tender is closed for bidding.'})
         deadline = bid.tender.last_date_submission or bid.tender.deadline
         if deadline and timezone.now() > deadline:
             raise ValidationError({'detail': 'Bidding deadline has passed.'})
@@ -650,6 +1057,8 @@ class TenderBidViewSet(viewsets.ModelViewSet):
         return target_status == BidStatus.SUBMITTED and bid.status == BidStatus.DRAFT
 
     def _validate_submission_payload(self, bid: TenderBid, request):
+        if bid.tender.status in {TenderStatus.AWARDED, TenderStatus.CLOSED}:
+            raise ValidationError({'detail': 'Tender is closed for bidding.'})
         deadline = bid.tender.last_date_submission or bid.tender.deadline
         if deadline and timezone.now() > deadline:
             raise ValidationError({'detail': 'Bidding deadline has passed.'})
@@ -781,7 +1190,22 @@ class TenderContractViewSet(viewsets.ModelViewSet):
 
         existing = TenderContract.objects.filter(tender=tender, vendor_id=vendor_id).first()
         if existing:
-            return Response(TenderContractSerializer(existing).data, status=status.HTTP_200_OK)
+            if bid:
+                existing.bid = bid
+            source_bid = bid or existing.bid
+            update_fields = ['bid', 'updated_at']
+            if source_bid:
+                _populate_generated_contract_package(existing, tender, source_bid, vendor)
+                update_fields.extend([
+                    'generated_file',
+                    'annex_a_file',
+                    'annex_b_file',
+                    'annex_c_file',
+                    'annex_d_file',
+                    'annex_e_file',
+                ])
+            existing.save(update_fields=update_fields)
+            return Response(TenderContractSerializer(existing, context={'request': request}).data, status=status.HTTP_200_OK)
 
         reference_number = f"CTR-{tender.reference_number}-{vendor_id}"
         contract = TenderContract.objects.create(
@@ -794,21 +1218,33 @@ class TenderContractViewSet(viewsets.ModelViewSet):
             template_name=str(request.data.get('template_name') or 'Performance-Based Agreement'),
             status=ContractStatus.GENERATED,
         )
+        if bid:
+            _populate_generated_contract_package(contract, tender, bid, vendor)
+            contract.save(update_fields=[
+                'generated_file',
+                'annex_a_file',
+                'annex_b_file',
+                'annex_c_file',
+                'annex_d_file',
+                'annex_e_file',
+                'updated_at',
+            ])
         log_audit(request.user, 'contract_generated', contract, {'tender_id': str(tender.id)})
         Notification.objects.create(
             recipient_id=vendor_id,
             recipient_name=vendor.full_name or vendor.username,
             type=NotificationChannel.IN_APP,
             event='contract_generated',
-            title=f'Contract Ready: {tender.reference_number}',
-            body=f'A performance-based agreement is ready for signature (Ref: {reference_number}).',
+            title=f'PBA Package Ready: {tender.reference_number}',
+            body='The Performance-Based Agreement and annex package are ready for vendor signature.',
             linked_entity_id=str(tender.id),
         )
-        return Response(TenderContractSerializer(contract).data, status=status.HTTP_201_CREATED)
+        return Response(TenderContractSerializer(contract, context={'request': request}).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['post'])
     def sign(self, request, pk=None):
         contract = self.get_object()
+        _hydrate_contract_from_bid(contract)
         if request.user.role != UserRole.VENDOR or contract.vendor_id != str(request.user.id):
             raise PermissionDenied('Only the awarded vendor can sign this contract.')
         if contract.tender.awarded_vendor_id and str(contract.tender.awarded_vendor_id) != str(contract.vendor_id):
@@ -816,6 +1252,12 @@ class TenderContractViewSet(viewsets.ModelViewSet):
         signed_file = request.data.get('signed_file')
         if not signed_file:
             raise ValidationError({'signed_file': 'Signed contract file is required.'})
+        signed_file_name = str(getattr(signed_file, 'name', '') or '').lower()
+        if not signed_file_name.endswith('.pdf'):
+            raise ValidationError({'signed_file': 'Signed contract must be uploaded as a PDF.'})
+        missing_annexes = _missing_contract_annexes(contract)
+        if missing_annexes:
+            raise ValidationError({'annexes': f"The contract package is incomplete. Missing: {', '.join(missing_annexes)}."})
         contract.signed_file = signed_file
         contract.signed_at = timezone.now()
         contract.status = ContractStatus.SUBMITTED
@@ -832,7 +1274,7 @@ class TenderContractViewSet(viewsets.ModelViewSet):
                         type=NotificationChannel.IN_APP,
                         event='contract_signed',
                         title=f'Contract Uploaded: {contract.reference_number}',
-                        body=f'A signed contract was uploaded by {contract.vendor_name}. Please review and finalize.',
+                        body=f'A signed contract package was uploaded by {contract.vendor_name}. Please review and finalize.',
                         status=NotificationStatus.SENT,
                         linked_entity_id=str(contract.tender_id),
                     )
@@ -844,6 +1286,7 @@ class TenderContractViewSet(viewsets.ModelViewSet):
     def approve(self, request, pk=None):
         self._assert_admin_permission(request)
         contract = self.get_object()
+        _hydrate_contract_from_bid(contract)
         if not contract.signed_file:
             return Response({'detail': 'Signed contract file is required before approval.'}, status=status.HTTP_400_BAD_REQUEST)
         if contract.status == ContractStatus.GENERATED:
@@ -927,6 +1370,14 @@ class TenderContractViewSet(viewsets.ModelViewSet):
             target_vulnerable_pct=(approved_prequal.vulnerable_group_target if approved_prequal else 30),
         )
 
+        prospect_ok, prospect_msg = push_project_to_prospect(project)
+        log_audit(
+            request.user,
+            'prospect_sync',
+            project,
+            {'success': prospect_ok, 'message': prospect_msg},
+        )
+
         milestones = request.data.get('milestones')
         if isinstance(milestones, str):
             try:
@@ -943,8 +1394,8 @@ class TenderContractViewSet(viewsets.ModelViewSet):
                 base_amount = float(tender.budget)
             default_milestones = [
                 {'name': 'Mobilization', 'percentage': 20},
-                {'name': 'Installation', 'percentage': 60},
-                {'name': 'Commissioning', 'percentage': 20},
+                {'name': 'Installation', 'percentage': 50},
+                {'name': 'Commissioning', 'percentage': 30},
             ]
             milestones = []
             for item in default_milestones:
@@ -962,6 +1413,21 @@ class TenderContractViewSet(viewsets.ModelViewSet):
                 amount=item.get('amount') or 0,
             )
 
+        mobilization_milestone = project.milestones.filter(name__iexact='Mobilization').first()
+        if mobilization_milestone and vendor:
+            PaymentClaim.objects.create(
+                project=project,
+                vendor=vendor,
+                milestone=mobilization_milestone,
+                claim_amount=mobilization_milestone.amount,
+                actual_beneficiaries=0,
+                actual_female_beneficiaries=0,
+                implementation_notes='Auto-generated mobilization payment after contract approval.',
+                declaration_accepted=True,
+                status=PaymentClaimStatus.PENDING,
+            )
+            log_audit(request.user, 'mobilization_claim_created', project, {'milestone': mobilization_milestone.id})
+
         contract.status = ContractStatus.APPROVED
         contract.approved_at = timezone.now()
         contract.approved_by = request.user.full_name or request.user.username
@@ -976,7 +1442,7 @@ class TenderContractViewSet(viewsets.ModelViewSet):
             type=NotificationChannel.IN_APP,
             event='contract_approved',
             title=f'Contract Approved: {tender.reference_number}',
-            body='Your contract has been approved. Project and milestones are now active.',
+            body='Your contract has been finalized. The project is now active and the mobilization payment request has been created.',
             linked_entity_id=str(tender.id),
         )
         return Response(TenderContractSerializer(contract).data, status=status.HTTP_200_OK)

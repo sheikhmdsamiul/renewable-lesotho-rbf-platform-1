@@ -53,9 +53,13 @@ class MilestoneStatus(models.TextChoices):
 class Milestone(models.Model):
     project = models.ForeignKey(Project, related_name='milestones', on_delete=models.CASCADE)
     name = models.CharField(max_length=255)
+    description = models.TextField(blank=True)
     percentage = models.PositiveIntegerField()
     status = models.CharField(max_length=16, choices=MilestoneStatus.choices, default=MilestoneStatus.PENDING)
     amount = models.DecimalField(max_digits=14, decimal_places=2)
+    progress_percentage = models.PositiveIntegerField(default=0)
+    target_date = models.DateField(null=True, blank=True)
+    completed_date = models.DateField(null=True, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -114,6 +118,12 @@ class PaymentClaimStatus(models.TextChoices):
     APPROVED = 'Approved'
     PAID = 'Paid'
     REJECTED = 'Rejected'
+
+
+class InstallationStatus(models.TextChoices):
+    SUBMITTED = 'Submitted'
+    VERIFIED = 'Verified'
+    FLAGGED = 'Flagged'
 
 
 class PaymentClaim(models.Model):
@@ -175,6 +185,74 @@ class Disbursement(models.Model):
 
     def __str__(self):
         return f"Disbursement {self.id} - Claim {self.claim_id} - {self.status}"
+
+
+class InstallationReport(models.Model):
+    project = models.ForeignKey(Project, related_name='installation_reports', on_delete=models.CASCADE)
+    vendor = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='installation_reports', on_delete=models.CASCADE)
+    milestone = models.ForeignKey(Milestone, related_name='installation_reports', on_delete=models.SET_NULL, null=True, blank=True)
+    gps_lat = models.DecimalField(max_digits=9, decimal_places=6)
+    gps_lng = models.DecimalField(max_digits=9, decimal_places=6)
+    serial_number = models.CharField(max_length=128)
+    beneficiary_id = models.CharField(max_length=128)
+    receipt_file = models.FileField(upload_to='installation_receipts/', null=True, blank=True)
+    photo_files = models.JSONField(default=list, blank=True)
+    meter_id = models.CharField(max_length=64, blank=True)
+    kwh_reading = models.FloatField(default=0)
+    status = models.CharField(max_length=16, choices=InstallationStatus.choices, default=InstallationStatus.SUBMITTED)
+    submitted_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-submitted_at']
+
+    def __str__(self):
+        return f"Installation {self.id} - Project {self.project_id}"
+
+
+class VerificationStatus(models.TextChoices):
+    PENDING = 'Pending'
+    VERIFIED = 'Verified'
+    FLAGGED = 'Flagged'
+
+
+class VerificationTask(models.Model):
+    report = models.OneToOneField(InstallationReport, related_name='verification_task', on_delete=models.CASCADE)
+    assigned_verifier = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        related_name='verification_tasks',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    vendor_lat = models.DecimalField(max_digits=9, decimal_places=6)
+    vendor_lng = models.DecimalField(max_digits=9, decimal_places=6)
+    verifier_lat = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    verifier_lng = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    distance_meters = models.FloatField(null=True, blank=True)
+    anomaly_flag = models.BooleanField(default=False)
+    status = models.CharField(max_length=16, choices=VerificationStatus.choices, default=VerificationStatus.PENDING)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Verification {self.id} - Report {self.report_id}"
+
+
+class SmartMeterReading(models.Model):
+    project = models.ForeignKey(Project, related_name='smart_meter_readings', on_delete=models.CASCADE)
+    meter_id = models.CharField(max_length=64)
+    kwh = models.FloatField(default=0)
+    recorded_at = models.DateTimeField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-recorded_at']
+
+    def __str__(self):
+        return f"{self.meter_id} - {self.kwh} kWh"
 
 
 class AuditLog(models.Model):

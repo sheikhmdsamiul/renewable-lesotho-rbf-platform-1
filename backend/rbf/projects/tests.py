@@ -2,7 +2,7 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 from django.contrib.auth import get_user_model
 
-from .models import Project, ProjectStatus
+from .models import Project, ProjectStatus, ProjectUpdate
 
 
 class ProjectApiTests(APITestCase):
@@ -45,9 +45,12 @@ class ProjectApiTests(APITestCase):
         payload = {
             "project": project.id,
             "name": "Installation Complete",
+            "description": "Complete installation and commission the deployed units.",
             "percentage": 40,
             "status": "Pending",
             "amount": "12500.00",
+            "progress_percentage": 50,
+            "target_date": "2026-04-15",
         }
 
         create_response = self.client.post("/api/projects/milestones/", payload, format="json")
@@ -58,6 +61,33 @@ class ProjectApiTests(APITestCase):
         self.assertEqual(list_response.data["count"], 1)
         self.assertEqual(len(list_response.data["results"]), 1)
         self.assertEqual(list_response.data["results"][0]["project"], project.id)
+        self.assertEqual(list_response.data["results"][0]["description"], payload["description"])
+        self.assertEqual(list_response.data["results"][0]["progress_percentage"], payload["progress_percentage"])
+        self.assertEqual(list_response.data["results"][0]["target_date"], payload["target_date"])
+        self.assertTrue(
+            ProjectUpdate.objects.filter(
+                project=project,
+                title="Milestone Added",
+            ).exists()
+        )
+
+    def test_project_planning_update_creates_project_update_entry(self):
+        project = Project.objects.create(**self._project_payload())
+        self.client.force_authenticate(self.admin_user)
+
+        response = self.client.patch(
+            f"/api/projects/{project.id}/",
+            {"deployment_team_roster": "Team A, Team B"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(
+            ProjectUpdate.objects.filter(
+                project=project,
+                title="Deployment Plan Updated",
+            ).exists()
+        )
 
     def test_payment_claim_workflow_verify_approve_pay_with_audit(self):
         User = get_user_model()

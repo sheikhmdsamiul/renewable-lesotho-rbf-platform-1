@@ -15,6 +15,7 @@ class BidStatus(models.TextChoices):
     DRAFT = 'Draft'
     SUBMITTED = 'Submitted'
     UNDER_REVIEW = 'Under Review'
+    AWARDED = 'Awarded'
     ACCEPTED = 'Accepted'
     REJECTED = 'Rejected'
     WITHDRAWN = 'Withdrawn'
@@ -58,8 +59,21 @@ class Tender(models.Model):
     experience_portfolio_file = models.FileField(upload_to='tender_documents/', blank=True)
     is_verified = models.BooleanField(default=False)
     funding_source = models.CharField(max_length=128, blank=True)
+    technical_weight = models.PositiveIntegerField(default=70)
+    financial_weight = models.PositiveIntegerField(default=30)
+    technical_threshold = models.PositiveIntegerField(default=70)
+    cooling_off_days = models.PositiveIntegerField(default=7)
     awarded_vendor_id = models.CharField(max_length=64, blank=True)
     awarded_vendor_name = models.CharField(max_length=255, blank=True)
+    intent_to_award_bid = models.ForeignKey(
+        'TenderBid',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='intent_awards',
+    )
+    intent_to_award_at = models.DateTimeField(null=True, blank=True)
+    cooling_off_until = models.DateTimeField(null=True, blank=True)
     verified_at = models.DateTimeField(null=True, blank=True)
     published_at = models.DateTimeField(null=True, blank=True)
     awarded_at = models.DateTimeField(null=True, blank=True)
@@ -104,6 +118,7 @@ class TenderBid(models.Model):
     boq_file = models.FileField(upload_to='tender_bids/', null=True, blank=True)
     gender_action_plan_file = models.FileField(upload_to='tender_bids/', null=True, blank=True)
     implementation_plan_file = models.FileField(upload_to='tender_bids/', null=True, blank=True)
+    reporting_templates_file = models.FileField(upload_to='tender_bids/', null=True, blank=True)
     
     # Metadata
     version_number = models.PositiveIntegerField(default=1)
@@ -180,9 +195,15 @@ class TenderContract(models.Model):
     reference_number = models.CharField(max_length=64, unique=True)
     template_name = models.CharField(max_length=255, blank=True)
     status = models.CharField(max_length=16, choices=ContractStatus.choices, default=ContractStatus.GENERATED)
+    generated_file = models.FileField(upload_to='tender_contracts/generated/', null=True, blank=True)
     generated_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     signed_file = models.FileField(upload_to='tender_contracts/', null=True, blank=True)
+    annex_a_file = models.FileField(upload_to='tender_contracts/annexes/', null=True, blank=True)
+    annex_b_file = models.FileField(upload_to='tender_contracts/annexes/', null=True, blank=True)
+    annex_c_file = models.FileField(upload_to='tender_contracts/annexes/', null=True, blank=True)
+    annex_d_file = models.FileField(upload_to='tender_contracts/annexes/', null=True, blank=True)
+    annex_e_file = models.FileField(upload_to='tender_contracts/annexes/', null=True, blank=True)
     signed_at = models.DateTimeField(null=True, blank=True)
     approved_at = models.DateTimeField(null=True, blank=True)
     approved_by = models.CharField(max_length=255, blank=True)

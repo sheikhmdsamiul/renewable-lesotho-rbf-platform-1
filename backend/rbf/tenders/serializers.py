@@ -43,7 +43,7 @@ class TenderBidSerializer(serializers.ModelSerializer):
             'bid_amount', 'proposal_file', 'stage', 'concept_note',
             'technical_proposal', 'financial_proposal',
             'technical_proposal_file', 'financial_proposal_file', 'boq_file',
-            'gender_action_plan_file', 'implementation_plan_file',
+            'gender_action_plan_file', 'implementation_plan_file', 'reporting_templates_file',
             'status', 'version_number',
             'submitted_at', 'reviewed_at', 'reviewed_by', 'rejection_reason',
             'created_at', 'updated_at', 'sites'
@@ -82,6 +82,7 @@ class TenderBidSerializer(serializers.ModelSerializer):
         validate_file('boq_file')
         validate_file('gender_action_plan_file')
         validate_file('implementation_plan_file')
+        validate_file('reporting_templates_file')
 
         if errors:
             raise serializers.ValidationError(errors)
@@ -118,6 +119,7 @@ class TenderBidSerializer(serializers.ModelSerializer):
                 'boq_file',
                 'gender_action_plan_file',
                 'implementation_plan_file',
+                'reporting_templates_file',
             ]
             for field in file_fields:
                 if data.get(field):
@@ -195,6 +197,14 @@ class TenderBidEvaluationSerializer(serializers.ModelSerializer):
 
 
 class TenderContractSerializer(serializers.ModelSerializer):
+    ANNEX_SOURCE_FIELDS = {
+        'annex_a_file': ('gender_action_plan_file',),
+        'annex_b_file': ('implementation_plan_file',),
+        'annex_c_file': ('financial_proposal_file', 'boq_file'),
+        'annex_d_file': ('reporting_templates_file', 'milestone_payment_schedule_file', 'schedule_file'),
+        'annex_e_file': ('technical_proposal_file',),
+    }
+
     class Meta:
         model = TenderContract
         fields = '__all__'
@@ -209,11 +219,40 @@ class TenderContractSerializer(serializers.ModelSerializer):
             'project_id',
         ]
 
+    def _resolve_bid(self, instance):
+        if instance.bid_id:
+            return instance.bid
+        return (
+            TenderBid.objects.filter(tender=instance.tender, vendor_id=instance.vendor_id)
+            .order_by('-version_number', '-submitted_at')
+            .first()
+        )
+
+    def _resolve_annex_value(self, instance, annex_field):
+        current_value = getattr(instance, annex_field, None)
+        if current_value:
+            return getattr(current_value, 'url', None) or str(current_value)
+        bid = self._resolve_bid(instance)
+        for source_field in self.ANNEX_SOURCE_FIELDS.get(annex_field, ()):
+            source = bid if bid is not None and hasattr(bid, source_field) else instance.tender
+            file_obj = getattr(source, source_field, None)
+            if file_obj:
+                return getattr(file_obj, 'url', None) or str(file_obj)
+        return None
+
     def to_representation(self, instance):
         data = super().to_representation(instance)
         request = self.context.get('request')
         if request and data.get('signed_file'):
             data['signed_file'] = request.build_absolute_uri(data['signed_file'])
+        if request and data.get('generated_file'):
+            data['generated_file'] = request.build_absolute_uri(data['generated_file'])
+        for annex_field in ('annex_a_file', 'annex_b_file', 'annex_c_file', 'annex_d_file', 'annex_e_file'):
+            resolved_value = self._resolve_annex_value(instance, annex_field)
+            if request and resolved_value:
+                data[annex_field] = request.build_absolute_uri(resolved_value)
+            else:
+                data[annex_field] = resolved_value
         return data
 
 
@@ -321,12 +360,16 @@ class TenderSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         errors = {}
+        instance = getattr(self, 'instance', None)
         for field in self.REQUIRED_FIELDS:
             value = attrs.get(field)
+            if value is None and instance is not None:
+                value = getattr(instance, field, None)
             if value in (None, '', []):
                 errors[field] = 'This field is required.'
 
-        if not attrs.get('technology_types'):
+        technology_types = attrs.get('technology_types', instance.technology_types if instance else [])
+        if not technology_types:
             errors['technology_types'] = 'Select at least one technology type.'
 
         def validate_file(field_name, max_size_mb=10, allowed_ext=None):
@@ -345,6 +388,18 @@ class TenderSerializer(serializers.ModelSerializer):
         validate_file('schedule_file')
         validate_file('rfp_documents_file')
         validate_file('milestone_payment_schedule_file')
+
+        technical_weight = attrs.get('technical_weight', instance.technical_weight if instance else 70)
+        financial_weight = attrs.get('financial_weight', instance.financial_weight if instance else 30)
+        technical_threshold = attrs.get('technical_threshold', instance.technical_threshold if instance else 70)
+        cooling_off_days = attrs.get('cooling_off_days', instance.cooling_off_days if instance else 7)
+
+        if technical_weight + financial_weight != 100:
+            errors['technical_weight'] = 'Technical and financial weights must add up to 100.'
+        if technical_threshold < 0 or technical_threshold > 100:
+            errors['technical_threshold'] = 'Technical threshold must be between 0 and 100.'
+        if cooling_off_days < 0 or cooling_off_days > 14:
+            errors['cooling_off_days'] = 'Cooling-off period must be between 0 and 14 days.'
 
         if errors:
             raise serializers.ValidationError(errors)

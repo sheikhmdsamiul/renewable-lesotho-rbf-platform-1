@@ -70,6 +70,7 @@ import {
   Milestone,
   ProjectUpdate,
   ProjectDocument,
+  InstallationReport,
   PaymentClaim,
   VendorPrequalification,
   Notification,
@@ -81,6 +82,7 @@ import {
   TenderBidSite,
   TenderBidEvaluation,
   TenderContract,
+  TenderAwardRankingRow,
 } from "./types";
 import { MOCK_TENDERS, MOCK_NOTIFICATIONS } from "./constants";
 import {
@@ -114,10 +116,12 @@ import {
   fetchProjects,
   fetchMilestones,
   createMilestone,
+  updateMilestone,
   fetchProjectUpdates,
-  createProjectUpdate,
   fetchProjectDocuments,
   uploadProjectDocument,
+  fetchInstallationReports,
+  createInstallationReport,
   fetchTenderBids,
   submitTenderBid,
   updateTenderBid,
@@ -126,10 +130,11 @@ import {
   createBidEvaluation,
   updateBidEvaluation,
   fetchTenderContracts,
-  generateTenderContract,
   signTenderContract,
   approveTenderContract,
   rejectTenderContract,
+  fetchTenderAwardRanking,
+  confirmTenderAward,
   updateProject,
   API_BASE,
 } from "./api";
@@ -1013,6 +1018,7 @@ const Tenders = ({
   const [awardBids, setAwardBids] = useState<TenderBid[]>([]);
   const [awardBidId, setAwardBidId] = useState("");
   const [awardBidLoading, setAwardBidLoading] = useState(false);
+  const [awardRankingRows, setAwardRankingRows] = useState<TenderAwardRankingRow[]>([]);
   const [notifyEmail, setNotifyEmail] = useState(true);
   const [isActioning, setIsActioning] = useState(false);
   const [tenderContracts, setTenderContracts] = useState<TenderContract[]>([]);
@@ -1020,8 +1026,8 @@ const Tenders = ({
   const [contractRejectionReason, setContractRejectionReason] = useState("");
   const [milestoneDrafts, setMilestoneDrafts] = useState([
     { name: "Mobilization", percentage: 20, amount: 0 },
-    { name: "Installation", percentage: 60, amount: 0 },
-    { name: "Commissioning", percentage: 20, amount: 0 },
+    { name: "Installation", percentage: 50, amount: 0 },
+    { name: "Commissioning", percentage: 30, amount: 0 },
   ]);
 
   const activeContract = useMemo(() => {
@@ -1054,6 +1060,7 @@ const Tenders = ({
     instruction: "",
     contactDetails: "",
     fundingSource: "",
+    coolingOffDays: 7,
     addressForDocument: "",
     addressForSecurity: "",
     placeForOpening: "",
@@ -1102,6 +1109,7 @@ const Tenders = ({
     instruction: tender.instruction ?? "",
     contactDetails: tender.contactDetails ?? "",
     fundingSource: tender.fundingSource ?? "",
+    coolingOffDays: tender.coolingOffDays ?? 7,
     addressForDocument: tender.addressForDocument ?? "",
     addressForSecurity: tender.addressForSecurity ?? "",
     placeForOpening: tender.placeForOpening ?? "",
@@ -1216,22 +1224,27 @@ const Tenders = ({
         setContractRejectionReason("");
         setAwardBidLoading(true);
         try {
-          const [bids, evals] = await Promise.all([
+          const [bids, ranking] = await Promise.all([
             fetchTenderBids(tenderId),
-            fetchBidEvaluations(),
+            fetchTenderAwardRanking(tenderId),
           ]);
-          const scoredBidIds = new Set(
-            evals.filter(ev => ev.status === "Scored" && (ev.totalScore ?? 0) >= 71).map(ev => ev.bid)
-          );
-          const eligible = bids.filter(b => scoredBidIds.has(b.id));
+          setAwardRankingRows(ranking.rows || []);
+          const qualifyingBidIds = new Set((ranking.rows || []).filter(row => row.combined_score != null).map(row => row.bid_id));
+          const eligible = bids.filter(b => qualifyingBidIds.has(b.id));
           setAwardBids(eligible);
-          let selected = eligible.find(b => full.awardedVendorId && b.vendor_id === full.awardedVendorId)
-            || eligible.find(b => full.awardedVendorName && b.vendor_name === full.awardedVendorName);
+          const recommended = ranking.recommended;
+          let selected = recommended ? eligible.find(b => b.id === recommended.bid_id) : undefined;
+          if (!selected) {
+            selected = eligible.find(b => full.intentToAwardBidId && b.id === full.intentToAwardBidId)
+              || eligible.find(b => full.awardedVendorId && b.vendor_id === full.awardedVendorId)
+              || eligible.find(b => full.awardedVendorName && b.vendor_name === full.awardedVendorName);
+          }
           if (!selected && eligible.length === 1) selected = eligible[0];
-          setAwardBidId(selected?.id || "");
-          setAwardWinner(selected?.vendor_name || full.awardedVendorName || "");
-          setAwardWinnerId(selected?.vendor_id || full.awardedVendorId || "");
+          setAwardBidId(selected?.id || recommended?.bid_id || "");
+          setAwardWinner(selected?.vendor_name || recommended?.vendor_name || full.awardedVendorName || "");
+          setAwardWinnerId(selected?.vendor_id || recommended?.vendor_id || full.awardedVendorId || "");
         } catch {
+          setAwardRankingRows([]);
           setAwardBids([]);
           setAwardBidId("");
           setAwardWinner(full.awardedVendorName || "");
@@ -1432,8 +1445,14 @@ const Tenders = ({
       showNotification("Winning Vendor Name and Vendor ID are required to issue the award.");
       return;
     }
+    const tenderLabel = selectedTender?.name || "this tender";
+    const confirmationMessage = `Award "${tenderLabel}" (Tender ID: ${tenderId}) to "${awardWinner}" (Vendor ID: ${awardWinnerId})?`;
+    if (!window.confirm(confirmationMessage)) {
+      return;
+    }
     try {
       setIsActioning(true);
+      setContractMessage(null);
       const updated = await awardTender(tenderId, {
         bidId: awardBidId,
         awardedVendorId: awardWinnerId || undefined,
@@ -1445,38 +1464,61 @@ const Tenders = ({
       }
       upsertTender(updated);
       await loadTenders();
+      const ranking = await fetchTenderAwardRanking(tenderId);
+      setAwardRankingRows(ranking.rows || []);
       const channels = [notifyEmail ? "Email" : null].filter(Boolean).join(" & ");
-      showNotification(`Tender awarded to ${awardWinner}. Winner notified via ${channels || "System"}.`);
-      setContractMessage("Award confirmed. You can now generate the contract.");
+      const coolingDate = updated.coolingOffUntil ? new Date(updated.coolingOffUntil).toLocaleString() : "the configured cooling-off deadline";
+      showNotification(`Intent to Award issued for ${tenderLabel}. Notifications sent via ${channels || "System"}.`);
+      setContractMessage(`Intent to Award issued to ${awardWinner}. Cooling-off period ends on ${coolingDate}. The final award and PBA generation will only happen after that date.`);
     } catch (err: any) {
-      showNotification(toActionError(err, "Failed to award tender."));
+      const message = toActionError(err, "Failed to award tender.");
+      showNotification(message);
+      setContractMessage(message);
     } finally {
       setIsActioning(false);
     }
   };
 
-  const handleGenerateContract = async () => {
-    if (!selectedTender) return;
-    if (selectedTender.status !== TenderStatus.AWARDED) {
-      setContractMessage("Please confirm the award before generating a contract.");
-      return;
-    }
-    const vendorId = selectedTender.awardedVendorId || awardWinnerId;
-    if (!vendorId) {
-      setContractMessage("Provide a Winning Vendor ID before generating a contract.");
+  const handleConfirmFinalAward = async (tenderId: string) => {
+    const tenderLabel = selectedTender?.name || "this tender";
+    if (!window.confirm(`Confirm final award for "${tenderLabel}" now? This will generate the PBA and open Contracting for vendor signature.`)) {
       return;
     }
     try {
       setIsActioning(true);
-      const contract = await generateTenderContract({
-        tenderId: selectedTender.id,
-        vendorId,
-        bidId: awardBidId || undefined,
-      });
-      setTenderContracts(prev => [contract, ...prev.filter(item => item.id !== contract.id)]);
-      setContractMessage("Contract generated and sent to vendor.");
+      setContractMessage(null);
+      const updated = await confirmTenderAward(tenderId, { sendEmail: notifyEmail });
+      if (selectedTender?.id === tenderId) {
+        setSelectedTender(updated);
+      }
+      upsertTender(updated);
+      await loadTenders();
+      showNotification(`Final award confirmed for ${tenderLabel}.`);
+      setContractMessage("Final award confirmed. Refreshing the Performance-Based Agreement package now.");
+
+      try {
+        const refreshedContracts = await fetchTenderContracts({ tenderId });
+        const activeAwardContract = refreshedContracts.find(
+          item => String(item.vendorId) === String(updated.awardedVendorId || awardWinnerId)
+        );
+        setTenderContracts(refreshedContracts);
+        if (activeAwardContract?.generatedFile) {
+          setContractMessage("Final award confirmed. The Performance-Based Agreement has been generated, the vendor can now see it under Contracting, download it, sign it digitally or by scanned signed PDF, upload it, and then admin can review and finalize.");
+        } else {
+          setContractMessage("Final award confirmed. The contract package is still being prepared. Re-open Manage Award in a moment if the PBA does not appear yet.");
+        }
+      } catch (contractErr: any) {
+        const raw = String(contractErr?.message || "");
+        setContractMessage(
+          isConnectivityError(raw)
+            ? "Final award confirmed, but the contract package could not be refreshed immediately. Re-open Manage Award in a moment to verify the generated PBA."
+            : (toFriendlyApiMessage(raw) || "Final award confirmed, but the contract package could not be refreshed immediately.")
+        );
+      }
     } catch (err: any) {
-      setContractMessage(toActionError(err, "Failed to generate contract."));
+      const message = toActionError(err, "Failed to confirm the final award.");
+      showNotification(message);
+      setContractMessage(message);
     } finally {
       setIsActioning(false);
     }
@@ -1623,6 +1665,19 @@ const Tenders = ({
                 <option>Private Investment</option>
                 <option>Other</option>
               </select>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-bold text-slate-700">Cooling-Off Period (Days)</label>
+              <input
+                type="number"
+                name="coolingOffDays"
+                min={0}
+                max={14}
+                value={formData.coolingOffDays ?? 7}
+                onChange={handleInputChange}
+                className="input-field"
+              />
+              <p className="text-[10px] text-slate-400">Set between 0 and 14 days. Use 0 for instant testing.</p>
             </div>
           </div>
 
@@ -2665,7 +2720,7 @@ const Tenders = ({
                         onClick={() => void openTenderView(tender.id, "award")}
                         className="text-purple-600 hover:text-purple-700 font-medium text-sm"
                       >
-                        {tender.status === TenderStatus.AWARDED ? "Manage Award" : "Award"}
+                        {tender.status === TenderStatus.AWARDED || tender.intentToAwardAt ? "Manage Award" : "Award"}
                       </button>
                     )}
                   </div>
@@ -2690,91 +2745,149 @@ const Tenders = ({
               initial={{ scale: 0.95, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.95, opacity: 0 }}
-              className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-8 space-y-6"
+              className="bg-white rounded-2xl shadow-2xl w-full max-w-6xl max-h-[92vh] overflow-y-auto p-6 md:p-8 space-y-6"
               onClick={(e) => e.stopPropagation()}
             >
-              <h2 className="text-xl font-bold text-slate-900">Issue Award Notification</h2>
-              <p className="text-sm text-slate-500">Select the winning bidder and notification options for {selectedTender.name}.</p>
+              <h2 className="text-xl font-bold text-slate-900">
+                {selectedTender.intentToAwardAt && selectedTender.status !== TenderStatus.AWARDED ? "Intent to Award Review" : "Issue Intent to Award"}
+              </h2>
+              <p className="text-sm text-slate-500">
+                The system ranks bidders by weighted technical and financial scoring. First issue the Intent to Award to the best evaluated bidder, then confirm the final award after the cooling-off period to generate the PBA.
+              </p>
               
-              <div className="space-y-4">
-                <div className="space-y-2">
-                  <label className="text-sm font-bold text-slate-700">Winning Bid</label>
-                  {awardBidLoading ? (
-                    <div className="text-xs text-slate-500">Loading submitted bids...</div>
-                  ) : (
-                    <select
-                      className="input-field"
-                      value={awardBidId}
-                      onChange={(e) => {
-                        const nextId = e.target.value;
-                        setAwardBidId(nextId);
-                        const match = awardBids.find(b => b.id === nextId);
-                        if (match) {
-                          setAwardWinner(match.vendor_name || "");
-                          setAwardWinnerId(match.vendor_id || "");
-                        }
-                      }}
-                    >
-                      <option value="">Select a submitted bid</option>
-                      {awardBids.map(bid => (
-                        <option key={bid.id} value={bid.id}>
-                          {bid.vendor_name} • Vendor {bid.vendor_id} • Version {bid.version_number ?? 1}
-                        </option>
-                      ))}
-                    </select>
-                  )}
-                  {!awardBidLoading && awardBids.length === 0 && (
-                    <p className="text-xs text-amber-700">No TAC‑scored bids found for this tender.</p>
-                  )}
-                  {!awardBidLoading && awardBids.length > 0 && (
-                    <p className="text-[10px] text-slate-400">Only TAC‑scored bids with total score ≥ 71 are available for award.</p>
-                  )}
-                </div>
-                <div className="space-y-2">
-                  <label className="text-sm font-bold text-slate-700">Winning Vendor ID</label>
-                  <input
-                    className="input-field"
-                    value={awardWinnerId}
-                    onChange={(e) => setAwardWinnerId(e.target.value)}
-                    placeholder="Vendor user ID (e.g., 12)"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <label className="text-sm font-bold text-slate-700">Winning Vendor Name</label>
-                  <input
-                    className="input-field"
-                    value={awardWinner}
-                    onChange={(e) => setAwardWinner(e.target.value)}
-                    placeholder="Vendor legal name"
-                  />
-                </div>
-
-                <div className="space-y-2">
-                  <label className="text-sm font-bold text-slate-700">Notification Options</label>
-                  <div className="space-y-2">
-                    <label className="flex items-center gap-3 cursor-pointer">
-                      <input 
-                        type="checkbox" 
-                        className="w-5 h-5 rounded border-slate-300 text-emerald-600" 
-                        checked={notifyEmail}
-                        onChange={(e) => setNotifyEmail(e.target.checked)}
+              <div className="grid grid-cols-1 gap-6 xl:grid-cols-[1.2fr_0.8fr]">
+                <div className="space-y-4">
+                  <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                    <div className="space-y-2 md:col-span-2">
+                      <label className="text-sm font-bold text-slate-700">Winning Bid</label>
+                      {awardBidLoading ? (
+                        <div className="text-xs text-slate-500">Loading submitted bids...</div>
+                      ) : (
+                        <select
+                          className="input-field"
+                          value={awardBidId}
+                          onChange={(e) => {
+                            const nextId = e.target.value;
+                            setAwardBidId(nextId);
+                            const match = awardBids.find(b => b.id === nextId);
+                            if (match) {
+                              setAwardWinner(match.vendor_name || "");
+                              setAwardWinnerId(match.vendor_id || "");
+                            }
+                          }}
+                        >
+                          <option value="">Select a submitted bid</option>
+                          {awardBids.map(bid => (
+                            <option key={bid.id} value={bid.id}>
+                              {bid.vendor_name} • Vendor {bid.vendor_id} • Version {bid.version_number ?? 1}
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                      {!awardBidLoading && awardBids.length === 0 && (
+                        <p className="text-xs text-amber-700">No TAC‑scored bids found for this tender.</p>
+                      )}
+                      {!awardBidLoading && awardBids.length > 0 && (
+                        <p className="text-[10px] text-slate-400">Only TAC‑scored bids with total score ≥ 71 are available for award.</p>
+                      )}
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-bold text-slate-700">Winning Vendor ID</label>
+                      <input
+                        className="input-field"
+                        value={awardWinnerId}
+                        onChange={(e) => setAwardWinnerId(e.target.value)}
+                        placeholder="Vendor user ID (e.g., 12)"
                       />
-                      <span className="text-sm font-medium text-slate-700">Send Email Notification</span>
-                    </label>
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-bold text-slate-700">Winning Vendor Name</label>
+                      <input
+                        className="input-field"
+                        value={awardWinner}
+                        onChange={(e) => setAwardWinner(e.target.value)}
+                        placeholder="Vendor legal name"
+                      />
+                    </div>
                   </div>
-                </div>
-              </div>
 
-              <div className="space-y-4 border-t border-slate-100 pt-4">
+                  <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+                    <p className="font-semibold">Award Confirmation Summary</p>
+                    <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-2">
+                      <p>Tender: {selectedTender.name}</p>
+                      <p>Tender ID: {selectedTender.id}</p>
+                      <p>Vendor: {awardWinner || "Select a winning bid"}</p>
+                      <p>Vendor ID: {awardWinnerId || "Select a winning bid"}</p>
+                    </div>
+                    {selectedTender.intentToAwardAt && (
+                      <p className="mt-2 text-xs text-amber-800">
+                        Intent to Award issued on {new Date(selectedTender.intentToAwardAt).toLocaleString()}.
+                        Cooling-off ends on {selectedTender.coolingOffUntil ? new Date(selectedTender.coolingOffUntil).toLocaleString() : "the configured deadline"}.
+                      </p>
+                    )}
+                    {!selectedTender.intentToAwardAt && (
+                      <p className="mt-2 text-xs text-amber-800">After you press the button, you will be asked to confirm this exact Intent to Award action before it is submitted.</p>
+                    )}
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-sm font-bold text-slate-700">Notification Options</label>
+                    <div className="space-y-2">
+                      <label className="flex items-center gap-3 cursor-pointer">
+                        <input 
+                          type="checkbox" 
+                          className="w-5 h-5 rounded border-slate-300 text-emerald-600" 
+                          checked={notifyEmail}
+                          onChange={(e) => setNotifyEmail(e.target.checked)}
+                        />
+                        <span className="text-sm font-medium text-slate-700">Send Email Notification</span>
+                      </label>
+                    </div>
+                  </div>
+
+                  {awardRankingRows.length > 0 && (
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                      <p className="text-sm font-semibold text-slate-800">Comparative Ranking Table</p>
+                      <div className="mt-3 max-h-[34vh] overflow-y-auto space-y-2 pr-1 text-xs">
+                        {awardRankingRows.map((row) => (
+                          <div key={row.bid_id} className={`rounded-lg border px-3 py-2 ${row.is_recommended_winner ? "border-emerald-300 bg-emerald-50" : "border-slate-200 bg-white"}`}>
+                            <div className="flex items-center justify-between gap-3">
+                              <div>
+                                <p className="font-semibold text-slate-900">{row.vendor_name}</p>
+                                <p className="text-slate-500">Bid Amount: {row.bid_amount ? `LSL ${Number(row.bid_amount).toLocaleString()}` : "N/A"}</p>
+                              </div>
+                              <div className="text-right">
+                                <p className="font-semibold text-slate-900">Rank {row.rank}</p>
+                                {row.is_recommended_winner && <p className="text-emerald-700 font-semibold">Recommended Winner</p>}
+                              </div>
+                            </div>
+                            <div className="mt-2 grid grid-cols-1 gap-2 text-slate-600 sm:grid-cols-3">
+                              <p>Ts (Technical Score): {row.technical_score ?? "N/A"}</p>
+                              <p>Fs (Financial Score): {row.financial_score ?? "Not opened"}</p>
+                              <p>S (Combined Score): {row.combined_score ?? "N/A"}</p>
+                            </div>
+                            {row.disqualification_reason && (
+                              <p className="mt-2 text-rose-600">{row.disqualification_reason}</p>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="space-y-4 border-t border-slate-100 pt-4 xl:border-t-0 xl:border-l xl:border-slate-100 xl:pl-6 xl:pt-0">
                 <h3 className="text-sm font-bold text-slate-700">Contract & Milestones</h3>
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3 text-xs text-slate-600">
+                  <p className="font-semibold text-slate-700">After Final Award Is Confirmed</p>
+                  <p className="mt-1">1. The PBA is generated.</p>
+                  <p>2. The vendor sees it under Contracting.</p>
+                  <p>3. The vendor downloads and signs it.</p>
+                  <p>4. The vendor uploads a digitally signed PDF or scanned signed PDF.</p>
+                  <p>5. Admin reviews the uploaded package and finalizes it.</p>
+                </div>
                 {tenderContracts.length === 0 && (
-                  <button
-                    onClick={handleGenerateContract}
-                    disabled={isActioning || !awardWinnerId.trim() || selectedTender.status !== TenderStatus.AWARDED}
-                    className="btn-secondary w-full"
-                  >
-                    {isActioning ? "Generating..." : "Generate Contract"}
-                  </button>
+                  <p className="text-xs text-slate-500">The Performance-Based Agreement will be generated automatically as soon as the award is confirmed.</p>
                 )}
                 {activeContract && (
                   <div className="space-y-3">
@@ -2786,6 +2899,40 @@ const Tenders = ({
                       <div className="space-y-3">
                         <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
                           <p className="font-semibold text-slate-700">Signed Contract Review</p>
+                          <p className="mt-1 text-[11px] text-slate-500">The awarded bid package is locked into Annexes A-E and must be complete before final activation.</p>
+                          {activeContract.generatedFile && (
+                            <a
+                              href={activeContract.generatedFile}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="block text-blue-700 hover:text-blue-800 underline mt-1"
+                            >
+                              Download generated Performance-Based Agreement
+                            </a>
+                          )}
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {[
+                              ["Annex A", activeContract.annexAFile],
+                              ["Annex B", activeContract.annexBFile],
+                              ["Annex C", activeContract.annexCFile],
+                              ["Annex D", activeContract.annexDFile],
+                              ["Annex E", activeContract.annexEFile],
+                            ].map(([label, file]) => (
+                              file ? (
+                                <a
+                                  key={label}
+                                  href={String(file)}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="text-blue-700 hover:text-blue-800 underline"
+                                >
+                                  {label}
+                                </a>
+                              ) : (
+                                <span key={label} className="text-rose-600">{label} missing</span>
+                              )
+                            ))}
+                          </div>
                           {activeContract.signedFile ? (
                             <a
                               href={activeContract.signedFile}
@@ -2802,7 +2949,7 @@ const Tenders = ({
                             Status: {activeContract.status}
                           </p>
                         </div>
-                        <p className="text-xs text-slate-500">Configure milestones before approval.</p>
+                        <p className="text-xs text-slate-500">After the vendor uploads the signed PBA, review the uploaded package here and finalize the default 20/50/30 milestones to activate the project.</p>
                         {milestoneDrafts.map((m, idx) => (
                           <div key={`${m.name}-${idx}`} className="grid grid-cols-3 gap-2">
                             <input
@@ -2832,7 +2979,7 @@ const Tenders = ({
                           disabled={isActioning}
                           className="btn-primary w-full"
                         >
-                          {isActioning ? "Approving..." : "Approve Contract"}
+                          {isActioning ? "Finalizing..." : "Finalize Contract"}
                         </button>
                         <div className="space-y-2">
                           <input
@@ -2855,12 +3002,22 @@ const Tenders = ({
                 )}
                 {contractMessage && <p className="text-xs text-slate-600">{contractMessage}</p>}
               </div>
+              </div>
 
-              <div className="flex gap-3 pt-4">
+              <div className="flex flex-col gap-3 border-t border-slate-100 pt-4 sm:flex-row">
                 <button onClick={() => setView("list")} className="btn-secondary flex-1">Cancel</button>
-                {selectedTender.status !== TenderStatus.AWARDED && (
+                {selectedTender.status !== TenderStatus.AWARDED && !selectedTender.intentToAwardAt && (
                   <button onClick={() => handleAward(selectedTender.id)} disabled={isActioning} className="btn-primary flex-1 bg-purple-600 hover:bg-purple-700 disabled:opacity-60">
-                    {isActioning ? "Awarding..." : "Confirm Award"}
+                    {isActioning ? "Submitting..." : "Issue Intent to Award"}
+                  </button>
+                )}
+                {selectedTender.status !== TenderStatus.AWARDED && selectedTender.intentToAwardAt && (
+                  <button
+                    onClick={() => handleConfirmFinalAward(selectedTender.id)}
+                    disabled={isActioning || (selectedTender.coolingOffUntil ? new Date(selectedTender.coolingOffUntil).getTime() > Date.now() : false)}
+                    className="btn-primary flex-1 bg-purple-600 hover:bg-purple-700 disabled:opacity-60"
+                  >
+                    {isActioning ? "Confirming..." : "Confirm Final Award"}
                   </button>
                 )}
               </div>
@@ -6432,6 +6589,7 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
                         { label: "BOQ", url: viewBid.boq_file },
                         { label: "Gender Action Plan", url: viewBid.gender_action_plan_file },
                         { label: "Implementation Plan", url: viewBid.implementation_plan_file },
+                        { label: "Reporting Templates", url: viewBid.reporting_templates_file },
                       ]
                         .filter(doc => Boolean(doc.url))
                         .map(doc => (
@@ -6454,6 +6612,7 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
                         viewBid.boq_file,
                         viewBid.gender_action_plan_file,
                         viewBid.implementation_plan_file,
+                        viewBid.reporting_templates_file,
                       ].every(item => !item) && (
                         <p className="text-xs text-slate-500">No documents uploaded for this bid.</p>
                       )}
@@ -6525,12 +6684,14 @@ const VendorDashboard = ({
     boq: File | null;
     genderActionPlan: File | null;
     implementationPlan: File | null;
+    reportingTemplates: File | null;
   }>({
     technicalProposal: null,
     financialProposal: null,
     boq: null,
     genderActionPlan: null,
     implementationPlan: null,
+    reportingTemplates: null,
   });
   const [bidSites, setBidSites] = useState<TenderBidSite[]>([
     { siteName: "", district: "", latitude: undefined, longitude: undefined, systemConfiguration: {}, boqItems: [], notes: "" },
@@ -6691,6 +6852,7 @@ const VendorDashboard = ({
       boq: null,
       genderActionPlan: null,
       implementationPlan: null,
+      reportingTemplates: null,
     });
   };
 
@@ -6738,6 +6900,7 @@ const VendorDashboard = ({
       boq: null,
       genderActionPlan: null,
       implementationPlan: null,
+      reportingTemplates: null,
     });
     const sites = (version.sites || []).map(site => ({
       siteName: site.siteName,
@@ -6806,6 +6969,7 @@ const VendorDashboard = ({
         boq_file: bidFiles.boq ?? undefined,
         gender_action_plan_file: bidFiles.genderActionPlan ?? undefined,
         implementation_plan_file: bidFiles.implementationPlan ?? undefined,
+        reporting_templates_file: bidFiles.reportingTemplates ?? undefined,
         status,
         sites: bidSites,
       };
@@ -6891,7 +7055,9 @@ const VendorDashboard = ({
     setIsContractSubmitting(true);
     setContractMessage(null);
     try {
-      const updated = await signTenderContract(contractId, file);
+      const updated = await signTenderContract(contractId, {
+        signedFile: file,
+      });
       setContracts(prev => prev.map(item => item.id === updated.id ? updated : item));
       setContractFiles(prev => ({ ...prev, [contractId]: null }));
       setContractMessage("Signed contract uploaded successfully.");
@@ -6986,6 +7152,7 @@ const VendorDashboard = ({
                     { key: "boq", label: "BOQ / Bill of Quantities", hint: "XLSX/PDF" },
                     { key: "genderActionPlan", label: "Gender Action Plan", hint: "PDF/DOCX" },
                     { key: "implementationPlan", label: "Implementation Plan", hint: "PDF/DOCX" },
+                    { key: "reportingTemplates", label: "Reporting Templates", hint: "PDF/DOCX/XLSX" },
                   ].map((doc, idx) => (
                     <div key={doc.key} className="p-4 border-2 border-dashed border-slate-200 rounded-xl text-center bg-slate-50">
                       <label htmlFor={`bid-doc-${doc.key}-${idx}`} className="cursor-pointer block">
@@ -7151,13 +7318,14 @@ const VendorDashboard = ({
                       </p>
                     )}
                     <div className="mt-3 space-y-1 text-[11px]">
-                      {[
-                        { label: "Technical Proposal", url: version.technical_proposal_file },
-                        { label: "Financial Proposal", url: version.financial_proposal_file },
-                        { label: "BOQ", url: version.boq_file },
-                        { label: "Gender Action Plan", url: version.gender_action_plan_file },
-                        { label: "Implementation Plan", url: version.implementation_plan_file },
-                      ].filter(doc => Boolean(doc.url)).length === 0 ? (
+                        {[
+                          { label: "Technical Proposal", url: version.technical_proposal_file },
+                          { label: "Financial Proposal", url: version.financial_proposal_file },
+                          { label: "BOQ", url: version.boq_file },
+                          { label: "Gender Action Plan", url: version.gender_action_plan_file },
+                          { label: "Implementation Plan", url: version.implementation_plan_file },
+                          { label: "Reporting Templates", url: version.reporting_templates_file },
+                        ].filter(doc => Boolean(doc.url)).length === 0 ? (
                         <p className="text-slate-400">No documents uploaded.</p>
                       ) : (
                         <div className="flex flex-wrap gap-2">
@@ -7167,6 +7335,7 @@ const VendorDashboard = ({
                             { label: "BOQ", url: version.boq_file },
                             { label: "Gender Action Plan", url: version.gender_action_plan_file },
                             { label: "Implementation Plan", url: version.implementation_plan_file },
+                            { label: "Reporting Templates", url: version.reporting_templates_file },
                           ]
                             .filter(doc => Boolean(doc.url))
                             .map(doc => (
@@ -7526,7 +7695,7 @@ const VendorDashboard = ({
             <div>
               <p className="text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-400">Contract Workflow</p>
               <h3 className="text-2xl font-bold text-slate-900 mt-2">Contracting & Project Setup</h3>
-              <p className="text-sm text-slate-500">Upload signed agreements, track review, and move into implementation.</p>
+              <p className="text-sm text-slate-500">After final award, the generated PBA appears here. Download it, review the locked Annexes A-E, sign it digitally or by scanned wet-signature PDF, upload it, and wait for final admin approval.</p>
             </div>
             <div className="flex flex-wrap gap-2 text-[11px]">
               <span className="badge bg-slate-100 text-slate-700">Generated</span>
@@ -7570,35 +7739,73 @@ const VendorDashboard = ({
                     ))}
                   </div>
 
-                  {contract.status === "Generated" && (
-                    <div className="mt-5 space-y-3">
-                      <label className="text-xs font-semibold text-slate-600">Upload signed agreement</label>
-                      <div className="flex flex-col gap-3 sm:flex-row">
-                        <input
-                          type="file"
-                          accept=".pdf,.doc,.docx"
-                          onChange={(e) => {
-                            const file = e.target.files?.[0] || null;
-                            setContractFiles(prev => ({ ...prev, [contract.id]: file }));
-                          }}
-                          className="input-field"
-                        />
-                        <button
-                          onClick={() => handleSignContract(contract.id)}
-                          disabled={isContractSubmitting}
-                          className="btn-primary px-6 disabled:opacity-60"
-                        >
-                          {isContractSubmitting ? "Uploading..." : "Upload Signed Contract"}
-                        </button>
+                  {contract.generatedFile && (
+                    <div className="mt-5 space-y-2">
+                      <a
+                        href={contract.generatedFile}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex text-xs font-semibold text-blue-700 underline"
+                      >
+                        Download generated Performance-Based Agreement
+                      </a>
+                      <div className="flex flex-wrap gap-3 text-xs text-slate-600">
+                        {[
+                          ["Annex A: Results Framework", contract.annexAFile],
+                          ["Annex B: Implementation Schedule", contract.annexBFile],
+                          ["Annex C: Payment Terms", contract.annexCFile],
+                          ["Annex D: Reporting Formats", contract.annexDFile],
+                          ["Annex E: Technical Standards", contract.annexEFile],
+                        ].map(([label, file]) => (
+                          file ? (
+                            <a key={label} href={String(file)} target="_blank" rel="noreferrer" className="underline text-slate-700">
+                              {label}
+                            </a>
+                          ) : (
+                            <span key={label} className="text-slate-400">{label} missing</span>
+                          )
+                        ))}
                       </div>
                     </div>
                   )}
 
+                  {contract.status === "Generated" && (
+                    <div className="mt-5 space-y-3">
+                      <label className="text-xs font-semibold text-slate-600">Upload signed agreement</label>
+                      <input
+                        type="file"
+                        accept=".pdf,application/pdf"
+                        onChange={(e) => {
+                          const file = e.target.files?.[0] || null;
+                          setContractFiles(prev => ({ ...prev, [contract.id]: file }));
+                        }}
+                        className="input-field"
+                      />
+                      <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600 space-y-1">
+                        <p className="font-semibold text-slate-700">Locked Contract Annexes</p>
+                        <p>Upload a signed PDF only. Digitally signed PDFs and scanned wet-signature PDFs are both accepted.</p>
+                        <p>After upload, the admin will review and finalize the contract before the project becomes active.</p>
+                        <p>Annex A: {contract.annexAFile ? "Results Framework from the awarded Gender Action Plan is attached" : "Missing"}</p>
+                        <p>Annex B: {contract.annexBFile ? "Implementation Schedule from the awarded Implementation Plan is attached" : "Missing"}</p>
+                        <p>Annex C: {contract.annexCFile ? "Payment Terms including the BOQ and disbursement table are attached" : "Missing"}</p>
+                        <p>Annex D: {contract.annexDFile ? "Reporting Formats from the standardized system templates are attached" : "Missing"}</p>
+                        <p>Annex E: {contract.annexEFile ? "Technical Standards from the awarded Technical Proposal are attached" : "Missing"}</p>
+                      </div>
+                      <button
+                        onClick={() => handleSignContract(contract.id)}
+                        disabled={isContractSubmitting}
+                        className="btn-primary px-6 disabled:opacity-60"
+                      >
+                        {isContractSubmitting ? "Uploading..." : "Submit Signed PBA"}
+                      </button>
+                    </div>
+                  )}
+
                   {contract.status === "Submitted" && (
-                    <p className="mt-5 text-xs text-amber-700">Signed contract uploaded. Awaiting admin approval.</p>
+                    <p className="mt-5 text-xs text-amber-700">Signed agreement uploaded successfully. Admin can now review the complete package and finalize the contract.</p>
                   )}
                   {contract.status === "Approved" && (
-                    <p className="mt-5 text-xs text-emerald-700">Contract approved. Project and milestones are now active.</p>
+                    <p className="mt-5 text-xs text-emerald-700">Contract finalized. The project is now active, the mobilization payment request has been queued, and installation reporting access is enabled.</p>
                   )}
                   {contract.status === "Rejected" && (
                     <p className="mt-5 text-xs text-rose-600">Rejected: {contract.rejectionReason || "Please contact admin."}</p>
@@ -7706,7 +7913,15 @@ const VendorDashboard = ({
                 return;
               }
               if (activeTenders.length > 0) {
-                void openBidForm(activeTenders[0]);
+                const latest = activeTenders[0];
+                const deadline = latest.lastDateSubmission || latest.deadline;
+                const deadlineOk = !deadline || new Date(deadline) > new Date();
+                const statusOk = latest.status === TenderStatus.PUBLISHED;
+                if (!deadlineOk || !statusOk) {
+                  alert("This tender is no longer open for bidding.");
+                  return;
+                }
+                void openBidForm(latest);
               }
             }}
             className="btn-secondary text-sm"
@@ -7723,7 +7938,12 @@ const VendorDashboard = ({
               </div>
               <button
                 onClick={() => openBidForm(tender)}
-                disabled={!isPreQualified}
+                disabled={!isPreQualified || (() => {
+                  const deadline = tender.lastDateSubmission || tender.deadline;
+                  const deadlineOk = !deadline || new Date(deadline) > new Date();
+                  const statusOk = tender.status === TenderStatus.PUBLISHED;
+                  return !(deadlineOk && statusOk);
+                })()}
                 className="btn-primary py-1.5 px-4 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 Submit Proposal
@@ -7813,9 +8033,9 @@ const VendorDashboard = ({
         </div>
         <div className="p-6 space-y-6">
           {[
-            { name: "Thaba-Tseka SHS Phase 1", progress: 100, status: "Verified", amount: "M 45,000" },
-            { name: "Thaba-Tseka SHS Phase 2", progress: 45, status: "In Progress", amount: "M 60,000" },
-            { name: "Maseru Mini-Grid Expansion", progress: 10, status: "Contracting", amount: "M 250,000" },
+            { id: "demo-ms-1", projectId: "demo-project-1", name: "Thaba-Tseka SHS Phase 1", percentage: 100, progressPercentage: 100, progress: 100, status: "Verified" as const, amount: 45000 },
+            { id: "demo-ms-2", projectId: "demo-project-2", name: "Thaba-Tseka SHS Phase 2", percentage: 45, progressPercentage: 45, progress: 45, status: "Submitted" as const, amount: 60000 },
+            { id: "demo-ms-3", projectId: "demo-project-3", name: "Maseru Mini-Grid Expansion", percentage: 10, progressPercentage: 10, progress: 10, status: "Pending" as const, amount: 250000 },
           ].map((p, i) => (
             <div key={i} className="flex items-center gap-6">
               <div className="flex-1">
@@ -7828,7 +8048,7 @@ const VendorDashboard = ({
                 </div>
               </div>
               <div className="text-right min-w-[100px]">
-                <div className="text-sm font-bold text-slate-900">{p.amount}</div>
+                <div className="text-sm font-bold text-slate-900">M {Number(p.amount).toLocaleString()}</div>
                 <div className={`text-[10px] font-bold uppercase ${p.status === 'Verified' ? 'text-emerald-600' : 'text-amber-600'}`}>{p.status}</div>
               </div>
               <button 
@@ -7846,18 +8066,26 @@ const VendorDashboard = ({
 };
 
 const VendorProjectsHub = () => {
+  const createEmptyMilestoneDraft = () => ({
+    name: "",
+    description: "",
+    progressPercentage: "0",
+    targetDate: "",
+    completedDate: "",
+  });
   const [projects, setProjects] = useState<Project[]>([]);
   const [milestones, setMilestones] = useState<Milestone[]>([]);
   const [claims, setClaims] = useState<PaymentClaim[]>([]);
   const [contracts, setContracts] = useState<TenderContract[]>([]);
   const [projectUpdates, setProjectUpdates] = useState<ProjectUpdate[]>([]);
   const [projectDocuments, setProjectDocuments] = useState<ProjectDocument[]>([]);
+  const [installationReports, setInstallationReports] = useState<InstallationReport[]>([]);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState("");
   const [techFilter, setTechFilter] = useState("All");
   const [statusFilter, setStatusFilter] = useState("All");
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
-  const [projectTab, setProjectTab] = useState<"overview" | "milestones" | "planning" | "payments" | "documents" | "updates">("overview");
+  const [projectTab, setProjectTab] = useState<"overview" | "milestones" | "planning" | "payments" | "documents" | "updates" | "fieldwork">("overview");
   const [deploymentPlan, setDeploymentPlan] = useState({
     teamRoster: "",
     equipmentPlan: "",
@@ -7865,16 +8093,27 @@ const VendorProjectsHub = () => {
   });
   const [planSaving, setPlanSaving] = useState(false);
   const [planMessage, setPlanMessage] = useState<string | null>(null);
-  const [milestoneDraft, setMilestoneDraft] = useState({ name: "", percentage: "", amount: "" });
+  const [milestoneDraft, setMilestoneDraft] = useState(createEmptyMilestoneDraft);
   const [milestoneSaving, setMilestoneSaving] = useState(false);
   const [milestoneMessage, setMilestoneMessage] = useState<string | null>(null);
-  const [updateDraft, setUpdateDraft] = useState({ title: "", body: "" });
-  const [updateSaving, setUpdateSaving] = useState(false);
-  const [updateMessage, setUpdateMessage] = useState<string | null>(null);
+  const [editingMilestoneId, setEditingMilestoneId] = useState<string | null>(null);
+  const [milestoneEditDraft, setMilestoneEditDraft] = useState(createEmptyMilestoneDraft);
   const [documentTitle, setDocumentTitle] = useState("");
   const [documentFile, setDocumentFile] = useState<File | null>(null);
   const [documentUploading, setDocumentUploading] = useState(false);
   const [documentMessage, setDocumentMessage] = useState<string | null>(null);
+  const [reportDraft, setReportDraft] = useState({
+    serialNumber: "",
+    beneficiaryId: "",
+    gpsLat: "",
+    gpsLng: "",
+    meterId: "",
+    kwhReading: "",
+  });
+  const [reportPhotos, setReportPhotos] = useState<File[]>([]);
+  const [reportReceipt, setReportReceipt] = useState<File | null>(null);
+  const [reportSubmitting, setReportSubmitting] = useState(false);
+  const [reportMessage, setReportMessage] = useState<string | null>(null);
 
   const loadData = React.useCallback(async () => {
     setLoading(true);
@@ -7903,6 +8142,7 @@ const VendorProjectsHub = () => {
   React.useEffect(() => {
     if (!selectedProject) {
       setProjectDocuments([]);
+      setInstallationReports([]);
       return;
     }
     setDeploymentPlan({
@@ -7911,13 +8151,17 @@ const VendorProjectsHub = () => {
       workSchedule: selectedProject.deploymentWorkSchedule || "",
     });
     setPlanMessage(null);
-    setMilestoneDraft({ name: "", percentage: "", amount: "" });
+    setMilestoneDraft(createEmptyMilestoneDraft());
     setMilestoneMessage(null);
-    setUpdateDraft({ title: "", body: "" });
-    setUpdateMessage(null);
+    setEditingMilestoneId(null);
+    setMilestoneEditDraft(createEmptyMilestoneDraft());
     setDocumentTitle("");
     setDocumentFile(null);
     setDocumentMessage(null);
+    setReportDraft({ serialNumber: "", beneficiaryId: "", gpsLat: "", gpsLng: "", meterId: "", kwhReading: "" });
+    setReportPhotos([]);
+    setReportReceipt(null);
+    setReportMessage(null);
   }, [selectedProject]);
 
   React.useEffect(() => {
@@ -7925,10 +8169,37 @@ const VendorProjectsHub = () => {
     let active = true;
     (async () => {
       try {
-        const docs = await fetchProjectDocuments(selectedProject.id);
-        if (active) setProjectDocuments(docs);
+        const [docs, updates] = await Promise.all([
+          fetchProjectDocuments(selectedProject.id),
+          fetchProjectUpdates(selectedProject.id),
+        ]);
+        if (active) {
+          setProjectDocuments(docs);
+          setProjectUpdates(prev => {
+            const otherProjects = prev.filter(update => update.projectId !== selectedProject.id);
+            return [...updates, ...otherProjects];
+          });
+        }
       } catch {
-        if (active) setProjectDocuments([]);
+        if (active) {
+          setProjectDocuments([]);
+        }
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [selectedProject]);
+
+  React.useEffect(() => {
+    if (!selectedProject) return;
+    let active = true;
+    (async () => {
+      try {
+        const reports = await fetchInstallationReports(selectedProject.id);
+        if (active) setInstallationReports(reports);
+      } catch {
+        if (active) setInstallationReports([]);
       }
     })();
     return () => {
@@ -7953,7 +8224,7 @@ const VendorProjectsHub = () => {
     () => projects.filter(p => p.status === ProjectStatus.CONTRACTING),
     [projects]
   );
-  const contractValueByProject = useMemo(() => {
+  const contractValueByProject = useMemo<Map<string, number>>(() => {
     const map = new Map<string, number>();
     milestones.forEach(m => {
       const total = map.get(m.projectId) ?? 0;
@@ -7962,7 +8233,7 @@ const VendorProjectsHub = () => {
     return map;
   }, [milestones]);
   const totalContractValue = useMemo(
-    () => Array.from(contractValueByProject.values()).reduce((sum, val) => sum + val, 0),
+    () => Array.from<number>(contractValueByProject.values()).reduce((sum, val) => sum + val, 0),
     [contractValueByProject]
   );
   const filteredProjects = useMemo(() => {
@@ -7989,11 +8260,90 @@ const VendorProjectsHub = () => {
     .filter(d => d.projectId === projectId)
     .slice()
     .sort((a, b) => (b.uploadedAt || "").localeCompare(a.uploadedAt || ""));
+  const reportsForProject = (projectId: string) => installationReports
+    .filter(r => r.projectId === projectId)
+    .slice()
+    .sort((a, b) => (b.submittedAt || "").localeCompare(a.submittedAt || ""));
+  const refreshProjectUpdates = async (projectId: string) => {
+    try {
+      const updates = await fetchProjectUpdates(projectId);
+      setProjectUpdates(prev => {
+        const otherProjects = prev.filter(update => update.projectId !== projectId);
+        return [...updates, ...otherProjects];
+      });
+    } catch {
+      // Leave the current update list in place if refresh fails.
+    }
+  };
   const formatDate = (value?: string) => {
     if (!value) return "N/A";
     const parsed = new Date(value);
     if (Number.isNaN(parsed.getTime())) return "N/A";
-    return parsed.toLocaleDateString();
+    return parsed.toLocaleDateString("en-US");
+  };
+  const toSortableDate = (value?: string) => {
+    if (!value) return Number.POSITIVE_INFINITY;
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? Number.POSITIVE_INFINITY : parsed.getTime();
+  };
+  const milestoneProgress = (milestone: Milestone) => Math.min(100, Math.max(0, Number(milestone.progressPercentage ?? 0)));
+  const milestoneCompleted = (milestone: Milestone) => milestoneProgress(milestone) >= 100 || Boolean(milestone.completedDate);
+  const nextOpenMilestoneForProject = (projectId: string) => {
+    const openMilestones = milestonesForProject(projectId).filter(m => !milestoneCompleted(m));
+    if (openMilestones.length === 0) return undefined;
+    return openMilestones
+      .slice()
+      .sort((a, b) => {
+        const dateDelta = toSortableDate(a.targetDate) - toSortableDate(b.targetDate);
+        if (dateDelta !== 0) return dateDelta;
+        return milestoneProgress(b) - milestoneProgress(a);
+      })[0];
+  };
+  const milestoneStatusFromProgress = (progress: number): Milestone["status"] => {
+    if (progress >= 100) return "Verified";
+    if (progress > 0) return "Submitted";
+    return "Pending";
+  };
+  const milestoneBadge = (milestone: Milestone) => {
+    if (milestoneCompleted(milestone)) {
+      return {
+        label: "Completed",
+        className: "border-emerald-200 bg-emerald-50 text-emerald-700",
+        barClassName: "bg-emerald-500",
+      };
+    }
+    if (milestoneProgress(milestone) > 0) {
+      return {
+        label: "In Progress",
+        className: "border-amber-200 bg-amber-50 text-amber-700",
+        barClassName: "bg-amber-400",
+      };
+    }
+    return {
+      label: "Not Started",
+      className: "border-slate-200 bg-slate-100 text-slate-600",
+      barClassName: "bg-slate-300",
+    };
+  };
+  const toMilestoneDraft = (milestone?: Milestone | null) => ({
+    name: milestone?.name ?? "",
+    description: milestone?.description ?? "",
+    progressPercentage: milestone ? String(milestoneProgress(milestone)) : "0",
+    targetDate: milestone?.targetDate ?? "",
+    completedDate: milestone?.completedDate ?? "",
+  });
+  const normalizeMilestoneDateInput = (value?: string | null) => {
+    const raw = String(value ?? "").trim();
+    if (!raw) return "";
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+    const slashMatch = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})$/);
+    if (!slashMatch) return null;
+    const [, monthRaw, dayRaw, yearRaw] = slashMatch;
+    const month = Number(monthRaw);
+    const day = Number(dayRaw);
+    const year = yearRaw.length === 2 ? 2000 + Number(yearRaw) : Number(yearRaw);
+    if (month < 1 || month > 12 || day < 1 || day > 31 || year < 2000 || year > 2100) return null;
+    return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
   };
   const toFileUrl = (raw?: string | null) => {
     if (!raw) return null;
@@ -8030,6 +8380,7 @@ const VendorProjectsHub = () => {
       });
       setSelectedProject(updated);
       setProjects(prev => prev.map(p => (p.id === updated.id ? updated : p)));
+      await refreshProjectUpdates(updated.id);
       setPlanMessage("Deployment plan saved.");
     } catch (err: any) {
       const raw = String(err?.message || "");
@@ -8042,18 +8393,23 @@ const VendorProjectsHub = () => {
   const handleAddMilestone = async () => {
     if (!selectedProject) return;
     const name = milestoneDraft.name.trim();
-    const percentageValue = Number(milestoneDraft.percentage);
-    const amountValue = Number(milestoneDraft.amount);
+    const description = milestoneDraft.description.trim();
+    const requestedProgressValue = Number(milestoneDraft.progressPercentage);
+    const normalizedTargetDate = normalizeMilestoneDateInput(milestoneDraft.targetDate);
+    const normalizedCompletedDate = normalizeMilestoneDateInput(milestoneDraft.completedDate);
+    const targetDate = normalizedTargetDate || undefined;
+    const completedDate = normalizedCompletedDate || undefined;
+    const progressValue = completedDate ? 100 : requestedProgressValue;
     if (!name) {
       setMilestoneMessage("Please provide a milestone name.");
       return;
     }
-    if (!Number.isFinite(percentageValue) || percentageValue <= 0 || percentageValue > 100) {
-      setMilestoneMessage("Please provide a milestone percentage between 1 and 100.");
+    if (!Number.isFinite(progressValue) || progressValue < 0 || progressValue > 100) {
+      setMilestoneMessage("Please provide milestone progress between 0 and 100.");
       return;
     }
-    if (!Number.isFinite(amountValue) || amountValue <= 0) {
-      setMilestoneMessage("Please provide a valid milestone amount.");
+    if (normalizedTargetDate === null || normalizedCompletedDate === null) {
+      setMilestoneMessage("Please enter milestone dates as YYYY-MM-DD or MM/DD/YYYY.");
       return;
     }
     setMilestoneSaving(true);
@@ -8062,11 +8418,15 @@ const VendorProjectsHub = () => {
       const created = await createMilestone({
         projectId: selectedProject.id,
         name,
-        percentage: percentageValue,
-        amount: amountValue,
+        description,
+        status: milestoneStatusFromProgress(progressValue),
+        progressPercentage: progressValue,
+        targetDate,
+        completedDate,
       });
       setMilestones(prev => [...prev, created]);
-      setMilestoneDraft({ name: "", percentage: "", amount: "" });
+      await refreshProjectUpdates(selectedProject.id);
+      setMilestoneDraft(createEmptyMilestoneDraft());
       setMilestoneMessage("Milestone added.");
     } catch (err: any) {
       const raw = String(err?.message || "");
@@ -8076,29 +8436,65 @@ const VendorProjectsHub = () => {
     }
   };
 
-  const handleAddUpdate = async () => {
-    if (!selectedProject) return;
-    const body = updateDraft.body.trim();
-    if (!body) {
-      setUpdateMessage("Please add update details before saving.");
+  const beginMilestoneEdit = (milestone: Milestone) => {
+    setEditingMilestoneId(milestone.id);
+    setMilestoneEditDraft(toMilestoneDraft(milestone));
+    setMilestoneMessage(null);
+  };
+
+  const handleSaveMilestone = async () => {
+    if (!editingMilestoneId) return;
+    const existingMilestone = milestones.find(item => item.id === editingMilestoneId);
+    if (!existingMilestone) {
+      setMilestoneMessage("Unable to find the milestone to update.");
       return;
     }
-    setUpdateSaving(true);
-    setUpdateMessage(null);
+    const name = milestoneEditDraft.name.trim();
+    const description = milestoneEditDraft.description.trim();
+    const requestedProgressValue = Number(milestoneEditDraft.progressPercentage);
+    const normalizedTargetDate = normalizeMilestoneDateInput(milestoneEditDraft.targetDate);
+    const normalizedCompletedDate = normalizeMilestoneDateInput(milestoneEditDraft.completedDate);
+    const targetDate = normalizedTargetDate || null;
+    const completedDate = normalizedCompletedDate || null;
+    const progressValue = completedDate ? 100 : requestedProgressValue;
+
+    if (!name) {
+      setMilestoneMessage("Please provide a milestone name.");
+      return;
+    }
+    if (!Number.isFinite(progressValue) || progressValue < 0 || progressValue > 100) {
+      setMilestoneMessage("Please provide milestone progress between 0 and 100.");
+      return;
+    }
+    if (normalizedTargetDate === null || normalizedCompletedDate === null) {
+      setMilestoneMessage("Please enter milestone dates as YYYY-MM-DD or MM/DD/YYYY.");
+      return;
+    }
+
+    setMilestoneSaving(true);
+    setMilestoneMessage(null);
     try {
-      const created = await createProjectUpdate({
-        projectId: selectedProject.id,
-        title: updateDraft.title.trim(),
-        body,
+      const updated = await updateMilestone(editingMilestoneId, {
+        projectId: existingMilestone.projectId,
+        name,
+        description,
+        percentage: existingMilestone.percentage,
+        amount: existingMilestone.amount,
+        status: milestoneStatusFromProgress(progressValue),
+        progressPercentage: progressValue,
+        targetDate,
+        completedDate,
       });
-      setProjectUpdates(prev => [created, ...prev]);
-      setUpdateDraft({ title: "", body: "" });
-      setUpdateMessage("Update posted.");
+      setMilestones(prev => prev.map(item => (item.id === updated.id ? updated : item)));
+      await refreshProjectUpdates(existingMilestone.projectId);
+      setEditingMilestoneId(null);
+      setMilestoneEditDraft(createEmptyMilestoneDraft());
+      setMilestoneMessage("Milestone updated.");
     } catch (err: any) {
       const raw = String(err?.message || "");
-      setUpdateMessage(toFriendlyApiMessage(raw) || "Unable to post update.");
+      setMilestoneMessage(toFriendlyApiMessage(raw) || "Unable to update milestone.");
     } finally {
-      setUpdateSaving(false);
+      setMilestoneSaving(false);
     }
   };
 
@@ -8117,6 +8513,7 @@ const VendorProjectsHub = () => {
         file: documentFile,
       });
       setProjectDocuments(prev => [uploaded, ...prev]);
+      await refreshProjectUpdates(selectedProject.id);
       setDocumentTitle("");
       setDocumentFile(null);
       setDocumentMessage("Document uploaded.");
@@ -8126,6 +8523,129 @@ const VendorProjectsHub = () => {
     } finally {
       setDocumentUploading(false);
     }
+  };
+
+  const handleSubmitReport = async () => {
+    if (!selectedProject) return;
+    const serialNumber = reportDraft.serialNumber.trim();
+    const beneficiaryId = reportDraft.beneficiaryId.trim();
+    const gpsLat = Number(reportDraft.gpsLat);
+    const gpsLng = Number(reportDraft.gpsLng);
+    if (!serialNumber || !beneficiaryId) {
+      setReportMessage("Serial number and beneficiary ID are required.");
+      return;
+    }
+    if (!Number.isFinite(gpsLat) || !Number.isFinite(gpsLng)) {
+      setReportMessage("Valid GPS coordinates are required.");
+      return;
+    }
+    setReportSubmitting(true);
+    setReportMessage(null);
+    try {
+      const created = await createInstallationReport({
+        projectId: selectedProject.id,
+        gpsLat,
+        gpsLng,
+        serialNumber,
+        beneficiaryId,
+        meterId: reportDraft.meterId.trim() || undefined,
+        kwhReading: reportDraft.kwhReading ? Number(reportDraft.kwhReading) : undefined,
+        receiptFile: reportReceipt,
+        photoFiles: reportPhotos,
+      });
+      setInstallationReports(prev => [created, ...prev]);
+      await refreshProjectUpdates(selectedProject.id);
+      setReportDraft({ serialNumber: "", beneficiaryId: "", gpsLat: "", gpsLng: "", meterId: "", kwhReading: "" });
+      setReportPhotos([]);
+      setReportReceipt(null);
+      setReportMessage("Installation report submitted.");
+    } catch (err: any) {
+      const raw = String(err?.message || "");
+      setReportMessage(toFriendlyApiMessage(raw) || "Unable to submit installation report.");
+    } finally {
+      setReportSubmitting(false);
+    }
+  };
+
+  const handleGenerateProjectReport = (project: Project) => {
+    const projectUpdatesForExport = updatesForProject(project.id);
+    const projectMilestones = milestonesForProject(project.id);
+    const nextMilestone = nextOpenMilestoneForProject(project.id);
+    const completedMilestones = projectMilestones.filter(m => milestoneCompleted(m));
+    const projectDocumentsForExport = documentsForProject(project.id);
+    const projectReports = reportsForProject(project.id);
+    const latestUpdate = projectUpdatesForExport[0];
+    const budgetValue = budgetForProject(project);
+    const reportLines = [
+      `PROJECT PERFORMANCE REPORT`,
+      `Generated on: ${new Date().toLocaleString()}`,
+      ``,
+      `1. Executive Summary`,
+      `Project Reference: ${project.projectReference || `Project ${project.id}`}`,
+      `Project Title: ${project.projectTitle || "N/A"}`,
+      `Vendor: ${project.vendorName}`,
+      `Technology: ${project.techType}`,
+      `Location: ${[project.region, project.district].filter(Boolean).join(", ") || "N/A"}`,
+      `Current Status: ${project.status}`,
+      `Overall Progress: ${project.progress}%`,
+      `Contract Value: ${budgetValue != null ? `M ${Number(budgetValue).toLocaleString()}` : "N/A"}`,
+      `Reporting Period Start: ${formatDate(startDateForProject(project))}`,
+      `Reporting Period End: ${formatDate(endDateForProject(project))}`,
+      ``,
+      `2. Immediate Priority`,
+      `Next Milestone To Finish: ${nextMilestone?.name || "All milestones completed"}`,
+      `Target Date: ${formatDate(nextMilestone?.targetDate)}`,
+      `Progress: ${nextMilestone ? `${milestoneProgress(nextMilestone)}%` : "100%"}`,
+      `Description: ${nextMilestone?.description?.trim() || "No open milestone description is available."}`,
+      ``,
+      `3. Milestone Status`,
+      ...(projectMilestones.length > 0
+        ? projectMilestones.map((milestone, index) => {
+            const badge = milestoneCompleted(milestone) ? "Completed" : milestoneBadge(milestone).label;
+            return [
+              `${index + 1}. ${milestone.name}`,
+              `   Status: ${badge}`,
+              `   Target Date: ${formatDate(milestone.targetDate)}`,
+              `   Completed Date: ${formatDate(milestone.completedDate)}`,
+              `   Progress: ${milestoneProgress(milestone)}%`,
+              `   Description: ${milestone.description?.trim() || "N/A"}`,
+            ].join("\n");
+          })
+        : ["No milestones have been recorded for this project."]),
+      ``,
+      `4. Project Activity Summary`,
+      `Completed Milestones: ${completedMilestones.length} of ${projectMilestones.length}`,
+      `Project Documents: ${projectDocumentsForExport.length}`,
+      `Installation Reports Submitted: ${projectReports.length}`,
+      `Latest Update: ${latestUpdate?.title || "No recent updates recorded"}`,
+      ``,
+      `5. Documents On Record`,
+      ...(projectDocumentsForExport.length > 0
+        ? projectDocumentsForExport.map((doc, index) => `${index + 1}. ${doc.title || doc.file.split("/").pop() || "Project Document"} - uploaded ${doc.uploadedAt ? new Date(doc.uploadedAt).toLocaleString() : "N/A"}`)
+        : ["No project documents have been uploaded."]),
+      ``,
+      `6. Field Work Summary`,
+      ...(projectReports.length > 0
+        ? projectReports.map((report, index) => `${index + 1}. Serial ${report.serialNumber} | Beneficiary ${report.beneficiaryId} | Status ${report.status} | Submitted ${report.submittedAt ? new Date(report.submittedAt).toLocaleString() : "N/A"}`)
+        : ["No installation reports have been submitted."]),
+      ``,
+      `7. Update Timeline`,
+      ...(projectUpdatesForExport.length > 0
+        ? projectUpdatesForExport.map((update, index) => {
+            const stamp = update.createdAt ? new Date(update.createdAt).toLocaleString() : "N/A";
+            const author = update.authorUsername ? ` | ${update.authorUsername}` : "";
+            return `${index + 1}. ${update.title || "Project Update"} | ${stamp}${author}\n${update.body}`;
+          })
+        : ["No project updates have been recorded yet."]),
+      ``,
+      `End of Report`,
+    ];
+
+    const safeReference = (project.projectReference || `project_${project.id}`)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_|_$/g, "");
+    triggerDownload(`${safeReference || `project_${project.id}`}_report.txt`, reportLines.join("\n"));
   };
 
   const renderProjectDetail = (project: Project) => (
@@ -8138,7 +8658,7 @@ const VendorProjectsHub = () => {
           </p>
         </div>
         <div className="flex items-center gap-2 overflow-x-auto pb-1">
-          {["overview", "milestones", "planning", "payments", "documents", "updates"].map(tab => (
+          {["overview", "milestones", "planning", "payments", "documents", "updates", "fieldwork"].map(tab => (
             <button
               key={tab}
               onClick={() => setProjectTab(tab as typeof projectTab)}
@@ -8148,9 +8668,35 @@ const VendorProjectsHub = () => {
                   : "bg-white text-slate-600 border-slate-200 hover:border-slate-300"
               }`}
             >
-              {tab.charAt(0).toUpperCase() + tab.slice(1)}
+              {tab === "fieldwork" ? "Field Work" : tab.charAt(0).toUpperCase() + tab.slice(1)}
             </button>
           ))}
+        </div>
+        <div className="flex flex-wrap gap-2 text-[11px]">
+          <button
+            onClick={() => setProjectTab("milestones")}
+            className="px-3 py-1.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-100 font-semibold"
+          >
+            Add Milestone
+          </button>
+          <button
+            onClick={() => setProjectTab("documents")}
+            className="px-3 py-1.5 rounded-full bg-slate-100 text-slate-700 border border-slate-200 font-semibold"
+          >
+            Upload Document
+          </button>
+          <button
+            onClick={() => setProjectTab("updates")}
+            className="px-3 py-1.5 rounded-full bg-slate-100 text-slate-700 border border-slate-200 font-semibold"
+          >
+            View Updates
+          </button>
+          <button
+            onClick={() => setProjectTab("fieldwork")}
+            className="px-3 py-1.5 rounded-full bg-blue-50 text-blue-700 border border-blue-100 font-semibold"
+          >
+            Report Installation
+          </button>
         </div>
       </div>
       <div className="px-6 pt-5">
@@ -8178,26 +8724,50 @@ const VendorProjectsHub = () => {
           <div className="space-y-4">
             <div>
               <h4 className="text-sm font-semibold text-slate-800">Overview</h4>
-              <p className="text-xs text-slate-500">Quick snapshot of targets and progress.</p>
+              <p className="text-xs text-slate-500">See the next thing to finish and the actions you can take right now.</p>
             </div>
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-              <div className="card p-4">
-                <p className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">Target Metrics</p>
-                <p className="text-sm text-slate-700 mt-2">
-                  Installations: {project.targetInstallations ?? "N/A"} • Beneficiaries: {project.targetBeneficiaries ?? "N/A"}
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+              <div className="rounded-2xl border border-emerald-100 bg-emerald-50 p-5">
+                <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-emerald-700">Next To Finish</p>
+                <p className="mt-3 text-lg font-semibold text-slate-900">
+                  {nextOpenMilestoneForProject(project.id)?.name || "All milestones completed"}
                 </p>
-                <p className="text-xs text-slate-500 mt-1">
-                  Female ≥{project.targetFemalePct ?? 50}% • Vulnerable ≥{project.targetVulnerablePct ?? 30}%
+                <p className="mt-2 text-sm text-slate-600">
+                  {nextOpenMilestoneForProject(project.id)?.targetDate
+                    ? `Target date: ${formatDate(nextOpenMilestoneForProject(project.id)?.targetDate)}`
+                    : nextOpenMilestoneForProject(project.id)?.description?.trim() || "No open milestone description is available."}
                 </p>
               </div>
-              <div className="card p-4">
-                <p className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">Verification Mode</p>
-                <p className="text-sm text-slate-700 mt-2">Manual (ODK/KoboToolbox)</p>
-              </div>
-              <div className="card p-4">
-                <p className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">Next Milestone</p>
-                <p className="text-sm text-slate-700 mt-2">
-                  {milestonesForProject(project.id).find(m => !["Verified", "Paid"].includes(m.status))?.name || "All milestones completed"}
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
+                <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-slate-500">What You Can Do Now</p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    onClick={() => setProjectTab("milestones")}
+                    className="btn-primary text-xs"
+                  >
+                    Update Milestones
+                  </button>
+                  <button
+                    onClick={() => setProjectTab("documents")}
+                    className="btn-secondary text-xs"
+                  >
+                    Upload Document
+                  </button>
+                  <button
+                    onClick={() => setProjectTab("fieldwork")}
+                    className="btn-secondary text-xs"
+                  >
+                    Report Field Work
+                  </button>
+                  <button
+                    onClick={() => handleGenerateProjectReport(project)}
+                    className="btn-secondary text-xs"
+                  >
+                    Generate Report
+                  </button>
+                </div>
+                <p className="mt-3 text-sm text-slate-500">
+                  Latest update: {updatesForProject(project.id)[0]?.title || "No updates recorded yet"}
                 </p>
               </div>
             </div>
@@ -8262,44 +8832,67 @@ const VendorProjectsHub = () => {
           <div className="space-y-4">
             <div>
               <h4 className="text-sm font-semibold text-slate-800">Milestones</h4>
-              <p className="text-xs text-slate-500">Add new tranches or review existing milestones.</p>
+              <p className="text-xs text-slate-500">Add milestones, set target dates, and track progress from one place.</p>
             </div>
             <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4 space-y-3">
               <div className="flex items-center justify-between">
                 <p className="text-sm font-semibold text-slate-700">Add Milestone</p>
                 <span className="text-[11px] text-slate-400">Fields marked * are required</span>
               </div>
-              <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                 <div className="space-y-1">
                   <label className="text-xs font-semibold text-slate-600">Milestone Name *</label>
                   <input
                     className="input-field"
-                    placeholder="e.g. Equipment Delivery"
+                    placeholder="e.g. Site Assessment"
                     value={milestoneDraft.name}
                     onChange={(e) => setMilestoneDraft(prev => ({ ...prev, name: e.target.value }))}
                   />
                 </div>
                 <div className="space-y-1">
-                  <label className="text-xs font-semibold text-slate-600">Percentage *</label>
+                  <label className="text-xs font-semibold text-slate-600">Target Date</label>
                   <input
                     className="input-field"
-                    type="number"
-                    min={1}
-                    max={100}
-                    placeholder="10"
-                    value={milestoneDraft.percentage}
-                    onChange={(e) => setMilestoneDraft(prev => ({ ...prev, percentage: e.target.value }))}
+                    type="date"
+                    value={milestoneDraft.targetDate}
+                    onChange={(e) => setMilestoneDraft(prev => ({ ...prev, targetDate: e.target.value }))}
+                  />
+                </div>
+                <div className="space-y-1 md:col-span-2">
+                  <label className="text-xs font-semibold text-slate-600">Description</label>
+                  <textarea
+                    className="input-field min-h-[88px]"
+                    placeholder="Briefly explain the purpose of this milestone."
+                    value={milestoneDraft.description}
+                    onChange={(e) => setMilestoneDraft(prev => ({ ...prev, description: e.target.value }))}
                   />
                 </div>
                 <div className="space-y-1">
-                  <label className="text-xs font-semibold text-slate-600">Amount (M) *</label>
+                  <label className="text-xs font-semibold text-slate-600">Progress %</label>
                   <input
                     className="input-field"
                     type="number"
                     min={0}
-                    placeholder="50000"
-                    value={milestoneDraft.amount}
-                    onChange={(e) => setMilestoneDraft(prev => ({ ...prev, amount: e.target.value }))}
+                    max={100}
+                    placeholder="0"
+                    value={milestoneDraft.progressPercentage}
+                    onChange={(e) => setMilestoneDraft(prev => ({
+                      ...prev,
+                      progressPercentage: e.target.value,
+                    }))}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-semibold text-slate-600">Completed Date</label>
+                  <input
+                    className="input-field"
+                    type="date"
+                    value={milestoneDraft.completedDate}
+                    onChange={(e) => setMilestoneDraft(prev => ({
+                      ...prev,
+                      completedDate: e.target.value,
+                      progressPercentage: e.target.value ? "100" : prev.progressPercentage,
+                    }))}
                   />
                 </div>
               </div>
@@ -8318,15 +8911,142 @@ const VendorProjectsHub = () => {
               {milestonesForProject(project.id).length === 0 && (
                 <p className="text-sm text-slate-500">No milestones added yet.</p>
               )}
-              {milestonesForProject(project.id).map(m => (
-                <div key={m.id} className="rounded-xl border border-slate-100 p-4 flex items-center justify-between">
-                  <div>
-                    <p className="font-semibold text-slate-900">{m.name}</p>
-                    <p className="text-xs text-slate-500">{m.percentage}% • M {Number(m.amount || 0).toLocaleString()}</p>
+              {milestonesForProject(project.id).map(m => {
+                const badge = milestoneBadge(m);
+                const progress = milestoneProgress(m);
+                const isEditing = editingMilestoneId === m.id;
+
+                return (
+                  <div key={m.id} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm space-y-4">
+                    <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                      <div className="space-y-2">
+                        <div>
+                          <p className="text-lg font-semibold text-slate-900">{m.name}</p>
+                          <p className="text-sm text-slate-500">
+                            {m.description?.trim() || "No description added yet for this milestone."}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className={`rounded-full border px-3 py-1 text-xs font-semibold ${badge.className}`}>
+                          {badge.label}
+                        </span>
+                        <button
+                          onClick={() => {
+                            if (isEditing) {
+                              setEditingMilestoneId(null);
+                              setMilestoneEditDraft(createEmptyMilestoneDraft());
+                              setMilestoneMessage(null);
+                            } else {
+                              beginMilestoneEdit(m);
+                            }
+                          }}
+                          className="btn-secondary py-1.5 px-3 text-xs"
+                        >
+                          {isEditing ? "Cancel" : "Edit"}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                      <div className="rounded-xl border border-slate-100 bg-slate-50 p-3">
+                        <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Target Date</p>
+                        <p className="mt-1 text-sm font-medium text-slate-900">{formatDate(m.targetDate)}</p>
+                      </div>
+                      {milestoneCompleted(m) && m.completedDate ? (
+                        <div className="rounded-xl border border-slate-100 bg-slate-50 p-3">
+                          <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Completed Date</p>
+                          <p className="mt-1 text-sm font-medium text-slate-900">{formatDate(m.completedDate)}</p>
+                        </div>
+                      ) : (
+                        <div className="rounded-xl border border-slate-100 bg-slate-50 p-3">
+                          <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Completed Date</p>
+                          <p className="mt-1 text-sm font-medium text-slate-400">Shown when the milestone reaches 100%</p>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="font-medium text-slate-700">Progress</span>
+                        <span className="font-semibold text-slate-900">{progress}%</span>
+                      </div>
+                      <div className="h-3 overflow-hidden rounded-full bg-slate-100">
+                        <div className={`h-full rounded-full transition-all ${badge.barClassName}`} style={{ width: `${progress}%` }} />
+                      </div>
+                    </div>
+
+                    {isEditing && (
+                      <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4 space-y-3">
+                        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                          <div className="space-y-1">
+                            <label className="text-xs font-semibold text-slate-600">Milestone Name *</label>
+                            <input
+                              className="input-field"
+                              value={milestoneEditDraft.name}
+                              onChange={(e) => setMilestoneEditDraft(prev => ({ ...prev, name: e.target.value }))}
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-xs font-semibold text-slate-600">Target Date</label>
+                            <input
+                              className="input-field"
+                              type="date"
+                              value={milestoneEditDraft.targetDate}
+                              onChange={(e) => setMilestoneEditDraft(prev => ({ ...prev, targetDate: e.target.value }))}
+                            />
+                          </div>
+                          <div className="space-y-1 md:col-span-2">
+                            <label className="text-xs font-semibold text-slate-600">Description</label>
+                            <textarea
+                              className="input-field min-h-[88px]"
+                              value={milestoneEditDraft.description}
+                              onChange={(e) => setMilestoneEditDraft(prev => ({ ...prev, description: e.target.value }))}
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-xs font-semibold text-slate-600">Progress %</label>
+                            <input
+                              className="input-field"
+                              type="number"
+                              min={0}
+                              max={100}
+                              value={milestoneEditDraft.progressPercentage}
+                              onChange={(e) => setMilestoneEditDraft(prev => ({
+                                ...prev,
+                                progressPercentage: e.target.value,
+                              }))}
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-xs font-semibold text-slate-600">Completed Date</label>
+                            <input
+                              className="input-field"
+                              type="date"
+                              value={milestoneEditDraft.completedDate}
+                              onChange={(e) => setMilestoneEditDraft(prev => ({
+                                ...prev,
+                                completedDate: e.target.value,
+                                progressPercentage: e.target.value ? "100" : prev.progressPercentage,
+                              }))}
+                            />
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <button
+                            onClick={handleSaveMilestone}
+                            className="btn-primary text-xs"
+                            disabled={milestoneSaving}
+                          >
+                            {milestoneSaving ? "Saving..." : "Save Changes"}
+                          </button>
+                          <span className="text-xs text-slate-500">Update the milestone details and progress tracking fields.</span>
+                        </div>
+                      </div>
+                    )}
                   </div>
-                  <span className="badge bg-slate-100 text-slate-700">{m.status}</span>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         )}
@@ -8430,39 +9150,11 @@ const VendorProjectsHub = () => {
           <div className="space-y-4">
             <div>
               <h4 className="text-sm font-semibold text-slate-800">Updates</h4>
-              <p className="text-xs text-slate-500">Post progress updates or review recent notes.</p>
-            </div>
-            <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4 space-y-3">
-              <div className="flex items-center justify-between">
-                <p className="text-sm font-semibold text-slate-700">Add Update</p>
-                <span className="text-[11px] text-slate-400">Visible to your project team</span>
-              </div>
-              <input
-                className="input-field"
-                placeholder="Update title (optional)"
-                value={updateDraft.title}
-                onChange={(e) => setUpdateDraft(prev => ({ ...prev, title: e.target.value }))}
-              />
-              <textarea
-                className="input-field min-h-[110px]"
-                placeholder="Share progress, risks, or milestones achieved..."
-                value={updateDraft.body}
-                onChange={(e) => setUpdateDraft(prev => ({ ...prev, body: e.target.value }))}
-              />
-              <div className="flex items-center gap-3">
-                <button
-                  onClick={handleAddUpdate}
-                  className="btn-primary text-xs"
-                  disabled={updateSaving}
-                >
-                  {updateSaving ? "Posting..." : "Add Update"}
-                </button>
-                {updateMessage && <span className="text-xs text-slate-500">{updateMessage}</span>}
-              </div>
+              <p className="text-xs text-slate-500">Recent activity from milestones, planning, documents, field work, and payments appears here automatically.</p>
             </div>
             <div className="space-y-3">
               {updatesForProject(project.id).length === 0 && (
-                <p className="text-sm text-slate-500">No recent updates yet.</p>
+                <p className="text-sm text-slate-500">No recent updates yet. New project activity will appear here automatically.</p>
               )}
               {updatesForProject(project.id).map(update => (
                 <div key={update.id} className="rounded-xl border border-slate-100 p-4 space-y-2">
@@ -8476,6 +9168,109 @@ const VendorProjectsHub = () => {
                   {update.authorUsername && (
                     <p className="text-xs text-slate-400">Posted by {update.authorUsername}</p>
                   )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        {projectTab === "fieldwork" && (
+          <div className="space-y-4">
+            <div>
+              <h4 className="text-sm font-semibold text-slate-800">Field Work Reporting</h4>
+              <p className="text-xs text-slate-500">Submit installation evidence for verification.</p>
+            </div>
+            <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-semibold text-slate-700">New Installation Report</p>
+                <span className="text-[11px] text-slate-400">GPS + Photo + Receipt</span>
+              </div>
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                <input
+                  className="input-field"
+                  placeholder="Serial number"
+                  value={reportDraft.serialNumber}
+                  onChange={(e) => setReportDraft(prev => ({ ...prev, serialNumber: e.target.value }))}
+                />
+                <input
+                  className="input-field"
+                  placeholder="Beneficiary ID (NID)"
+                  value={reportDraft.beneficiaryId}
+                  onChange={(e) => setReportDraft(prev => ({ ...prev, beneficiaryId: e.target.value }))}
+                />
+                <input
+                  className="input-field"
+                  placeholder="GPS Latitude"
+                  value={reportDraft.gpsLat}
+                  onChange={(e) => setReportDraft(prev => ({ ...prev, gpsLat: e.target.value }))}
+                />
+                <input
+                  className="input-field"
+                  placeholder="GPS Longitude"
+                  value={reportDraft.gpsLng}
+                  onChange={(e) => setReportDraft(prev => ({ ...prev, gpsLng: e.target.value }))}
+                />
+                <input
+                  className="input-field"
+                  placeholder="Smart meter ID (optional)"
+                  value={reportDraft.meterId}
+                  onChange={(e) => setReportDraft(prev => ({ ...prev, meterId: e.target.value }))}
+                />
+                <input
+                  className="input-field"
+                  placeholder="kWh reading (optional)"
+                  value={reportDraft.kwhReading}
+                  onChange={(e) => setReportDraft(prev => ({ ...prev, kwhReading: e.target.value }))}
+                />
+              </div>
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                <input
+                  className="input-field"
+                  type="file"
+                  multiple
+                  onChange={(e) => setReportPhotos(Array.from(e.target.files || []))}
+                />
+                <input
+                  className="input-field"
+                  type="file"
+                  onChange={(e) => setReportReceipt(e.target.files?.[0] || null)}
+                />
+              </div>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={handleSubmitReport}
+                  className="btn-primary text-xs"
+                  disabled={reportSubmitting}
+                >
+                  {reportSubmitting ? "Submitting..." : "Submit Report"}
+                </button>
+                {reportMessage && <span className="text-xs text-slate-500">{reportMessage}</span>}
+              </div>
+            </div>
+            <div className="space-y-3">
+              {reportsForProject(project.id).length === 0 && (
+                <p className="text-sm text-slate-500">No installation reports submitted yet.</p>
+              )}
+              {reportsForProject(project.id).map(report => (
+                <div key={report.id} className="rounded-xl border border-slate-100 p-4 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <p className="font-semibold text-slate-900">Serial: {report.serialNumber}</p>
+                    <span className="badge bg-slate-100 text-slate-700">{report.status}</span>
+                  </div>
+                  <div className="text-xs text-slate-500">
+                    Beneficiary: {report.beneficiaryId} • GPS: {report.gpsLat}, {report.gpsLng}
+                  </div>
+                  <div className="flex flex-wrap gap-2 text-xs text-emerald-700">
+                    {(report.photoFiles || []).map((file, idx) => (
+                      <a key={`${report.id}-photo-${idx}`} href={toFileUrl(file) ?? "#"} target="_blank" rel="noreferrer" className="underline">
+                        Photo {idx + 1}
+                      </a>
+                    ))}
+                    {(report.receiptFileUrl || report.receiptFile) && (
+                      <a href={toFileUrl(report.receiptFileUrl || report.receiptFile) ?? "#"} target="_blank" rel="noreferrer" className="underline">
+                        Receipt
+                      </a>
+                    )}
+                  </div>
                 </div>
               ))}
             </div>
@@ -8920,6 +9715,7 @@ const TACView = () => {
                   { label: "BOQ", url: selectedEval.bid.boq_file },
                   { label: "Gender Action Plan", url: selectedEval.bid.gender_action_plan_file },
                   { label: "Implementation Plan", url: selectedEval.bid.implementation_plan_file },
+                  { label: "Reporting Templates", url: selectedEval.bid.reporting_templates_file },
                 ]
                   .filter(doc => Boolean(doc.url))
                   .map(doc => (
@@ -8942,6 +9738,7 @@ const TACView = () => {
                   selectedEval.bid.boq_file,
                   selectedEval.bid.gender_action_plan_file,
                   selectedEval.bid.implementation_plan_file,
+                  selectedEval.bid.reporting_templates_file,
                 ].every(item => !item) && (
                   <p className="text-xs text-slate-500">No documents uploaded for this bid.</p>
                 )}
@@ -11196,9 +11993,9 @@ export default function App() {
           <AnimatePresence mode="wait">
             <motion.div
               key={`${role}-${activeTab}`}
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -10 }}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
               transition={{ duration: 0.2 }}
             >
               {renderContent()}

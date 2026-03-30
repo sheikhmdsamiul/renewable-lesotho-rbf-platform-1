@@ -13,6 +13,11 @@ from .models import (
     Milestone,
     ProjectUpdate,
     ProjectDocument,
+    InstallationReport,
+    InstallationStatus,
+    VerificationTask,
+    VerificationStatus,
+    SmartMeterReading,
     PaymentClaim,
     PaymentClaimStatus,
     Disbursement,
@@ -24,12 +29,17 @@ from .serializers import (
     MilestoneSerializer,
     ProjectUpdateSerializer,
     ProjectDocumentSerializer,
+    InstallationReportSerializer,
+    VerificationTaskSerializer,
+    SmartMeterReadingSerializer,
     PaymentClaimSerializer,
     DisbursementSerializer,
     AuditLogSerializer,
 )
 from rbf.users.models import UserRole
+from rbf.users.models import User
 from .audit import log_audit
+from rbf.notifications.models import Notification, NotificationChannel, NotificationStatus
 
 
 def vendor_query_filter(user, prefix: str = ''):
@@ -39,6 +49,15 @@ def vendor_query_filter(user, prefix: str = ''):
     vendor_names = {user.full_name, user.organization_name, user.username}
     vendor_names = {name for name in vendor_names if name}
     return Q(**{f'{prefix}vendor_id__in': vendor_ids}) | Q(**{f'{prefix}vendor_name__in': vendor_names})
+
+
+def create_project_activity_update(project: Project, author, title: str, body: str):
+    return ProjectUpdate.objects.create(
+        project=project,
+        author=author,
+        title=title,
+        body=body,
+    )
 
 
 class ProjectViewSet(viewsets.ModelViewSet):
@@ -90,6 +109,30 @@ class ProjectViewSet(viewsets.ModelViewSet):
             self._enforce_vendor_locked_fields(request.data)
         return super().partial_update(request, *args, **kwargs)
 
+    def perform_update(self, serializer):
+        instance = self.get_object()
+        tracked_fields = {
+            'deployment_team_roster': 'field team roster',
+            'deployment_equipment_plan': 'equipment sourcing plan',
+            'deployment_work_schedule': 'work schedule',
+        }
+        changed_labels = []
+        for field_name, label in tracked_fields.items():
+            if field_name in serializer.validated_data:
+                previous = getattr(instance, field_name, '') or ''
+                current = serializer.validated_data.get(field_name) or ''
+                if previous != current:
+                    changed_labels.append(label)
+
+        project = serializer.save()
+        if changed_labels:
+            create_project_activity_update(
+                project,
+                self.request.user,
+                'Deployment Plan Updated',
+                f"Updated deployment planning details: {', '.join(changed_labels)}.",
+            )
+
     def destroy(self, request, *args, **kwargs):
         self._assert_write_permission()
         return super().destroy(request, *args, **kwargs)
@@ -129,6 +172,42 @@ class MilestoneViewSet(viewsets.ModelViewSet):
     def partial_update(self, request, *args, **kwargs):
         self._assert_write_permission()
         return super().partial_update(request, *args, **kwargs)
+
+    def perform_create(self, serializer):
+        milestone = serializer.save()
+        create_project_activity_update(
+            milestone.project,
+            self.request.user,
+            'Milestone Added',
+            f"Added milestone '{milestone.name}' for project tracking.",
+        )
+
+    def perform_update(self, serializer):
+        instance = self.get_object()
+        field_labels = {
+            'name': 'name',
+            'description': 'description',
+            'target_date': 'target date',
+            'completed_date': 'completed date',
+            'progress_percentage': 'progress',
+            'status': 'status',
+        }
+        changed_labels = []
+        for field_name, label in field_labels.items():
+            if field_name in serializer.validated_data:
+                previous = getattr(instance, field_name, None)
+                current = serializer.validated_data.get(field_name)
+                if previous != current:
+                    changed_labels.append(label)
+
+        milestone = serializer.save()
+        if changed_labels:
+            create_project_activity_update(
+                milestone.project,
+                self.request.user,
+                'Milestone Updated',
+                f"Updated milestone '{milestone.name}': {', '.join(changed_labels)}.",
+            )
 
     def destroy(self, request, *args, **kwargs):
         self._assert_write_permission()
@@ -225,6 +304,12 @@ class ProjectDocumentViewSet(viewsets.ModelViewSet):
         self._assert_project_access(project_id)
         document = serializer.save(uploaded_by=self.request.user)
         log_audit(self.request.user, 'project_document_uploaded', document, {'project_id': project_id})
+        create_project_activity_update(
+            document.project,
+            self.request.user,
+            'Document Uploaded',
+            f"Uploaded project document '{document.title or document.file.name.split('/')[-1]}'.",
+        )
 
     def update(self, request, *args, **kwargs):
         self._assert_write_permission()
@@ -281,6 +366,12 @@ class PaymentClaimViewSet(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         claim = serializer.save()
         log_audit(request.user, 'payment_claim_submitted', claim, {'status': claim.status})
+        create_project_activity_update(
+            claim.project,
+            request.user,
+            'Payment Claim Submitted',
+            f"Submitted a payment claim for M {claim.claim_amount} with status {claim.status}.",
+        )
         return Response(self.get_serializer(claim).data, status=status.HTTP_201_CREATED)
 
     def update(self, request, *args, **kwargs):
@@ -308,6 +399,12 @@ class PaymentClaimViewSet(viewsets.ModelViewSet):
         claim.remarks = request.data.get('remarks', claim.remarks)
         claim.save(update_fields=['status', 'verified_at', 'reviewed_by', 'remarks'])
         log_audit(request.user, 'payment_claim_verified', claim, {'status': claim.status})
+        create_project_activity_update(
+            claim.project,
+            request.user,
+            'Payment Claim Verified',
+            f"Payment claim {claim.id} was verified.",
+        )
         return Response(self.get_serializer(claim).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'])
@@ -323,6 +420,12 @@ class PaymentClaimViewSet(viewsets.ModelViewSet):
         claim.remarks = request.data.get('remarks', claim.remarks)
         claim.save(update_fields=['status', 'approved_at', 'reviewed_by', 'remarks'])
         log_audit(request.user, 'payment_claim_approved', claim, {'status': claim.status})
+        create_project_activity_update(
+            claim.project,
+            request.user,
+            'Payment Claim Approved',
+            f"Payment claim {claim.id} was approved.",
+        )
         return Response(self.get_serializer(claim).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'])
@@ -337,6 +440,12 @@ class PaymentClaimViewSet(viewsets.ModelViewSet):
         claim.remarks = request.data.get('remarks', claim.remarks)
         claim.save(update_fields=['status', 'reviewed_by', 'remarks'])
         log_audit(request.user, 'payment_claim_rejected', claim, {'status': claim.status})
+        create_project_activity_update(
+            claim.project,
+            request.user,
+            'Payment Claim Rejected',
+            f"Payment claim {claim.id} was rejected.",
+        )
         return Response(self.get_serializer(claim).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'])
@@ -371,6 +480,12 @@ class PaymentClaimViewSet(viewsets.ModelViewSet):
             claim,
             {'status': claim.status, 'payment_reference': reference, 'disbursement_id': disbursement.id},
         )
+        create_project_activity_update(
+            claim.project,
+            request.user,
+            'Payment Disbursed',
+            f"Payment claim {claim.id} was paid with reference {reference}.",
+        )
         return Response(self.get_serializer(claim).data, status=status.HTTP_200_OK)
 
 
@@ -389,6 +504,191 @@ class DisbursementViewSet(viewsets.ReadOnlyModelViewSet):
         if user.role == UserRole.VENDOR:
             return qs.filter(claim__vendor=user)
         return qs
+
+
+class InstallationReportViewSet(viewsets.ModelViewSet):
+    queryset = InstallationReport.objects.select_related('project', 'vendor', 'milestone').all()
+    serializer_class = InstallationReportSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['project', 'status', 'vendor']
+    search_fields = ['serial_number', 'beneficiary_id', 'meter_id']
+    ordering_fields = ['submitted_at']
+
+    WRITE_ROLES = {UserRole.VENDOR, UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.DOE_OFFICER}
+
+    def get_queryset(self):
+        qs = self.queryset.order_by('-submitted_at')
+        user = self.request.user
+        if user.role == UserRole.VENDOR:
+            return qs.filter(vendor=user)
+        if user.role == UserRole.FIELD_VERIFIER:
+            return qs.filter(verification_task__assigned_verifier=user)
+        return qs
+
+    def _assert_write_permission(self):
+        if self.request.user.role not in self.WRITE_ROLES:
+            raise PermissionDenied('You do not have permission to submit installation reports.')
+
+    def _assert_project_access(self, project_id: str):
+        if not project_id:
+            raise PermissionDenied('project is required.')
+        if not Project.objects.filter(id=project_id).exists():
+            raise PermissionDenied('project not found.')
+        if self.request.user.role == UserRole.VENDOR:
+            if not Project.objects.filter(id=project_id).filter(vendor_query_filter(self.request.user)).exists():
+                raise PermissionDenied('You can only report installations for your own projects.')
+
+    def create(self, request, *args, **kwargs):
+        self._assert_write_permission()
+        data = request.data.copy()
+        project_id = str(data.get('project') or '')
+        self._assert_project_access(project_id)
+
+        if request.user.role == UserRole.VENDOR:
+            data['vendor'] = request.user.id
+
+        serializer = self.get_serializer(data=data)
+        serializer.is_valid(raise_exception=True)
+        if request.user.role == UserRole.VENDOR:
+            report = serializer.save(vendor=request.user)
+        else:
+            report = serializer.save()
+
+        photo_paths: list[str] = []
+        files = request.FILES.getlist('photos')
+        if files:
+            from django.core.files.storage import default_storage
+            for file in files:
+                saved = default_storage.save(f'installation_photos/{file.name}', file)
+                photo_paths.append(saved)
+        if photo_paths:
+            report.photo_files = photo_paths
+            report.save(update_fields=['photo_files'])
+
+        assigned_verifier = User.objects.filter(
+            role=UserRole.FIELD_VERIFIER,
+            verification_zone__iexact=report.project.district,
+        ).first()
+
+        task = VerificationTask.objects.create(
+            report=report,
+            assigned_verifier=assigned_verifier,
+            vendor_lat=report.gps_lat,
+            vendor_lng=report.gps_lng,
+            status=VerificationStatus.PENDING,
+        )
+        log_audit(request.user, 'installation_report_submitted', report, {'verification_task': str(task.id)})
+        create_project_activity_update(
+            report.project,
+            request.user,
+            'Installation Report Submitted',
+            f"Submitted installation report for serial number {report.serial_number}.",
+        )
+        if assigned_verifier:
+            Notification.objects.create(
+                recipient_id=str(assigned_verifier.id),
+                recipient_name=assigned_verifier.full_name or assigned_verifier.username,
+                type=NotificationChannel.IN_APP,
+                event='verification_task_created',
+                title='New Verification Task',
+                body=f'Installation report {report.id} requires field verification.',
+                linked_entity_id=str(report.project_id),
+            )
+        return Response(self.get_serializer(report).data, status=status.HTTP_201_CREATED)
+
+
+class VerificationTaskViewSet(viewsets.ModelViewSet):
+    queryset = VerificationTask.objects.select_related('report', 'assigned_verifier').all()
+    serializer_class = VerificationTaskSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['status', 'assigned_verifier', 'report__project']
+    search_fields = ['report__serial_number', 'report__beneficiary_id']
+    ordering_fields = ['created_at']
+
+    VERIFY_ROLES = {UserRole.FIELD_VERIFIER, UserRole.RBF_OFFICIAL, UserRole.ADMIN}
+
+    def get_queryset(self):
+        qs = self.queryset.order_by('-created_at')
+        user = self.request.user
+        if user.role == UserRole.FIELD_VERIFIER:
+            return qs.filter(assigned_verifier=user)
+        if user.role == UserRole.VENDOR:
+            return qs.filter(report__vendor=user)
+        return qs
+
+    @action(detail=True, methods=['post'])
+    def verify(self, request, pk=None):
+        if request.user.role not in self.VERIFY_ROLES:
+            raise PermissionDenied('You do not have permission to verify installations.')
+        task = self.get_object()
+        lat = request.data.get('verifier_lat')
+        lng = request.data.get('verifier_lng')
+        try:
+            verifier_lat = float(lat)
+            verifier_lng = float(lng)
+        except (TypeError, ValueError):
+            return Response({'detail': 'verifier_lat and verifier_lng are required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        import math
+        def haversine(lat1, lon1, lat2, lon2):
+            r = 6371000
+            phi1 = math.radians(lat1)
+            phi2 = math.radians(lat2)
+            dphi = math.radians(lat2 - lat1)
+            dlambda = math.radians(lon2 - lon1)
+            a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+            return 2 * r * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+        distance = haversine(float(task.vendor_lat), float(task.vendor_lng), verifier_lat, verifier_lng)
+        anomaly = distance > 100
+
+        task.verifier_lat = verifier_lat
+        task.verifier_lng = verifier_lng
+        task.distance_meters = distance
+        task.anomaly_flag = anomaly
+        task.status = VerificationStatus.FLAGGED if anomaly else VerificationStatus.VERIFIED
+        task.save(update_fields=['verifier_lat', 'verifier_lng', 'distance_meters', 'anomaly_flag', 'status', 'updated_at'])
+
+        report = task.report
+        report.status = InstallationStatus.FLAGGED if anomaly else InstallationStatus.VERIFIED
+        report.save(update_fields=['status'])
+        log_audit(request.user, 'installation_verified', report, {'distance_meters': distance, 'anomaly': anomaly})
+        create_project_activity_update(
+            report.project,
+            request.user,
+            'Installation Verification Completed',
+            f"Installation report {report.id} was {'flagged' if anomaly else 'verified'} after field verification.",
+        )
+        return Response(self.get_serializer(task).data, status=status.HTTP_200_OK)
+
+
+class SmartMeterReadingViewSet(viewsets.ModelViewSet):
+    queryset = SmartMeterReading.objects.select_related('project').all()
+    serializer_class = SmartMeterReadingSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['project', 'meter_id']
+    search_fields = ['meter_id']
+    ordering_fields = ['recorded_at']
+
+    WRITE_ROLES = {UserRole.VENDOR, UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.DOE_OFFICER}
+
+    def get_queryset(self):
+        qs = self.queryset.order_by('-recorded_at')
+        user = self.request.user
+        if user.role == UserRole.VENDOR:
+            return qs.filter(project__vendor_id=str(user.id))
+        return qs
+
+    def _assert_write_permission(self):
+        if self.request.user.role not in self.WRITE_ROLES:
+            raise PermissionDenied('You do not have permission to submit smart meter readings.')
+
+    def create(self, request, *args, **kwargs):
+        self._assert_write_permission()
+        return super().create(request, *args, **kwargs)
 
 
 class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):

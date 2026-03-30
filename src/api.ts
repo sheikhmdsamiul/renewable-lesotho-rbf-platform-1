@@ -7,6 +7,8 @@ import {
   Milestone,
   ProjectUpdate,
   ProjectDocument,
+  InstallationReport,
+  VerificationTask,
   VendorPrequalification,
   VendorPrequalificationSubmission,
   PaymentClaim,
@@ -18,6 +20,7 @@ import {
   BidStatus,
   TenderBidEvaluation,
   TenderContract,
+  TenderAwardRankingRow,
 } from "./types";
 
 const env = (import.meta as any)?.env ?? {};
@@ -216,9 +219,16 @@ function mapTenderFromApi(api: any): Tender {
     targetSiteType: api.target_site_type ?? undefined,
     isVerified: api.is_verified ?? undefined,
     fundingSource: api.funding_source ?? undefined,
+    technicalWeight: api.technical_weight != null ? Number(api.technical_weight) : undefined,
+    financialWeight: api.financial_weight != null ? Number(api.financial_weight) : undefined,
+    technicalThreshold: api.technical_threshold != null ? Number(api.technical_threshold) : undefined,
+    coolingOffDays: api.cooling_off_days != null ? Number(api.cooling_off_days) : undefined,
     scheduleFile: normalizeFileUrl(api.schedule_file ?? undefined),
     rfpDocumentsFile: normalizeFileUrl(api.rfp_documents_file ?? undefined),
     milestonePaymentScheduleFile: normalizeFileUrl(api.milestone_payment_schedule_file ?? undefined),
+    intentToAwardBidId: api.intent_to_award_bid != null ? String(api.intent_to_award_bid) : undefined,
+    intentToAwardAt: api.intent_to_award_at ?? undefined,
+    coolingOffUntil: api.cooling_off_until ?? undefined,
     createdAt: api.created_at ?? undefined,
     updatedAt: api.updated_at ?? undefined,
     publishedAt: api.published_at ?? undefined,
@@ -292,6 +302,10 @@ function mapTenderToApi(ui: Partial<Tender>): any {
     target_site_type: ui.targetSiteType ?? null,
     is_verified: ui.isVerified ?? false,
     funding_source: ui.fundingSource ?? null,
+    technical_weight: ui.technicalWeight ?? 70,
+    financial_weight: ui.financialWeight ?? 30,
+    technical_threshold: ui.technicalThreshold ?? 70,
+    cooling_off_days: ui.coolingOffDays ?? 7,
   };
 }
 
@@ -372,9 +386,13 @@ function mapMilestoneFromApi(api: any): Milestone {
     id: String(api.id ?? ""),
     projectId: String(api.project ?? ""),
     name: api.name ?? "",
+    description: api.description ?? undefined,
     percentage: Number(api.percentage ?? 0),
     status: api.status ?? "Pending",
     amount: Number(api.amount ?? 0),
+    progressPercentage: Number(api.progress_percentage ?? 0),
+    targetDate: api.target_date ?? undefined,
+    completedDate: api.completed_date ?? undefined,
   };
 }
 
@@ -399,6 +417,45 @@ function mapProjectDocumentFromApi(api: any): ProjectDocument {
     uploadedBy: api.uploaded_by != null ? String(api.uploaded_by) : undefined,
     uploadedByUsername: api.uploaded_by_username ?? undefined,
     uploadedAt: api.uploaded_at ?? "",
+  };
+}
+
+function mapInstallationReportFromApi(api: any): InstallationReport {
+  return {
+    id: String(api.id ?? ""),
+    projectId: String(api.project ?? ""),
+    vendorId: String(api.vendor ?? ""),
+    vendorUsername: api.vendor_username ?? undefined,
+    milestoneId: api.milestone != null ? String(api.milestone) : undefined,
+    gpsLat: Number(api.gps_lat ?? 0),
+    gpsLng: Number(api.gps_lng ?? 0),
+    serialNumber: api.serial_number ?? "",
+    beneficiaryId: api.beneficiary_id ?? "",
+    receiptFile: normalizeFileUrl(api.receipt_file ?? undefined),
+    receiptFileUrl: normalizeFileUrl(api.receipt_file_url ?? undefined),
+    photoFiles: Array.isArray(api.photo_files) ? api.photo_files.map(normalizeFileUrl) : [],
+    meterId: api.meter_id ?? undefined,
+    kwhReading: api.kwh_reading != null ? Number(api.kwh_reading) : undefined,
+    status: api.status ?? "Submitted",
+    submittedAt: api.submitted_at ?? "",
+  };
+}
+
+function mapVerificationTaskFromApi(api: any): VerificationTask {
+  return {
+    id: String(api.id ?? ""),
+    report: String(api.report ?? ""),
+    assignedVerifier: api.assigned_verifier != null ? String(api.assigned_verifier) : undefined,
+    assignedVerifierUsername: api.assigned_verifier_username ?? undefined,
+    vendorLat: Number(api.vendor_lat ?? 0),
+    vendorLng: Number(api.vendor_lng ?? 0),
+    verifierLat: api.verifier_lat != null ? Number(api.verifier_lat) : undefined,
+    verifierLng: api.verifier_lng != null ? Number(api.verifier_lng) : undefined,
+    distanceMeters: api.distance_meters != null ? Number(api.distance_meters) : undefined,
+    anomalyFlag: Boolean(api.anomaly_flag),
+    status: api.status ?? "Pending",
+    createdAt: api.created_at ?? "",
+    updatedAt: api.updated_at ?? "",
   };
 }
 
@@ -435,7 +492,13 @@ function mapTenderContractFromApi(api: any): TenderContract {
     referenceNumber: api.reference_number ?? "",
     templateName: api.template_name ?? undefined,
     status: api.status ?? "Generated",
+    generatedFile: normalizeFileUrl(api.generated_file ?? undefined),
     signedFile: normalizeFileUrl(api.signed_file ?? undefined),
+    annexAFile: normalizeFileUrl(api.annex_a_file ?? undefined),
+    annexBFile: normalizeFileUrl(api.annex_b_file ?? undefined),
+    annexCFile: normalizeFileUrl(api.annex_c_file ?? undefined),
+    annexDFile: normalizeFileUrl(api.annex_d_file ?? undefined),
+    annexEFile: normalizeFileUrl(api.annex_e_file ?? undefined),
     signedAt: api.signed_at ?? undefined,
     approvedAt: api.approved_at ?? undefined,
     approvedBy: api.approved_by ?? undefined,
@@ -494,6 +557,7 @@ function mapTenderBidFromApi(api: any): TenderBid {
     boq_file: normalizeFileUrl(api.boq_file ?? undefined),
     gender_action_plan_file: normalizeFileUrl(api.gender_action_plan_file ?? undefined),
     implementation_plan_file: normalizeFileUrl(api.implementation_plan_file ?? undefined),
+    reporting_templates_file: normalizeFileUrl(api.reporting_templates_file ?? undefined),
     status: (api.status as BidStatus) ?? BidStatus.DRAFT,
     version_number: Number(api.version_number ?? 0),
     submitted_at: api.submitted_at ?? undefined,
@@ -604,10 +668,15 @@ function unwrapListResponse<T>(data: any): T[] {
 
 // ============ HTTP helpers ============
 
-async function http<T>(url: string, init?: RequestInit): Promise<T> {
+type ApiRequestInit = RequestInit & {
+  timeoutMs?: number;
+};
+
+async function http<T>(url: string, init?: ApiRequestInit): Promise<T> {
   const token = typeof window !== "undefined" ? localStorage.getItem(ACCESS_TOKEN_KEY) : null;
   const initHeaders = headersInitToObject(init?.headers as HeadersInit | undefined);
   const skipAuth = Boolean(getHeaderValue(initHeaders, "X-Skip-Auth"));
+  const timeoutMs = init?.timeoutMs ?? requestTimeoutMs;
   
   // Don't set Content-Type for FormData - let browser set multipart/form-data
   const isFormData = init?.body instanceof FormData;
@@ -633,7 +702,7 @@ async function http<T>(url: string, init?: RequestInit): Promise<T> {
   if (token && !skipAuth) {
     headers["Authorization"] = `Bearer ${token}`;
   }
-  const { headers: _ignoredHeaders, ...requestInit } = init ?? {};
+  const { headers: _ignoredHeaders, timeoutMs: _ignoredTimeoutMs, ...requestInit } = init ?? {};
 
   const isAbsolute = /^https?:\/\//i.test(url);
   const requestUrls = isAbsolute
@@ -645,7 +714,7 @@ async function http<T>(url: string, init?: RequestInit): Promise<T> {
     const requestUrl = requestUrls[i];
     const isLastAttempt = i === requestUrls.length - 1;
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), requestTimeoutMs);
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const res = await fetch(requestUrl, {
         ...requestInit,
@@ -656,6 +725,23 @@ async function http<T>(url: string, init?: RequestInit): Promise<T> {
         const text = await res.text().catch(() => "");
         const detail = extractApiErrorDetail(text);
         const statusError = new Error(`HTTP ${res.status} ${res.statusText}: ${detail || text}`);
+        if (res.status === 401 && !skipAuth) {
+          const refreshed = await refreshAccessToken();
+          if (refreshed) {
+            const retryHeaders = { ...headers, Authorization: `Bearer ${refreshed}` };
+            const retryRes = await fetch(requestUrl, {
+              ...requestInit,
+              headers: retryHeaders,
+              signal: controller.signal,
+            });
+            if (retryRes.ok) {
+              if (retryRes.status === 204) {
+                return undefined as T;
+              }
+              return (await retryRes.json()) as T;
+            }
+          }
+        }
         // If same-origin /api path doesn't exist, try explicit backends.
         if (!isAbsolute && res.status === 404 && requestUrls.length > 1) {
           lastError = statusError;
@@ -675,7 +761,7 @@ async function http<T>(url: string, init?: RequestInit): Promise<T> {
       }
 
       if (error?.name === "AbortError") {
-        lastError = new Error(`Request timed out after ${requestTimeoutMs}ms`);
+        lastError = new Error(`Request timed out after ${timeoutMs}ms`);
       } else {
         lastError = error instanceof Error ? error : new Error(String(error));
       }
@@ -689,6 +775,26 @@ async function http<T>(url: string, init?: RequestInit): Promise<T> {
   }
 
   throw lastError ?? new Error("Request failed");
+}
+
+async function refreshAccessToken(): Promise<string | null> {
+  if (typeof window === "undefined") return null;
+  const refresh = localStorage.getItem(REFRESH_TOKEN_KEY);
+  if (!refresh) return null;
+  try {
+    const data = await http<any>(`/api/users/auth/token/refresh/`, {
+      method: "POST",
+      headers: { "X-Skip-Auth": "1" } as any,
+      body: JSON.stringify({ refresh }),
+    });
+    if (data?.access) {
+      localStorage.setItem(ACCESS_TOKEN_KEY, data.access);
+      return data.access;
+    }
+  } catch {
+    logoutUser();
+  }
+  return null;
 }
 
 // ============ API functions ============
@@ -761,6 +867,33 @@ export async function awardTender(
       awarded_vendor_name: payload.awardedVendorName ?? "",
       send_sms: payload.sendSms ?? false,
       send_email: payload.sendEmail ?? true,
+    }),
+  });
+  return mapTenderFromApi(data);
+}
+
+export async function fetchTenderAwardRanking(
+  tenderId: string
+): Promise<{
+  technical_weight: number;
+  financial_weight: number;
+  technical_threshold: number;
+  cooling_off_days: number;
+  rows: TenderAwardRankingRow[];
+  recommended?: TenderAwardRankingRow | null;
+}> {
+  return await http<any>(`/api/tenders/${tenderId}/award_ranking/`);
+}
+
+export async function confirmTenderAward(
+  tenderId: string,
+  payload?: { sendEmail?: boolean }
+): Promise<Tender> {
+  const data = await http<any>(`/api/tenders/${tenderId}/confirm_award/`, {
+    method: "POST",
+    timeoutMs: 60000,
+    body: JSON.stringify({
+      send_email: payload?.sendEmail ?? true,
     }),
   });
   return mapTenderFromApi(data);
@@ -843,6 +976,10 @@ export async function submitTenderBid(payload: Partial<TenderBid>): Promise<Tend
   if (implementationPlanFile instanceof File) {
     form.append('implementation_plan_file', implementationPlanFile);
   }
+  const reportingTemplatesFile = (payload as any).reporting_templates_file;
+  if (reportingTemplatesFile instanceof File) {
+    form.append('reporting_templates_file', reportingTemplatesFile);
+  }
 
   const data = await http<any>(`/api/tender-bids/`, {
     method: "POST",
@@ -892,6 +1029,10 @@ export async function updateTenderBid(bidId: string, payload: Partial<TenderBid>
   const implementationPlanFile = (payload as any).implementation_plan_file;
   if (implementationPlanFile instanceof File) {
     form.append('implementation_plan_file', implementationPlanFile);
+  }
+  const reportingTemplatesFile = (payload as any).reporting_templates_file;
+  if (reportingTemplatesFile instanceof File) {
+    form.append('reporting_templates_file', reportingTemplatesFile);
   }
 
   const data = await http<any>(`/api/tender-bids/${bidId}/`, {
@@ -1002,6 +1143,7 @@ export async function fetchTenderContracts(params?: { tenderId?: string; vendorI
 export async function generateTenderContract(payload: { tenderId: string; bidId?: string; vendorId?: string; templateName?: string }): Promise<TenderContract> {
   const data = await http<any>(`/api/tender-contracts/generate/`, {
     method: "POST",
+    timeoutMs: 60000,
     body: JSON.stringify({
       tender: payload.tenderId,
       bid: payload.bidId ?? null,
@@ -1012,9 +1154,11 @@ export async function generateTenderContract(payload: { tenderId: string; bidId?
   return mapTenderContractFromApi(data);
 }
 
-export async function signTenderContract(contractId: string, signedFile: File): Promise<TenderContract> {
+export async function signTenderContract(contractId: string, payload: {
+  signedFile: File;
+}): Promise<TenderContract> {
   const form = new FormData();
-  form.append("signed_file", signedFile);
+  form.append("signed_file", payload.signedFile);
   const data = await http<any>(`/api/tender-contracts/${contractId}/sign/`, {
     method: "POST",
     body: form,
@@ -1067,17 +1211,57 @@ export async function fetchMilestones(projectId?: string): Promise<Milestone[]> 
 export async function createMilestone(payload: {
   projectId: string;
   name: string;
-  percentage: number;
-  amount: number;
+  description?: string;
+  percentage?: number;
+  amount?: number;
+  status?: "Pending" | "Submitted" | "Verified" | "Paid";
+  progressPercentage?: number;
+  targetDate?: string;
+  completedDate?: string;
 }): Promise<Milestone> {
   const data = await http<any>(`/api/projects/milestones/`, {
     method: "POST",
     body: JSON.stringify({
       project: payload.projectId,
       name: payload.name,
-      percentage: payload.percentage,
-      amount: payload.amount,
+      description: payload.description ?? "",
+      percentage: payload.percentage ?? 0,
+      amount: payload.amount ?? 0,
+      status: payload.status ?? "Pending",
+      progress_percentage: payload.progressPercentage ?? 0,
+      target_date: payload.targetDate ?? null,
+      completed_date: payload.completedDate ?? null,
     }),
+  });
+  return mapMilestoneFromApi(data);
+}
+
+export async function updateMilestone(id: string, payload: {
+  projectId: string;
+  name?: string;
+  description?: string;
+  percentage?: number;
+  amount?: number;
+  status?: "Pending" | "Submitted" | "Verified" | "Paid";
+  progressPercentage?: number;
+  targetDate?: string | null;
+  completedDate?: string | null;
+}): Promise<Milestone> {
+  const body: Record<string, unknown> = {
+    project: payload.projectId,
+  };
+  if (payload.name !== undefined) body.name = payload.name;
+  if (payload.description !== undefined) body.description = payload.description;
+  if (payload.percentage !== undefined) body.percentage = payload.percentage;
+  if (payload.amount !== undefined) body.amount = payload.amount;
+  if (payload.status !== undefined) body.status = payload.status;
+  if (payload.progressPercentage !== undefined) body.progress_percentage = payload.progressPercentage;
+  if (payload.targetDate !== undefined) body.target_date = payload.targetDate;
+  if (payload.completedDate !== undefined) body.completed_date = payload.completedDate;
+
+  const data = await http<any>(`/api/projects/milestones/${id}/`, {
+    method: "PUT",
+    body: JSON.stringify(body),
   });
   return mapMilestoneFromApi(data);
 }
@@ -1126,6 +1310,52 @@ export async function uploadProjectDocument(payload: {
     body: form,
   });
   return mapProjectDocumentFromApi(data);
+}
+
+export async function fetchInstallationReports(projectId?: string): Promise<InstallationReport[]> {
+  const query = projectId ? `?project=${encodeURIComponent(projectId)}` : "";
+  const data = await http<any>(`/api/projects/installations/${query}`);
+  return unwrapListResponse<any>(data).map(mapInstallationReportFromApi);
+}
+
+export async function createInstallationReport(payload: {
+  projectId: string;
+  milestoneId?: string;
+  gpsLat: number;
+  gpsLng: number;
+  serialNumber: string;
+  beneficiaryId: string;
+  receiptFile?: File | null;
+  photoFiles?: File[];
+  meterId?: string;
+  kwhReading?: number;
+}): Promise<InstallationReport> {
+  const form = new FormData();
+  form.append("project", payload.projectId);
+  if (payload.milestoneId) form.append("milestone", payload.milestoneId);
+  form.append("gps_lat", String(payload.gpsLat));
+  form.append("gps_lng", String(payload.gpsLng));
+  form.append("serial_number", payload.serialNumber);
+  form.append("beneficiary_id", payload.beneficiaryId);
+  if (payload.meterId) form.append("meter_id", payload.meterId);
+  if (payload.kwhReading != null) form.append("kwh_reading", String(payload.kwhReading));
+  if (payload.receiptFile instanceof File) {
+    form.append("receipt_file", payload.receiptFile);
+  }
+  (payload.photoFiles || []).forEach((file) => {
+    form.append("photos", file);
+  });
+  const data = await http<any>(`/api/projects/installations/`, {
+    method: "POST",
+    body: form,
+  });
+  return mapInstallationReportFromApi(data);
+}
+
+export async function fetchVerificationTasks(projectId?: string): Promise<VerificationTask[]> {
+  const query = projectId ? `?report__project=${encodeURIComponent(projectId)}` : "";
+  const data = await http<any>(`/api/projects/verification-tasks/${query}`);
+  return unwrapListResponse<any>(data).map(mapVerificationTaskFromApi);
 }
 
 export async function fetchNotifications(): Promise<Notification[]> {

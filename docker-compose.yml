@@ -30,6 +30,7 @@ services:
     command: sh -c "python manage.py migrate --noinput && python manage.py seed_demo_users && python manage.py collectstatic --noinput && gunicorn core.wsgi:application --bind 0.0.0.0:8000 --workers ${GUNICORN_WORKERS:-3} --timeout ${GUNICORN_TIMEOUT:-60}"
     volumes:
       - ./backend:/app
+      - ./backend/scripts/render_pdf.mjs:/opt/pba-renderer/render_pdf.mjs:ro
     env_file:
       - ./backend/.env
     environment:
@@ -48,6 +49,8 @@ services:
       CORS_ALLOW_ALL_ORIGINS: ${CORS_ALLOW_ALL_ORIGINS:-1}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3000,http://192.168.68.140:5174}
       CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:-http://localhost:3000,http://192.168.68.140:5174}
+      PBA_RENDER_SCRIPT: ${PBA_RENDER_SCRIPT:-/opt/pba-renderer/render_pdf.mjs}
+      PBA_CHROME_PATH: ${PBA_CHROME_PATH:-/usr/bin/chromium}
       SECURE_SSL_REDIRECT: ${SECURE_SSL_REDIRECT:-0}
       SECURE_HSTS_SECONDS: ${SECURE_HSTS_SECONDS:-31536000}
       SECURE_HSTS_INCLUDE_SUBDOMAINS: ${SECURE_HSTS_INCLUDE_SUBDOMAINS:-1}

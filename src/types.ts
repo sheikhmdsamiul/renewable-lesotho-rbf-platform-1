@@ -26,6 +26,7 @@ export enum BidStatus {
   DRAFT = "Draft",
   SUBMITTED = "Submitted",
   UNDER_REVIEW = "Under Review",
+  AWARDED = "Awarded",
   ACCEPTED = "Accepted",
   REJECTED = "Rejected",
   WITHDRAWN = "Withdrawn",
@@ -72,9 +73,16 @@ export interface Tender {
   targetSiteType?: "Household" | "Business" | "School" | "Clinic";
   isVerified?: boolean;
   fundingSource?: string;
+  technicalWeight?: number;
+  financialWeight?: number;
+  technicalThreshold?: number;
+  coolingOffDays?: number;
   scheduleFile?: string;
   rfpDocumentsFile?: string;
   milestonePaymentScheduleFile?: string;
+  intentToAwardBidId?: string;
+  intentToAwardAt?: string;
+  coolingOffUntil?: string;
   createdAt?: string;
   updatedAt?: string;
   publishedAt?: string;
@@ -115,6 +123,7 @@ export interface TenderBid {
   boq_file?: string;
   gender_action_plan_file?: string;
   implementation_plan_file?: string;
+  reporting_templates_file?: string;
   status: BidStatus;
   version_number: number;
   submitted_at?: string;
@@ -206,6 +215,23 @@ export interface TenderBidEvaluation {
   updatedAt?: string;
 }
 
+export interface TenderAwardRankingRow {
+  rank: number;
+  bid_id: string;
+  vendor_id: string;
+  vendor_name: string;
+  bid_amount: number;
+  technical_score?: number | null;
+  financial_score?: number | null;
+  combined_score?: number | null;
+  gender_score?: number | null;
+  female_headed_household_target?: number;
+  passed_technical_threshold: boolean;
+  financial_opened: boolean;
+  is_recommended_winner: boolean;
+  disqualification_reason?: string;
+}
+
 export interface TenderContract {
   id: string;
   tender: string;
@@ -216,7 +242,13 @@ export interface TenderContract {
   referenceNumber: string;
   templateName?: string;
   status: "Generated" | "Submitted" | "Signed" | "Approved" | "Rejected";
+  generatedFile?: string;
   signedFile?: string;
+  annexAFile?: string;
+  annexBFile?: string;
+  annexCFile?: string;
+  annexDFile?: string;
+  annexEFile?: string;
   signedAt?: string;
   approvedAt?: string;
   approvedBy?: string;
@@ -231,9 +263,13 @@ export interface Milestone {
   id: string;
   projectId: string;
   name: string;
+  description?: string;
   percentage: number;
   status: "Pending" | "Submitted" | "Verified" | "Paid";
   amount: number;
+  progressPercentage: number;
+  targetDate?: string;
+  completedDate?: string;
 }
 
 export interface ProjectUpdate {
@@ -254,6 +290,44 @@ export interface ProjectDocument {
   uploadedBy?: string;
   uploadedByUsername?: string;
   uploadedAt: string;
+}
+
+export type InstallationStatus = "Submitted" | "Verified" | "Flagged";
+export type VerificationStatus = "Pending" | "Verified" | "Flagged";
+
+export interface InstallationReport {
+  id: string;
+  projectId: string;
+  vendorId: string;
+  vendorUsername?: string;
+  milestoneId?: string;
+  gpsLat: number;
+  gpsLng: number;
+  serialNumber: string;
+  beneficiaryId: string;
+  receiptFile?: string;
+  receiptFileUrl?: string;
+  photoFiles: string[];
+  meterId?: string;
+  kwhReading?: number;
+  status: InstallationStatus;
+  submittedAt: string;
+}
+
+export interface VerificationTask {
+  id: string;
+  report: string;
+  assignedVerifier?: string;
+  assignedVerifierUsername?: string;
+  vendorLat: number;
+  vendorLng: number;
+  verifierLat?: number;
+  verifierLng?: number;
+  distanceMeters?: number;
+  anomalyFlag: boolean;
+  status: VerificationStatus;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export enum NotificationChannel {
