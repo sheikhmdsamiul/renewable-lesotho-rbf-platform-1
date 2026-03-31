@@ -653,6 +653,17 @@ class VerificationTaskViewSet(viewsets.ModelViewSet):
         if request.user.role not in self.VERIFY_ROLES:
             raise PermissionDenied('You do not have permission to verify installations.')
         task = self.get_object()
+        if task.status == VerificationStatus.PAUSED:
+            return Response({'detail': 'Field verification is paused while the vendor is under suspension.'}, status=status.HTTP_400_BAD_REQUEST)
+        if task.status == VerificationStatus.TERMINATED:
+            return Response({'detail': 'Field verification was terminated for this vendor. Only new logs may resume after reinstatement.'}, status=status.HTTP_400_BAD_REQUEST)
+        if is_vendor_restricted(task.report.vendor):
+            detail = (
+                'Field verification is paused while the vendor is under suspension.'
+                if task.report.vendor.status == 'Suspended'
+                else 'Field verification was terminated for this blacklisted vendor.'
+            )
+            return Response({'detail': detail}, status=status.HTTP_400_BAD_REQUEST)
         lat = request.data.get('verifier_lat')
         lng = request.data.get('verifier_lng')
         try:

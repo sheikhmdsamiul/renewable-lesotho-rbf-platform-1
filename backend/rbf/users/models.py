@@ -32,6 +32,7 @@ class User(AbstractUser):
     address = models.CharField(max_length=255, blank=True)
     organization_name = models.CharField(max_length=255, blank=True)
     organization_type = models.CharField(max_length=64, blank=True)
+    associated_entities = models.JSONField(default=list, blank=True)
     technology_types = models.JSONField(default=list, blank=True)
     registration_certificate_name = models.CharField(max_length=255, blank=True)
     tax_id = models.CharField(max_length=64, blank=True)
@@ -202,13 +203,18 @@ class BlacklistedIdentifier(models.Model):
     vendor = models.ForeignKey(User, related_name='blacklisted_identifiers', on_delete=models.CASCADE)
     organization_name = models.CharField(max_length=255, blank=True)
     tax_id = models.CharField(max_length=64, blank=True)
+    national_id = models.CharField(max_length=64, blank=True)
+    associated_entities = models.JSONField(default=list, blank=True)
     normalized_organization_name = models.CharField(max_length=255, blank=True, db_index=True)
     normalized_tax_id = models.CharField(max_length=64, blank=True, db_index=True)
+    normalized_national_id = models.CharField(max_length=64, blank=True, db_index=True)
+    normalized_associated_entities = models.JSONField(default=list, blank=True)
     active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     released_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
+        db_table = 'users_blacklistidentifier'
         ordering = ['-created_at']
 
     def __str__(self):

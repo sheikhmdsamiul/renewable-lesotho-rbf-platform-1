@@ -135,6 +135,16 @@ class PaymentClaimSerializer(serializers.ModelSerializer):
     vendor_username = serializers.CharField(source='vendor.username', read_only=True)
     reviewed_by_username = serializers.CharField(source='reviewed_by.username', read_only=True)
     disbursement = DisbursementSerializer(read_only=True)
+    payment_locked = serializers.SerializerMethodField()
+    payment_lock_reason = serializers.SerializerMethodField()
+
+    def get_payment_locked(self, obj: PaymentClaim):
+        return bool(obj.vendor and obj.vendor.role == 'Vendor' and obj.vendor.status in {'Suspended', 'Blacklisted'})
+
+    def get_payment_lock_reason(self, obj: PaymentClaim):
+        if self.get_payment_locked(obj):
+            return 'Payment is locked because this transaction is linked to a suspended or blacklisted vendor.'
+        return None
 
     class Meta:
         model = PaymentClaim
@@ -149,6 +159,8 @@ class PaymentClaimSerializer(serializers.ModelSerializer):
             'reviewed_by_username',
             'vendor_username',
             'disbursement',
+            'payment_locked',
+            'payment_lock_reason',
         ]
 
 

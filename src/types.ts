@@ -241,6 +241,7 @@ export interface User {
   address?: string;
   organizationName?: string;
   organizationType?: string;
+  associatedEntities?: string[];
   technologyTypes?: string[];
   registrationCertificateName?: string;
   taxId?: string;
@@ -522,6 +523,8 @@ export interface PaymentClaim {
   reviewedByUsername?: string;
   vendorUsername?: string;
   disbursement?: Disbursement;
+  paymentLocked?: boolean;
+  paymentLockReason?: string;
 }
 
 export interface PaymentClaimSubmission {

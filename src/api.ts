@@ -256,6 +256,7 @@ function mapUserFromApi(api: any): User {
     address: api.address ?? undefined,
     organizationName: api.organization_name ?? undefined,
     organizationType: api.organization_type ?? undefined,
+    associatedEntities: Array.isArray(api.associated_entities) ? api.associated_entities : undefined,
     technologyTypes: Array.isArray(api.technology_types) ? api.technology_types : undefined,
     registrationCertificateName: api.registration_certificate_name ?? undefined,
     taxId: api.tax_id ?? undefined,
@@ -694,6 +695,8 @@ function mapPaymentClaimFromApi(api: any): PaymentClaim {
     reviewedByUsername: api.reviewed_by_username ?? undefined,
     vendorUsername: api.vendor_username ?? undefined,
     disbursement: api.disbursement ? mapDisbursementFromApi(api.disbursement) : undefined,
+    paymentLocked: Boolean(api.payment_locked),
+    paymentLockReason: api.payment_lock_reason ?? undefined,
   };
 }
 
@@ -839,6 +842,9 @@ async function refreshAccessToken(): Promise<string | null> {
     });
     if (data?.access) {
       localStorage.setItem(ACCESS_TOKEN_KEY, data.access);
+      if (data?.refresh) {
+        localStorage.setItem(REFRESH_TOKEN_KEY, data.refresh);
+      }
       return data.access;
     }
   } catch {
@@ -1675,6 +1681,11 @@ export async function fetchAuditLogs(): Promise<AuditLog[]> {
 
 export async function loginUser(username: string, password: string): Promise<{ user: User; access: string; refresh: string }> {
   const normalizedUsername = (username || "").trim();
+  if (typeof window !== "undefined") {
+    localStorage.removeItem(ACCESS_TOKEN_KEY);
+    localStorage.removeItem(REFRESH_TOKEN_KEY);
+    localStorage.removeItem(USER_KEY);
+  }
 
   if (DEMO_USERNAMES.has(normalizedUsername)) {
     try {
@@ -1806,6 +1817,7 @@ export async function registerVendor(payload: {
   address: string;
   organizationName: string;
   organizationType: string;
+  associatedEntities?: string[];
   technologyTypes: string[];
   registrationCertificateName: string;
   taxId: string;
@@ -1824,6 +1836,7 @@ export async function registerVendor(payload: {
     role: UserRole.VENDOR,
     organization_name: payload.organizationName,
     organization_type: payload.organizationType,
+    associated_entities: payload.associatedEntities ?? [],
     technology_types: payload.technologyTypes,
     registration_certificate_name: payload.registrationCertificateName,
     tax_id: payload.taxId,

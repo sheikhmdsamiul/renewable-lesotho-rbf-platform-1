@@ -32,11 +32,32 @@ class UserSerializer(serializers.ModelSerializer):
             'id', 'username', 'email', 'full_name', 'gender', 'role', 'region',
             'mobile_number', 'national_id', 'address',
             'organization_name', 'organization_type', 'technology_types',
-            'registration_certificate_name', 'tax_id', 'device_id',
+            'registration_certificate_name', 'tax_id', 'device_id', 'associated_entities',
             'tier_assignment', 'verification_zone',
             'status', 'must_change_password', 'password', 'vendor_tag', 'blacklist_summary'
         ]
         read_only_fields = ['id']
+
+    def validate_associated_entities(self, value):
+        if value in (None, ''):
+            return []
+        if isinstance(value, str):
+            items = re.split(r'[\n,;]+', value)
+        elif isinstance(value, list):
+            items = value
+        else:
+            raise serializers.ValidationError('Associated entities must be a list of names.')
+
+        cleaned = []
+        seen = set()
+        for item in items:
+            text = str(item).strip()
+            key = normalize_identifier(text)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(text)
+        return cleaned
 
     def validate(self, attrs):
         request = self.context.get('request')
@@ -88,6 +109,7 @@ class UserSerializer(serializers.ModelSerializer):
             tech_types = attrs.get('technology_types') or getattr(self.instance, 'technology_types', None) or []
             reg_cert = attrs.get('registration_certificate_name') or getattr(self.instance, 'registration_certificate_name', None)
             tax_id = attrs.get('tax_id') or getattr(self.instance, 'tax_id', None)
+            associated_entities = attrs.get('associated_entities', getattr(self.instance, 'associated_entities', [])) or []
             if not national_id:
                 missing['national_id'] = 'National ID or Passport is required for vendors.'
             if not address:
@@ -106,18 +128,32 @@ class UserSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(missing)
             normalized_org = normalize_identifier(org_name)
             normalized_tax = normalize_identifier(tax_id)
+            normalized_national_id = normalize_identifier(national_id)
+            normalized_entities = {normalize_identifier(item) for item in associated_entities if normalize_identifier(item)}
             identifier_filter = Q()
             if normalized_org:
                 identifier_filter |= Q(normalized_organization_name=normalized_org)
             if normalized_tax:
                 identifier_filter |= Q(normalized_tax_id=normalized_tax)
+            if normalized_national_id:
+                identifier_filter |= Q(normalized_national_id=normalized_national_id)
             identifier_qs = BlacklistedIdentifier.objects.filter(active=True).filter(identifier_filter) if identifier_filter else BlacklistedIdentifier.objects.none()
             if self.instance is not None:
                 identifier_qs = identifier_qs.exclude(vendor=self.instance)
-            if identifier_qs.exists():
+            associated_match = False
+            if normalized_entities:
+                for identifier in BlacklistedIdentifier.objects.filter(active=True):
+                    if self.instance is not None and identifier.vendor_id == self.instance.id:
+                        continue
+                    if normalized_entities.intersection(identifier.normalized_associated_entities or []):
+                        associated_match = True
+                        break
+            if identifier_qs.exists() or associated_match:
                 raise serializers.ValidationError({
                     'organization_name': 'This vendor identity is blacklisted and cannot be re-registered.',
                     'tax_id': 'This vendor identity is blacklisted and cannot be re-registered.',
+                    'national_id': 'This vendor identity is blacklisted and cannot be re-registered.',
+                    'associated_entities': 'A director or partner linked to a blacklisted company appears in this application.',
                 })
         else:
             verification_zone = attrs.get('verification_zone') or getattr(self.instance, 'verification_zone', None)

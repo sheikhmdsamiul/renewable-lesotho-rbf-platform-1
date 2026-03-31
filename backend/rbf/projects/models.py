@@ -124,8 +124,10 @@ class PaymentClaimStatus(models.TextChoices):
 
 class InstallationStatus(models.TextChoices):
     SUBMITTED = 'Submitted'
+    PAUSED = 'Paused'
     VERIFIED = 'Verified'
     FLAGGED = 'Flagged'
+    TERMINATED = 'Terminated'
 
 
 class PaymentClaim(models.Model):
@@ -214,8 +216,10 @@ class InstallationReport(models.Model):
 
 class VerificationStatus(models.TextChoices):
     PENDING = 'Pending'
+    PAUSED = 'Paused'
     VERIFIED = 'Verified'
     FLAGGED = 'Flagged'
+    TERMINATED = 'Terminated'
 
 
 class VerificationTask(models.Model):

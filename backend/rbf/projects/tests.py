@@ -2,7 +2,17 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 from django.contrib.auth import get_user_model
 
-from .models import Project, ProjectStatus, ProjectUpdate
+from .models import (
+    InstallationReport,
+    InstallationStatus,
+    PaymentClaim,
+    PaymentClaimStatus,
+    Project,
+    ProjectStatus,
+    ProjectUpdate,
+    VerificationStatus,
+    VerificationTask,
+)
 
 
 class ProjectApiTests(APITestCase):
@@ -157,6 +167,7 @@ class ProjectApiTests(APITestCase):
         self.assertEqual(pay_response.status_code, status.HTTP_200_OK)
         self.assertEqual(pay_response.data["status"], "Paid")
         self.assertEqual(pay_response.data["payment_reference"], "PMT-TEST-001")
+        self.assertFalse(pay_response.data["payment_locked"])
 
         disbursement_list = self.client.get("/api/projects/disbursements/")
         self.assertEqual(disbursement_list.status_code, status.HTTP_200_OK)
@@ -165,3 +176,114 @@ class ProjectApiTests(APITestCase):
         audit_logs = self.client.get("/api/projects/audit-logs/")
         self.assertEqual(audit_logs.status_code, status.HTTP_200_OK)
         self.assertGreaterEqual(audit_logs.data["count"], 3)
+
+    def test_blacklisted_vendor_claim_exposes_payment_lock_and_cannot_be_paid(self):
+        User = get_user_model()
+        vendor = User.objects.create_user(
+            username="locked_claim_vendor",
+            password="securePass123",
+            role="Vendor",
+            status="Blacklisted",
+            is_active=True,
+        )
+        approver = User.objects.create_user(
+            username="payment_lock_admin",
+            password="securePass123",
+            role="Digital Admin",
+            status="Active",
+        )
+
+        project = Project.objects.create(
+            vendor_id=str(vendor.id),
+            vendor_name=vendor.username,
+            tech_type="SHS",
+            region="Maseru",
+            status=ProjectStatus.DISBURSEMENT,
+            progress=90,
+            energy_output=100,
+            uptime=97,
+            gender_impact=50,
+        )
+        claim = PaymentClaim.objects.create(
+            project=project,
+            vendor=vendor,
+            claim_amount="5000.00",
+            status=PaymentClaimStatus.APPROVED,
+            declaration_accepted=True,
+        )
+
+        self.client.force_authenticate(approver)
+        detail_response = self.client.get(f"/api/projects/claims/{claim.id}/")
+        self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(detail_response.data["payment_locked"])
+        self.assertIn("blacklisted vendor", detail_response.data["payment_lock_reason"].lower())
+
+        pay_response = self.client.post(f"/api/projects/claims/{claim.id}/pay/", {}, format="json")
+        self.assertEqual(pay_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("frozen", str(pay_response.data).lower())
+
+    def test_paused_or_terminated_verification_tasks_cannot_be_verified(self):
+        User = get_user_model()
+        vendor = User.objects.create_user(
+            username="verification_vendor",
+            password="securePass123",
+            role="Vendor",
+            status="Suspended",
+            is_active=True,
+        )
+        verifier = User.objects.create_user(
+            username="verification_guard",
+            password="securePass123",
+            role="Field Verifier",
+            status="Active",
+        )
+        project = Project.objects.create(
+            vendor_id=str(vendor.id),
+            vendor_name=vendor.username,
+            tech_type="SHS",
+            region="Maseru",
+            status=ProjectStatus.VERIFICATION,
+            progress=80,
+            energy_output=88,
+            uptime=96,
+            gender_impact=50,
+        )
+        report = InstallationReport.objects.create(
+            project=project,
+            vendor=vendor,
+            gps_lat=-29.31,
+            gps_lng=27.48,
+            serial_number="SERIAL-VERIFY-1",
+            beneficiary_id="BEN-VERIFY-1",
+            status=InstallationStatus.PAUSED,
+        )
+        paused_task = VerificationTask.objects.create(
+            report=report,
+            vendor_lat=report.gps_lat,
+            vendor_lng=report.gps_lng,
+            status=VerificationStatus.PAUSED,
+        )
+
+        self.client.force_authenticate(verifier)
+        paused_response = self.client.post(
+            f"/api/projects/verification-tasks/{paused_task.id}/verify/",
+            {"verifier_lat": -29.31, "verifier_lng": 27.48},
+            format="json",
+        )
+        self.assertEqual(paused_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("paused", str(paused_response.data).lower())
+
+        vendor.status = "Blacklisted"
+        vendor.save(update_fields=["status"])
+        report.status = InstallationStatus.TERMINATED
+        report.save(update_fields=["status"])
+        paused_task.status = VerificationStatus.TERMINATED
+        paused_task.save(update_fields=["status"])
+
+        terminated_response = self.client.post(
+            f"/api/projects/verification-tasks/{paused_task.id}/verify/",
+            {"verifier_lat": -29.31, "verifier_lng": 27.48},
+            format="json",
+        )
+        self.assertEqual(terminated_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("terminated", str(terminated_response.data).lower())

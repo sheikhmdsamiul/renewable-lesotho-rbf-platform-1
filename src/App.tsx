@@ -389,6 +389,7 @@ const Register = ({
     nationalId: "",
     orgName: "",
     orgType: "Private",
+    associatedEntities: "",
     techTypes: [] as string[],
     address: "",
     taxId: "",
@@ -467,6 +468,10 @@ const Register = ({
         address: formData.address,
         organizationName: formData.orgName,
         organizationType: formData.orgType,
+        associatedEntities: formData.associatedEntities
+          .split(/[\n,;]+/)
+          .map((item) => item.trim())
+          .filter(Boolean),
         technologyTypes: formData.techTypes,
         registrationCertificateName: registrationCertName,
         taxId: formData.taxId,
@@ -664,6 +669,15 @@ const Register = ({
                     onChange={(e) => setFormData({ ...formData, address: e.target.value })}
                     className="input-field"
                     placeholder="Physical Address"
+                  />
+                </div>
+                <div className="space-y-1 md:col-span-2">
+                  <label className="text-sm font-bold text-slate-700 ml-1">Directors / Partners</label>
+                  <textarea
+                    value={formData.associatedEntities}
+                    onChange={(e) => setFormData({ ...formData, associatedEntities: e.target.value })}
+                    className="input-field min-h-[96px]"
+                    placeholder="Comma-separated names for directors, partners, or key principals"
                   />
                 </div>
                 <div className="space-y-1">
@@ -4405,6 +4419,7 @@ const Blacklisting = ({ currentUser }: { currentUser: User | null }) => {
   const [appealNotes, setAppealNotes] = useState("");
   const [appealResolution, setAppealResolution] = useState("");
   const [appealFile, setAppealFile] = useState<File | null>(null);
+  const caseDetailsRef = React.useRef<HTMLDivElement | null>(null);
 
   const role = currentUser?.role;
   const canInitiate = role === UserRole.RBF_OFFICIAL || role === UserRole.AUDITOR;
@@ -4452,6 +4467,17 @@ const Blacklisting = ({ currentUser }: { currentUser: User | null }) => {
 
   const selectedVendorRecord = vendors.find(v => String(v.vendorId) === initiateForm.vendorId);
   const activeCaseAppeals = appeals.filter(item => item.case === selectedCase?.id);
+
+  const openCase = (item: VendorBlacklistCase) => {
+    setSelectedCase(item);
+    setReviewNotes(item.reviewNotes ?? "");
+    setDecisionNotes(item.finalDecisionNotes ?? "");
+    if (typeof window !== "undefined") {
+      window.requestAnimationFrame(() => {
+        caseDetailsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    }
+  };
 
   const handleInitiate = async () => {
     if (!initiateForm.vendorId) {
@@ -4666,6 +4692,41 @@ const Blacklisting = ({ currentUser }: { currentUser: User | null }) => {
         </div>
       )}
 
+      <div className="card overflow-hidden">
+        <div className="p-6 border-b border-slate-100">
+          <h3 className="text-lg font-bold">Blacklisting Policy Table</h3>
+          <p className="text-sm text-slate-500">Operational effects by vendor restriction stage.</p>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left">
+            <thead>
+              <tr className="bg-slate-50">
+                <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Feature</th>
+                <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Suspended (Initiated)</th>
+                <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Blacklisted (Confirmed)</th>
+                <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Reinstated</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {[
+                ["Login", "Allowed", "Allowed", "Allowed"],
+                ["View Past Projects", "Read-Only", "Read-Only", "Read-Only"],
+                ["Submit New Bids", "Blocked", "Blocked", "Blocked (until re-qualified)"],
+                ["Request Payments", "Blocked", "Blocked", "Allowed"],
+                ["Field Verification", "Paused", "Terminated", "Resume (new logs only)"],
+              ].map(([feature, suspended, blacklisted, reinstated]) => (
+                <tr key={feature} className="hover:bg-slate-50">
+                  <td className="px-6 py-4 text-sm font-medium text-slate-900">{feature}</td>
+                  <td className="px-6 py-4 text-sm text-slate-600">{suspended}</td>
+                  <td className="px-6 py-4 text-sm text-slate-600">{blacklisted}</td>
+                  <td className="px-6 py-4 text-sm text-slate-600">{reinstated}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
       <div className="grid grid-cols-1 xl:grid-cols-[1.2fr_0.8fr] gap-6">
         <div className="card overflow-hidden">
           <div className="p-6 border-b border-slate-100">
@@ -4684,21 +4745,52 @@ const Blacklisting = ({ currentUser }: { currentUser: User | null }) => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {cases.map(item => (
-                  <tr key={item.id} className={`hover:bg-slate-50 ${selectedCase?.id === item.id ? "bg-slate-50" : ""}`}>
-                    <td className="px-6 py-4 text-sm font-medium text-slate-900">{item.vendorUsername || item.vendor}</td>
-                    <td className="px-6 py-4 text-sm text-slate-600">{item.reason}</td>
-                    <td className="px-6 py-4">
-                      <span className={`badge ${item.status === "Blacklisted" ? "bg-rose-100 text-rose-700" : item.status === "Under Review" ? "bg-amber-100 text-amber-700" : "bg-slate-100 text-slate-700"}`}>
-                        {item.status}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4 text-sm text-slate-500">{item.coolingOffUntil ? new Date(item.coolingOffUntil).toLocaleString() : "N/A"}</td>
-                    <td className="px-6 py-4 text-right">
-                      <button onClick={() => setSelectedCase(item)} className="btn-secondary py-1 px-3 text-xs">Open</button>
-                    </td>
-                  </tr>
-                ))}
+                {cases.map(item => {
+                  const isSelected = selectedCase?.id === item.id;
+                  return (
+                    <React.Fragment key={item.id}>
+                      <tr
+                        onClick={() => openCase(item)}
+                        className={`cursor-pointer hover:bg-slate-50 ${isSelected ? "bg-emerald-50/60" : ""}`}
+                      >
+                        <td className="px-6 py-4 text-sm font-medium text-slate-900">{item.vendorUsername || item.vendor}</td>
+                        <td className="px-6 py-4 text-sm text-slate-600">{item.reason}</td>
+                        <td className="px-6 py-4">
+                          <span className={`badge ${item.status === "Blacklisted" ? "bg-rose-100 text-rose-700" : item.status === "Under Review" ? "bg-amber-100 text-amber-700" : "bg-slate-100 text-slate-700"}`}>
+                            {item.status}
+                          </span>
+                        </td>
+                        <td className="px-6 py-4 text-sm text-slate-500">{item.coolingOffUntil ? new Date(item.coolingOffUntil).toLocaleString() : "N/A"}</td>
+                        <td className="px-6 py-4 text-right">
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              openCase(item);
+                            }}
+                            className={`btn-secondary py-1 px-3 text-xs ${isSelected ? "border-emerald-200 text-emerald-700 bg-emerald-50" : ""}`}
+                          >
+                            {isSelected ? "Opened" : "Open"}
+                          </button>
+                        </td>
+                      </tr>
+                      {isSelected && (
+                        <tr className="bg-emerald-50/40">
+                          <td colSpan={5} className="px-6 py-3 text-sm text-slate-700">
+                            <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                              <span>
+                                Selected case: <span className="font-semibold">{item.vendorUsername || item.vendor}</span> • {item.status}
+                              </span>
+                              <span className="text-slate-500">
+                                Details are shown in the Case Details panel.
+                              </span>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
                 {!loading && cases.length === 0 && (
                   <tr>
                     <td colSpan={5} className="px-6 py-8 text-sm text-slate-500">No blacklist cases found.</td>
@@ -4709,12 +4801,15 @@ const Blacklisting = ({ currentUser }: { currentUser: User | null }) => {
           </div>
         </div>
 
-        <div className="card p-6 space-y-4">
+        <div ref={caseDetailsRef} className="card p-6 space-y-4">
           <h3 className="text-lg font-bold">Case Details</h3>
           {!selectedCase ? (
             <p className="text-sm text-slate-500">Select a blacklist case to review actions and evidence.</p>
           ) : (
             <>
+              <div className="rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+                Viewing case for <span className="font-semibold">{selectedCase.vendorUsername || selectedCase.vendor}</span>.
+              </div>
               <div className="space-y-2 text-sm">
                 <p><span className="font-bold text-slate-700">Vendor:</span> {selectedCase.vendorUsername || selectedCase.vendor}</p>
                 <p><span className="font-bold text-slate-700">Reason:</span> {selectedCase.reason}</p>
@@ -4737,7 +4832,7 @@ const Blacklisting = ({ currentUser }: { currentUser: User | null }) => {
                 <div className="space-y-2 pt-2 border-t border-slate-100">
                   <label className="text-[10px] font-bold text-slate-400 uppercase">Review Notes</label>
                   <textarea className="input-field min-h-24 text-sm" value={reviewNotes} onChange={(e) => setReviewNotes(e.target.value)} />
-                  <button onClick={() => handleCaseAction("review")} disabled={isSubmitting} className="btn-secondary w-full disabled:opacity-60">Mark Under Review</button>
+                  <button type="button" onClick={() => handleCaseAction("review")} disabled={isSubmitting} className="btn-secondary w-full disabled:opacity-60">Mark Under Review</button>
                 </div>
               )}
 
@@ -4746,11 +4841,11 @@ const Blacklisting = ({ currentUser }: { currentUser: User | null }) => {
                   <label className="text-[10px] font-bold text-slate-400 uppercase">Decision Notes</label>
                   <textarea className="input-field min-h-24 text-sm" value={decisionNotes} onChange={(e) => setDecisionNotes(e.target.value)} />
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    <button onClick={() => handleCaseAction("confirm")} disabled={isSubmitting} className="btn-primary disabled:opacity-60">Confirm Blacklist</button>
-                    <button onClick={() => handleCaseAction("reject")} disabled={isSubmitting} className="btn-secondary disabled:opacity-60">Reject Case</button>
+                    <button type="button" onClick={() => handleCaseAction("confirm")} disabled={isSubmitting} className="btn-primary disabled:opacity-60">Confirm Blacklist</button>
+                    <button type="button" onClick={() => handleCaseAction("reject")} disabled={isSubmitting} className="btn-secondary disabled:opacity-60">Reject Case</button>
                   </div>
                   {selectedCase.status === "Blacklisted" && (
-                    <button onClick={() => handleCaseAction("reinstate")} disabled={isSubmitting} className="btn-secondary w-full disabled:opacity-60">Reinstate Vendor</button>
+                    <button type="button" onClick={() => handleCaseAction("reinstate")} disabled={isSubmitting} className="btn-secondary w-full disabled:opacity-60">Reinstate Vendor</button>
                   )}
                 </div>
               )}
@@ -4760,7 +4855,7 @@ const Blacklisting = ({ currentUser }: { currentUser: User | null }) => {
                   <label className="text-[10px] font-bold text-slate-400 uppercase">Appeal Statement</label>
                   <textarea className="input-field min-h-24 text-sm" value={appealNotes} onChange={(e) => setAppealNotes(e.target.value)} />
                   <input type="file" className="input-field py-2 text-sm" onChange={(e) => setAppealFile(e.target.files?.[0] ?? null)} />
-                  <button onClick={handleSubmitAppeal} disabled={isSubmitting} className="btn-primary w-full disabled:opacity-60">Submit Appeal</button>
+                  <button type="button" onClick={handleSubmitAppeal} disabled={isSubmitting} className="btn-primary w-full disabled:opacity-60">Submit Appeal</button>
                 </div>
               )}
             </>
@@ -4803,7 +4898,7 @@ const Blacklisting = ({ currentUser }: { currentUser: User | null }) => {
                     onChange={(e) => setAppealResolution(e.target.value)}
                     placeholder="Resolution notes"
                   />
-                  <button onClick={() => handleReviewAppeal(item.id)} disabled={isSubmitting} className="btn-secondary disabled:opacity-60">Resolve Appeal</button>
+                  <button type="button" onClick={() => handleReviewAppeal(item.id)} disabled={isSubmitting} className="btn-secondary disabled:opacity-60">Resolve Appeal</button>
                 </div>
               )}
             </div>
@@ -4868,7 +4963,7 @@ const Disbursements = () => {
   };
 
   const processPayment = async (claim: PaymentClaim) => {
-    if (!canProcessPayments || claim.status === "Paid") return;
+    if (!canProcessPayments || claim.status === "Paid" || claim.paymentLocked) return;
 
     try {
       setProcessingClaimId(claim.id);
@@ -4974,9 +5069,10 @@ const Disbursements = () => {
                   <button
                     onClick={() => processPayment(claim)}
                     className="text-emerald-600 hover:text-emerald-700 font-medium text-sm disabled:text-slate-400 disabled:cursor-not-allowed"
-                    disabled={!canProcessPayments || claim.status === "Paid" || processingClaimId === claim.id}
+                    disabled={!canProcessPayments || claim.status === "Paid" || claim.paymentLocked || processingClaimId === claim.id}
+                    title={claim.paymentLocked ? (claim.paymentLockReason || "Payment locked for audit.") : undefined}
                   >
-                    {!canProcessPayments ? "View Only" : claim.status === "Paid" ? "Paid" : processingClaimId === claim.id ? "Processing..." : "Process Payment"}
+                    {!canProcessPayments ? "View Only" : claim.status === "Paid" ? "Paid" : claim.paymentLocked ? "Locked" : processingClaimId === claim.id ? "Processing..." : "Process Payment"}
                   </button>
                 </td>
               </tr>
@@ -11934,6 +12030,10 @@ export default function App() {
   const [authMessage, setAuthMessage] = useState<string | null>(null);
 
   const loadNotifications = React.useCallback(async () => {
+    if (!getStoredUser()) {
+      setNotifications((prev) => (prev.length ? prev : MOCK_NOTIFICATIONS));
+      return;
+    }
     try {
       const data = await fetchNotifications();
       setNotifications(data);

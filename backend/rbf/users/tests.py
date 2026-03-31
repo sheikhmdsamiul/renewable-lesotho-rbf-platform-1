@@ -1,12 +1,28 @@
 import re
+from datetime import timedelta
 
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.core import mail
 from django.core.management import call_command
+from django.utils import timezone
 from django.test import override_settings
 from rest_framework import status
 from rest_framework.test import APITestCase
+
+from rbf.projects.models import (
+    Disbursement,
+    DisbursementStatus,
+    InstallationReport,
+    InstallationStatus,
+    PaymentClaim,
+    PaymentClaimStatus,
+    Project,
+    ProjectStatus,
+    VerificationStatus,
+    VerificationTask,
+)
+from rbf.users.models import BlacklistedIdentifier, BlacklistCaseStatus, VendorBlacklistCase
 
 
 class UserApiTests(APITestCase):
@@ -177,6 +193,72 @@ class UserApiTests(APITestCase):
             format="json",
         )
         self.assertEqual(login_response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_vendor_registration_is_blocked_for_blacklisted_associated_entity(self):
+        User = get_user_model()
+        vendor = User.objects.create_user(
+            username="blacklisted_source_vendor",
+            password="securePass123",
+            role="Vendor",
+            status="Blacklisted",
+            is_active=True,
+            gender="Male",
+            region="Maseru",
+            mobile_number="26655555555",
+            national_id="ID-BL-1",
+            address="Maseru HQ",
+            organization_name="Blocked Vendor Ltd",
+            organization_type="Private",
+            associated_entities=["Jane Director", "John Partner"],
+            technology_types=["SHS"],
+            registration_certificate_name="reg.pdf",
+            tax_id="TIN-BL-1",
+        )
+        case = VendorBlacklistCase.objects.create(
+            vendor=vendor,
+            reason="Fraudulent Reporting",
+            status=BlacklistCaseStatus.BLACKLISTED,
+        )
+        BlacklistedIdentifier.objects.create(
+            case=case,
+            vendor=vendor,
+            organization_name=vendor.organization_name,
+            tax_id=vendor.tax_id,
+            national_id=vendor.national_id,
+            associated_entities=vendor.associated_entities,
+            normalized_organization_name="blockedvendorltd",
+            normalized_tax_id="tinbl1",
+            normalized_national_id="idbl1",
+            normalized_associated_entities=["janedirector", "johnpartner"],
+            active=True,
+        )
+
+        cache.set("registration_otp_verified:associated@example.com", True, timeout=300)
+        response = self.client.post(
+            "/api/users/",
+            {
+                "username": "associated_match_vendor",
+                "password": "securePass123",
+                "email": "associated@example.com",
+                "role": "Vendor",
+                "full_name": "Associated Match",
+                "gender": "Female",
+                "region": "Maseru",
+                "mobile_number": "26655555555",
+                "national_id": "ID-NEW-1",
+                "address": "Maseru HQ",
+                "organization_name": "Fresh Entity Ltd",
+                "organization_type": "Private",
+                "associated_entities": ["Jane Director"],
+                "technology_types": ["SHS"],
+                "registration_certificate_name": "reg.pdf",
+                "tax_id": "TIN-NEW-1",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("associated_entities", response.data)
 
     def test_seed_demo_users_command_creates_expected_accounts(self):
         call_command("seed_demo_users")
@@ -410,3 +492,308 @@ class UserApiTests(APITestCase):
         )
         self.assertEqual(approve_response.status_code, status.HTTP_200_OK)
         self.assertEqual(approve_response.data["status"], "Approved")
+
+    def test_blacklisting_case_detail_is_visible_to_official_roles(self):
+        User = get_user_model()
+        vendor = User.objects.create_user(
+            username="blacklist_vendor_detail",
+            password="securePass123",
+            role="Vendor",
+            status="Suspended",
+            is_active=True,
+            gender="Male",
+            region="Maseru",
+            mobile_number="26655555555",
+            national_id="ID-DETAIL-1",
+            address="Maseru HQ",
+            organization_name="Detail Vendor Ltd",
+            organization_type="Private",
+            technology_types=["SHS"],
+            registration_certificate_name="reg.pdf",
+            tax_id="TIN-DETAIL-1",
+        )
+        initiator = User.objects.create_user(
+            username="detail_rbf",
+            password="securePass123",
+            role="RBF Official",
+            status="Active",
+            gender="Female",
+            region="Maseru",
+            mobile_number="26655555555",
+        )
+        case = vendor.blacklist_cases.create(
+            reason="Fraudulent Reporting",
+            description="Testing detail retrieval for officials.",
+            status="Initiated",
+            initiated_by=initiator,
+            notice_sent_at=timezone.now(),
+            cooling_off_until=timezone.now(),
+        )
+        roles = [
+            ("detail_admin", "Digital Admin"),
+            ("detail_rbf_official_2", "RBF Official"),
+            ("detail_tac", "TAC Member"),
+            ("detail_doe", "DoE Officer"),
+            ("detail_auditor", "Auditor"),
+        ]
+
+        for username, role in roles:
+            official = User.objects.create_user(
+                username=username,
+                password="securePass123",
+                role=role,
+                status="Active",
+                gender="Female",
+                region="Maseru",
+                mobile_number="26655555555",
+            )
+            self.client.force_authenticate(official)
+            response = self.client.get(f"/api/users/blacklisting-cases/{case.id}/")
+            self.assertEqual(response.status_code, status.HTTP_200_OK, msg=f"{role} should be able to open blacklist cases")
+
+        self.client.force_authenticate(vendor)
+        vendor_response = self.client.get(f"/api/users/blacklisting-cases/{case.id}/")
+        self.assertEqual(vendor_response.status_code, status.HTTP_200_OK)
+
+    def test_blacklisting_workflow_updates_vendor_projects_claims_and_appeals(self):
+        User = get_user_model()
+        vendor = User.objects.create_user(
+            username="blacklist_vendor_flow",
+            password="securePass123",
+            role="Vendor",
+            status="Active",
+            is_active=True,
+            gender="Male",
+            region="Maseru",
+            mobile_number="26655555555",
+            national_id="ID-FLOW-1",
+            address="Maseru HQ",
+            organization_name="Workflow Vendor Ltd",
+            organization_type="Private",
+            technology_types=["SHS"],
+            registration_certificate_name="reg.pdf",
+            tax_id="TIN-FLOW-1",
+        )
+        initiator = User.objects.create_user(
+            username="blacklist_initiator",
+            password="securePass123",
+            role="RBF Official",
+            status="Active",
+            gender="Female",
+            region="Maseru",
+            mobile_number="26655555555",
+        )
+        reviewer = User.objects.create_user(
+            username="blacklist_reviewer",
+            password="securePass123",
+            role="TAC Member",
+            status="Active",
+            gender="Female",
+            region="Maseru",
+            mobile_number="26655555555",
+        )
+        confirmer = User.objects.create_user(
+            username="blacklist_confirmer",
+            password="securePass123",
+            role="Digital Admin",
+            status="Active",
+            gender="Female",
+            region="Maseru",
+            mobile_number="26655555555",
+        )
+        appeal_reviewer = User.objects.create_user(
+            username="blacklist_appeal_reviewer",
+            password="securePass123",
+            role="Auditor",
+            status="Active",
+            gender="Female",
+            region="Maseru",
+            mobile_number="26655555555",
+        )
+
+        project = Project.objects.create(
+            vendor_id=str(vendor.id),
+            vendor_name="Workflow Vendor Ltd",
+            tech_type="SHS",
+            region="Maseru",
+            district="Maseru",
+            status=ProjectStatus.INSTALLATION,
+        )
+        related_vendor = User.objects.create_user(
+            username="related_vendor_flow",
+            password="securePass123",
+            role="Vendor",
+            status="Active",
+            is_active=True,
+            gender="Female",
+            region="Maseru",
+            mobile_number="26655555556",
+            national_id="ID-REL-1",
+            address="Maseru Branch",
+            organization_name="Related Vendor Ltd",
+            organization_type="Private",
+            technology_types=["SHS"],
+            registration_certificate_name="reg.pdf",
+            tax_id="TIN-REL-1",
+        )
+        related_project = Project.objects.create(
+            vendor_id=str(related_vendor.id),
+            vendor_name="Related Vendor Ltd",
+            tech_type="SHS",
+            region="Maseru",
+            district="Maseru",
+            status=ProjectStatus.INSTALLATION,
+        )
+        claim = PaymentClaim.objects.create(
+            project=project,
+            vendor=vendor,
+            claim_amount="1000.00",
+            status=PaymentClaimStatus.APPROVED,
+            declaration_accepted=True,
+        )
+        disbursement = Disbursement.objects.create(
+            claim=claim,
+            amount="1000.00",
+            status=DisbursementStatus.INITIATED,
+        )
+        related_claim = PaymentClaim.objects.create(
+            project=related_project,
+            vendor=related_vendor,
+            claim_amount="1200.00",
+            status=PaymentClaimStatus.APPROVED,
+            declaration_accepted=True,
+        )
+        InstallationReport.objects.create(
+            project=project,
+            vendor=vendor,
+            gps_lat=-29.31,
+            gps_lng=27.48,
+            serial_number="SERIAL-DUP-1",
+            beneficiary_id="BEN-100",
+        )
+        related_report = InstallationReport.objects.create(
+            project=related_project,
+            vendor=related_vendor,
+            gps_lat=-29.32,
+            gps_lng=27.49,
+            serial_number="SERIAL-DUP-1",
+            beneficiary_id="BEN-200",
+        )
+        related_task = VerificationTask.objects.create(
+            report=related_report,
+            vendor_lat=related_report.gps_lat,
+            vendor_lng=related_report.gps_lng,
+            status="Pending",
+        )
+
+        self.client.force_authenticate(initiator)
+        initiate_response = self.client.post(
+            f"/api/users/{vendor.id}/initiate_blacklisting/",
+            {
+                "reason": "Fraudulent Reporting",
+                "description": "Evidence package attached.",
+                "cooling_off_days": 3,
+            },
+            format="multipart",
+        )
+        self.assertEqual(initiate_response.status_code, status.HTTP_201_CREATED)
+        case_id = initiate_response.data["id"]
+        vendor.refresh_from_db()
+        own_report = InstallationReport.objects.get(project=project, vendor=vendor)
+        own_task = VerificationTask.objects.get(report=own_report)
+        own_report.refresh_from_db()
+        own_task.refresh_from_db()
+        self.assertEqual(vendor.status, "Suspended")
+        self.assertEqual(initiate_response.data["status"], "Initiated")
+        self.assertEqual(own_report.status, InstallationStatus.PAUSED)
+        self.assertEqual(own_task.status, VerificationStatus.PAUSED)
+
+        self.client.force_authenticate(vendor)
+        vendor_cases = self.client.get("/api/users/blacklisting-cases/")
+        self.assertEqual(vendor_cases.status_code, status.HTTP_200_OK)
+        self.assertEqual(vendor_cases.data["results"][0]["id"], case_id)
+
+        appeal_response = self.client.post(
+            f"/api/users/blacklisting-cases/{case_id}/appeal/",
+            {
+                "rebuttal_text": "We dispute the allegation and request review.",
+            },
+            format="multipart",
+        )
+        self.assertEqual(appeal_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(appeal_response.data["status"], "Submitted")
+        appeal_id = appeal_response.data["id"]
+
+        self.client.force_authenticate(reviewer)
+        review_response = self.client.post(
+            f"/api/users/blacklisting-cases/{case_id}/review/",
+            {"review_notes": "Escalating for formal review."},
+            format="json",
+        )
+        self.assertEqual(review_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(review_response.data["status"], "Under Review")
+
+        self.client.force_authenticate(confirmer)
+        early_confirm = self.client.post(
+            f"/api/users/blacklisting-cases/{case_id}/confirm/",
+            {"final_decision_notes": "Too early to confirm."},
+            format="json",
+        )
+        self.assertEqual(early_confirm.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Cooling-off period is still active.", str(early_confirm.data))
+
+        case = vendor.blacklist_cases.get(id=case_id)
+        case.cooling_off_until = timezone.now() - timedelta(days=1)
+        case.save(update_fields=["cooling_off_until"])
+
+        confirm_response = self.client.post(
+            f"/api/users/blacklisting-cases/{case_id}/confirm/",
+            {"final_decision_notes": "Confirmed after cooling-off."},
+            format="json",
+        )
+        self.assertEqual(confirm_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(confirm_response.data["status"], "Blacklisted")
+        vendor.refresh_from_db()
+        project.refresh_from_db()
+        related_project.refresh_from_db()
+        claim.refresh_from_db()
+        related_claim.refresh_from_db()
+        disbursement.refresh_from_db()
+        related_report.refresh_from_db()
+        related_task.refresh_from_db()
+        own_report.refresh_from_db()
+        own_task.refresh_from_db()
+        self.assertEqual(vendor.status, "Blacklisted")
+        self.assertTrue(vendor.is_active)
+        self.assertEqual(project.status, ProjectStatus.HALTED)
+        self.assertEqual(related_project.status, ProjectStatus.HALTED)
+        self.assertEqual(claim.status, PaymentClaimStatus.HELD_AUDIT)
+        self.assertEqual(related_claim.status, PaymentClaimStatus.HELD_AUDIT)
+        self.assertEqual(disbursement.status, DisbursementStatus.HELD_AUDIT)
+        self.assertEqual(own_report.status, InstallationStatus.TERMINATED)
+        self.assertEqual(own_task.status, VerificationStatus.TERMINATED)
+        self.assertEqual(related_report.status, "Flagged")
+        self.assertEqual(related_task.status, "Flagged")
+        self.assertTrue(related_task.anomaly_flag)
+        self.assertTrue(BlacklistedIdentifier.objects.filter(case_id=case_id, vendor=vendor, active=True).exists())
+
+        self.client.force_authenticate(appeal_reviewer)
+        resolve_appeal = self.client.post(
+            f"/api/users/blacklisting-appeals/{appeal_id}/review/",
+            {"resolution_notes": "Appeal reviewed and closed."},
+            format="json",
+        )
+        self.assertEqual(resolve_appeal.status_code, status.HTTP_200_OK)
+        self.assertEqual(resolve_appeal.data["status"], "Resolved")
+
+        self.client.force_authenticate(confirmer)
+        reinstate_response = self.client.post(
+            f"/api/users/blacklisting-cases/{case_id}/reinstate/",
+            {},
+            format="json",
+        )
+        self.assertEqual(reinstate_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(reinstate_response.data["status"], "Reinstated")
+        vendor.refresh_from_db()
+        self.assertEqual(vendor.status, "Registered")
+        self.assertFalse(BlacklistedIdentifier.objects.filter(case_id=case_id, vendor=vendor, active=True).exists())
