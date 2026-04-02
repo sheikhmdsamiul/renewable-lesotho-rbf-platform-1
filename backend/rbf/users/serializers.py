@@ -75,7 +75,7 @@ class UserSerializer(serializers.ModelSerializer):
 
         if self.instance is None and request is not None and request.user.is_authenticated:
             if request.user.role != UserRole.ADMIN:
-                raise serializers.ValidationError({'role': 'Only Digital Admin can create accounts.'})
+                raise serializers.ValidationError({'role': 'Only Platform Administrator (Super Admin) can create accounts.'})
 
         if self.instance is None:
             role = attrs.get('role', UserRole.VENDOR)
@@ -300,6 +300,12 @@ class VendorPrequalificationSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         """Validate pre-qualification submission"""
         request = self.context.get('request')
+        if self.instance is not None and request and request.user.role == UserRole.VENDOR:
+            if self.instance.vendor_id != request.user.id:
+                raise serializers.ValidationError('You can only edit your own pre-qualification submission.')
+            if self.instance.status != PrequalificationStatus.CLARIFICATION_REQUESTED:
+                raise serializers.ValidationError('Only submissions marked Partial (Resubmit) can be edited by vendors.')
+
         if request and request.method == 'POST':
             if request.user.role != UserRole.VENDOR:
                 raise serializers.ValidationError('Only vendors can submit pre-qualification forms.')
@@ -356,6 +362,25 @@ class VendorPrequalificationSerializer(serializers.ModelSerializer):
         validate_file('experience_financial_proof')
         
         return attrs
+
+    def update(self, instance, validated_data):
+        request = self.context.get('request')
+        is_vendor_resubmission = bool(
+            request
+            and request.user.role == UserRole.VENDOR
+            and instance.vendor_id == request.user.id
+        )
+
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+
+        if is_vendor_resubmission:
+            instance.status = PrequalificationStatus.PENDING
+            instance.reviewed_by = None
+            instance.reviewed_at = None
+
+        instance.save()
+        return instance
 
 
 class VendorBlacklistCaseSerializer(serializers.ModelSerializer):

@@ -330,7 +330,7 @@ def _notify_intent_to_award(tender: Tender, ranking_payload: dict, send_email=Tr
 
 class IsRbfOfficialOrReadOnly(BasePermission):
     """
-    Allows only RBF Officials to perform write actions; others can read.
+    Allows only the RBF Management Team to perform write actions; others can read.
     """
 
     def has_permission(self, request, view):
@@ -393,12 +393,12 @@ class TenderViewSet(viewsets.ModelViewSet):
     def _assert_write_permission(self):
         user = self.request.user
         if getattr(user, 'role', None) not in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}:
-            raise PermissionDenied('Only RBF Officials can create or modify tenders.')
+            raise PermissionDenied('Only the RBF Management Team can create or modify tenders.')
 
     def check_permissions(self, request):
         super().check_permissions(request)
         if request.method not in SAFE_METHODS and getattr(request.user, 'role', None) not in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}:
-            self.permission_denied(request, message='Only RBF Officials can create or modify tenders.')
+            self.permission_denied(request, message='Only the RBF Management Team can create or modify tenders.')
 
     def create(self, request, *args, **kwargs):
         self._assert_write_permission()
@@ -468,10 +468,14 @@ class TenderViewSet(viewsets.ModelViewSet):
         # Always notify approved (pre-qualified) vendors
         vendors = User.objects.filter(role=UserRole.VENDOR)
         vendors = vendors.filter(prequalifications__status=PrequalificationStatus.APPROVED)
-
-        vendors = vendors.distinct()
-        recipient_count = vendors.count()
-        vendors = vendors.only('id', 'email', 'full_name', 'username')
+        vendors = list(vendors.distinct().only('id', 'email', 'full_name', 'username'))
+        stakeholders = list(
+            User.objects.filter(role__in={UserRole.DOE_OFFICER, UserRole.UNDP_DONOR})
+            .distinct()
+            .only('id', 'email', 'full_name', 'username', 'role')
+        )
+        recipients = vendors + stakeholders
+        recipient_count = len(recipients)
         
         notifications = []
         email_subject = f"Tender Published: {tender.name}"
@@ -489,11 +493,11 @@ class TenderViewSet(viewsets.ModelViewSet):
             or str(getattr(settings, 'EMAIL_HOST', '')).lower() in {'mailhog', 'localhost'}
         )
 
-        for vendor in vendors:
+        for recipient in recipients:
             notifications.append(
                 Notification(
-                    recipient_id=str(vendor.id),
-                    recipient_name=vendor.full_name or vendor.username or vendor.email,
+                    recipient_id=str(recipient.id),
+                    recipient_name=recipient.full_name or recipient.username or recipient.email,
                     type=NotificationChannel.IN_APP,
                     event='tender_published',
                     title=email_subject,
@@ -509,7 +513,7 @@ class TenderViewSet(viewsets.ModelViewSet):
         email_recipients = []
         email_error = None
         if email_enabled:
-            email_recipients = [v.email for v in vendors if v.email]
+            email_recipients = list(dict.fromkeys([recipient.email for recipient in recipients if recipient.email]))
             if email_recipients:
                 try:
                     send_mail(
@@ -524,6 +528,8 @@ class TenderViewSet(viewsets.ModelViewSet):
 
         return {
             'recipient_count': recipient_count,
+            'vendor_recipient_count': len(vendors),
+            'stakeholder_recipient_count': len(stakeholders),
             'email_enabled': email_enabled,
             'email_recipient_count': len(email_recipients),
             'email_error': email_error,
@@ -1123,7 +1129,7 @@ class TenderBidEvaluationViewSet(viewsets.ModelViewSet):
 
     def _assert_eval_permission(self, request):
         if request.user.role not in {UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.TAC}:
-            raise PermissionDenied('Only RBF Officials or TAC members can score bids.')
+            raise PermissionDenied('Only the RBF Management Team or TAC members can score bids.')
 
     def create(self, request, *args, **kwargs):
         self._assert_eval_permission(request)
@@ -1160,7 +1166,7 @@ class TenderContractViewSet(viewsets.ModelViewSet):
 
     def _assert_admin_permission(self, request):
         if request.user.role not in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}:
-            raise PermissionDenied('Only RBF Officials or Admins can manage contracts.')
+            raise PermissionDenied('Only the RBF Management Team or Platform Administrators can manage contracts.')
 
     @action(detail=False, methods=['post'])
     def generate(self, request):

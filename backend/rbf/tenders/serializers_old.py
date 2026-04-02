@@ -148,7 +148,7 @@ class TenderSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         request = self.context.get('request')
         if request and getattr(request.user, 'role', None) != UserRole.RBF_OFFICIAL:
-            raise serializers.ValidationError('Only RBF Officials can create tenders.')
+            raise serializers.ValidationError('Only the RBF Management Team can create tenders.')
         # Auto-generate reference number if missing
         if not validated_data.get('reference_number'):
             # Simple sequential tag; in production consider DB sequence or UUID
@@ -175,7 +175,7 @@ class TenderSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         request = self.context.get('request')
         if request and getattr(request.user, 'role', None) != UserRole.RBF_OFFICIAL:
-            raise serializers.ValidationError('Only RBF Officials can create tenders.')
+            raise serializers.ValidationError('Only the RBF Management Team can create tenders.')
         # Auto-generate reference number if missing
         if not validated_data.get('reference_number'):
             # Simple sequential tag; in production consider DB sequence or UUID

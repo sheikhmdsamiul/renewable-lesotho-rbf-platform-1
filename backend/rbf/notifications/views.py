@@ -28,7 +28,7 @@ class NotificationViewSet(viewsets.ModelViewSet):
     def _assert_write_permission(self):
         user = self.request.user
         if user.role not in self.WRITE_ROLES:
-            raise PermissionDenied('Only RBF Official or Digital Admin can modify notifications.')
+            raise PermissionDenied('Only RBF Management Team or Platform Administrator (Super Admin) can modify notifications.')
 
     def create(self, request, *args, **kwargs):
         self._assert_write_permission()

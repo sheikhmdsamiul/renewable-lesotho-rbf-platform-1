@@ -194,7 +194,7 @@ class UserViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['patch', 'post'], permission_classes=[IsAuthenticated])
     def approve(self, request, pk=None):
         if not IsAdminOrRbfOfficial.check(request.user):
-            raise PermissionDenied('Only RBF Official or Digital Admin can approve vendors.')
+            raise PermissionDenied('Only RBF Management Team or Platform Administrator (Super Admin) can approve vendors.')
 
         user = self.get_object()
         if user.role != UserRole.VENDOR:
@@ -209,7 +209,7 @@ class UserViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated], parser_classes=[MultiPartParser, FormParser])
     def initiate_blacklisting(self, request, pk=None):
         if not IsBlacklistInitiatorRole.check(request.user):
-            raise PermissionDenied('Only RBF Officials or Auditors can initiate blacklisting.')
+            raise PermissionDenied('Only RBF Management Team or Auditors can initiate blacklisting.')
         vendor = self.get_object()
         if vendor.role != UserRole.VENDOR:
             return Response({'detail': 'Only vendor accounts can be blacklisted.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -258,11 +258,25 @@ class VendorPrequalificationViewSet(viewsets.ModelViewSet):
         return Response(self.get_serializer(preq).data, status=status.HTTP_201_CREATED)
 
     def update(self, request, *args, **kwargs):
+        preq = self.get_object()
+        if request.user.role == UserRole.VENDOR and preq.vendor_id == request.user.id:
+            if preq.status != PrequalificationStatus.CLARIFICATION_REQUESTED:
+                raise PermissionDenied('Only submissions marked Partial (Resubmit) can be edited.')
+            response = super().update(request, *args, **kwargs)
+            log_audit(request.user, 'prequalification_resubmitted', preq, {'vendor_id': preq.vendor_id})
+            return response
         if not IsReviewerRole.check(request.user):
             raise PermissionDenied('Only reviewer roles can update pre-qualification records.')
         return super().update(request, *args, **kwargs)
 
     def partial_update(self, request, *args, **kwargs):
+        preq = self.get_object()
+        if request.user.role == UserRole.VENDOR and preq.vendor_id == request.user.id:
+            if preq.status != PrequalificationStatus.CLARIFICATION_REQUESTED:
+                raise PermissionDenied('Only submissions marked Partial (Resubmit) can be edited.')
+            response = super().partial_update(request, *args, **kwargs)
+            log_audit(request.user, 'prequalification_resubmitted', preq, {'vendor_id': preq.vendor_id})
+            return response
         if not IsReviewerRole.check(request.user):
             raise PermissionDenied('Only reviewer roles can update pre-qualification records.')
         return super().partial_update(request, *args, **kwargs)
@@ -358,7 +372,7 @@ class VendorBlacklistCaseViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def confirm(self, request, pk=None):
         if not IsBlacklistConfirmerRole.check(request.user):
-            raise PermissionDenied('Only Digital Admin or DoE Officer can confirm blacklisting.')
+            raise PermissionDenied('Only Platform Administrator (Super Admin) or DoE Officer can confirm blacklisting.')
         case = self.get_object()
         if case.status not in {BlacklistCaseStatus.INITIATED, BlacklistCaseStatus.UNDER_REVIEW}:
             return Response({'detail': 'Only initiated or under-review cases can be confirmed.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -392,7 +406,7 @@ class VendorBlacklistCaseViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def reinstate(self, request, pk=None):
         if not IsBlacklistConfirmerRole.check(request.user):
-            raise PermissionDenied('Only Digital Admin or DoE Officer can reinstate a vendor.')
+            raise PermissionDenied('Only Platform Administrator (Super Admin) or DoE Officer can reinstate a vendor.')
         case = self.get_object()
         if case.status != BlacklistCaseStatus.BLACKLISTED:
             return Response({'detail': 'Only blacklisted cases can be reinstated.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -432,7 +446,7 @@ class BlacklistAppealViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=True, methods=['post'])
     def review(self, request, pk=None):
         if request.user.role not in {UserRole.AUDITOR, UserRole.ADMIN}:
-            raise PermissionDenied('Only Auditor or Digital Admin can review appeals.')
+            raise PermissionDenied('Only Auditor or Platform Administrator (Super Admin) can review appeals.')
         appeal = self.get_object()
         appeal.status = BlacklistAppealStatus.RESOLVED
         appeal.reviewed_by = request.user
@@ -463,7 +477,7 @@ class RequestRegistrationOtpView(APIView):
         otp_length = max(4, int(getattr(settings, 'OTP_LENGTH', 6)))
         otp = ''.join(random.choices(string.digits, k=otp_length))
         cache_key = f'registration_otp:{email}'
-        otp_timeout = int(getattr(settings, 'OTP_EXPIRY_SECONDS', 300))
+        otp_timeout = int(getattr(settings, 'OTP_EXPIRY_SECONDS', 600))
         # Cache is preferred, but keep a local fallback for dev/local setups.
         try:
             cache.set(cache_key, otp, timeout=otp_timeout)

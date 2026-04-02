@@ -31,7 +31,7 @@ class UserApiTests(APITestCase):
         admin = User.objects.create_user(
             username="platform_admin",
             password="securePass123",
-            role="Digital Admin",
+            role="Platform Administrator (Super Admin)",
             status="Active",
         )
         self.client.force_authenticate(admin)
@@ -42,7 +42,7 @@ class UserApiTests(APITestCase):
             "email": "admin@rbf.ls",
             "full_name": "Admin User",
             "gender": "Female",
-            "role": "Digital Admin",
+            "role": "Platform Administrator (Super Admin)",
             "region": "Maseru",
             "mobile_number": "26655555555",
             "organization_name": "RBF Office",
@@ -89,7 +89,7 @@ class UserApiTests(APITestCase):
         admin = User.objects.create_user(
             username="creator_admin",
             password="securePass123",
-            role="Digital Admin",
+            role="Platform Administrator (Super Admin)",
             status="Active",
         )
         self.client.force_authenticate(admin)
@@ -100,7 +100,7 @@ class UserApiTests(APITestCase):
                 "username": "api_created_user",
                 "password": "securePass123",
                 "email": "api@example.com",
-                "role": "Digital Admin",
+                "role": "Platform Administrator (Super Admin)",
                 "status": "Active",
                 "gender": "Male",
                 "region": "Maseru",
@@ -302,7 +302,7 @@ class UserApiTests(APITestCase):
         EMAIL_HOST_PASSWORD="secret",
         DEFAULT_FROM_EMAIL="sender@example.com",
         OTP_LENGTH=6,
-        OTP_EXPIRY_SECONDS=300,
+        OTP_EXPIRY_SECONDS=600,
     )
     def test_registration_otp_request_and_verify(self):
         request_response = self.client.post(
@@ -387,7 +387,7 @@ class UserApiTests(APITestCase):
             "username": "unauth_user",
             "password": "securePass123",
             "email": "unauth@example.com",
-            "role": "Digital Admin",
+            "role": "Platform Administrator (Super Admin)",
             "gender": "Male",
             "region": "Maseru",
             "mobile_number": "26655555555",
@@ -403,7 +403,7 @@ class UserApiTests(APITestCase):
         admin = User.objects.create_user(
             username="approver_admin",
             password="securePass123",
-            role="Digital Admin",
+            role="Platform Administrator (Super Admin)",
             status="Active",
         )
         vendor = User.objects.create_user(
@@ -428,7 +428,7 @@ class UserApiTests(APITestCase):
                 "username": "public_admin_attempt",
                 "password": "securePass123",
                 "email": "public-admin@example.com",
-                "role": "Digital Admin",
+                "role": "Platform Administrator (Super Admin)",
                 "gender": "Male",
                 "region": "Maseru",
                 "mobile_number": "26655555555",
@@ -452,7 +452,7 @@ class UserApiTests(APITestCase):
         reviewer = User.objects.create_user(
             username="prequal_reviewer",
             password="securePass123",
-            role="RBF Official",
+            role="RBF Management Team",
             status="Active",
             gender="Female",
             region="Maseru",
@@ -493,6 +493,62 @@ class UserApiTests(APITestCase):
         self.assertEqual(approve_response.status_code, status.HTTP_200_OK)
         self.assertEqual(approve_response.data["status"], "Approved")
 
+    def test_vendor_can_resubmit_partial_prequalification(self):
+        User = get_user_model()
+        vendor = User.objects.create_user(
+            username="prequal_resubmit_vendor",
+            password="securePass123",
+            role="Vendor",
+            status="Active",
+            gender="Male",
+            region="Maseru",
+            mobile_number="26655555555",
+        )
+        reviewer = User.objects.create_user(
+            username="prequal_resubmit_reviewer",
+            password="securePass123",
+            role="RBF Management Team",
+            status="Active",
+            gender="Female",
+            region="Maseru",
+            mobile_number="26655555555",
+        )
+        preq = vendor.prequalifications.create(
+            company_name="Original Vendor Ltd",
+            organization_type="Private",
+            tax_id="TIN-123",
+            hq_address="Maseru HQ",
+            technology_types=["SHS"],
+            declaration_accepted=True,
+            contact_number="26655555555",
+            email="vendor@example.com",
+            status="Partial (Resubmit)",
+            reviewer_comments="Please correct your application.",
+            reviewed_by=reviewer,
+            reviewed_at=timezone.now(),
+        )
+
+        self.client.force_authenticate(vendor)
+        response = self.client.patch(
+            f"/api/users/prequalifications/{preq.id}/",
+            {
+                "company_name": "Updated Vendor Ltd",
+                "technology_types": ["SHS", "Mini-grid"],
+                "declaration_accepted": True,
+                "contact_number": "26655555555",
+                "email": "vendor@example.com",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        preq.refresh_from_db()
+        self.assertEqual(preq.company_name, "Updated Vendor Ltd")
+        self.assertEqual(preq.technology_types, ["SHS", "Mini-grid"])
+        self.assertEqual(preq.status, "Pending")
+        self.assertIsNone(preq.reviewed_by)
+        self.assertIsNone(preq.reviewed_at)
+
     def test_blacklisting_case_detail_is_visible_to_official_roles(self):
         User = get_user_model()
         vendor = User.objects.create_user(
@@ -515,7 +571,7 @@ class UserApiTests(APITestCase):
         initiator = User.objects.create_user(
             username="detail_rbf",
             password="securePass123",
-            role="RBF Official",
+            role="RBF Management Team",
             status="Active",
             gender="Female",
             region="Maseru",
@@ -530,8 +586,8 @@ class UserApiTests(APITestCase):
             cooling_off_until=timezone.now(),
         )
         roles = [
-            ("detail_admin", "Digital Admin"),
-            ("detail_rbf_official_2", "RBF Official"),
+            ("detail_admin", "Platform Administrator (Super Admin)"),
+            ("detail_rbf_official_2", "RBF Management Team"),
             ("detail_tac", "TAC Member"),
             ("detail_doe", "DoE Officer"),
             ("detail_auditor", "Auditor"),
@@ -577,7 +633,7 @@ class UserApiTests(APITestCase):
         initiator = User.objects.create_user(
             username="blacklist_initiator",
             password="securePass123",
-            role="RBF Official",
+            role="RBF Management Team",
             status="Active",
             gender="Female",
             region="Maseru",
@@ -595,7 +651,7 @@ class UserApiTests(APITestCase):
         confirmer = User.objects.create_user(
             username="blacklist_confirmer",
             password="securePass123",
-            role="Digital Admin",
+            role="Platform Administrator (Super Admin)",
             status="Active",
             gender="Female",
             region="Maseru",

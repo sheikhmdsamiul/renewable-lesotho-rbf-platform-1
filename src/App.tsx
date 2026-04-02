@@ -125,6 +125,7 @@ import {
   submitPaymentClaim,
   approvePaymentClaim,
   payPaymentClaim,
+  flagProjectIssue,
   fetchProjects,
   fetchMilestones,
   createMilestone,
@@ -4110,7 +4111,7 @@ const PreQualification = () => {
         updated = await startVendorPrequalificationReview(vendor.id, reviewerComments);
       } else if (newStatus === "Approved") {
         updated = await approveVendorPrequalification(vendor.id, reviewerComments);
-      } else if (newStatus === "Clarification Requested") {
+      } else if (newStatus === "Partial (Resubmit)") {
         updated = await requestVendorPrequalificationClarification(vendor.id, reviewerComments);
       } else {
         updated = await rejectVendorPrequalification(vendor.id, reviewerComments);
@@ -4187,7 +4188,7 @@ const PreQualification = () => {
                     vendor.status === 'Approved' ? 'bg-emerald-100 text-emerald-700' :
                     vendor.status === 'Under Review' ? 'bg-blue-100 text-blue-700' :
                     vendor.status === 'Rejected' ? 'bg-rose-100 text-rose-700' :
-                    vendor.status === 'Clarification Requested' ? 'bg-amber-100 text-amber-700' :
+                    vendor.status === 'Partial (Resubmit)' ? 'bg-amber-100 text-amber-700' :
                     'bg-slate-100 text-slate-700'
                   }`}>
                     {vendor.status}
@@ -4374,11 +4375,11 @@ const PreQualification = () => {
                     Reject Application
                   </button>
                   <button 
-                    onClick={() => updateVendorStatus(selectedVendor, 'Clarification Requested')}
+                    onClick={() => updateVendorStatus(selectedVendor, 'Partial (Resubmit)')}
                     disabled={isSubmitting}
                     className="btn-secondary text-amber-600 border-amber-100 hover:bg-amber-50 disabled:opacity-60"
                   >
-                    Request Clarification
+                    Mark Partial (Resubmit)
                   </button>
                   <button 
                     onClick={() => updateVendorStatus(selectedVendor, 'Approved')}
@@ -4916,7 +4917,9 @@ const Disbursements = () => {
   const [processingClaimId, setProcessingClaimId] = useState<string | null>(null);
   const currentUser = getStoredUser();
   const canProcessPayments =
-    currentUser?.role === UserRole.ADMIN || currentUser?.role === UserRole.RBF_OFFICIAL;
+    currentUser?.role === UserRole.ADMIN || currentUser?.role === UserRole.RBF_OFFICIAL || currentUser?.role === UserRole.UNDP_DONOR;
+  const canFlagIssues =
+    currentUser?.role === UserRole.UNDP_DONOR || currentUser?.role === UserRole.ADMIN || currentUser?.role === UserRole.RBF_OFFICIAL;
 
   const showNotification = (msg: string) => {
     setNotification(msg);
@@ -4980,6 +4983,34 @@ const Disbursements = () => {
         showNotification(`Cannot connect to backend (${API_BASE}).`);
       } else {
         showNotification(toFriendlyApiMessage(raw) || "Failed to process payment.");
+      }
+    } finally {
+      setProcessingClaimId(null);
+    }
+  };
+
+  const flagClaimIssue = async (claim: PaymentClaim) => {
+    if (!canFlagIssues) return;
+
+    const details = window.prompt(
+      `Flag a payment delay or contract issue for project PRJ-${claim.projectId}:`,
+      `Payment delay review requested for claim ${claim.id}.`
+    );
+    if (!details || !details.trim()) return;
+
+    try {
+      setProcessingClaimId(claim.id);
+      await flagProjectIssue(claim.projectId, {
+        category: "payment_delay",
+        details: details.trim(),
+      });
+      showNotification(`Issue flagged for project PRJ-${claim.projectId}.`);
+    } catch (err: any) {
+      const raw = String(err?.message || "");
+      if (isConnectivityError(raw)) {
+        showNotification(`Cannot connect to backend (${API_BASE}).`);
+      } else {
+        showNotification(toFriendlyApiMessage(raw) || "Failed to flag project issue.");
       }
     } finally {
       setProcessingClaimId(null);
@@ -5066,14 +5097,25 @@ const Disbursements = () => {
                   </span>
                 </td>
                 <td className="px-6 py-4">
-                  <button
-                    onClick={() => processPayment(claim)}
-                    className="text-emerald-600 hover:text-emerald-700 font-medium text-sm disabled:text-slate-400 disabled:cursor-not-allowed"
-                    disabled={!canProcessPayments || claim.status === "Paid" || claim.paymentLocked || processingClaimId === claim.id}
-                    title={claim.paymentLocked ? (claim.paymentLockReason || "Payment locked for audit.") : undefined}
-                  >
-                    {!canProcessPayments ? "View Only" : claim.status === "Paid" ? "Paid" : claim.paymentLocked ? "Locked" : processingClaimId === claim.id ? "Processing..." : "Process Payment"}
-                  </button>
+                  <div className="flex flex-col gap-2">
+                    <button
+                      onClick={() => processPayment(claim)}
+                      className="text-emerald-600 hover:text-emerald-700 font-medium text-sm disabled:text-slate-400 disabled:cursor-not-allowed text-left"
+                      disabled={!canProcessPayments || claim.status === "Paid" || claim.paymentLocked || processingClaimId === claim.id}
+                      title={claim.paymentLocked ? (claim.paymentLockReason || "Payment locked for audit.") : undefined}
+                    >
+                      {!canProcessPayments ? "View Only" : claim.status === "Paid" ? "Paid" : claim.paymentLocked ? "Locked" : processingClaimId === claim.id ? "Processing..." : "Process Payment"}
+                    </button>
+                    {canFlagIssues && (
+                      <button
+                        onClick={() => flagClaimIssue(claim)}
+                        className="text-amber-600 hover:text-amber-700 font-medium text-sm text-left"
+                        disabled={processingClaimId === claim.id}
+                      >
+                        Flag Delay / Issue
+                      </button>
+                    )}
+                  </div>
                 </td>
               </tr>
             ))}
@@ -5658,6 +5700,7 @@ const PreQualificationSubmission = () => {
   const [submissionId, setSubmissionId] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string>("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [editingPrequalId, setEditingPrequalId] = useState<string | null>(null);
 
   const techSectors = ["SHS", "ICS", "GMG", "SAS", "PUE", "SWP"];
 
@@ -5678,6 +5721,42 @@ const PreQualificationSubmission = () => {
 
   // Show current status if vendor has already submitted
   const latestPrequal = getLatestPrequalification(prequals);
+  const isResubmitMode = Boolean(
+    latestPrequal &&
+    latestPrequal.status === "Partial (Resubmit)" &&
+    editingPrequalId === latestPrequal.id
+  );
+
+  const startResubmission = (prequal: VendorPrequalification) => {
+    setFormData({
+      companyName: prequal.companyName ?? "",
+      yearsOfExperience: String(prequal.yearsExperience ?? ""),
+      sectorFocus: prequal.technologyTypes ?? [],
+      priorProjects: String(prequal.priorProjects ?? ""),
+      annualRevenue: prequal.annualRevenue != null ? String(prequal.annualRevenue) : "",
+      femaleCommitment: prequal.femaleBeneficiaryTarget ?? 50,
+      vulnerableInclusion: prequal.vulnerableGroupTarget ?? 30,
+      districtsCovered: String(prequal.districtsCovered ?? ""),
+      bankAccountName: prequal.bankAccountName ?? "",
+      bankAccountNumber: prequal.bankAccountNumber ?? "",
+      focalPersonGender: prequal.genderOfFocalPerson ?? "Male",
+      contactNumber: prequal.contactNumber ?? "",
+      emailAddress: prequal.email ?? "",
+      techTier: prequal.techTier ?? "Level 1",
+      declaration: Boolean(prequal.declarationAccepted),
+    });
+    setDocFiles({
+      tradingLicense: null,
+      registrationCertificate: null,
+      taxComplianceCertificate: null,
+      experienceFinancialProof: null,
+    });
+    setEditingPrequalId(prequal.id);
+    setSubmitted(false);
+    setSubmissionId(null);
+    setSubmitError("");
+    setStep(1);
+  };
 
   const handleTechToggle = (tech: string) => {
     setFormData(prev => ({
@@ -5698,7 +5777,17 @@ const PreQualificationSubmission = () => {
         setSubmitError("Please select at least one technology type.");
         return;
       }
-      if (!docFiles.tradingLicense || !docFiles.taxComplianceCertificate || !docFiles.registrationCertificate || !docFiles.experienceFinancialProof) {
+      const hasExistingRequiredDocs = Boolean(
+        isResubmitMode &&
+        latestPrequal?.tradingLicense &&
+        latestPrequal?.taxComplianceCertificate &&
+        latestPrequal?.registrationCertificate &&
+        latestPrequal?.experienceFinancialProof
+      );
+      if (
+        !hasExistingRequiredDocs &&
+        (!docFiles.tradingLicense || !docFiles.taxComplianceCertificate || !docFiles.registrationCertificate || !docFiles.experienceFinancialProof)
+      ) {
         setSubmitError("Please upload all required legal and financial documents.");
         return;
       }
@@ -5728,8 +5817,10 @@ const PreQualificationSubmission = () => {
           email: formData.emailAddress,
           genderOfFocalPerson: formData.focalPersonGender,
           declarationAccepted: formData.declaration,
-        });
+        }, editingPrequalId ?? undefined);
         setSubmissionId(created.id);
+        setPrequals((prev) => [created, ...prev.filter((item) => item.id !== created.id)]);
+        setEditingPrequalId(null);
         setSubmitted(true);
       } catch (err: any) {
         const raw = String(err?.message || "");
@@ -5749,7 +5840,7 @@ const PreQualificationSubmission = () => {
       case 'Approved': return 'bg-emerald-100 text-emerald-700 border-emerald-300';
       case 'Under Review': return 'bg-blue-100 text-blue-700 border-blue-300';
       case 'Pending': return 'bg-amber-100 text-amber-700 border-amber-300';
-      case 'Clarification Requested': return 'bg-orange-100 text-orange-700 border-orange-300';
+      case 'Partial (Resubmit)': return 'bg-orange-100 text-orange-700 border-orange-300';
       case 'Rejected': return 'bg-rose-100 text-rose-700 border-rose-300';
       default: return 'bg-slate-100 text-slate-700 border-slate-300';
     }
@@ -5760,7 +5851,7 @@ const PreQualificationSubmission = () => {
       case 'Approved': return <CheckCircle2 className="text-emerald-600" size={32} />;
       case 'Under Review': return <Clock className="text-blue-600" size={32} />;
       case 'Pending': return <Clock className="text-amber-600" size={32} />;
-      case 'Clarification Requested': return <AlertCircle className="text-orange-600" size={32} />;
+      case 'Partial (Resubmit)': return <AlertCircle className="text-orange-600" size={32} />;
       case 'Rejected': return <XCircle className="text-rose-600" size={32} />;
       default: return <HelpCircle className="text-slate-600" size={32} />;
     }
@@ -5802,7 +5893,7 @@ const PreQualificationSubmission = () => {
   }
 
   // Show status if vendor has submitted
-  if (latestPrequal) {
+  if (latestPrequal && !isResubmitMode) {
     return (
       <div className="max-w-3xl mx-auto space-y-6">
         <div className="card p-8">
@@ -5900,10 +5991,10 @@ const PreQualificationSubmission = () => {
           </div>
         )}
 
-        {latestPrequal.status === 'Clarification Requested' && (
+        {latestPrequal.status === 'Partial (Resubmit)' && (
           <div className="card p-6 border-2 border-orange-200 bg-orange-50">
             <h3 className="font-bold text-orange-900 mb-2 flex items-center gap-2">
-              <AlertCircle size={20} /> Clarification Needed
+              <AlertCircle size={20} /> Partial (Resubmit)
             </h3>
             <p className="text-orange-800 mb-3">
               The review team needs more information to process your application. Please review the comments below and resubmit.
@@ -5916,9 +6007,7 @@ const PreQualificationSubmission = () => {
             )}
             <button 
               onClick={() => {
-                setPrequals([]);
-                setSubmitted(false);
-                setStep(1);
+                startResubmission(latestPrequal);
               }}
               className="btn-primary mt-4"
             >
@@ -6041,7 +6130,9 @@ const PreQualificationSubmission = () => {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-slate-900">Vendor Pre-Qualification</h1>
-          <p className="text-slate-500">Complete the mandatory process to access bidding opportunities</p>
+          <p className="text-slate-500">
+            {isResubmitMode ? "Update your previous submission and resubmit it for review" : "Complete the mandatory process to access bidding opportunities"}
+          </p>
         </div>
         <div className="flex items-center gap-2 text-sm font-bold text-slate-400">
           <span className={step >= 1 ? "text-emerald-600" : ""}>Step 1</span>
@@ -8628,7 +8719,11 @@ const VendorDashboard = ({
   );
 };
 
-const VendorProjectsHub = () => {
+const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
+  const isRbfPortal = mode === "rbf";
+  const projectTabs = isRbfPortal
+    ? ["overview", "milestones", "payments", "documents", "updates"] as const
+    : ["overview", "milestones", "planning", "payments", "documents", "updates", "fieldwork"] as const;
   const createEmptyMilestoneDraft = () => ({
     name: "",
     description: "",
@@ -8640,13 +8735,18 @@ const VendorProjectsHub = () => {
   const [milestones, setMilestones] = useState<Milestone[]>([]);
   const [claims, setClaims] = useState<PaymentClaim[]>([]);
   const [contracts, setContracts] = useState<TenderContract[]>([]);
+  const [tenders, setTenders] = useState<Tender[]>([]);
   const [projectUpdates, setProjectUpdates] = useState<ProjectUpdate[]>([]);
   const [projectDocuments, setProjectDocuments] = useState<ProjectDocument[]>([]);
+  const [portfolioReports, setPortfolioReports] = useState<InstallationReport[]>([]);
   const [installationReports, setInstallationReports] = useState<InstallationReport[]>([]);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState("");
   const [techFilter, setTechFilter] = useState("All");
   const [statusFilter, setStatusFilter] = useState("All");
+  const [districtFilter, setDistrictFilter] = useState("All");
+  const [windowFilter, setWindowFilter] = useState("All");
+  const [dateRangeFilter, setDateRangeFilter] = useState("All");
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
   const [projectTab, setProjectTab] = useState<"overview" | "milestones" | "planning" | "payments" | "documents" | "updates" | "fieldwork">("overview");
   const [deploymentPlan, setDeploymentPlan] = useState({
@@ -8681,18 +8781,22 @@ const VendorProjectsHub = () => {
   const loadData = React.useCallback(async () => {
     setLoading(true);
     try {
-      const [projectRows, milestoneRows, claimRows, contractRows, updateRows] = await Promise.all([
+      const [projectRows, milestoneRows, claimRows, contractRows, tenderRows, updateRows, reportRows] = await Promise.all([
         fetchProjects(),
         fetchMilestones(),
         fetchPaymentClaims(),
         fetchTenderContracts(),
+        fetchTenders(),
         fetchProjectUpdates(),
+        fetchInstallationReports(),
       ]);
       setProjects(projectRows);
       setMilestones(milestoneRows);
       setClaims(claimRows);
       setContracts(contractRows);
+      setTenders(tenderRows);
       setProjectUpdates(updateRows);
+      setPortfolioReports(reportRows);
     } finally {
       setLoading(false);
     }
@@ -8775,6 +8879,15 @@ const VendorProjectsHub = () => {
     () => ["All", ...Array.from(new Set(projects.map(p => p.techType).filter(Boolean)))],
     [projects]
   );
+  const districtOptions = useMemo(
+    () => ["All", ...Array.from(new Set(projects.map(p => p.district || p.region).filter(Boolean)))],
+    [projects]
+  );
+  const tenderById = useMemo(() => {
+    const map = new Map<string, Tender>();
+    tenders.forEach(tender => map.set(tender.id, tender));
+    return map;
+  }, [tenders]);
   const activeProjects = useMemo(
     () => projects.filter(p => [ProjectStatus.INSTALLATION, ProjectStatus.VERIFICATION].includes(p.status)),
     [projects]
@@ -8799,18 +8912,59 @@ const VendorProjectsHub = () => {
     () => Array.from<number>(contractValueByProject.values()).reduce((sum, val) => sum + val, 0),
     [contractValueByProject]
   );
+  const projectWindowLabel = (project: Project) => tenderById.get(project.tenderId || "")?.applicationType || "N/A";
+  const reportsForPortfolioProject = (projectId: string) => portfolioReports.filter(report => report.projectId === projectId);
+  const verifiedInstallationsForProject = (projectId: string) =>
+    reportsForPortfolioProject(projectId).filter(report => report.status === "Verified").length;
+  const flaggedInstallationsForProject = (projectId: string) =>
+    reportsForPortfolioProject(projectId).filter(report => report.status === "Flagged").length;
+  const totalInstallations = useMemo(
+    () => projects.reduce((sum, project) => sum + Number(project.targetInstallations || 0), 0),
+    [projects]
+  );
+  const totalVerifiedInstallations = useMemo(
+    () => portfolioReports.filter(report => report.status === "Verified").length,
+    [portfolioReports]
+  );
+  const totalFlaggedInstallations = useMemo(
+    () => portfolioReports.filter(report => report.status === "Flagged").length,
+    [portfolioReports]
+  );
+  const claimsPendingCount = useMemo(
+    () => claims.filter(claim => !["Paid", "Rejected"].includes(claim.status)).length,
+    [claims]
+  );
+  const verifiedInstallationsPct = totalInstallations > 0
+    ? Math.round((totalVerifiedInstallations / totalInstallations) * 100)
+    : 0;
+  const matchesDateRange = (project: Project) => {
+    if (dateRangeFilter === "All") return true;
+    const baseDate = startDateForProject(project) || project.tenderAwardedAt || project.tenderDeadline;
+    if (!baseDate) return false;
+    const parsed = new Date(baseDate);
+    if (Number.isNaN(parsed.getTime())) return false;
+    const now = new Date();
+    const dayMs = 24 * 60 * 60 * 1000;
+    const deltaDays = (now.getTime() - parsed.getTime()) / dayMs;
+    if (dateRangeFilter === "30d") return deltaDays <= 30;
+    if (dateRangeFilter === "90d") return deltaDays <= 90;
+    if (dateRangeFilter === "365d") return deltaDays <= 365;
+    return true;
+  };
   const filteredProjects = useMemo(() => {
     return projects.filter(project => {
-      const matchesSearch = !search || `${project.projectReference || ""} ${project.techType} ${project.region}`.toLowerCase().includes(search.toLowerCase());
+      const matchesSearch = !search || `${project.projectReference || ""} ${project.id} ${project.techType} ${project.region} ${project.vendorName}`.toLowerCase().includes(search.toLowerCase());
       const matchesTech = techFilter === "All" || project.techType === techFilter;
+      const matchesDistrict = districtFilter === "All" || (project.district || project.region) === districtFilter;
+      const matchesWindow = windowFilter === "All" || projectWindowLabel(project) === windowFilter;
       const matchesStatus =
         statusFilter === "All" ||
         (statusFilter === "Active" && activeProjects.some(p => p.id === project.id)) ||
         (statusFilter === "Completed" && completedProjects.some(p => p.id === project.id)) ||
         (statusFilter === "Pending" && pendingProjects.some(p => p.id === project.id));
-      return matchesSearch && matchesTech && matchesStatus;
+      return matchesSearch && matchesTech && matchesDistrict && matchesWindow && matchesStatus && matchesDateRange(project);
     });
-  }, [projects, search, techFilter, statusFilter, activeProjects, completedProjects, pendingProjects]);
+  }, [projects, search, techFilter, districtFilter, windowFilter, dateRangeFilter, statusFilter, activeProjects, completedProjects, pendingProjects, tenderById]);
 
   const milestonesForProject = (projectId: string) => milestones.filter(m => m.projectId === projectId);
   const claimsForProject = (projectId: string) => claims.filter(c => c.projectId === projectId);
@@ -8930,6 +9084,86 @@ const VendorProjectsHub = () => {
   };
   const startDateForProject = (project: Project) => project.startDate || project.tenderAwardedAt;
   const endDateForProject = (project: Project) => project.endDate || project.tenderDeadline;
+  const formatMetricValue = (value?: number, suffix = "") => {
+    if (typeof value !== "number" || Number.isNaN(value) || value <= 0) return "N/A";
+    return suffix ? `${Number(value).toLocaleString()}${suffix}` : Number(value).toLocaleString();
+  };
+  const formatPercent = (value?: number, digits = 0) => {
+    if (typeof value !== "number" || Number.isNaN(value)) return "N/A";
+    return `${value.toFixed(digits)}%`;
+  };
+  const formatCurrency = (value?: number | null) => {
+    if (typeof value !== "number" || Number.isNaN(value)) return "N/A";
+    return `LSL ${Number(value).toLocaleString()}`;
+  };
+  const formatDuration = (start?: string, end?: string) => {
+    if (!start || !end) return "N/A";
+    const startDate = new Date(start);
+    const endDate = new Date(end);
+    if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) return "N/A";
+    const months = Math.max(
+      1,
+      (endDate.getFullYear() - startDate.getFullYear()) * 12 + (endDate.getMonth() - startDate.getMonth())
+    );
+    return `${months} month${months === 1 ? "" : "s"}`;
+  };
+  const getProjectContract = (projectId: string) => contracts.find(contract => contract.projectId === projectId);
+  const getMilestoneDisplayName = (milestone: Milestone, index: number) =>
+    `Milestone ${index + 1} - ${milestone.percentage}%${milestone.name ? ` (${milestone.name})` : ""}`;
+  const getMilestoneStateLabel = (milestone: Milestone, projectId: string) => {
+    if (milestone.status === "Paid") return "PAID";
+    const relatedClaim = claimsForProject(projectId).find(claim => claim.milestoneId === milestone.id);
+    if (relatedClaim && ["Pending", "Verified", "Approved"].includes(relatedClaim.status)) return relatedClaim.status.toUpperCase();
+    if (milestone.status === "Verified") return "CLAIMABLE";
+    if (milestone.status === "Submitted") return "UNDER REVIEW";
+    return "LOCKED";
+  };
+  const getMilestoneStateTone = (label: string) => {
+    if (label === "PAID") return "text-emerald-700";
+    if (label === "CLAIMABLE" || label === "APPROVED" || label === "VERIFIED") return "text-sky-700";
+    if (label === "UNDER REVIEW" || label === "PENDING") return "text-amber-700";
+    return "text-slate-500";
+  };
+  const exportRmtProjectsCsv = () => {
+    const header = [
+      "project_id",
+      "vendor",
+      "technology",
+      "district",
+      "window",
+      "target_installations",
+      "verified_installations",
+      "verified_pct",
+      "gender_pct",
+      "uptime_pct",
+      "milestone_status",
+      "status",
+    ];
+    const rows = filteredProjects.map(project => {
+      const verifiedCount = verifiedInstallationsForProject(project.id);
+      const target = Number(project.targetInstallations || 0);
+      const verifiedPct = target > 0 ? ((verifiedCount / target) * 100).toFixed(1) : "0.0";
+      const nextMilestone = nextOpenMilestoneForProject(project.id);
+      const milestoneLabel = nextMilestone
+        ? `M${milestonesForProject(project.id).findIndex(item => item.id === nextMilestone.id) + 1} - ${getMilestoneStateLabel(nextMilestone, project.id)}`
+        : "Completed";
+      return [
+        project.projectReference || project.id,
+        project.vendorName,
+        project.techType,
+        project.district || project.region,
+        projectWindowLabel(project),
+        String(target),
+        String(verifiedCount),
+        verifiedPct,
+        typeof project.genderImpact === "number" ? project.genderImpact.toFixed(1) : "",
+        typeof project.uptime === "number" ? project.uptime.toFixed(1) : "",
+        milestoneLabel,
+        project.status,
+      ].join(",");
+    });
+    triggerDownload("rbf_projects_rmt.csv", [header.join(","), ...rows].join("\n"), "text/csv;charset=utf-8");
+  };
 
   const handleSaveDeploymentPlan = async () => {
     if (!selectedProject) return;
@@ -9211,17 +9445,174 @@ const VendorProjectsHub = () => {
     triggerDownload(`${safeReference || `project_${project.id}`}_report.txt`, reportLines.join("\n"));
   };
 
+  const handleFlagProjectForRmt = async (project: Project) => {
+    const details = window.prompt(`Flag an issue for ${project.projectReference || project.id}:`);
+    if (!details || !details.trim()) return;
+    try {
+      await flagProjectIssue(project.id, {
+        category: "general",
+        details: details.trim(),
+      });
+      await refreshProjectUpdates(project.id);
+      alert("Project issue flagged successfully.");
+    } catch (err: any) {
+      const raw = String(err?.message || "");
+      alert(toFriendlyApiMessage(raw) || "Unable to flag the project.");
+    }
+  };
+
+  const renderRmtProjectDetail = (project: Project) => {
+    const projectMilestones = milestonesForProject(project.id)
+      .slice()
+      .sort((a, b) => Number(a.percentage || 0) - Number(b.percentage || 0));
+    const projectClaims = claimsForProject(project.id);
+    const contract = getProjectContract(project.id);
+    const projectReports = reportsForPortfolioProject(project.id);
+    const verifiedCount = verifiedInstallationsForProject(project.id);
+    const flaggedCount = flaggedInstallationsForProject(project.id);
+    const targetInstallations = Number(project.targetInstallations || 0);
+    const verifiedPct = targetInstallations > 0 ? (verifiedCount / targetInstallations) * 100 : 0;
+    const paidAmount = projectClaims
+      .filter(claim => claim.status === "Paid")
+      .reduce((sum, claim) => sum + Number(claim.claimAmount || 0), 0);
+    const totalContractAmount = Number(budgetForProject(project) || 0);
+    const remainingAmount = Math.max(0, totalContractAmount - paidAmount);
+    const projectContractFile = contract?.generatedFile || project.contractSignedFile;
+    const signedCopyFile = contract?.signedFile || project.contractSignedFile;
+
+    return (
+      <div className="mt-5 space-y-6 rounded-3xl border border-slate-100 bg-white p-6 shadow-[0_30px_70px_-55px_rgba(15,23,42,0.7)]">
+        <section className="rounded-3xl border border-slate-200 bg-[linear-gradient(135deg,#f8fafc_0%,#eef6ff_100%)] p-6 space-y-5">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+              <p className="text-[11px] font-bold uppercase tracking-[0.3em] text-slate-400">Project Header</p>
+              <h3 className="mt-2 text-2xl font-semibold text-slate-900">{project.projectReference || `PRJ-${project.id}`}</h3>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">{project.status || "N/A"}</span>
+              {project.contractStatus && <span className="rounded-full bg-sky-50 px-3 py-1 text-xs font-semibold text-sky-700">{project.contractStatus}</span>}
+            </div>
+          </div>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+            <div><p className="text-xs text-slate-500">Vendor</p><p className="font-semibold text-slate-900">{project.vendorName || "N/A"}</p></div>
+            <div><p className="text-xs text-slate-500">Contract ID</p><p className="font-semibold text-slate-900">{project.contractReference || contract?.referenceNumber || "N/A"}</p></div>
+            <div><p className="text-xs text-slate-500">Technology</p><p className="font-semibold text-slate-900">{project.techType || "N/A"}</p></div>
+            <div><p className="text-xs text-slate-500">Window</p><p className="font-semibold text-slate-900">{projectWindowLabel(project)}</p></div>
+            <div><p className="text-xs text-slate-500">Assigned District</p><p className="font-semibold text-slate-900">{project.district || project.region || "N/A"}</p></div>
+            <div><p className="text-xs text-slate-500">Duration</p><p className="font-semibold text-slate-900">{formatDuration(startDateForProject(project), endDateForProject(project))}</p></div>
+            <div><p className="text-xs text-slate-500">Start Date</p><p className="font-semibold text-slate-900">{formatDate(startDateForProject(project))}</p></div>
+            <div><p className="text-xs text-slate-500">End Date</p><p className="font-semibold text-slate-900">{formatDate(endDateForProject(project))}</p></div>
+            <div><p className="text-xs text-slate-500">Verification Method</p><p className="font-semibold text-slate-900">Manual (CSV + ODK)</p></div>
+            <div><p className="text-xs text-slate-500">Created by</p><p className="font-semibold text-slate-900">{updatesForProject(project.id)[0]?.authorUsername || "N/A"}</p></div>
+            <div><p className="text-xs text-slate-500">Assigned on</p><p className="font-semibold text-slate-900">{formatDate(startDateForProject(project))}</p></div>
+            <div><p className="text-xs text-slate-500">Target / Verified</p><p className="font-semibold text-slate-900">{formatMetricValue(project.targetInstallations)} / {verifiedCount.toLocaleString()} ({formatPercent(verifiedPct, 0)})</p></div>
+          </div>
+          <div className="flex flex-wrap gap-3">
+            <a href={projectContractFile ? toFileUrl(projectContractFile) || "#" : "#"} target="_blank" rel="noreferrer" className={`btn-secondary text-xs ${projectContractFile ? "" : "pointer-events-none opacity-50"}`}>View Contract</a>
+            <a href={signedCopyFile ? toFileUrl(signedCopyFile) || "#" : "#"} target="_blank" rel="noreferrer" className={`btn-secondary text-xs ${signedCopyFile ? "" : "pointer-events-none opacity-50"}`}>View Signed Copy</a>
+            <button className="btn-secondary text-xs opacity-60 cursor-not-allowed" disabled>Edit Project</button>
+            <button onClick={() => void handleFlagProjectForRmt(project)} className="btn-primary text-xs">Flag Project</button>
+          </div>
+        </section>
+
+        <section className="space-y-5">
+          <div>
+            <p className="text-[11px] font-bold uppercase tracking-[0.3em] text-slate-400">Milestone Progress Panel</p>
+          </div>
+          <div className="space-y-4">
+            {projectMilestones.length === 0 && (
+              <div className="rounded-2xl border border-dashed border-slate-200 p-5 text-sm text-slate-500">
+                No milestones are available for this project yet.
+              </div>
+            )}
+            {projectMilestones.map((milestone, index) => {
+              const relatedClaim = projectClaims.find(claim => claim.milestoneId === milestone.id);
+              const stateLabel = getMilestoneStateLabel(milestone, project.id);
+              const stateTone = getMilestoneStateTone(stateLabel);
+              return (
+                <div key={milestone.id} className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+                  <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                    <div>
+                      <h4 className="text-lg font-semibold text-slate-900">{getMilestoneDisplayName(milestone, index)}</h4>
+                      <p className="mt-1 text-sm text-slate-600">{milestone.description || "No milestone condition details have been added."}</p>
+                    </div>
+                    <div className={`text-sm font-bold ${stateTone}`}>{stateLabel}</div>
+                  </div>
+                  <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+                    <div className="rounded-2xl bg-slate-50 p-4">
+                      <p className="text-xs text-slate-500">Amount</p>
+                      <p className="font-semibold text-slate-900">{formatCurrency(Number(milestone.amount || 0))}</p>
+                    </div>
+                    <div className="rounded-2xl bg-slate-50 p-4">
+                      <p className="text-xs text-slate-500">Target Date</p>
+                      <p className="font-semibold text-slate-900">{formatDate(milestone.targetDate)}</p>
+                    </div>
+                    <div className="rounded-2xl bg-slate-50 p-4">
+                      <p className="text-xs text-slate-500">Completed Date</p>
+                      <p className="font-semibold text-slate-900">{formatDate(milestone.completedDate)}</p>
+                    </div>
+                    <div className="rounded-2xl bg-slate-50 p-4">
+                      <p className="text-xs text-slate-500">Vendor Claim</p>
+                      <p className="font-semibold text-slate-900">{relatedClaim ? relatedClaim.status : "NOT YET"}</p>
+                    </div>
+                  </div>
+                  <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
+                    <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
+                      <p className="text-xs text-slate-500">Verification Snapshot</p>
+                      <div className="mt-2 space-y-1 text-sm text-slate-700">
+                        <p>{verifiedCount >= Math.ceil(targetInstallations * 0.8) ? "✅" : "❌"} Verified installations: {verifiedCount}/{formatMetricValue(project.targetInstallations)}</p>
+                        <p>{(project.genderImpact || 0) >= 50 ? "✅" : "❌"} Gender KPI: {formatPercent(project.genderImpact, 0)}</p>
+                        <p>{flaggedCount === 0 ? "✅" : "❌"} Blocking anomaly flags: {flaggedCount}</p>
+                        <p>{(project.uptime || 0) > 0 ? "✅" : "❌"} Uptime data present: {formatPercent(project.uptime, 1)}</p>
+                      </div>
+                    </div>
+                    <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
+                      <p className="text-xs text-slate-500">Approval / Payment</p>
+                      <div className="mt-2 space-y-1 text-sm text-slate-700">
+                        <p>Paid on: {relatedClaim?.paidAt ? formatDate(relatedClaim.paidAt) : "Not yet paid"}</p>
+                        <p>Approved by: {relatedClaim?.reviewedByUsername || "N/A"}</p>
+                        <p>Reports submitted: {projectReports.length}</p>
+                        <p>Milestone progress: {formatPercent(milestoneProgress(milestone), 0)}</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
+              <p className="text-xs text-slate-500">Total Contract Value</p>
+              <p className="text-lg font-semibold text-slate-900">{formatCurrency(totalContractAmount)}</p>
+            </div>
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
+              <p className="text-xs text-slate-500">Paid So Far</p>
+              <p className="text-lg font-semibold text-slate-900">{formatCurrency(paidAmount)} {totalContractAmount > 0 ? `(${formatPercent((paidAmount / totalContractAmount) * 100, 0)})` : ""}</p>
+            </div>
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
+              <p className="text-xs text-slate-500">Remaining</p>
+              <p className="text-lg font-semibold text-slate-900">{formatCurrency(remainingAmount)}</p>
+            </div>
+          </div>
+        </section>
+      </div>
+    );
+  };
+
   const renderProjectDetail = (project: Project) => (
+    isRbfPortal ? renderRmtProjectDetail(project) :
     <div className="mt-5 rounded-3xl border border-slate-100 bg-white shadow-[0_30px_70px_-55px_rgba(15,23,42,0.7)] overflow-hidden">
       <div className="p-5 border-b border-slate-100 bg-[linear-gradient(120deg,#f8fafc_0%,#f1f5f9_45%,#ffffff_100%)] space-y-4">
         <div>
           <p className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Project Details</p>
           <p className="text-sm text-slate-600 mt-1">
-            Choose a section below to add or view information for this project.
+            {isRbfPortal
+              ? "Choose a section below to review implementation, payments, documents, and recent project activity."
+              : "Choose a section below to add or view information for this project."}
           </p>
         </div>
         <div className="flex items-center gap-2 overflow-x-auto pb-1">
-          {["overview", "milestones", "planning", "payments", "documents", "updates", "fieldwork"].map(tab => (
+          {projectTabs.map(tab => (
             <button
               key={tab}
               onClick={() => setProjectTab(tab as typeof projectTab)}
@@ -9235,35 +9626,60 @@ const VendorProjectsHub = () => {
             </button>
           ))}
         </div>
-        <div className="flex flex-wrap gap-2 text-[11px]">
-          <button
-            onClick={() => setProjectTab("milestones")}
-            className="px-3 py-1.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-100 font-semibold"
-          >
-            Add Milestone
-          </button>
-          <button
-            onClick={() => setProjectTab("documents")}
-            className="px-3 py-1.5 rounded-full bg-slate-100 text-slate-700 border border-slate-200 font-semibold"
-          >
-            Upload Document
-          </button>
-          <button
-            onClick={() => setProjectTab("updates")}
-            className="px-3 py-1.5 rounded-full bg-slate-100 text-slate-700 border border-slate-200 font-semibold"
-          >
-            View Updates
-          </button>
-          <button
-            onClick={() => setProjectTab("fieldwork")}
-            className="px-3 py-1.5 rounded-full bg-blue-50 text-blue-700 border border-blue-100 font-semibold"
-          >
-            Report Installation
-          </button>
-        </div>
+        {!isRbfPortal && (
+          <div className="flex flex-wrap gap-2 text-[11px]">
+            <button
+              onClick={() => setProjectTab("milestones")}
+              className="px-3 py-1.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-100 font-semibold"
+            >
+              Add Milestone
+            </button>
+            <button
+              onClick={() => setProjectTab("documents")}
+              className="px-3 py-1.5 rounded-full bg-slate-100 text-slate-700 border border-slate-200 font-semibold"
+            >
+              Upload Document
+            </button>
+            <button
+              onClick={() => setProjectTab("updates")}
+              className="px-3 py-1.5 rounded-full bg-slate-100 text-slate-700 border border-slate-200 font-semibold"
+            >
+              View Updates
+            </button>
+            <button
+              onClick={() => setProjectTab("fieldwork")}
+              className="px-3 py-1.5 rounded-full bg-blue-50 text-blue-700 border border-blue-100 font-semibold"
+            >
+              Report Installation
+            </button>
+          </div>
+        )}
       </div>
       <div className="px-6 pt-5">
+        {isRbfPortal && (
+          <div className="mb-4 rounded-2xl border border-emerald-100 bg-emerald-50/80 p-4">
+            <p className="text-[11px] font-bold uppercase tracking-[0.24em] text-emerald-700">Assigned Vendor</p>
+            <div className="mt-2 flex flex-wrap items-center gap-3">
+              <p className="text-lg font-semibold text-slate-900">{project.vendorName || "Unassigned Vendor"}</p>
+              <span className="rounded-full border border-emerald-200 bg-white px-3 py-1 text-xs font-medium text-emerald-700">
+                Vendor ID: {project.vendorId || "N/A"}
+              </span>
+            </div>
+          </div>
+        )}
         <div className="grid grid-cols-2 gap-3 text-[11px] text-slate-500 sm:grid-cols-4">
+          {isRbfPortal && (
+            <>
+              <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
+                <p className="uppercase tracking-wider text-slate-400">Project Status</p>
+                <p className="font-semibold text-slate-700">{project.status || "N/A"}</p>
+              </div>
+              <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
+                <p className="uppercase tracking-wider text-slate-400">Vendor</p>
+                <p className="font-semibold text-slate-700">{project.vendorName || "N/A"}</p>
+              </div>
+            </>
+          )}
           <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
             <p className="uppercase tracking-wider text-slate-400">Contract Ref</p>
             <p className="font-semibold text-slate-700">{project.contractReference || "N/A"}</p>
@@ -9287,8 +9703,52 @@ const VendorProjectsHub = () => {
           <div className="space-y-4">
             <div>
               <h4 className="text-sm font-semibold text-slate-800">Overview</h4>
-              <p className="text-xs text-slate-500">See the next thing to finish and the actions you can take right now.</p>
+              <p className="text-xs text-slate-500">
+                {isRbfPortal ? "See the next milestone at risk and the oversight actions available from this workspace." : "See the next thing to finish and the actions you can take right now."}
+              </p>
             </div>
+            {isRbfPortal && (
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Project Reference</p>
+                  <p className="mt-1 text-sm font-semibold text-slate-900">{project.projectReference || `Project ${project.id}`}</p>
+                </div>
+                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Assigned Vendor</p>
+                  <p className="mt-1 text-sm font-semibold text-slate-900">{project.vendorName || "N/A"}</p>
+                </div>
+                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Technology</p>
+                  <p className="mt-1 text-sm font-semibold text-slate-900">{project.techType || "N/A"}</p>
+                </div>
+                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Location</p>
+                  <p className="mt-1 text-sm font-semibold text-slate-900">{[project.region, project.district].filter(Boolean).join(", ") || "N/A"}</p>
+                </div>
+                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Budget</p>
+                  <p className="mt-1 text-sm font-semibold text-slate-900">
+                    {budgetForProject(project) != null ? `M ${Number(budgetForProject(project)).toLocaleString()}` : "N/A"}
+                  </p>
+                </div>
+                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Target Installations</p>
+                  <p className="mt-1 text-sm font-semibold text-slate-900">{formatMetricValue(project.targetInstallations)}</p>
+                </div>
+                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Target Beneficiaries</p>
+                  <p className="mt-1 text-sm font-semibold text-slate-900">{formatMetricValue(project.targetBeneficiaries)}</p>
+                </div>
+                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Target Female / Vulnerable</p>
+                  <p className="mt-1 text-sm font-semibold text-slate-900">
+                    {typeof project.targetFemalePct === "number" || typeof project.targetVulnerablePct === "number"
+                      ? `${formatMetricValue(project.targetFemalePct, "%")} / ${formatMetricValue(project.targetVulnerablePct, "%")}`
+                      : "N/A"}
+                  </p>
+                </div>
+              </div>
+            )}
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
               <div className="rounded-2xl border border-emerald-100 bg-emerald-50 p-5">
                 <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-emerald-700">Next To Finish</p>
@@ -9302,26 +9762,34 @@ const VendorProjectsHub = () => {
                 </p>
               </div>
               <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
-                <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-slate-500">What You Can Do Now</p>
+                <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-slate-500">
+                  {isRbfPortal ? "Oversight Actions" : "What You Can Do Now"}
+                </p>
                 <div className="mt-3 flex flex-wrap gap-2">
                   <button
-                    onClick={() => setProjectTab("milestones")}
+                    onClick={() => setProjectTab(isRbfPortal ? "updates" : "milestones")}
                     className="btn-primary text-xs"
                   >
-                    Update Milestones
+                    {isRbfPortal ? "Review Updates" : "Update Milestones"}
                   </button>
                   <button
                     onClick={() => setProjectTab("documents")}
                     className="btn-secondary text-xs"
                   >
-                    Upload Document
+                    {isRbfPortal ? "View Documents" : "Upload Document"}
                   </button>
-                  <button
+                  {!isRbfPortal && <button
                     onClick={() => setProjectTab("fieldwork")}
                     className="btn-secondary text-xs"
                   >
                     Report Field Work
-                  </button>
+                  </button>}
+                  {isRbfPortal && <button
+                    onClick={() => setProjectTab("payments")}
+                    className="btn-secondary text-xs"
+                  >
+                    Review Payments
+                  </button>}
                   <button
                     onClick={() => handleGenerateProjectReport(project)}
                     className="btn-secondary text-xs"
@@ -9340,54 +9808,77 @@ const VendorProjectsHub = () => {
           <div className="space-y-4">
             <div>
               <h4 className="text-sm font-semibold text-slate-800">Deployment Planning</h4>
-              <p className="text-xs text-slate-500">Provide team, equipment, and schedule details.</p>
+              <p className="text-xs text-slate-500">
+                {isRbfPortal ? "Deployment planning is shown here for oversight only." : "Provide team, equipment, and schedule details."}
+              </p>
             </div>
             <div className="space-y-6">
               <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
                 <p className="text-xs text-slate-500">
-                  Core project parameters are locked because they are inherited from the awarded bid and tender.
-                  Use this section to provide your deployment-level planning.
+                  {isRbfPortal
+                    ? "Core project parameters and vendor planning inputs are available here for review."
+                    : "Core project parameters are locked because they are inherited from the awarded bid and tender. Use this section to provide your deployment-level planning."}
                 </p>
               </div>
               <div className="grid grid-cols-1 gap-4">
                 <div className="space-y-2">
                   <label className="text-sm font-semibold text-slate-700">Field Team Roster</label>
-                  <textarea
-                    className="input-field min-h-[90px]"
-                    placeholder="List roles, headcount, and deployment leads"
-                    value={deploymentPlan.teamRoster}
-                    onChange={(e) => setDeploymentPlan(prev => ({ ...prev, teamRoster: e.target.value }))}
-                  />
+                  {isRbfPortal ? (
+                    <div className="rounded-2xl border border-slate-200 bg-white p-4 text-sm text-slate-600 min-h-[90px] whitespace-pre-wrap">
+                      {deploymentPlan.teamRoster || "No field team roster has been submitted."}
+                    </div>
+                  ) : (
+                    <textarea
+                      className="input-field min-h-[90px]"
+                      placeholder="List roles, headcount, and deployment leads"
+                      value={deploymentPlan.teamRoster}
+                      onChange={(e) => setDeploymentPlan(prev => ({ ...prev, teamRoster: e.target.value }))}
+                    />
+                  )}
                 </div>
                 <div className="space-y-2">
                   <label className="text-sm font-semibold text-slate-700">Equipment Sourcing Plan</label>
-                  <textarea
-                    className="input-field min-h-[90px]"
-                    placeholder="Describe suppliers, lead times, and logistics"
-                    value={deploymentPlan.equipmentPlan}
-                    onChange={(e) => setDeploymentPlan(prev => ({ ...prev, equipmentPlan: e.target.value }))}
-                  />
+                  {isRbfPortal ? (
+                    <div className="rounded-2xl border border-slate-200 bg-white p-4 text-sm text-slate-600 min-h-[90px] whitespace-pre-wrap">
+                      {deploymentPlan.equipmentPlan || "No equipment sourcing plan has been submitted."}
+                    </div>
+                  ) : (
+                    <textarea
+                      className="input-field min-h-[90px]"
+                      placeholder="Describe suppliers, lead times, and logistics"
+                      value={deploymentPlan.equipmentPlan}
+                      onChange={(e) => setDeploymentPlan(prev => ({ ...prev, equipmentPlan: e.target.value }))}
+                    />
+                  )}
                 </div>
                 <div className="space-y-2">
                   <label className="text-sm font-semibold text-slate-700">Work Schedule</label>
-                  <textarea
-                    className="input-field min-h-[90px]"
-                    placeholder="Phases, timelines, and key milestones"
-                    value={deploymentPlan.workSchedule}
-                    onChange={(e) => setDeploymentPlan(prev => ({ ...prev, workSchedule: e.target.value }))}
-                  />
+                  {isRbfPortal ? (
+                    <div className="rounded-2xl border border-slate-200 bg-white p-4 text-sm text-slate-600 min-h-[90px] whitespace-pre-wrap">
+                      {deploymentPlan.workSchedule || "No work schedule has been submitted."}
+                    </div>
+                  ) : (
+                    <textarea
+                      className="input-field min-h-[90px]"
+                      placeholder="Phases, timelines, and key milestones"
+                      value={deploymentPlan.workSchedule}
+                      onChange={(e) => setDeploymentPlan(prev => ({ ...prev, workSchedule: e.target.value }))}
+                    />
+                  )}
                 </div>
               </div>
-              <div className="flex items-center gap-3">
-                <button
-                  onClick={handleSaveDeploymentPlan}
-                  className="btn-primary px-6"
-                  disabled={planSaving}
-                >
-                  {planSaving ? "Saving..." : "Save Deployment Plan"}
-                </button>
-                {planMessage && <span className="text-sm text-slate-500">{planMessage}</span>}
-              </div>
+              {!isRbfPortal && (
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={handleSaveDeploymentPlan}
+                    className="btn-primary px-6"
+                    disabled={planSaving}
+                  >
+                    {planSaving ? "Saving..." : "Save Deployment Plan"}
+                  </button>
+                  {planMessage && <span className="text-sm text-slate-500">{planMessage}</span>}
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -9395,9 +9886,11 @@ const VendorProjectsHub = () => {
           <div className="space-y-4">
             <div>
               <h4 className="text-sm font-semibold text-slate-800">Milestones</h4>
-              <p className="text-xs text-slate-500">Add milestones, set target dates, and track progress from one place.</p>
+              <p className="text-xs text-slate-500">
+                {isRbfPortal ? "Review milestone progress and delivery status." : "Add milestones, set target dates, and track progress from one place."}
+              </p>
             </div>
-            <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4 space-y-3">
+            {!isRbfPortal && <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4 space-y-3">
               <div className="flex items-center justify-between">
                 <p className="text-sm font-semibold text-slate-700">Add Milestone</p>
                 <span className="text-[11px] text-slate-400">Fields marked * are required</span>
@@ -9469,7 +9962,7 @@ const VendorProjectsHub = () => {
                 </button>
                 {milestoneMessage && <span className="text-xs text-slate-500">{milestoneMessage}</span>}
               </div>
-            </div>
+            </div>}
             <div className="space-y-3">
               {milestonesForProject(project.id).length === 0 && (
                 <p className="text-sm text-slate-500">No milestones added yet.</p>
@@ -9494,7 +9987,7 @@ const VendorProjectsHub = () => {
                         <span className={`rounded-full border px-3 py-1 text-xs font-semibold ${badge.className}`}>
                           {badge.label}
                         </span>
-                        <button
+                        {!isRbfPortal && <button
                           onClick={() => {
                             if (isEditing) {
                               setEditingMilestoneId(null);
@@ -9507,7 +10000,7 @@ const VendorProjectsHub = () => {
                           className="btn-secondary py-1.5 px-3 text-xs"
                         >
                           {isEditing ? "Cancel" : "Edit"}
-                        </button>
+                        </button>}
                       </div>
                     </div>
 
@@ -9539,7 +10032,7 @@ const VendorProjectsHub = () => {
                       </div>
                     </div>
 
-                    {isEditing && (
+                    {!isRbfPortal && isEditing && (
                       <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4 space-y-3">
                         <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                           <div className="space-y-1">
@@ -9639,9 +10132,11 @@ const VendorProjectsHub = () => {
           <div className="space-y-4">
             <div>
               <h4 className="text-sm font-semibold text-slate-800">Documents</h4>
-              <p className="text-xs text-slate-500">Upload project files or download existing ones.</p>
+              <p className="text-xs text-slate-500">
+                {isRbfPortal ? "Review contract files and supporting project documents." : "Upload project files or download existing ones."}
+              </p>
             </div>
-            <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4 space-y-3">
+            {!isRbfPortal && <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4 space-y-3">
               <div className="flex items-center justify-between">
                 <p className="text-sm font-semibold text-slate-700">Upload Document</p>
                 <span className="text-[11px] text-slate-400">PDF, XLS, DOC, images</span>
@@ -9669,7 +10164,7 @@ const VendorProjectsHub = () => {
                 </button>
                 {documentMessage && <span className="text-xs text-slate-500">{documentMessage}</span>}
               </div>
-            </div>
+            </div>}
             <div className="space-y-3">
               {contractForProject(project.id)?.signedFile && (
                 <a
@@ -9713,7 +10208,11 @@ const VendorProjectsHub = () => {
           <div className="space-y-4">
             <div>
               <h4 className="text-sm font-semibold text-slate-800">Updates</h4>
-              <p className="text-xs text-slate-500">Recent activity from milestones, planning, documents, field work, and payments appears here automatically.</p>
+              <p className="text-xs text-slate-500">
+                {isRbfPortal
+                  ? "Recent project activity across milestones, documents, planning, field verification, and payments appears here automatically."
+                  : "Recent activity from milestones, planning, documents, field work, and payments appears here automatically."}
+              </p>
             </div>
             <div className="space-y-3">
               {updatesForProject(project.id).length === 0 && (
@@ -9740,9 +10239,11 @@ const VendorProjectsHub = () => {
           <div className="space-y-4">
             <div>
               <h4 className="text-sm font-semibold text-slate-800">Field Work Reporting</h4>
-              <p className="text-xs text-slate-500">Submit installation evidence for verification.</p>
+              <p className="text-xs text-slate-500">
+                {isRbfPortal ? "Review submitted installation evidence and verification-ready records." : "Submit installation evidence for verification."}
+              </p>
             </div>
-            <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4 space-y-3">
+            {!isRbfPortal && <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4 space-y-3">
               <div className="flex items-center justify-between">
                 <p className="text-sm font-semibold text-slate-700">New Installation Report</p>
                 <span className="text-[11px] text-slate-400">GPS + Photo + Receipt</span>
@@ -9808,7 +10309,7 @@ const VendorProjectsHub = () => {
                 </button>
                 {reportMessage && <span className="text-xs text-slate-500">{reportMessage}</span>}
               </div>
-            </div>
+            </div>}
             <div className="space-y-3">
               {reportsForProject(project.id).length === 0 && (
                 <p className="text-sm text-slate-500">No installation reports submitted yet.</p>
@@ -9850,11 +10351,13 @@ const VendorProjectsHub = () => {
           <div className="flex flex-col gap-8 lg:flex-row lg:items-start lg:justify-between">
             <div className="max-w-2xl">
               <div className="inline-flex items-center gap-2 rounded-full border border-emerald-400/30 bg-emerald-500/10 px-3 py-1 text-[11px] uppercase tracking-[0.35em] text-emerald-200/80">
-                Project Intelligence Hub
+                {isRbfPortal ? "RMT Project Oversight" : "Project Intelligence Hub"}
               </div>
-              <h1 className="text-3xl font-semibold mt-4">Projects Hub</h1>
+              <h1 className="text-3xl font-semibold mt-4">{isRbfPortal ? "RBF Project" : "Projects Hub"}</h1>
               <p className="text-sm text-slate-200/90 mt-2">
-                A unified command center for implementation health, contract readiness, and disbursement momentum.
+                {isRbfPortal
+                  ? "A dedicated project workspace for the RBF Management Team to review assigned project details, implementation status, and supporting records."
+                  : "A unified command center for implementation health, contract readiness, and disbursement momentum."}
               </p>
               <div className="mt-5 flex flex-wrap gap-2 text-[11px] text-slate-200/80">
                 <span className="rounded-full border border-white/15 bg-white/10 px-3 py-1">Realtime Milestone Visibility</span>
@@ -9862,24 +10365,44 @@ const VendorProjectsHub = () => {
                 <span className="rounded-full border border-white/15 bg-white/10 px-3 py-1">Project Documents Vault</span>
               </div>
             </div>
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-              <div className="rounded-2xl border border-white/10 bg-white/10 px-4 py-3">
-                <p className="text-[10px] uppercase tracking-wider text-white/60 font-semibold">Total Projects</p>
-                <p className="text-xl font-semibold">{projects.length}</p>
+            {isRbfPortal ? (
+              <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+                {[
+                  ["Total Projects", String(projects.length)],
+                  ["Active", String(activeProjects.length)],
+                  ["Pending Setup", String(pendingProjects.length)],
+                  ["Completed", String(completedProjects.length)],
+                  ["Total Install.", Number(totalInstallations).toLocaleString()],
+                  ["Verified", `${Number(totalVerifiedInstallations).toLocaleString()} (${verifiedInstallationsPct}%)`],
+                  ["Flagged", String(totalFlaggedInstallations)],
+                  ["Claims Pending", String(claimsPendingCount)],
+                ].map(([label, value]) => (
+                  <div key={label} className="rounded-2xl border border-white/10 bg-white/10 px-4 py-3">
+                    <p className="text-[10px] uppercase tracking-wider text-white/60 font-semibold">{label}</p>
+                    <p className="text-xl font-semibold">{value}</p>
+                  </div>
+                ))}
               </div>
-              <div className="rounded-2xl border border-white/10 bg-white/10 px-4 py-3">
-                <p className="text-[10px] uppercase tracking-wider text-white/60 font-semibold">Active</p>
-                <p className="text-xl font-semibold">{activeProjects.length}</p>
+            ) : (
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                <div className="rounded-2xl border border-white/10 bg-white/10 px-4 py-3">
+                  <p className="text-[10px] uppercase tracking-wider text-white/60 font-semibold">Total Projects</p>
+                  <p className="text-xl font-semibold">{projects.length}</p>
+                </div>
+                <div className="rounded-2xl border border-white/10 bg-white/10 px-4 py-3">
+                  <p className="text-[10px] uppercase tracking-wider text-white/60 font-semibold">Active</p>
+                  <p className="text-xl font-semibold">{activeProjects.length}</p>
+                </div>
+                <div className="rounded-2xl border border-white/10 bg-white/10 px-4 py-3">
+                  <p className="text-[10px] uppercase tracking-wider text-white/60 font-semibold">Completed</p>
+                  <p className="text-xl font-semibold">{completedProjects.length}</p>
+                </div>
+                <div className="rounded-2xl border border-white/10 bg-white/10 px-4 py-3">
+                  <p className="text-[10px] uppercase tracking-wider text-white/60 font-semibold">Contract Value</p>
+                  <p className="text-xl font-semibold">M {totalContractValue.toLocaleString()}</p>
+                </div>
               </div>
-              <div className="rounded-2xl border border-white/10 bg-white/10 px-4 py-3">
-                <p className="text-[10px] uppercase tracking-wider text-white/60 font-semibold">Completed</p>
-                <p className="text-xl font-semibold">{completedProjects.length}</p>
-              </div>
-              <div className="rounded-2xl border border-white/10 bg-white/10 px-4 py-3">
-                <p className="text-[10px] uppercase tracking-wider text-white/60 font-semibold">Contract Value</p>
-                <p className="text-xl font-semibold">M {totalContractValue.toLocaleString()}</p>
-              </div>
-            </div>
+            )}
           </div>
         </div>
       </div>
@@ -9887,15 +10410,19 @@ const VendorProjectsHub = () => {
       <div className="card">
         <div className="p-6 border-b border-slate-100 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <div>
-            <h3 className="text-lg font-bold">Project Portfolio</h3>
-            <p className="text-sm text-slate-500">Curated overview with smart filters and at-a-glance health</p>
+            <h3 className="text-lg font-bold">{isRbfPortal ? "Assigned Projects" : "Project Portfolio"}</h3>
+            <p className="text-sm text-slate-500">
+              {isRbfPortal
+                ? "Review all available project details for the RMT oversight portfolio."
+                : "Curated overview with smart filters and at-a-glance health"}
+            </p>
           </div>
           <div className="flex flex-wrap gap-3">
             <div className="relative">
               <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
               <input
                 className="input-field pl-9"
-                placeholder="Search by ID, technology, region"
+                placeholder={isRbfPortal ? "Search by vendor name / project ID" : "Search by ID, technology, region"}
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
               />
@@ -9909,16 +10436,92 @@ const VendorProjectsHub = () => {
               <option value="Completed">Completed</option>
               <option value="Pending">Pending</option>
             </select>
+            {isRbfPortal && (
+              <>
+                <select className="input-field" value={districtFilter} onChange={(e) => setDistrictFilter(e.target.value)}>
+                  {districtOptions.map(opt => <option key={opt} value={opt}>{opt === "All" ? "District: All" : opt}</option>)}
+                </select>
+                <select className="input-field" value={windowFilter} onChange={(e) => setWindowFilter(e.target.value)}>
+                  <option value="All">Window: All</option>
+                  <option value="Access Window">Access Window</option>
+                  <option value="Application Window">Application Window</option>
+                </select>
+                <select className="input-field" value={dateRangeFilter} onChange={(e) => setDateRangeFilter(e.target.value)}>
+                  <option value="All">Date Range</option>
+                  <option value="30d">Last 30 days</option>
+                  <option value="90d">Last 90 days</option>
+                  <option value="365d">Last 12 months</option>
+                </select>
+                <button onClick={exportRmtProjectsCsv} className="btn-secondary text-xs">Export CSV</button>
+              </>
+            )}
           </div>
         </div>
         <div className="p-6 space-y-4">
           {loading && <p className="text-sm text-slate-500">Loading projects...</p>}
           {!loading && filteredProjects.length === 0 && (
             <div className="rounded-2xl border border-dashed border-slate-200 p-6 text-sm text-slate-500">
-              No projects found for the selected filters.
+              {isRbfPortal ? "No assigned projects found for the selected filters." : "No projects found for the selected filters."}
             </div>
           )}
-          {!loading && filteredProjects.map(project => (
+          {!loading && isRbfPortal && (
+            <div className="overflow-x-auto rounded-3xl border border-slate-100">
+              <table className="min-w-full text-sm">
+                <thead className="bg-slate-50 text-slate-500">
+                  <tr>
+                    {["Project ID", "Vendor", "Technology", "District", "Target", "Verified", "Gender", "%Uptime", "%Milestone", "Status", "Action"].map(label => (
+                      <th key={label} className="px-4 py-3 text-left font-semibold">{label}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredProjects.map(project => {
+                    const verifiedCount = verifiedInstallationsForProject(project.id);
+                    const target = Number(project.targetInstallations || 0);
+                    const verifiedPct = target > 0 ? (verifiedCount / target) * 100 : 0;
+                    const milestoneRows = milestonesForProject(project.id);
+                    const nextMilestone = nextOpenMilestoneForProject(project.id);
+                    const nextMilestoneIndex = nextMilestone ? milestoneRows.findIndex(item => item.id === nextMilestone.id) + 1 : milestoneRows.length;
+                    const milestoneLabel = nextMilestone
+                      ? `M${Math.max(1, nextMilestoneIndex)} - ${getMilestoneStateLabel(nextMilestone, project.id)}`
+                      : "Completed";
+                    return (
+                      <React.Fragment key={project.id}>
+                        <tr className="border-t border-slate-100">
+                          <td className="px-4 py-3 font-semibold text-slate-900">{project.projectReference || `PRJ-${project.id}`}</td>
+                          <td className="px-4 py-3">{project.vendorName || "N/A"}</td>
+                          <td className="px-4 py-3">{project.techType || "N/A"}</td>
+                          <td className="px-4 py-3">{project.district || project.region || "N/A"}</td>
+                          <td className="px-4 py-3">{formatMetricValue(project.targetInstallations)}</td>
+                          <td className="px-4 py-3">{verifiedCount.toLocaleString()} ({formatPercent(verifiedPct, 0)})</td>
+                          <td className="px-4 py-3">{formatPercent(project.genderImpact, 0)}</td>
+                          <td className="px-4 py-3">{formatPercent(project.uptime, 1)}</td>
+                          <td className="px-4 py-3">{milestoneLabel}</td>
+                          <td className="px-4 py-3"><span className="rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-700">{project.status}</span></td>
+                          <td className="px-4 py-3">
+                            <button
+                              onClick={() => setSelectedProject(prev => (prev?.id === project.id ? null : project))}
+                              className="btn-primary text-xs"
+                            >
+                              {selectedProject?.id === project.id ? "Close" : "View"}
+                            </button>
+                          </td>
+                        </tr>
+                        {selectedProject?.id === project.id && (
+                          <tr className="border-t border-slate-100 bg-white">
+                            <td colSpan={11} className="px-4 py-4">
+                              {renderProjectDetail(project)}
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {!loading && !isRbfPortal && filteredProjects.map(project => (
             <div key={project.id} className="rounded-3xl border border-slate-100 bg-white p-5 shadow-[0_24px_60px_-46px_rgba(15,23,42,0.55)] space-y-4 relative overflow-hidden">
               <div className="absolute left-0 top-0 h-full w-1.5 bg-[linear-gradient(180deg,#22c55e_0%,#0ea5e9_60%,#1e293b_100%)]" />
               <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
@@ -9929,6 +10532,11 @@ const VendorProjectsHub = () => {
                   <p className="text-xs text-slate-500 mt-1">
                     {project.projectReference || `Project ${project.id}`}
                   </p>
+                  {isRbfPortal && (
+                    <p className="text-sm font-medium text-emerald-700 mt-2">
+                      Assigned to vendor: {project.vendorName || "N/A"}
+                    </p>
+                  )}
                   <p className="text-xs text-slate-500 mt-1">{project.techType} • {project.region}</p>
                   <div className="flex flex-wrap gap-2 mt-3 text-[11px]">
                     <span className="badge bg-slate-100 text-slate-700">Progress {project.progress}%</span>
@@ -9949,6 +10557,12 @@ const VendorProjectsHub = () => {
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-3 text-[11px] text-slate-500 sm:grid-cols-6">
+                {isRbfPortal && (
+                  <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
+                    <p className="uppercase tracking-wider text-slate-400">Vendor</p>
+                    <p className="font-semibold text-slate-700">{project.vendorName || "N/A"}</p>
+                  </div>
+                )}
                 <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
                   <p className="uppercase tracking-wider text-slate-400">Start</p>
                   <p className="font-semibold text-slate-700">{formatDate(startDateForProject(project))}</p>
@@ -9977,6 +10591,12 @@ const VendorProjectsHub = () => {
                     M {Number(project.milestoneTotalAmount ?? contractValueByProject.get(project.id) ?? 0).toLocaleString()}
                   </p>
                 </div>
+                {isRbfPortal && (
+                  <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
+                    <p className="uppercase tracking-wider text-slate-400">Beneficiaries</p>
+                    <p className="font-semibold text-slate-700">{formatMetricValue(project.targetBeneficiaries)}</p>
+                  </div>
+                )}
               </div>
               <div className="flex flex-wrap gap-3 text-[11px] text-slate-500">
                 <span className="rounded-full bg-slate-100 px-3 py-1">
@@ -10913,10 +11533,11 @@ const AdminView = () => {
                   className="input-field"
                   required
                 >
-                  <option value={UserRole.RBF_OFFICIAL}>RBF Official</option>
+                  <option value={UserRole.RBF_OFFICIAL}>RBF Management Team</option>
                   <option value={UserRole.DOE_OFFICER}>DoE Officer</option>
                   <option value={UserRole.TAC}>TAC Member</option>
                   <option value={UserRole.FIELD_VERIFIER}>Field Verifier</option>
+                  <option value={UserRole.UNDP_DONOR}>Project Steering Committee</option>
                   <option value={UserRole.AUDITOR}>Auditor</option>
                 </select>
               </div>
@@ -12134,7 +12755,7 @@ export default function App() {
     if (role === UserRole.ADMIN || role === UserRole.RBF_OFFICIAL) {
       if (isTender && linkedId) return { tab: "tenders", tenderId: linkedId };
       if (isPrequal) return { tab: "prequal" };
-      if (isProject) return { tab: "monitoring" };
+      if (isProject) return { tab: role === UserRole.RBF_OFFICIAL ? "rbf_projects" : "monitoring" };
       if (isReport) return { tab: "reports" };
       return { tab: "dashboard" };
     }
@@ -12147,7 +12768,7 @@ export default function App() {
 
     if (role === UserRole.UNDP_DONOR) {
       if (isReport) return { tab: "reports" };
-      if (isProject) return { tab: "impact" };
+      if (isProject) return { tab: "payments" };
       return { tab: "dashboard" };
     }
 
@@ -12267,7 +12888,7 @@ export default function App() {
             }}
           />
         );
-        case "projects_hub": return <VendorProjectsHub />;
+        case "projects_hub": return <ProjectsHub mode="vendor" />;
         case "claims": return <Disbursements />;
         default: return <VendorDashboard />;
       }
@@ -12332,6 +12953,10 @@ export default function App() {
         case "impact":
         case "funding":
           return <DonorView />;
+        case "payments":
+          return <Disbursements />;
+        case "compliance":
+          return <AuditorView />;
         default:
           return <DonorView />;
       }
@@ -12360,6 +12985,7 @@ export default function App() {
         />
       );
       case "prequal": return <PreQualification />;
+      case "rbf_projects": return <ProjectsHub mode="rbf" />;
       case "blacklisting": return <Blacklisting currentUser={currentUser} />;
       case "payments": return <Disbursements />;
       default: return <Dashboard role={role} onNewTender={handleNewTender} />;
@@ -12430,9 +13056,11 @@ export default function App() {
     if (role === UserRole.UNDP_DONOR) {
       return [
         ...common,
-        { id: "impact", icon: Activity, label: "Impact Dashboard" },
-        { id: "funding", icon: CreditCard, label: "Funding Flows" },
-        { id: "reports", icon: BarChart3, label: "Donor Reports" },
+        { id: "impact", icon: Activity, label: "Portfolio Dashboard" },
+        { id: "payments", icon: CreditCard, label: "Disbursements" },
+        { id: "compliance", icon: CheckCircle2, label: "Compliance Logs" },
+        { id: "reports", icon: BarChart3, label: "Briefings & Reports" },
+        { id: "notifications", icon: Bell, label: "Briefings" },
       ];
     }
 
@@ -12451,6 +13079,7 @@ export default function App() {
       ...common,
       { id: "tenders", icon: FileText, label: "Tender Management" },
       { id: "prequal", icon: ClipboardCheck, label: "Pre-Qualification" },
+      { id: "rbf_projects", icon: BarChart3, label: "RBF Project" },
       { id: "blacklisting", icon: FileWarning, label: "Blacklisting" },
       { id: "monitoring", icon: Activity, label: "Monitoring" },
       { id: "gis", icon: MapIcon, label: "GIS Mapping" },

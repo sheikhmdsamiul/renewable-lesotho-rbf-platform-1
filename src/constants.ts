@@ -191,6 +191,10 @@ export const ROLES_CONFIG = {
     permissions: ["all"],
     dashboard: "Macro-level portfolio view",
   },
+  [UserRole.UNDP_DONOR]: {
+    permissions: ["portfolio_dashboards", "review_disbursements", "review_compliance", "final_disbursement_approval"],
+    dashboard: "Oversight & Approval",
+  },
   [UserRole.VENDOR]: {
     permissions: ["submit_bid", "view_own_projects", "claim_payment"],
     dashboard: "Performance & Claims",

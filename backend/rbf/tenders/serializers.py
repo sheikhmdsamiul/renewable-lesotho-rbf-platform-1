@@ -429,7 +429,7 @@ class TenderSerializer(serializers.ModelSerializer):
         if request:
             role = getattr(request.user, 'role', None)
             if role not in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}:
-                raise serializers.ValidationError('Only RBF Officials or Admins can create tenders.')
+                raise serializers.ValidationError('Only the RBF Management Team or Platform Administrators can create tenders.')
         # Auto-generate reference number if missing
         if not validated_data.get('reference_number'):
             last_id = Tender.objects.order_by('-id').values_list('id', flat=True).first() or 0

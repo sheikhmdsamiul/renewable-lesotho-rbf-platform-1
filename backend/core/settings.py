@@ -205,7 +205,7 @@ EMAIL_HOST_USER = env('EMAIL_HOST_USER', default='')
 EMAIL_HOST_PASSWORD = env('EMAIL_HOST_PASSWORD', default='')
 DEFAULT_FROM_EMAIL = env('DEFAULT_FROM_EMAIL', default=EMAIL_HOST_USER or 'no-reply@rbf.local')
 OTP_LENGTH = env.int('OTP_LENGTH', default=6)
-OTP_EXPIRY_SECONDS = env.int('OTP_EXPIRY_SECONDS', default=300)
+OTP_EXPIRY_SECONDS = env.int('OTP_EXPIRY_SECONDS', default=600)
 
 # Celery
 CELERY_BROKER_URL = env('REDIS_URL', default='redis://localhost:6379/0')

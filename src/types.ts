@@ -4,13 +4,13 @@
  */
 
 export enum UserRole {
-  RBF_OFFICIAL = "RBF Official",
+  RBF_OFFICIAL = "RBF Management Team",
   TAC = "TAC Member",
   DOE_OFFICER = "DoE Officer",
   FIELD_VERIFIER = "Field Verifier",
   VENDOR = "Vendor",
-  ADMIN = "Digital Admin",
-  UNDP_DONOR = "UNDP & Donors",
+  ADMIN = "Platform Administrator (Super Admin)",
+  UNDP_DONOR = "Project Steering Committee",
   AUDITOR = "Auditor",
 }
 
@@ -419,7 +419,7 @@ export type PrequalificationStatus =
   | "Pending"
   | "Under Review"
   | "Approved"
-  | "Clarification Requested"
+  | "Partial (Resubmit)"
   | "Rejected";
 
 export interface VendorPrequalification {

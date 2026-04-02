@@ -66,6 +66,27 @@ def assert_user_not_blacklisted_for_writes(user: User, message: str):
         raise PermissionDenied(message)
 
 
+def notify_project_oversight(project: Project, title: str, body: str, linked_entity_id: str = ''):
+    recipients = User.objects.filter(
+        role__in={UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.UNDP_DONOR}
+    ).only('id', 'full_name', 'username')
+    notifications = [
+        Notification(
+            recipient_id=str(user.id),
+            recipient_name=user.full_name or user.username,
+            type=NotificationChannel.IN_APP,
+            event='project_oversight_flag',
+            title=title,
+            body=body,
+            status=NotificationStatus.SENT,
+            linked_entity_id=linked_entity_id or str(project.id),
+        )
+        for user in recipients
+    ]
+    if notifications:
+        Notification.objects.bulk_create(notifications, ignore_conflicts=True)
+
+
 class ProjectViewSet(viewsets.ModelViewSet):
     queryset = Project.objects.select_related('tender').prefetch_related('milestones').all().order_by('id')
     serializer_class = ProjectSerializer
@@ -144,6 +165,34 @@ class ProjectViewSet(viewsets.ModelViewSet):
     def destroy(self, request, *args, **kwargs):
         self._assert_write_permission()
         return super().destroy(request, *args, **kwargs)
+
+    @action(detail=True, methods=['post'])
+    def flag_issue(self, request, pk=None):
+        project = self.get_object()
+        if request.user.role not in {UserRole.UNDP_DONOR, UserRole.RBF_OFFICIAL, UserRole.ADMIN}:
+            raise PermissionDenied('Only Project Steering Committee, RBF Management Team, or Platform Administrator can flag project issues.')
+
+        category = str(request.data.get('category') or 'general').strip() or 'general'
+        details = str(request.data.get('details') or request.data.get('message') or '').strip()
+        if not details:
+            return Response({'detail': 'details is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        title_map = {
+            'payment_delay': 'Payment Delay Flagged',
+            'contract_issue': 'Contract Issue Flagged',
+            'compliance': 'Compliance Issue Flagged',
+            'general': 'Project Issue Flagged',
+        }
+        title = title_map.get(category, 'Project Issue Flagged')
+        update = create_project_activity_update(project, request.user, title, details)
+        log_audit(request.user, 'project_issue_flagged', update, {'project_id': str(project.id), 'category': category})
+        notify_project_oversight(
+            project,
+            title=f'{title}: {project.project_reference or project.id}',
+            body=details,
+            linked_entity_id=str(project.id),
+        )
+        return Response({'status': 'flagged', 'title': title, 'details': details}, status=status.HTTP_200_OK)
 
 
 class MilestoneViewSet(viewsets.ModelViewSet):
@@ -349,7 +398,7 @@ class PaymentClaimViewSet(viewsets.ModelViewSet):
 
     WRITE_ROLES = {UserRole.VENDOR, UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.DOE_OFFICER}
     VERIFY_ROLES = {UserRole.FIELD_VERIFIER, UserRole.RBF_OFFICIAL, UserRole.ADMIN}
-    APPROVE_ROLES = {UserRole.RBF_OFFICIAL, UserRole.ADMIN}
+    APPROVE_ROLES = {UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.UNDP_DONOR}
 
     def get_queryset(self):
         qs = self.queryset.order_by('-submitted_at')
@@ -743,7 +792,7 @@ class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        if user.role in {UserRole.ADMIN, UserRole.RBF_OFFICIAL, UserRole.AUDITOR}:
+        if user.role in {UserRole.ADMIN, UserRole.RBF_OFFICIAL, UserRole.AUDITOR, UserRole.UNDP_DONOR}:
             return self.queryset
         if user.role == UserRole.VENDOR:
             claim_ids = [str(cid) for cid in PaymentClaim.objects.filter(vendor=user).values_list('id', flat=True)]

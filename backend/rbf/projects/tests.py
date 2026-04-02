@@ -21,7 +21,7 @@ class ProjectApiTests(APITestCase):
         self.admin_user = User.objects.create_user(
             username="project_admin",
             password="securePass123",
-            role="Digital Admin",
+            role="Platform Administrator (Super Admin)",
             status="Active",
         )
 
@@ -116,7 +116,7 @@ class ProjectApiTests(APITestCase):
         approver = User.objects.create_user(
             username="rbf_approver",
             password="securePass123",
-            role="RBF Official",
+            role="RBF Management Team",
             status="Active",
         )
 
@@ -189,7 +189,7 @@ class ProjectApiTests(APITestCase):
         approver = User.objects.create_user(
             username="payment_lock_admin",
             password="securePass123",
-            role="Digital Admin",
+            role="Platform Administrator (Super Admin)",
             status="Active",
         )
 
@@ -221,6 +221,65 @@ class ProjectApiTests(APITestCase):
         pay_response = self.client.post(f"/api/projects/claims/{claim.id}/pay/", {}, format="json")
         self.assertEqual(pay_response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("frozen", str(pay_response.data).lower())
+
+    def test_project_steering_committee_can_pay_claims_and_flag_project_issues(self):
+        User = get_user_model()
+        vendor = User.objects.create_user(
+            username="psc_vendor",
+            password="securePass123",
+            role="Vendor",
+            status="Active",
+        )
+        psc_user = User.objects.create_user(
+            username="psc_user",
+            password="securePass123",
+            role="Project Steering Committee",
+            status="Active",
+        )
+        project = Project.objects.create(
+            vendor_id=str(vendor.id),
+            vendor_name=vendor.username,
+            tech_type="SHS",
+            region="Maseru",
+            status=ProjectStatus.DISBURSEMENT,
+            progress=90,
+            energy_output=100,
+            uptime=97,
+            gender_impact=50,
+            project_reference="PRJ-PSC-001",
+        )
+        claim = PaymentClaim.objects.create(
+            project=project,
+            vendor=vendor,
+            claim_amount="7000.00",
+            status=PaymentClaimStatus.APPROVED,
+            declaration_accepted=True,
+        )
+
+        self.client.force_authenticate(psc_user)
+        pay_response = self.client.post(
+            f"/api/projects/claims/{claim.id}/pay/",
+            {"payment_reference": "PMT-PSC-001"},
+            format="json",
+        )
+        self.assertEqual(pay_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(pay_response.data["status"], "Paid")
+
+        audit_logs = self.client.get("/api/projects/audit-logs/")
+        self.assertEqual(audit_logs.status_code, status.HTTP_200_OK)
+
+        flag_response = self.client.post(
+            f"/api/projects/{project.id}/flag_issue/",
+            {"category": "payment_delay", "details": "PSC flagged delayed payment clearance for review."},
+            format="json",
+        )
+        self.assertEqual(flag_response.status_code, status.HTTP_200_OK)
+        self.assertTrue(
+            ProjectUpdate.objects.filter(
+                project=project,
+                title="Payment Delay Flagged",
+            ).exists()
+        )
 
     def test_paused_or_terminated_verification_tasks_cannot_be_verified(self):
         User = get_user_model()

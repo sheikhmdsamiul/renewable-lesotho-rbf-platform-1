@@ -1520,7 +1520,8 @@ export async function reviewBlacklistAppeal(appealId: string, resolutionNotes?: 
 }
 
 export async function submitVendorPrequalification(
-  payload: VendorPrequalificationSubmission
+  payload: VendorPrequalificationSubmission,
+  existingId?: string
 ): Promise<VendorPrequalification> {
   const form = new FormData();
   
@@ -1562,8 +1563,8 @@ export async function submitVendorPrequalification(
     form.append('experience_financial_proof', payload.experienceFinancialProof);
   }
   
-  const data = await http<any>(`/api/users/prequalifications/`, {
-    method: "POST",
+  const data = await http<any>(existingId ? `/api/users/prequalifications/${existingId}/` : `/api/users/prequalifications/`, {
+    method: existingId ? "PATCH" : "POST",
     body: form,
   });
   return mapVendorPrequalificationFromApi(data);
@@ -1677,6 +1678,19 @@ export async function fetchDisbursements(): Promise<Disbursement[]> {
 export async function fetchAuditLogs(): Promise<AuditLog[]> {
   const data = await http<any>(`/api/projects/audit-logs/`);
   return unwrapListResponse<any>(data).map(mapAuditLogFromApi);
+}
+
+export async function flagProjectIssue(
+  projectId: string,
+  payload: { category?: string; details: string }
+): Promise<{ status: string; title: string; details: string }> {
+  return await http(`/api/projects/${projectId}/flag_issue/`, {
+    method: "POST",
+    body: JSON.stringify({
+      category: payload.category ?? "general",
+      details: payload.details,
+    }),
+  });
 }
 
 export async function loginUser(username: string, password: string): Promise<{ user: User; access: string; refresh: string }> {

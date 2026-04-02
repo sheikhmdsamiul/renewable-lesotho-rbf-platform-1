@@ -3,13 +3,13 @@ from django.db import models
 
 
 class UserRole(models.TextChoices):
-    RBF_OFFICIAL = 'RBF Official'
+    RBF_OFFICIAL = 'RBF Management Team'
     TAC = 'TAC Member'
     DOE_OFFICER = 'DoE Officer'
     FIELD_VERIFIER = 'Field Verifier'
     VENDOR = 'Vendor'
-    ADMIN = 'Digital Admin'
-    UNDP_DONOR = 'UNDP & Donors'
+    ADMIN = 'Platform Administrator (Super Admin)'
+    UNDP_DONOR = 'Project Steering Committee'
     AUDITOR = 'Auditor'
 
 
@@ -25,7 +25,7 @@ class UserStatus(models.TextChoices):
 class User(AbstractUser):
     full_name = models.CharField(max_length=255, blank=True)
     gender = models.CharField(max_length=16, blank=True)
-    role = models.CharField(max_length=32, choices=UserRole.choices, default=UserRole.VENDOR)
+    role = models.CharField(max_length=64, choices=UserRole.choices, default=UserRole.VENDOR)
     region = models.CharField(max_length=128, blank=True)
     mobile_number = models.CharField(max_length=20, blank=True)
     national_id = models.CharField(max_length=64, blank=True)
@@ -50,7 +50,7 @@ class PrequalificationStatus(models.TextChoices):
     PENDING = 'Pending'
     UNDER_REVIEW = 'Under Review'
     APPROVED = 'Approved'
-    CLARIFICATION_REQUESTED = 'Clarification Requested'
+    CLARIFICATION_REQUESTED = 'Partial (Resubmit)'
     REJECTED = 'Rejected'
 
 
