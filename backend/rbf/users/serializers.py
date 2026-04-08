@@ -1,4 +1,5 @@
 import re
+from secrets import choice as secret_choice
 
 from django.contrib.auth.password_validation import validate_password
 from django.db.models import Q
@@ -19,6 +20,28 @@ from .models import (
     VendorPrequalification,
     PrequalificationStatus,
 )
+from rbf.projects.models import AuditLog, ProspectSyncLog
+
+
+ADMIN_CREATE_ROLE_ALIASES = {
+    'RMT': UserRole.RBF_OFFICIAL,
+    'RBF Management Team': UserRole.RBF_OFFICIAL,
+    'TAC': UserRole.TAC,
+    'TAC Member': UserRole.TAC,
+    'DoE': UserRole.DOE_OFFICER,
+    'DoE Officer': UserRole.DOE_OFFICER,
+    'Field Officer': UserRole.FIELD_VERIFIER,
+    'Field Verifier': UserRole.FIELD_VERIFIER,
+    'PSC': UserRole.UNDP_DONOR,
+    'Project Steering Committee': UserRole.UNDP_DONOR,
+    'UNDP': UserRole.UNDP_DONOR,
+    'Auditor': UserRole.AUDITOR,
+}
+
+
+def generate_temporary_password(length: int = 12) -> str:
+    alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%'
+    return ''.join(secret_choice(alphabet) for _ in range(length))
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -239,8 +262,163 @@ class UserSerializer(serializers.ModelSerializer):
         }
 
 
+class AdminManagedUserSerializer(serializers.ModelSerializer):
+    role = serializers.CharField()
+    district = serializers.SerializerMethodField(read_only=True)
+    role_label = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = User
+        fields = [
+            'id',
+            'username',
+            'email',
+            'full_name',
+            'gender',
+            'role',
+            'role_label',
+            'region',
+            'verification_zone',
+            'district',
+            'status',
+            'is_active',
+            'must_change_password',
+            'last_login',
+        ]
+        read_only_fields = ['id', 'username', 'must_change_password', 'last_login']
+        extra_kwargs = {
+            'username': {'required': False, 'allow_blank': True},
+            'email': {'required': True},
+        }
+
+    def get_district(self, obj):
+        return obj.verification_zone or obj.region or ''
+
+    def get_role_label(self, obj):
+        if obj.role == UserRole.UNDP_DONOR:
+            return 'PSC/UNDP'
+        if obj.role == UserRole.RBF_OFFICIAL:
+            return 'RMT'
+        if obj.role == UserRole.DOE_OFFICER:
+            return 'DoE'
+        if obj.role == UserRole.FIELD_VERIFIER:
+            return 'Field Officer'
+        return obj.role
+
+    def validate_role(self, value):
+        normalized = ADMIN_CREATE_ROLE_ALIASES.get(str(value).strip(), value)
+        if normalized in {UserRole.VENDOR, UserRole.ADMIN}:
+            raise serializers.ValidationError('Role cannot be Vendor or Super Admin for admin-created users.')
+        if normalized not in {UserRole.RBF_OFFICIAL, UserRole.TAC, UserRole.DOE_OFFICER, UserRole.FIELD_VERIFIER, UserRole.UNDP_DONOR, UserRole.AUDITOR}:
+            raise serializers.ValidationError('Unsupported admin-managed role.')
+        return normalized
+
+    def validate(self, attrs):
+        role = attrs.get('role', getattr(self.instance, 'role', None))
+        full_name = str(attrs.get('full_name', getattr(self.instance, 'full_name', '')) or '').strip()
+        email = str(attrs.get('email', getattr(self.instance, 'email', '')) or '').strip().lower()
+        gender = str(attrs.get('gender', getattr(self.instance, 'gender', '')) or '').strip()
+        region = str(attrs.get('region', getattr(self.instance, 'region', '')) or '').strip()
+        verification_zone = str(attrs.get('verification_zone', getattr(self.instance, 'verification_zone', '')) or '').strip()
+
+        errors = {}
+        if not full_name:
+            errors['full_name'] = 'Full name is required.'
+        if not email:
+            errors['email'] = 'Email is required.'
+        if not gender:
+            errors['gender'] = 'Gender is required.'
+        if role in {UserRole.FIELD_VERIFIER, UserRole.DOE_OFFICER} and not (verification_zone or region):
+            errors['region'] = 'Assigned district/region is required for Field Officer and DoE users.'
+        if errors:
+            raise serializers.ValidationError(errors)
+        return attrs
+
+    def create(self, validated_data):
+        email = str(validated_data['email']).strip().lower()
+        validated_data['email'] = email
+        if not validated_data.get('username'):
+            base = re.sub(r'[^a-z0-9]+', '_', email.split('@')[0].lower()).strip('_') or 'user'
+            username = base
+            suffix = 1
+            while User.objects.filter(username=username).exists():
+                suffix += 1
+                username = f'{base}_{suffix}'
+            validated_data['username'] = username
+
+        temporary_password = generate_temporary_password(12)
+        user = User(**validated_data)
+        user.status = UserStatus.ACTIVE
+        user.is_active = True
+        user.must_change_password = True
+        user.set_password(temporary_password)
+        user.save()
+        self.generated_password = temporary_password
+        return user
+
+    def update(self, instance, validated_data):
+        old_active = instance.is_active
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        status_value = str(validated_data.get('status', instance.status) or instance.status)
+        instance.is_active = status_value == UserStatus.ACTIVE and bool(validated_data.get('is_active', instance.is_active))
+        instance.save()
+        self.was_deactivated = old_active and not instance.is_active
+        return instance
+
+
+class AdminManagedUserDetailSerializer(AdminManagedUserSerializer):
+    recent_audit_logs = serializers.SerializerMethodField()
+    prospect_sync_status = serializers.SerializerMethodField()
+
+    class Meta(AdminManagedUserSerializer.Meta):
+        fields = AdminManagedUserSerializer.Meta.fields + ['recent_audit_logs', 'prospect_sync_status']
+
+    def get_recent_audit_logs(self, obj):
+        logs = AuditLog.objects.filter(actor=obj).order_by('-created_at')[:10]
+        return [
+            {
+                'id': log.id,
+                'action': log.action,
+                'module': log.module,
+                'record_id': log.record_id,
+                'record_type': log.record_type,
+                'created_at': log.created_at,
+            }
+            for log in logs
+        ]
+
+    def get_prospect_sync_status(self, obj):
+        logs = ProspectSyncLog.objects.filter(record_id=obj.id, record_type='user').order_by('-created_at')[:10]
+        return [
+            {
+                'id': log.id,
+                'method_name': log.method_name,
+                'status': log.status,
+                'attempts': log.attempts,
+                'error_message': log.error_message,
+                'created_at': log.created_at,
+            }
+            for log in logs
+        ]
+
+
+class ChangePasswordSerializer(serializers.Serializer):
+    current_password = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    new_password = serializers.CharField(write_only=True, min_length=8)
+
+    def validate_new_password(self, value):
+        validate_password(value)
+        return value
+
+
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     def validate(self, attrs):
+        login_identifier = str(attrs.get('username', '') or '').strip()
+        if login_identifier and '@' in login_identifier:
+            matched_user = User.objects.filter(email__iexact=login_identifier).only('username').first()
+            if matched_user:
+                attrs = {**attrs, 'username': matched_user.username}
         data = super().validate(attrs)
         data['user'] = UserSerializer(self.user).data
         return data

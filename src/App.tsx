@@ -45,7 +45,9 @@ import {
   Award,
   Calendar,
   Database,
-  Upload
+  Upload,
+  MapPin,
+  Trash2
 } from "lucide-react";
 import { 
   LineChart, 
@@ -68,6 +70,7 @@ import {
   ProjectStatus,
   Tender,
   Project,
+  ProjectSetup,
   Milestone,
   ProjectUpdate,
   ProjectDocument,
@@ -80,12 +83,16 @@ import {
   User,
   BidStatus,
   TenderBid,
-  TenderBidSite,
   TenderBidEvaluation,
   TenderContract,
   TenderAwardRankingRow,
   VendorBlacklistCase,
   BlacklistAppeal,
+  ProjectKpiSummary,
+  AuditLog,
+  SmartMeterReading,
+  AnomalyFlag,
+  ProspectSyncLog,
 } from "./types";
 import { MOCK_TENDERS, MOCK_NOTIFICATIONS } from "./constants";
 import {
@@ -104,8 +111,13 @@ import {
   fetchCurrentUser,
   requestRegistrationOtp,
   verifyRegistrationOtp,
-  updateUserPassword,
-  createOfficialAccount,
+  changeOwnPassword,
+  fetchAdminManagedUsers,
+  fetchAdminUserDetail,
+  fetchUserManagementMeta,
+  createAdminManagedUser,
+  updateAdminManagedUser,
+  deactivateAdminManagedUser,
   fetchVendorPrequalifications,
   fetchBlacklistCases,
   fetchBlacklistAppeals,
@@ -139,18 +151,36 @@ import {
   submitTenderBid,
   updateTenderBid,
   reviewTenderBid,
+  acceptTenderBid,
+  rejectTenderBid,
+  markTenderBidPartialConformity,
   fetchBidEvaluations,
   createBidEvaluation,
   updateBidEvaluation,
   fetchTenderContracts,
+  fetchTenderContractAssignment,
   signTenderContract,
   approveTenderContract,
+  assignTenderContract,
   rejectTenderContract,
   fetchTenderAwardRanking,
   confirmTenderAward,
-  updateProject,
+  saveProjectSetupDraft,
+  submitProjectSetup,
+  testProjectSetupConnection,
+  fetchProjectKpiSummary,
+  fetchAuditLogs,
+  fetchSmartMeterReadings,
+  fetchAnomalyFlags,
+  fetchProspectSyncLogs,
+  refreshProspectSyncPanel,
+  requestProjectSetupChange,
+  uploadProjectMeterCsv,
   API_BASE,
 } from "./api";
+import GisInstallationsMap from "./components/GisInstallationsMap";
+import KpiDashboard from "./components/KpiDashboard";
+import PortfolioKpiSummary from "./components/PortfolioKpiSummary";
 
 // --- Components ---
 
@@ -187,6 +217,140 @@ const StatCard = ({ label, value, trend, icon: Icon, color }: any) => (
   </div>
 );
 
+const getProspectOperationType = (methodName: string) => methodName.startsWith("get") ? "GET" : "POST";
+
+const getProspectStatusTone = (status: string) => {
+  const normalized = status.toLowerCase();
+  if (normalized === "success") return "bg-emerald-100 text-emerald-700";
+  if (normalized === "failed") return "bg-rose-100 text-rose-700";
+  return "bg-amber-100 text-amber-700";
+};
+
+const ProspectSyncStatusPanel = ({
+  logs,
+  loading,
+  refreshing,
+  operationFilter,
+  statusFilter,
+  onOperationFilterChange,
+  onStatusFilterChange,
+  onRefresh,
+}: {
+  logs: ProspectSyncLog[];
+  loading: boolean;
+  refreshing: boolean;
+  operationFilter: "all" | "post" | "get";
+  statusFilter: "all" | "pending" | "success" | "failed";
+  onOperationFilterChange: (value: "all" | "post" | "get") => void;
+  onStatusFilterChange: (value: "all" | "pending" | "success" | "failed") => void;
+  onRefresh: () => void;
+}) => {
+  const filteredLogs = logs.filter((log) => {
+    const operationType = getProspectOperationType(log.methodName).toLowerCase();
+    if (operationFilter !== "all" && operationType !== operationFilter) return false;
+    if (statusFilter !== "all" && log.status.toLowerCase() !== statusFilter) return false;
+    return true;
+  });
+
+  const summary = logs.reduce(
+    (acc, log) => {
+      const operationType = getProspectOperationType(log.methodName);
+      acc.total += 1;
+      if (operationType === "POST") acc.post += 1;
+      if (operationType === "GET") acc.get += 1;
+      const normalizedStatus = log.status.toLowerCase();
+      if (normalizedStatus === "success") acc.success += 1;
+      else if (normalizedStatus === "failed") acc.failed += 1;
+      else acc.pending += 1;
+      return acc;
+    },
+    { total: 0, post: 0, get: 0, success: 0, failed: 0, pending: 0 }
+  );
+
+  return (
+    <div className="card">
+      <div className="flex flex-col gap-4 border-b border-slate-100 p-6 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <h3 className="text-lg font-bold text-slate-900">Prospect Sync Status</h3>
+          <p className="text-sm text-slate-500">In-app status for every Prospect POST and GET operation.</p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <select className="input-field py-1.5 text-sm" value={operationFilter} onChange={(e) => onOperationFilterChange(e.target.value as "all" | "post" | "get")}>
+            <option value="all">All Operations</option>
+            <option value="post">POST Only</option>
+            <option value="get">GET Only</option>
+          </select>
+          <select className="input-field py-1.5 text-sm" value={statusFilter} onChange={(e) => onStatusFilterChange(e.target.value as "all" | "pending" | "success" | "failed")}>
+            <option value="all">All Statuses</option>
+            <option value="pending">Pending</option>
+            <option value="success">Success</option>
+            <option value="failed">Failed</option>
+          </select>
+          <button onClick={onRefresh} className="btn-secondary flex items-center gap-2 text-sm" disabled={refreshing}>
+            {refreshing ? <Loader2 size={16} className="animate-spin" /> : <History size={16} />}
+            Refresh Prospect Reads
+          </button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-4 border-b border-slate-100 p-6 md:grid-cols-6">
+        {[
+          { label: "Total", value: summary.total, tone: "text-slate-900" },
+          { label: "POST", value: summary.post, tone: "text-blue-700" },
+          { label: "GET", value: summary.get, tone: "text-cyan-700" },
+          { label: "Success", value: summary.success, tone: "text-emerald-700" },
+          { label: "Pending", value: summary.pending, tone: "text-amber-700" },
+          { label: "Failed", value: summary.failed, tone: "text-rose-700" },
+        ].map((item) => (
+          <div key={item.label} className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
+            <p className="text-[11px] font-bold uppercase tracking-wide text-slate-500">{item.label}</p>
+            <p className={`mt-1 text-2xl font-bold ${item.tone}`}>{item.value}</p>
+          </div>
+        ))}
+      </div>
+
+      <div className="divide-y divide-slate-100">
+        {loading && (
+          <div className="flex items-center gap-3 p-6 text-sm text-slate-500">
+            <Loader2 size={16} className="animate-spin" />
+            Loading Prospect sync activity...
+          </div>
+        )}
+        {!loading && filteredLogs.length === 0 && (
+          <div className="p-6 text-sm text-slate-500">No Prospect sync activity matched the selected filters.</div>
+        )}
+        {!loading && filteredLogs.map((log) => {
+          const operationType = getProspectOperationType(log.methodName);
+          return (
+            <div key={log.id} className="p-6">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                <div className="space-y-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-widest ${operationType === "POST" ? "bg-blue-100 text-blue-700" : "bg-cyan-100 text-cyan-700"}`}>
+                      {operationType}
+                    </span>
+                    <p className="font-semibold text-slate-900">{log.methodName}</p>
+                    <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-widest ${getProspectStatusTone(log.status)}`}>
+                      {log.status}
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-500">
+                    Record: {log.recordType || "—"} #{log.recordId || "—"} • Attempts: {log.attempts}
+                  </p>
+                  {log.errorMessage && <p className="text-xs text-rose-600">{log.errorMessage}</p>}
+                </div>
+                <div className="text-xs text-slate-400">
+                  {log.createdAt ? new Date(log.createdAt).toLocaleString() : "N/A"}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
 const triggerDownload = (filename: string, content: string, mimeType = "text/plain;charset=utf-8") => {
   const blob = new Blob([content], { type: mimeType });
   const url = URL.createObjectURL(blob);
@@ -216,6 +380,51 @@ const toFriendlyApiMessage = (raw: string): string => {
   if (!cleaned || cleaned.length > 220) return "";
   return cleaned;
 };
+
+const createEmptyProjectSetupDraft = () => ({
+  siteStatus: "not_started",
+  workScheduleStart: "",
+  workScheduleEnd: "",
+  deviceModel: "",
+  deviceBrand: "",
+  techTier: "",
+  meterApiEndpoint: "",
+  meterApiToken: "",
+  manualVerificationConfirmed: false,
+  checklistTeamReady: false,
+  checklistEquipmentReady: false,
+  checklistSiteReady: false,
+  checklistSafetyReady: false,
+  checklistLogisticsReady: false,
+  teamRosterFile: null as File | null,
+  equipmentPlanFile: null as File | null,
+  complianceDocsFile: null as File | null,
+  insuranceCertificateFile: null as File | null,
+});
+
+const setupDraftFromProject = (project?: Project | null) => {
+  const setup = project?.projectSetup;
+  return {
+    ...createEmptyProjectSetupDraft(),
+    siteStatus: setup?.siteStatus ?? "not_started",
+    workScheduleStart: setup?.workScheduleStart ?? "",
+    workScheduleEnd: setup?.workScheduleEnd ?? "",
+    deviceModel: setup?.deviceModel ?? "",
+    deviceBrand: setup?.deviceBrand ?? "",
+    techTier: setup?.techTier != null ? String(setup.techTier) : "",
+    meterApiEndpoint: setup?.meterApiEndpoint ?? "",
+    meterApiToken: "",
+    manualVerificationConfirmed: Boolean(setup?.manualVerificationConfirmed),
+    checklistTeamReady: Boolean(setup?.checklistTeamReady),
+    checklistEquipmentReady: Boolean(setup?.checklistEquipmentReady),
+    checklistSiteReady: Boolean(setup?.checklistSiteReady),
+    checklistSafetyReady: Boolean(setup?.checklistSafetyReady),
+    checklistLogisticsReady: Boolean(setup?.checklistLogisticsReady),
+  };
+};
+
+const isProjectSetupComplete = (project?: Project | null) =>
+  Boolean(project?.projectSetup?.setupCompletedAt || project?.setupCompletedAt);
 
 // --- Auth Components ---
 
@@ -852,7 +1061,7 @@ const ForcePasswordReset = ({
     }
     try {
       setIsSubmitting(true);
-      const updated = await updateUserPassword(user.id, password);
+      const updated = await changeOwnPassword(password);
       onComplete(updated);
     } catch (err: any) {
       const friendly = toFriendlyApiMessage(String(err?.message || ""));
@@ -962,6 +1171,14 @@ const Dashboard = ({ role, onNewTender }: { role: UserRole, onNewTender: () => v
         <StatCard label="Gender Equity" value="54%" trend="+3%" icon={ClipboardCheck} color="bg-purple-600" />
       </div>
 
+      <div className="card p-6">
+        <div className="mb-4">
+          <h3 className="text-lg font-bold text-slate-900">GIS Installation Map</h3>
+          <p className="text-sm text-slate-500">Portfolio-wide installation visibility for the RBF Management Team.</p>
+        </div>
+        <GisInstallationsMap showFilters height="550px" />
+      </div>
+
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="card p-6 lg:col-span-2">
           <h3 className="text-lg font-bold mb-6">Energy Output Trend (MWh)</h3>
@@ -1051,11 +1268,18 @@ const Tenders = ({
   const [tenderContracts, setTenderContracts] = useState<TenderContract[]>([]);
   const [contractMessage, setContractMessage] = useState<string | null>(null);
   const [contractRejectionReason, setContractRejectionReason] = useState("");
-  const [milestoneDrafts, setMilestoneDrafts] = useState([
-    { name: "Mobilization", percentage: 20, amount: 0 },
-    { name: "Installation", percentage: 50, amount: 0 },
-    { name: "Commissioning", percentage: 30, amount: 0 },
-  ]);
+  const [assignmentMeta, setAssignmentMeta] = useState<any | null>(null);
+  const [contractAssignmentDraft, setContractAssignmentDraft] = useState({
+    projectDurationMonths: 12,
+    targetInstallations: 500,
+    techType: "SHS",
+    energyOutput: 20000,
+    district: "Maseru",
+    verificationMethod: "Manual",
+    targetFemalePct: 50,
+    targetVulnerablePct: 30,
+    targetLowIncomePct: 60,
+  });
 
   const activeContract = useMemo(() => {
     if (!tenderContracts.length) return null;
@@ -1067,12 +1291,47 @@ const Tenders = ({
     return tenderContracts[0];
   }, [tenderContracts, selectedTender]);
 
+  React.useEffect(() => {
+    if (!activeContract || String(activeContract.status).toLowerCase() !== "approved") {
+      setAssignmentMeta(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const meta = await fetchTenderContractAssignment(activeContract.id);
+        if (cancelled) return;
+        setAssignmentMeta(meta);
+        const defaults = meta.assignment_defaults || {};
+        setContractAssignmentDraft({
+          projectDurationMonths: Number(defaults.project_duration_months ?? 12),
+          targetInstallations: Number(defaults.installation_target ?? 500),
+          techType: defaults.technology_type || activeContract.referenceNumber || "SHS",
+          energyOutput: Number(defaults.energy_output_target_kwh ?? 20000),
+          district: defaults.district_zone || "Maseru",
+          verificationMethod: String(defaults.verification_method || "manual").toLowerCase(),
+          targetFemalePct: Number(defaults.female_target_pct ?? 50),
+          targetVulnerablePct: Number(defaults.vulnerable_target_pct ?? 30),
+          targetLowIncomePct: Number(defaults.low_income_target_pct ?? 60),
+        });
+      } catch (err: any) {
+        if (!cancelled) {
+          setAssignmentMeta(null);
+          setContractMessage(toActionError(err, "Unable to load project assignment form."));
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeContract?.id, activeContract?.status]);
+
   // Form State
   const defaultFormData: Partial<Tender> = {
     name: "",
     department: "",
     applicationType: "Access Window",
-    stageType: "Pre-Qualification",
+    stageType: "Stage 1: Concept",
     procurementMethod: "Open Competitive",
     biddingCurrency: "LSL (Maloti)",
     category: "SHS",
@@ -1148,10 +1407,11 @@ const Tenders = ({
 
   const loadTenders = React.useCallback(async () => {
     try {
-      const tnds = await fetchTenders().catch(() => MOCK_TENDERS);
+      const tnds = await fetchTenders();
       setTenders(tnds);
-    } catch {
-      setTenders(MOCK_TENDERS);
+    } catch (err: any) {
+      setTenders([]);
+      showNotification(toActionError(err, "Failed to load tenders."));
     }
   }, []);
 
@@ -1207,6 +1467,14 @@ const Tenders = ({
     setTimeout(() => setNotification(null), 3000);
   };
 
+  const queueStatusTone = (bid: TenderBid) =>
+    bid.status === BidStatus.SUBMITTED ? "bg-blue-100 text-blue-700" :
+    bid.status === BidStatus.UNDER_REVIEW ? "bg-amber-100 text-amber-700" :
+    bid.status === BidStatus.REVISION_REQUIRED ? "bg-orange-100 text-orange-700" :
+    bid.status === BidStatus.ACCEPTED ? "bg-emerald-100 text-emerald-700" :
+    bid.status === BidStatus.REJECTED ? "bg-rose-100 text-rose-700" :
+    "bg-slate-100 text-slate-700";
+
   const NotificationToast = () => (
     <AnimatePresence>
       {notification && (
@@ -1256,8 +1524,21 @@ const Tenders = ({
             fetchTenderAwardRanking(tenderId),
           ]);
           setAwardRankingRows(ranking.rows || []);
-          const qualifyingBidIds = new Set((ranking.rows || []).filter(row => row.combined_score != null).map(row => row.bid_id));
-          const eligible = bids.filter(b => qualifyingBidIds.has(b.id));
+          const bidsById = new Map(bids.map((bid) => [bid.id, bid]));
+          const eligible = (ranking.rows || [])
+            .filter((row) => row.combined_score != null)
+            .map((row) => (
+              bidsById.get(row.bid_id) || {
+                id: row.bid_id,
+                tender: tenderId,
+                vendor_id: row.vendor_id,
+                vendor_name: row.vendor_name,
+                vendor_email: "",
+                bid_amount: row.bid_amount,
+                status: BidStatus.SUBMITTED,
+                version_number: 1,
+              }
+            ));
           setAwardBids(eligible);
           const recommended = ranking.recommended;
           let selected = recommended ? eligible.find(b => b.id === recommended.bid_id) : undefined;
@@ -1279,11 +1560,17 @@ const Tenders = ({
         } finally {
           setAwardBidLoading(false);
         }
-        setMilestoneDrafts([
-          { name: "Mobilization", percentage: 20, amount: 0 },
-          { name: "Installation", percentage: 60, amount: 0 },
-          { name: "Commissioning", percentage: 20, amount: 0 },
-        ]);
+        setContractAssignmentDraft({
+          projectDurationMonths: 12,
+          targetInstallations: 500,
+          techType: full.technologyTypes?.[0] || full.category || "SHS",
+          energyOutput: 20000,
+          district: "Maseru",
+          verificationMethod: "Manual",
+          targetFemalePct: 50,
+          targetVulnerablePct: 30,
+          targetLowIncomePct: 60,
+        });
       }
       setView(nextView);
     } catch (err: any) {
@@ -1554,9 +1841,28 @@ const Tenders = ({
   const handleApproveContract = async (contractId: string) => {
     try {
       setIsActioning(true);
-      const updated = await approveTenderContract(contractId, milestoneDrafts);
-      setTenderContracts(prev => prev.map(item => item.id === updated.id ? updated : item));
-      setContractMessage("Contract approved. Project and milestones created.");
+      const contractToProcess = tenderContracts.find(item => item.id === contractId);
+      const normalizedStatus = String(contractToProcess?.status || "").toLowerCase();
+      if (normalizedStatus !== "approved") {
+        await approveTenderContract(contractId, { sendEmail: true });
+      }
+      const updated: any = await assignTenderContract(contractId, {
+        projectDurationMonths: contractAssignmentDraft.projectDurationMonths,
+        targetInstallations: contractAssignmentDraft.targetInstallations,
+        techType: contractAssignmentDraft.techType,
+        energyOutput: contractAssignmentDraft.energyOutput,
+        district: contractAssignmentDraft.district,
+        verificationMethod: contractAssignmentDraft.verificationMethod,
+        targetFemalePct: contractAssignmentDraft.targetFemalePct,
+        targetVulnerablePct: contractAssignmentDraft.targetVulnerablePct,
+        targetLowIncomePct: contractAssignmentDraft.targetLowIncomePct,
+      });
+      const refreshedContracts = selectedTender ? await fetchTenderContracts({ tenderId: selectedTender.id }) : tenderContracts;
+      setTenderContracts(refreshedContracts);
+      setContractMessage(updated?.message || `Project #${updated?.project_id || updated?.project?.id || "new"} created. Vendor notified.`);
+      if (updated?.project?.id) {
+        showNotification(`Project PRJ-${updated.project.id} created. Vendor notified.`);
+      }
     } catch (err: any) {
       setContractMessage(toActionError(err, "Failed to approve contract."));
     } finally {
@@ -1646,8 +1952,8 @@ const Tenders = ({
                 onChange={handleInputChange}
                 className="input-field"
               >
-                <option>Pre-Qualification</option>
-                <option>Site-Specific</option>
+                <option>Stage 1: Concept</option>
+                <option>Stage 2: Detailed</option>
               </select>
             </div>
             <div className="space-y-2">
@@ -2349,6 +2655,7 @@ const Tenders = ({
             </div>
           </div>
         </div>
+
       </div>
     );
   }
@@ -2812,10 +3119,10 @@ const Tenders = ({
                         </select>
                       )}
                       {!awardBidLoading && awardBids.length === 0 && (
-                        <p className="text-xs text-amber-700">No TAC‑scored bids found for this tender.</p>
+                        <p className="text-xs text-amber-700">No Stage 2 bids have completed both technical and financial evaluation yet.</p>
                       )}
                       {!awardBidLoading && awardBids.length > 0 && (
-                        <p className="text-[10px] text-slate-400">Only TAC‑scored bids with total score ≥ 71 are available for award.</p>
+                        <p className="text-[10px] text-slate-400">Only bids with completed technical and RMT financial evaluation are available for award selection.</p>
                       )}
                     </div>
                     <div className="space-y-2">
@@ -2886,6 +3193,19 @@ const Tenders = ({
                               <div className="text-right">
                                 <p className="font-semibold text-slate-900">Rank {row.rank}</p>
                                 {row.is_recommended_winner && <p className="text-emerald-700 font-semibold">Recommended Winner</p>}
+                                {row.is_recommended_winner && row.combined_score != null && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setAwardBidId(row.bid_id);
+                                      setAwardWinner(row.vendor_name || "");
+                                      setAwardWinnerId(row.vendor_id || "");
+                                    }}
+                                    className="mt-2 text-[11px] font-semibold text-emerald-700 underline"
+                                  >
+                                    Select winner for form
+                                  </button>
+                                )}
                               </div>
                             </div>
                             <div className="mt-2 grid grid-cols-1 gap-2 text-slate-600 sm:grid-cols-3">
@@ -2904,7 +3224,7 @@ const Tenders = ({
                 </div>
 
                 <div className="space-y-4 border-t border-slate-100 pt-4 xl:border-t-0 xl:border-l xl:border-slate-100 xl:pl-6 xl:pt-0">
-                <h3 className="text-sm font-bold text-slate-700">Contract & Milestones</h3>
+                <h3 className="text-sm font-bold text-slate-700">Contract & Project Assignment</h3>
                 <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3 text-xs text-slate-600">
                   <p className="font-semibold text-slate-700">After Final Award Is Confirmed</p>
                   <p className="mt-1">1. The PBA is generated.</p>
@@ -2922,8 +3242,7 @@ const Tenders = ({
                       <span className="font-medium text-slate-700">{activeContract.referenceNumber}</span>
                       <span className="badge bg-slate-100 text-slate-700">{activeContract.status}</span>
                     </div>
-                    {activeContract && (
-                      <div className="space-y-3">
+                    <div className="space-y-3">
                         <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
                           <p className="font-semibold text-slate-700">Signed Contract Review</p>
                           <p className="mt-1 text-[11px] text-slate-500">The awarded bid package is locked into Annexes A-E and must be complete before final activation.</p>
@@ -2976,55 +3295,169 @@ const Tenders = ({
                             Status: {activeContract.status}
                           </p>
                         </div>
-                        <p className="text-xs text-slate-500">After the vendor uploads the signed PBA, review the uploaded package here and finalize the default 20/50/30 milestones to activate the project.</p>
-                        {milestoneDrafts.map((m, idx) => (
-                          <div key={`${m.name}-${idx}`} className="grid grid-cols-3 gap-2">
-                            <input
-                              className="input-field"
-                              value={m.name}
-                              onChange={(e) => setMilestoneDrafts(prev => prev.map((item, i) => i === idx ? { ...item, name: e.target.value } : item))}
-                              placeholder="Milestone name"
-                            />
-                            <input
-                              className="input-field"
-                              type="number"
-                              value={m.percentage}
-                              onChange={(e) => setMilestoneDrafts(prev => prev.map((item, i) => i === idx ? { ...item, percentage: Number(e.target.value) } : item))}
-                              placeholder="%"
-                            />
-                            <input
-                              className="input-field"
-                              type="number"
-                              value={m.amount}
-                              onChange={(e) => setMilestoneDrafts(prev => prev.map((item, i) => i === idx ? { ...item, amount: Number(e.target.value) } : item))}
-                              placeholder="Amount"
-                            />
+                        <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-3">
+                          <div>
+                            <p className="text-sm font-semibold text-slate-800">Milestone Assignment</p>
+                            <p className="text-xs text-slate-500 mt-1">
+                              {Boolean(activeContract.projectId)
+                                ? "Project assignment is already complete for this contract. Milestones were created when the project was saved."
+                                : "Review the signed contract, then save the project assignment details. The system will auto-create Milestones 1, 2, and 3 after the project is created."}
+                            </p>
                           </div>
-                        ))}
-                        <button
-                          onClick={() => handleApproveContract(activeContract.id)}
-                          disabled={isActioning}
-                          className="btn-primary w-full"
-                        >
-                          {isActioning ? "Finalizing..." : "Finalize Contract"}
-                        </button>
-                        <div className="space-y-2">
-                          <input
-                            className="input-field"
-                            value={contractRejectionReason}
-                            onChange={(e) => setContractRejectionReason(e.target.value)}
-                            placeholder="Rejection reason (optional)"
-                          />
-                          <button
-                            onClick={() => handleRejectContract(activeContract.id)}
-                            disabled={isActioning}
-                            className="btn-secondary w-full"
-                          >
-                            Reject Contract
-                          </button>
+                          {assignmentMeta?.contract_details && (
+                            <div className="grid grid-cols-1 gap-3 rounded-xl border border-slate-100 bg-slate-50 p-3 text-xs text-slate-600 md:grid-cols-2">
+                              <p><span className="font-semibold text-slate-700">Contract Ref:</span> {assignmentMeta.contract_details.contract_ref}</p>
+                              <p><span className="font-semibold text-slate-700">Vendor Name:</span> {assignmentMeta.contract_details.vendor_name}</p>
+                              <p><span className="font-semibold text-slate-700">Technology:</span> {assignmentMeta.contract_details.technology}</p>
+                              <p><span className="font-semibold text-slate-700">Bid Amount:</span> LSL {Number(assignmentMeta.contract_details.bid_amount || 0).toLocaleString()}</p>
+                              <p><span className="font-semibold text-slate-700">Signed Date:</span> {assignmentMeta.contract_details.signed_date ? new Date(assignmentMeta.contract_details.signed_date).toLocaleString() : "N/A"}</p>
+                            </div>
+                          )}
+                          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                            <div>
+                              <label className="text-xs font-semibold text-slate-600">Project duration (months)</label>
+                              <select className="input-field mt-1" disabled={Boolean(activeContract.projectId)} value={contractAssignmentDraft.projectDurationMonths} onChange={(e) => setContractAssignmentDraft(prev => ({ ...prev, projectDurationMonths: Number(e.target.value) || 0 }))}>
+                                {(assignmentMeta?.assignment_fields?.project_duration_months || [6, 12, 18]).map((value: number) => (
+                                  <option key={value} value={value}>{value}</option>
+                                ))}
+                              </select>
+                            </div>
+                            <div>
+                              <label className="text-xs font-semibold text-slate-600">Installation target</label>
+                              <input
+                                className="input-field mt-1"
+                                type="number"
+                                min={0}
+                                disabled={Boolean(activeContract.projectId)}
+                                value={contractAssignmentDraft.targetInstallations}
+                                onChange={(e) => setContractAssignmentDraft(prev => ({ ...prev, targetInstallations: Number(e.target.value) || 0 }))}
+                              />
+                            </div>
+                            <div>
+                              <label className="text-xs font-semibold text-slate-600">Technology</label>
+                              {assignmentMeta?.assignment_fields?.technology_type_read_only ? (
+                                <input className="input-field mt-1 bg-slate-50" value={contractAssignmentDraft.techType} readOnly />
+                              ) : (
+                                <select className="input-field mt-1" disabled={Boolean(activeContract.projectId)} value={contractAssignmentDraft.techType} onChange={(e) => setContractAssignmentDraft(prev => ({ ...prev, techType: e.target.value }))}>
+                                  {(assignmentMeta?.assignment_fields?.technology_type || ["SHS", "ICS", "GMG", "SWP", "PUE"]).map((value: string) => (
+                                    <option key={value} value={value}>{value}</option>
+                                  ))}
+                                </select>
+                              )}
+                            </div>
+                            <div>
+                              <label className="text-xs font-semibold text-slate-600">Energy target (kWh/month)</label>
+                              <input
+                                className="input-field mt-1"
+                                type="number"
+                                min={0}
+                                disabled={Boolean(activeContract.projectId)}
+                                value={contractAssignmentDraft.energyOutput}
+                                onChange={(e) => setContractAssignmentDraft(prev => ({ ...prev, energyOutput: Number(e.target.value) || 0 }))}
+                              />
+                            </div>
+                            <div>
+                              <label className="text-xs font-semibold text-slate-600">District</label>
+                              <select className="input-field mt-1" disabled={Boolean(activeContract.projectId)} value={contractAssignmentDraft.district} onChange={(e) => setContractAssignmentDraft(prev => ({ ...prev, district: e.target.value }))}>
+                                {(assignmentMeta?.assignment_fields?.district_zone || ["Maseru"]).map((value: string) => (
+                                  <option key={value} value={value}>{value}</option>
+                                ))}
+                              </select>
+                            </div>
+                            <div>
+                              <label className="text-xs font-semibold text-slate-600">Verification method</label>
+                              <select className="input-field mt-1" disabled={Boolean(activeContract.projectId)} value={contractAssignmentDraft.verificationMethod} onChange={(e) => setContractAssignmentDraft(prev => ({ ...prev, verificationMethod: e.target.value }))}>
+                                {(assignmentMeta?.assignment_fields?.verification_method || ["iot", "manual"]).map((value: string) => (
+                                  <option key={value} value={value}>{String(value).toUpperCase()}</option>
+                                ))}
+                              </select>
+                            </div>
+                          </div>
+                          <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                            <div>
+                              <label className="text-xs font-semibold text-slate-600">Female target %</label>
+                              <input
+                                className="input-field mt-1"
+                                type="number"
+                                min={0}
+                                max={100}
+                                disabled={Boolean(activeContract.projectId)}
+                                value={contractAssignmentDraft.targetFemalePct}
+                                onChange={(e) => setContractAssignmentDraft(prev => ({ ...prev, targetFemalePct: Number(e.target.value) || 0 }))}
+                              />
+                            </div>
+                            <div>
+                              <label className="text-xs font-semibold text-slate-600">Vulnerable target %</label>
+                              <input
+                                className="input-field mt-1"
+                                type="number"
+                                min={0}
+                                max={100}
+                                disabled={Boolean(activeContract.projectId)}
+                                value={contractAssignmentDraft.targetVulnerablePct}
+                                onChange={(e) => setContractAssignmentDraft(prev => ({ ...prev, targetVulnerablePct: Number(e.target.value) || 0 }))}
+                              />
+                            </div>
+                            <div>
+                              <label className="text-xs font-semibold text-slate-600">Low-income target %</label>
+                              <input
+                                className="input-field mt-1"
+                                type="number"
+                                min={0}
+                                max={100}
+                                disabled={Boolean(activeContract.projectId)}
+                                value={contractAssignmentDraft.targetLowIncomePct}
+                                onChange={(e) => setContractAssignmentDraft(prev => ({ ...prev, targetLowIncomePct: Number(e.target.value) || 0 }))}
+                              />
+                            </div>
+                          </div>
                         </div>
-                      </div>
-                    )}
+                        <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3 text-xs text-slate-600">
+                          <p className="font-semibold text-slate-700">Milestones Auto-Created On Save</p>
+                          <p className="mt-1">M1: Mobilization — 20% — status `pending`</p>
+                          <p>M2: 80% Implementation — 50% — status `locked`</p>
+                          <p>M3: Final — 30% — status `locked`</p>
+                          {assignmentMeta?.disbursement_preview && (
+                            <div className="mt-2 space-y-1">
+                              <p>M1 (20%): LSL {Number(assignmentMeta.disbursement_preview.m1 || 0).toLocaleString()}</p>
+                              <p>M2 (50%): LSL {Number(assignmentMeta.disbursement_preview.m2 || 0).toLocaleString()}</p>
+                              <p>M3 (30%): LSL {Number(assignmentMeta.disbursement_preview.m3 || 0).toLocaleString()}</p>
+                              <p>Total: LSL {Number(assignmentMeta.disbursement_preview.total || 0).toLocaleString()}</p>
+                            </div>
+                          )}
+                        </div>
+                        {Boolean(activeContract.projectId) ? (
+                          <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-3 text-xs text-emerald-800">
+                            <p className="font-semibold">Project already assigned</p>
+                            <p className="mt-1">This contract has already been used to create project `PRJ-{activeContract.projectId}` for vendor `{activeContract.vendorId}`. Save & Assign Project is now locked for this contract.</p>
+                          </div>
+                        ) : (
+                          <>
+                            <button
+                              onClick={() => handleApproveContract(activeContract.id)}
+                              disabled={isActioning}
+                              className="btn-primary w-full"
+                            >
+                              {isActioning ? "Saving..." : "Save & Assign Project"}
+                            </button>
+                            <div className="space-y-2">
+                              <input
+                                className="input-field"
+                                value={contractRejectionReason}
+                                onChange={(e) => setContractRejectionReason(e.target.value)}
+                                placeholder="Rejection reason (optional)"
+                              />
+                              <button
+                                onClick={() => handleRejectContract(activeContract.id)}
+                                disabled={isActioning}
+                                className="btn-secondary w-full"
+                              >
+                                Reject Contract
+                              </button>
+                            </div>
+                          </>
+                        )}
+                    </div>
                   </div>
                 )}
                 {contractMessage && <p className="text-xs text-slate-600">{contractMessage}</p>}
@@ -3056,343 +3489,15 @@ const Tenders = ({
   );
 };
 
-const GISMap = () => {
-  const [activeLayers, setActiveLayers] = useState<string[]>(['Installation Density', 'Tender Zones']);
-  const [timePeriod, setTimePeriod] = useState<'Daily' | 'Weekly' | 'Monthly'>('Monthly');
-  const [selectedVendor, setSelectedVendor] = useState<string>('All');
-  const [showVerificationQueue, setShowVerificationQueue] = useState(false);
-  const [mapZoom, setMapZoom] = useState(100);
-  const [actionMessage, setActionMessage] = useState<string | null>(null);
-  const [verificationQueue, setVerificationQueue] = useState([
-    { id: 'SITE-991', meterId: 'MTR-8821', lat: -29.63, long: 27.91, status: 'Pending', vendor: 'SolarLease Ltd', type: 'SHS' },
-    { id: 'SITE-992', meterId: 'MTR-7712', lat: -28.81, long: 28.24, status: 'Flagged', vendor: 'EcoPower', type: 'Mini-grid' },
-  ]);
-
-  const toggleLayer = (layer: string) => {
-    setActiveLayers(prev => 
-      prev.includes(layer) ? prev.filter(l => l !== layer) : [...prev, layer]
-    );
-  };
-
-  const showActionMessage = (message: string) => {
-    setActionMessage(message);
-    setTimeout(() => setActionMessage(null), 2500);
-  };
-
-  const handleZoomIn = () => {
-    const nextZoom = Math.min(140, mapZoom + 10);
-    setMapZoom(nextZoom);
-    showActionMessage(`Map zoom set to ${nextZoom}%`);
-  };
-
-  const handleZoomOut = () => {
-    const nextZoom = Math.max(60, mapZoom - 10);
-    setMapZoom(nextZoom);
-    showActionMessage(`Map zoom set to ${nextZoom}%`);
-  };
-
-  const handleResetMapView = () => {
-    setMapZoom(100);
-    setSelectedVendor('All');
-    setActiveLayers(['Installation Density', 'Tender Zones']);
-    showActionMessage("Map view reset.");
-  };
-
-  const updateVerificationStatus = (id: string, status: 'Verified' | 'Flagged') => {
-    setVerificationQueue(prev =>
-      prev.map(item => (item.id === id ? { ...item, status } : item))
-    );
-    showActionMessage(`Site ${id} marked as ${status}.`);
-  };
-
-  return (
-    <div className="space-y-6 h-full flex flex-col">
-      <AnimatePresence>
-        {actionMessage && (
-          <motion.div
-            initial={{ opacity: 0, y: -12 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -12 }}
-            className="fixed top-24 right-8 z-[300] bg-blue-600 text-white px-5 py-2.5 rounded-xl shadow-xl text-sm font-medium"
-          >
-            {actionMessage}
-          </motion.div>
-        )}
-      </AnimatePresence>
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900">GIS & Spatial Analytics</h1>
-          <p className="text-sm text-slate-500">Powered by Prospect Visualization Layer</p>
-        </div>
-        <div className="flex gap-3">
-          <div className="flex bg-white rounded-xl p-1 shadow-sm border border-slate-200">
-            {['Daily', 'Weekly', 'Monthly'].map(p => (
-              <button
-                key={p}
-                onClick={() => setTimePeriod(p as any)}
-                className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${
-                  timePeriod === p ? 'bg-emerald-600 text-white shadow-md' : 'text-slate-500 hover:bg-slate-50'
-                }`}
-              >
-                {p}
-              </button>
-            ))}
-          </div>
-          <button 
-            onClick={() => setShowVerificationQueue(!showVerificationQueue)}
-            className="btn-secondary flex items-center gap-2 relative"
-          >
-            <ShieldCheck size={18} />
-            Verification Queue
-            <span className="absolute -top-1 -right-1 w-5 h-5 bg-rose-500 text-white text-[10px] font-bold rounded-full flex items-center justify-center border-2 border-white">
-              2
-            </span>
-          </button>
-        </div>
-      </div>
-
-      <div className="flex-1 flex gap-6 min-h-[600px]">
-        {/* Map Area */}
-        <div className="flex-1 card relative bg-slate-200 overflow-hidden border-none shadow-inner">
-          <div className="absolute top-4 left-4 z-20 bg-white/90 px-3 py-1 rounded-lg text-xs font-bold text-slate-700 border border-slate-200">
-            Zoom: {mapZoom}%
-          </div>
-          {/* Base Map Placeholder */}
-          <div className="absolute inset-0 bg-[#e5e7eb] opacity-50">
-            <div className="absolute inset-0" style={{ backgroundImage: 'radial-gradient(#cbd5e1 1px, transparent 1px)', backgroundSize: '40px 40px' }} />
-          </div>
-
-          {/* Layer: Tender Zones */}
-          <AnimatePresence>
-            {activeLayers.includes('Tender Zones') && (
-              <motion.div 
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                className="absolute inset-0 pointer-events-none"
-              >
-                <div className="absolute top-1/4 left-1/4 w-64 h-64 bg-emerald-500/10 border-2 border-emerald-500/30 rounded-full blur-2xl" />
-                <div className="absolute bottom-1/4 right-1/3 w-80 h-80 bg-blue-500/10 border-2 border-blue-500/30 rounded-full blur-3xl" />
-                <div className="absolute top-1/2 right-1/4 w-48 h-48 bg-amber-500/10 border-2 border-amber-500/30 rounded-full blur-xl" />
-              </motion.div>
-            )}
-          </AnimatePresence>
-
-          {/* Layer: Installation Density (Heatmap Mock) */}
-          <AnimatePresence>
-            {activeLayers.includes('Installation Density') && (
-              <motion.div 
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                className="absolute inset-0 pointer-events-none"
-              >
-                <div className="absolute top-[40%] left-[35%] w-32 h-32 bg-emerald-400/40 rounded-full blur-3xl" />
-                <div className="absolute top-[45%] left-[38%] w-16 h-16 bg-emerald-600/50 rounded-full blur-2xl" />
-                <div className="absolute bottom-[30%] left-[50%] w-40 h-40 bg-emerald-400/30 rounded-full blur-3xl" />
-              </motion.div>
-            )}
-          </AnimatePresence>
-
-          {/* Layer: Gender Impact */}
-          <AnimatePresence>
-            {activeLayers.includes('Gender Impact') && (
-              <motion.div 
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                className="absolute inset-0 pointer-events-none"
-              >
-                <div className="absolute top-[20%] right-[20%] flex items-center gap-2 bg-white/90 backdrop-blur px-3 py-1.5 rounded-full shadow-lg border border-pink-100">
-                  <div className="w-2 h-2 rounded-full bg-pink-500" />
-                  <span className="text-[10px] font-bold text-slate-700">65% Female Beneficiaries</span>
-                </div>
-                <div className="absolute bottom-[40%] left-[20%] flex items-center gap-2 bg-white/90 backdrop-blur px-3 py-1.5 rounded-full shadow-lg border border-pink-100">
-                  <div className="w-2 h-2 rounded-full bg-pink-500" />
-                  <span className="text-[10px] font-bold text-slate-700">58% Female Beneficiaries</span>
-                </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
-
-          {/* Map Center Content */}
-          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-            <div className="text-center space-y-4 opacity-20">
-              <Globe size={120} className="mx-auto text-slate-400" />
-              <p className="text-2xl font-black text-slate-400 uppercase tracking-[0.2em]">Lesotho Spatial Engine</p>
-            </div>
-          </div>
-          
-          {/* Mock Pins with Detailed Attributes */}
-          <div className="absolute top-1/4 left-1/3 w-5 h-5 rounded-full bg-emerald-500 border-2 border-white shadow-xl animate-pulse cursor-pointer group">
-            <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 p-4 bg-white rounded-2xl shadow-2xl opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10 border border-slate-100">
-              <div className="flex justify-between items-start mb-2">
-                <div>
-                  <p className="text-xs font-bold text-slate-900">Meter: MTR-8821</p>
-                  <p className="text-[10px] text-slate-500">Tender: RL-2025-SHS-01</p>
-                </div>
-                <span className="px-2 py-0.5 rounded bg-emerald-100 text-[8px] font-bold text-emerald-700 uppercase">Online</span>
-              </div>
-              <div className="grid grid-cols-2 gap-2 text-[10px] mb-2">
-                <div>
-                  <p className="text-slate-400 uppercase font-bold">Type</p>
-                  <p className="text-slate-700 font-medium">SHS</p>
-                </div>
-                <div>
-                  <p className="text-slate-400 uppercase font-bold">Gender Impact</p>
-                  <p className="text-pink-600 font-bold">True</p>
-                </div>
-                <div>
-                  <p className="text-slate-400 uppercase font-bold">Lat/Long</p>
-                  <p className="text-slate-700 font-medium">-29.63, 27.91</p>
-                </div>
-                <div>
-                  <p className="text-slate-400 uppercase font-bold">Output</p>
-                  <p className="text-emerald-600 font-bold">450.2 kWh</p>
-                </div>
-              </div>
-              <div className="pt-2 border-t border-slate-100 flex justify-between items-center">
-                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Vendor: SolarLease Ltd</span>
-              </div>
-            </div>
-          </div>
-
-          <div className="absolute top-1/2 left-1/2 w-5 h-5 rounded-full bg-emerald-500 border-2 border-white shadow-xl" />
-          <div className="absolute top-1/3 left-2/3 w-5 h-5 rounded-full bg-amber-500 border-2 border-white shadow-xl" />
-          <div className="absolute bottom-1/4 left-1/2 w-5 h-5 rounded-full bg-rose-500 border-2 border-white shadow-xl" />
-
-          {/* Map Controls */}
-          <div className="absolute bottom-6 left-6 space-y-2">
-            <div className="card p-2 flex flex-col gap-1 shadow-2xl border-none">
-              <button onClick={handleZoomIn} className="p-2 hover:bg-slate-100 rounded-lg text-slate-600 transition-colors"><Plus size={20} /></button>
-              <div className="h-px bg-slate-100 mx-1" />
-              <button onClick={handleZoomOut} className="p-2 hover:bg-slate-100 rounded-lg text-slate-600 transition-colors"><X size={20} /></button>
-            </div>
-            <button onClick={handleResetMapView} className="card p-3 shadow-2xl border-none text-slate-600 hover:text-emerald-600 transition-colors">
-              <Globe size={20} />
-            </button>
-          </div>
-
-          {/* Layer Toggle Panel */}
-          <div className="absolute top-6 right-6">
-            <div className="card p-5 w-72 space-y-5 shadow-2xl border-none backdrop-blur-md bg-white/90">
-              <div className="flex items-center justify-between">
-                <h4 className="font-bold text-xs uppercase tracking-widest text-slate-400">Map Layers</h4>
-                <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full">
-                  {activeLayers.length} Active
-                </span>
-              </div>
-              <div className="space-y-1">
-                {[
-                  { name: 'Installation Density', icon: Activity, color: 'text-emerald-500' },
-                  { name: 'Gender Impact', icon: Users, color: 'text-pink-500' },
-                  { name: 'Tender Zones', icon: ShieldCheck, color: 'text-blue-500' },
-                  { name: 'Community Vulnerability', icon: AlertCircle, color: 'text-amber-500' }
-                ].map(layer => (
-                  <label 
-                    key={layer.name} 
-                    className={`flex items-center justify-between p-2.5 rounded-xl cursor-pointer transition-all ${
-                      activeLayers.includes(layer.name) ? 'bg-slate-50' : 'hover:bg-slate-50/50'
-                    }`}
-                  >
-                    <div className="flex items-center gap-3">
-                      <div className={`p-1.5 rounded-lg ${activeLayers.includes(layer.name) ? 'bg-white shadow-sm' : 'bg-transparent'}`}>
-                        <layer.icon size={16} className={activeLayers.includes(layer.name) ? layer.color : 'text-slate-400'} />
-                      </div>
-                      <span className={`text-sm font-bold ${activeLayers.includes(layer.name) ? 'text-slate-900' : 'text-slate-500'}`}>
-                        {layer.name}
-                      </span>
-                    </div>
-                    <input 
-                      type="checkbox" 
-                      checked={activeLayers.includes(layer.name)}
-                      onChange={() => toggleLayer(layer.name)}
-                      className="w-4 h-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 cursor-pointer" 
-                    />
-                  </label>
-                ))}
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Sidebar: Verification Queue */}
-        <AnimatePresence>
-          {showVerificationQueue && (
-            <motion.div
-              initial={{ x: 300, opacity: 0 }}
-              animate={{ x: 0, opacity: 1 }}
-              exit={{ x: 300, opacity: 0 }}
-              className="w-96 bg-white border-l border-slate-200 flex flex-col shadow-2xl z-20"
-            >
-              <div className="p-6 border-b border-slate-100 flex items-center justify-between">
-                <h3 className="font-bold text-slate-900 flex items-center gap-2">
-                  <ShieldCheck className="text-emerald-600" size={20} />
-                  GPS Verification
-                </h3>
-                <button onClick={() => setShowVerificationQueue(false)} className="text-slate-400 hover:text-slate-600">
-                  <X size={20} />
-                </button>
-              </div>
-              <div className="flex-1 overflow-y-auto p-6 space-y-4">
-                <div className="bg-amber-50 border border-amber-100 rounded-xl p-4 space-y-2">
-                  <p className="text-xs font-bold text-amber-800 uppercase tracking-wider">Boundary Check</p>
-                  <p className="text-xs text-amber-700 leading-relaxed">
-                    System automatically validates that coordinates fall within Lesotho's national boundaries via Prospect Spatial API.
-                  </p>
-                </div>
-
-                {verificationQueue.map(item => (
-                  <div key={item.id} className="card p-4 space-y-3 border-slate-100 hover:border-emerald-200 transition-colors">
-                    <div className="flex justify-between items-start">
-                      <div>
-                        <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">{item.id}</p>
-                        <p className="text-sm font-bold text-slate-900">Meter: {item.meterId}</p>
-                      </div>
-                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
-                        item.status === 'Pending' ? 'bg-amber-100 text-amber-700' : 'bg-rose-100 text-rose-700'
-                      }`}>
-                        {item.status}
-                      </span>
-                    </div>
-                    <div className="grid grid-cols-2 gap-2 text-[11px]">
-                      <div>
-                        <p className="text-slate-400 font-bold uppercase">Vendor</p>
-                        <p className="text-slate-700">{item.vendor}</p>
-                      </div>
-                      <div>
-                        <p className="text-slate-400 font-bold uppercase">Type</p>
-                        <p className="text-slate-700">{item.type}</p>
-                      </div>
-                      <div className="col-span-2">
-                        <p className="text-slate-400 font-bold uppercase">Coordinates</p>
-                        <p className="text-slate-700 font-mono">{item.lat}, {item.long}</p>
-                      </div>
-                    </div>
-                    <div className="flex gap-2 pt-2">
-                      <button
-                        onClick={() => updateVerificationStatus(item.id, 'Verified')}
-                        className="flex-1 py-2 bg-emerald-600 text-white text-xs font-bold rounded-lg hover:bg-emerald-700 transition-colors"
-                      >
-                        Approve
-                      </button>
-                      <button
-                        onClick={() => updateVerificationStatus(item.id, 'Flagged')}
-                        className="flex-1 py-2 bg-slate-100 text-slate-600 text-xs font-bold rounded-lg hover:bg-slate-200 transition-colors"
-                      >
-                        Flag
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </div>
+const GISMap = () => (
+  <div className="space-y-6">
+    <div>
+      <h1 className="text-2xl font-bold text-slate-900">GIS & Spatial Analytics</h1>
+      <p className="text-sm text-slate-500">Leaflet + OpenStreetMap view of installation coverage across Lesotho.</p>
     </div>
-  );
-};
+    <GisInstallationsMap showFilters height="550px" />
+  </div>
+);
 
 const Monitoring = () => {
   const [activeTab, setActiveTab] = useState<"dashboard" | "api" | "fallback" | "gis" | "reports" | "field">("dashboard");
@@ -5664,6 +5769,15 @@ const getLatestPrequalification = (items: VendorPrequalification[]) => {
   return sorted[0] ?? null;
 };
 
+const getLatestApprovedPrequalification = (items: VendorPrequalification[]) => {
+  return getLatestPrequalification(items.filter(item => String(item.status || "").toLowerCase() === "approved"));
+};
+
+const parseTierLevel = (value?: string | null) => {
+  const match = String(value || "").match(/(\d+)/);
+  return match ? Number(match[1]) : null;
+};
+
 const PreQualificationSubmission = () => {
   const [step, setStep] = useState(1);
   const [prequals, setPrequals] = useState<VendorPrequalification[]>([]);
@@ -6958,17 +7072,22 @@ const VendorTenders = ({ onSubmitTender }: { onSubmitTender?: (tenderId: string)
 const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
   const [bids, setBids] = useState<TenderBid[]>([]);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<"all" | "action_required" | "under_review" | "completed" | "rejected">("all");
   const [viewBid, setViewBid] = useState<TenderBid | null>(null);
   const [viewBidVersions, setViewBidVersions] = useState<TenderBid[]>([]);
   const [viewBidLoading, setViewBidLoading] = useState(false);
 
   const loadBids = React.useCallback(async () => {
     setLoading(true);
+    setLoadError("");
     try {
       const data = await fetchTenderBids();
       setBids(data);
     } catch {
       setBids([]);
+      setLoadError("We couldn't load your bids right now. Please refresh and try again.");
     } finally {
       setLoading(false);
     }
@@ -6984,6 +7103,195 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
     return () => window.removeEventListener("rbf-bid-updated", handler);
   }, [loadBids]);
 
+  const getBidActivityTimestamp = (bid: TenderBid) =>
+    bid.updated_at || bid.submitted_at || bid.reviewed_at || bid.created_at || "";
+
+  const getBidStatusColor = (bid: TenderBid) =>
+    bid.status === BidStatus.SUBMITTED ? "bg-blue-100 text-blue-700" :
+    bid.status === BidStatus.UNDER_REVIEW ? "bg-amber-100 text-amber-700" :
+    bid.status === BidStatus.REVISION_REQUIRED ? "bg-orange-100 text-orange-700" :
+    bid.status === BidStatus.ACCEPTED ? "bg-emerald-100 text-emerald-700" :
+    bid.status === BidStatus.REJECTED ? "bg-rose-100 text-rose-700" :
+    "bg-slate-100 text-slate-700";
+
+  const getBidProgress = (display: TenderBid, editableDraft: TenderBid | null, latestSubmitted: TenderBid | null) => {
+    const hasStageTwoAccess = Boolean(editableDraft?.stage_two_unlocked || display.stage_two_ready || display.stage_key === "site_specific");
+    const stageOnePassed = hasStageTwoAccess;
+    const stageTwoTechnicallyScored = display.stage_key === "site_specific" && display.evaluation_status === "technical_scored";
+    const stageTwoEvaluated = display.stage_key === "site_specific" && display.evaluation_status === "evaluated";
+    const intentToAwardIssued = Boolean(
+      display.tender_intent_to_award_at
+      && (
+        display.tender_intent_to_award_bid_id === display.id
+        || (display.tender_awarded_vendor_id && display.tender_awarded_vendor_id === display.vendor_id)
+      )
+    );
+    const finalAwarded = display.status === BidStatus.AWARDED || (
+      display.tender_status === TenderStatus.AWARDED
+      && display.tender_awarded_vendor_id === display.vendor_id
+    );
+    const finalAccepted = display.status === BidStatus.ACCEPTED || finalAwarded;
+    const rejected = display.status === BidStatus.REJECTED;
+    const isStageTwoContext = display.stage_key === "site_specific" || display.stage?.includes("Stage 2") || Boolean(editableDraft?.stage_two_unlocked);
+
+    const stageOneStatus =
+      rejected && !stageOnePassed ? "failed" :
+      display.status === BidStatus.REVISION_REQUIRED ? "revision_required" :
+      stageOnePassed ? "passed" :
+      latestSubmitted?.status === BidStatus.SUBMITTED ? "in_review" :
+      display.status === BidStatus.DRAFT ? "draft" :
+      "pending";
+
+    const stageTwoStatus =
+      rejected && isStageTwoContext ? "failed" :
+      finalAccepted ? "passed" :
+      stageTwoEvaluated ? "evaluated" :
+      stageTwoTechnicallyScored ? "technical_scored" :
+      hasStageTwoAccess ? "ready" :
+      isStageTwoContext && latestSubmitted?.status === BidStatus.SUBMITTED ? "in_review" :
+      stageOnePassed ? "available" :
+      "locked";
+
+    const primaryMessage =
+      finalAwarded ? "Tender awarded" :
+      intentToAwardIssued ? "Intent to Award issued" :
+      finalAccepted ? "Final evaluation passed" :
+      stageTwoEvaluated ? "Stage 2 fully evaluated" :
+      stageTwoTechnicallyScored ? "Stage 2 technical evaluation completed" :
+      editableDraft?.stage_two_unlocked ? "Stage 1 passed. Stage 2 is unlocked" :
+      stageOnePassed ? "Stage 1 passed" :
+      display.status === BidStatus.REVISION_REQUIRED ? "Revision required before shortlist" :
+      rejected ? "This bid did not pass review" :
+      latestSubmitted?.status === BidStatus.SUBMITTED ? "Submission under review" :
+      display.status === BidStatus.DRAFT ? "Draft in progress" :
+      "Bid in progress";
+
+    const secondaryMessage =
+      finalAwarded ? "Your tender has been awarded. Open Contracting to download and sign the Performance-Based Agreement." :
+      intentToAwardIssued ? "You are currently the recommended winner. Contracting will unlock after the final award is confirmed." :
+      finalAccepted ? "Your bid has passed the final evaluation for this tender." :
+      stageTwoEvaluated ? "Both technical and financial evaluations have been completed for your Stage 2 submission." :
+      stageTwoTechnicallyScored ? "Technical evaluation is complete. Financial evaluation is the next review step." :
+      editableDraft?.stage_two_unlocked ? "You can now continue with the detailed submission requirements." :
+      stageOnePassed && !isStageTwoContext ? "You have been shortlisted in Stage 1 and can now move forward with Stage 2." :
+      display.status === BidStatus.REVISION_REQUIRED ? "The review team requested changes. Open the bid, apply the feedback, and resubmit Stage 1." :
+      isStageTwoContext && latestSubmitted?.status === BidStatus.SUBMITTED ? "Your detailed Stage 2 submission is awaiting final review." :
+      latestSubmitted?.status === BidStatus.SUBMITTED ? "The review team is assessing this submission before the next step unlocks." :
+      rejected ? "Check the bid details for the outcome and any rejection reason." :
+      "Complete the remaining bid information before submission.";
+
+    const canProceed = Boolean(editableDraft?.stage_two_unlocked || display.status === BidStatus.DRAFT);
+    const proceedAllowed = canProceed || display.status === BidStatus.REVISION_REQUIRED;
+    const proceedLabel =
+      editableDraft?.stage_two_unlocked ? "Proceed to Stage 2" :
+      display.status === BidStatus.REVISION_REQUIRED ? "Revise Stage 1" :
+      display.stage_two_unlocked ? "Continue Stage 2" :
+      display.status === BidStatus.DRAFT ? "Continue Draft" :
+      null;
+
+    return {
+      stageOnePassed,
+      stageOneStatus,
+      stageTwoStatus,
+      stageTwoTechnicallyScored,
+      stageTwoEvaluated,
+      finalAccepted,
+      finalAwarded,
+      intentToAwardIssued,
+      rejected,
+      primaryMessage,
+      secondaryMessage,
+      canProceed: proceedAllowed,
+      proceedLabel,
+    };
+  };
+
+  const getVendorVisibleStatus = (display: TenderBid, editableDraft: TenderBid | null, latestSubmitted: TenderBid | null) => {
+    const progress = getBidProgress(display, editableDraft, latestSubmitted);
+    if (progress.finalAwarded) {
+      return { label: "Awarded - Contract Ready", color: "bg-emerald-100 text-emerald-700" };
+    }
+    if (progress.intentToAwardIssued) {
+      return { label: "Intent to Award Issued", color: "bg-blue-100 text-blue-700" };
+    }
+    if (display.stage_key === "site_specific" && display.evaluation_status === "evaluated") {
+      return { label: "Stage 2 Evaluated", color: "bg-emerald-100 text-emerald-700" };
+    }
+    if (display.stage_key === "site_specific" && display.evaluation_status === "technical_scored") {
+      return { label: "Stage 2 Technical Score Saved", color: "bg-blue-100 text-blue-700" };
+    }
+    if (progress.finalAccepted) {
+      return { label: "Final Evaluation Passed", color: "bg-emerald-100 text-emerald-700" };
+    }
+    if (display.status === BidStatus.REVISION_REQUIRED) {
+      return { label: "Revision Required", color: "bg-orange-100 text-orange-700" };
+    }
+    if (progress.rejected && !progress.stageOnePassed) {
+      return { label: "Not Shortlisted", color: "bg-rose-100 text-rose-700" };
+    }
+    if (display.stage_key !== "site_specific" && (editableDraft?.stage_two_unlocked || progress.stageOnePassed)) {
+      return { label: "Shortlisted - Submit Stage 2", color: "bg-emerald-100 text-emerald-700" };
+    }
+    if (display.status === BidStatus.DRAFT) {
+      return { label: "Draft", color: "bg-slate-100 text-slate-700" };
+    }
+    if (latestSubmitted?.status === BidStatus.SUBMITTED || display.status === BidStatus.UNDER_REVIEW) {
+      return {
+        label: progress.stageOnePassed || display.stage_key === "site_specific" ? "Stage 2 Submitted - Under Evaluation" : "Stage 1 Submitted - Awaiting Review",
+        color: "bg-amber-100 text-amber-700",
+      };
+    }
+    return { label: display.status, color: getBidStatusColor(display) };
+  };
+
+  const getStageTwoBadge = (stageTwoStatus: string) => {
+    if (stageTwoStatus === "passed") return { label: "Passed", color: "bg-emerald-100 text-emerald-700" };
+    if (stageTwoStatus === "evaluated") return { label: "Evaluated", color: "bg-emerald-100 text-emerald-700" };
+    if (stageTwoStatus === "technical_scored") return { label: "Technical Scored", color: "bg-blue-100 text-blue-700" };
+    if (stageTwoStatus === "ready" || stageTwoStatus === "available") return { label: stageTwoStatus === "ready" ? "Ready" : "Available", color: "bg-blue-100 text-blue-700" };
+    if (stageTwoStatus === "in_review") return { label: "In Review", color: "bg-amber-100 text-amber-700" };
+    if (stageTwoStatus === "failed") return { label: "Failed", color: "bg-rose-100 text-rose-700" };
+    return { label: "Locked", color: "bg-slate-100 text-slate-700" };
+  };
+
+  const getBidOperationalState = (display: TenderBid, editableDraft: TenderBid | null, latestSubmitted: TenderBid | null) => {
+    if (display.status === BidStatus.REJECTED) return "rejected";
+    if (display.stage_key === "site_specific" && display.evaluation_status === "evaluated") return "completed";
+    if (display.status === BidStatus.ACCEPTED || display.status === BidStatus.AWARDED || (display.tender_status === TenderStatus.AWARDED && display.tender_awarded_vendor_id === display.vendor_id)) return "completed";
+    if (editableDraft?.stage_two_unlocked || display.status === BidStatus.DRAFT || display.status === BidStatus.REVISION_REQUIRED) return "action_required";
+    if (latestSubmitted?.status === BidStatus.SUBMITTED || display.status === BidStatus.UNDER_REVIEW) return "under_review";
+    return "all";
+  };
+
+  const getBidActionLabel = (display: TenderBid, editableDraft: TenderBid | null) => {
+    if (editableDraft?.stage_two_unlocked || display.status === BidStatus.DRAFT) return "Continue";
+    if (display.status === BidStatus.SUBMITTED) return "Open";
+    return "View";
+  };
+
+  const pickLatestByVersion = (items: TenderBid[]) =>
+    items.slice().sort((a, b) => (b.version_number || 0) - (a.version_number || 0))[0] || null;
+
+  const resolveVendorBidVersions = (items: TenderBid[]) => {
+    const sorted = items.slice().sort((a, b) => (b.version_number || 0) - (a.version_number || 0));
+    const latestStageTwoSubmitted = pickLatestByVersion(
+      sorted.filter((item) => item.stage_key === "site_specific" && item.status !== BidStatus.DRAFT)
+    );
+    const stageTwoDraft = latestStageTwoSubmitted
+      ? null
+      : (sorted.find((item) => item.stage_key === "site_specific" && item.status === BidStatus.DRAFT) || null);
+    const stageOneDraft = sorted.find((item) => item.stage_key !== "site_specific" && item.status === BidStatus.DRAFT) || null;
+    const latestSubmitted = latestStageTwoSubmitted || sorted.find((item) => item.status !== BidStatus.DRAFT) || null;
+    const editableDraft = stageTwoDraft || (!latestSubmitted ? stageOneDraft : null);
+    const display = editableDraft || latestSubmitted || stageOneDraft || sorted[0] || null;
+    return {
+      sorted,
+      editableDraft,
+      latestSubmitted,
+      display,
+    };
+  };
+
   const grouped = useMemo(() => {
     const byTender = new Map<string, TenderBid[]>();
     bids.forEach(bid => {
@@ -6993,10 +7301,41 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
       byTender.set(key, list);
     });
     return Array.from(byTender.entries()).map(([tenderId, items]) => {
-      const sorted = items.slice().sort((a, b) => (b.version_number || 0) - (a.version_number || 0));
-      return { tenderId, latest: sorted[0], versions: sorted };
-    }).sort((a, b) => (b.latest.submitted_at || "").localeCompare(a.latest.submitted_at || ""));
+      const { sorted, editableDraft, latestSubmitted, display } = resolveVendorBidVersions(items);
+      if (!display) {
+        return null;
+      }
+      const operationalState = getBidOperationalState(display, editableDraft, latestSubmitted);
+      return { tenderId, latest: sorted[0], latestSubmitted, display, editableDraft, operationalState, versions: sorted };
+    }).filter((group): group is NonNullable<typeof group> => Boolean(group))
+      .sort((a, b) => getBidActivityTimestamp(b.display).localeCompare(getBidActivityTimestamp(a.display)));
   }, [bids]);
+
+  const summary = useMemo(() => ({
+    total: grouped.length,
+    actionRequired: grouped.filter(item => item.operationalState === "action_required").length,
+    underReview: grouped.filter(item => item.operationalState === "under_review").length,
+    completed: grouped.filter(item => item.operationalState === "completed").length,
+  }), [grouped]);
+
+  const filteredGrouped = useMemo(() => {
+    const query = searchQuery.trim().toLowerCase();
+    return grouped.filter(({ display, latestSubmitted, operationalState, versions }) => {
+      const matchesStatus = statusFilter === "all" || operationalState === statusFilter;
+      if (!matchesStatus) return false;
+      if (!query) return true;
+      const haystack = [
+        display.tender_name,
+        display.tender_reference,
+        display.stage,
+        display.stage_badge,
+        display.status,
+        latestSubmitted?.status,
+        versions.map(version => version.version_number).join(" "),
+      ].filter(Boolean).join(" ").toLowerCase();
+      return haystack.includes(query);
+    });
+  }, [grouped, searchQuery, statusFilter]);
 
   const openViewBid = async (bid: TenderBid) => {
     setViewBid(bid);
@@ -7016,53 +7355,148 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold text-slate-900">My Bids</h1>
-        <p className="text-slate-500">Track your submissions and individual bid status</p>
+        <p className="text-slate-500">Track live bid status, Stage 2 readiness, and next actions across every tender you have entered</p>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <div className="card p-5">
+          <p className="text-[11px] font-bold uppercase tracking-widest text-slate-400">Total Tenders</p>
+          <p className="mt-3 text-3xl font-bold text-slate-900">{summary.total}</p>
+          <p className="mt-2 text-xs text-slate-500">Unique tenders with at least one saved bid version</p>
+        </div>
+        <div className="card p-5 border border-amber-100 bg-amber-50/60">
+          <p className="text-[11px] font-bold uppercase tracking-widest text-amber-700">Needs Action</p>
+          <p className="mt-3 text-3xl font-bold text-slate-900">{summary.actionRequired}</p>
+          <p className="mt-2 text-xs text-amber-800">Drafts and unlocked Stage 2 submissions ready to continue</p>
+        </div>
+        <div className="card p-5 border border-blue-100 bg-blue-50/60">
+          <p className="text-[11px] font-bold uppercase tracking-widest text-blue-700">Under Review</p>
+          <p className="mt-3 text-3xl font-bold text-slate-900">{summary.underReview}</p>
+          <p className="mt-2 text-xs text-blue-800">Submitted bids currently waiting for evaluation progress</p>
+        </div>
+        <div className="card p-5 border border-emerald-100 bg-emerald-50/60">
+          <p className="text-[11px] font-bold uppercase tracking-widest text-emerald-700">Completed</p>
+          <p className="mt-3 text-3xl font-bold text-slate-900">{summary.completed}</p>
+          <p className="mt-2 text-xs text-emerald-800">Bids already accepted or moved to a completed state</p>
+        </div>
       </div>
 
       <div className="card">
         <div className="p-6 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <div>
-            <h3 className="text-lg font-bold">Submitted Bids</h3>
-            <p className="text-xs text-slate-500">Latest updates across all your tenders</p>
+            <h3 className="text-lg font-bold">All My Bids</h3>
+            <p className="text-xs text-slate-500">Filter, inspect, and continue the exact bid that needs your attention</p>
           </div>
           <button onClick={loadBids} className="btn-secondary text-sm">Refresh</button>
         </div>
-        <div className="p-6 space-y-4">
+        <div className="p-6 space-y-5">
+          <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr),220px] gap-3">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+              <input
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search by tender name, reference, stage, or bid status"
+                className="input-field pl-9"
+              />
+            </div>
+            <div className="relative">
+              <Filter className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+              <select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value as "all" | "action_required" | "under_review" | "completed" | "rejected")}
+                className="input-field pl-9"
+              >
+                <option value="all">All statuses</option>
+                <option value="action_required">Needs action</option>
+                <option value="under_review">Under review</option>
+                <option value="completed">Completed</option>
+                <option value="rejected">Rejected</option>
+              </select>
+            </div>
+          </div>
+
+          {loadError && (
+            <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+              {loadError}
+            </div>
+          )}
+
           {loading && <p className="text-sm text-slate-500">Loading bids...</p>}
-          {!loading && grouped.length === 0 && (
+          {!loading && !loadError && grouped.length === 0 && (
             <p className="text-sm text-slate-500">No bids submitted yet.</p>
           )}
-          {!loading && grouped.map(({ latest, versions }) => {
-            const statusColor =
-              latest.status === BidStatus.SUBMITTED ? "bg-blue-100 text-blue-700" :
-              latest.status === BidStatus.UNDER_REVIEW ? "bg-amber-100 text-amber-700" :
-              latest.status === BidStatus.ACCEPTED ? "bg-emerald-100 text-emerald-700" :
-              latest.status === BidStatus.REJECTED ? "bg-rose-100 text-rose-700" :
-              "bg-slate-100 text-slate-700";
+          {!loading && !loadError && grouped.length > 0 && filteredGrouped.length === 0 && (
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 px-5 py-8 text-center">
+              <p className="text-sm font-medium text-slate-700">No bids matched your current search or filter.</p>
+              <button onClick={() => { setSearchQuery(""); setStatusFilter("all"); }} className="btn-secondary mt-4 text-sm">Clear filters</button>
+            </div>
+          )}
+          {!loading && filteredGrouped.map(({ latest, latestSubmitted, display, editableDraft, operationalState, versions }) => {
+            const progress = getBidProgress(display, editableDraft, latestSubmitted);
+            const visibleStatus = getVendorVisibleStatus(display, editableDraft, latestSubmitted);
+            const stageTwoBadge = getStageTwoBadge(progress.stageTwoStatus);
+            const statusSummary =
+              operationalState === "action_required" ? "Action required" :
+              operationalState === "under_review" ? "Under review" :
+              operationalState === "completed" ? "Completed" :
+              operationalState === "rejected" ? "Rejected" :
+              "Active";
             return (
-              <div key={latest.id} className="border border-slate-100 rounded-2xl p-5 hover:border-emerald-200 transition-colors">
-                <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
-                  <div className="space-y-1">
-                    <p className="text-sm font-bold text-slate-900">
-                      {latest.tender_name || `Tender ${latest.tender_reference || latest.tender}`}
+              <div key={latest.id} className="border border-slate-100 rounded-2xl p-5 hover:border-emerald-200 transition-colors bg-white">
+                <div className="flex flex-col xl:flex-row xl:items-start xl:justify-between gap-5">
+                  <div className="space-y-3 min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className={`badge ${visibleStatus.color}`}>{visibleStatus.label}</span>
+                      <span className="badge bg-slate-100 text-slate-700">{display.stage_badge || display.stage || "Bid"}</span>
+                      {editableDraft?.stage_key === "site_specific" && (
+                        <span className="badge bg-emerald-100 text-emerald-700">Stage 2 draft ready</span>
+                      )}
+                      <span className="text-[11px] font-medium text-slate-500">{statusSummary}</span>
+                    </div>
+                    <p className="text-base font-bold text-slate-900">
+                      {display.tender_name || `Tender ${display.tender_reference || display.tender}`}
                     </p>
                     <p className="text-xs text-slate-500">
-                      Ref: {latest.tender_reference || "N/A"} • Latest Version {latest.version_number}
+                      Ref: {display.tender_reference || "N/A"} • Latest Version {latest.version_number}
                     </p>
-                    <div className="flex flex-wrap gap-3 text-[11px] text-slate-500">
-                      <span>Amount: {latest.bid_amount != null ? `M ${Number(latest.bid_amount).toLocaleString()}` : "N/A"}</span>
-                      <span>Submitted: {latest.submitted_at ? new Date(latest.submitted_at).toLocaleString() : "Draft"}</span>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-[11px] text-slate-500">
+                      <span>Amount: {display.bid_amount != null ? `M ${Number(display.bid_amount).toLocaleString()}` : "N/A"}</span>
+                      <span>{display.status === BidStatus.DRAFT ? "Last updated" : "Submitted"}: {getBidActivityTimestamp(display) ? new Date(getBidActivityTimestamp(display)).toLocaleString() : "Draft"}</span>
                       <span>Versions: {versions.length}</span>
                     </div>
-                    {latest.rejection_reason && (
-                      <div className="text-xs text-rose-600">Rejection: {latest.rejection_reason}</div>
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className={`badge ${progress.stageOnePassed ? "bg-emerald-100 text-emerald-700" : progress.stageOneStatus === "in_review" ? "bg-amber-100 text-amber-700" : progress.stageOneStatus === "failed" ? "bg-rose-100 text-rose-700" : "bg-slate-100 text-slate-700"}`}>
+                          Stage 1 {progress.stageOnePassed ? "Passed" : progress.stageOneStatus === "in_review" ? "In Review" : progress.stageOneStatus === "failed" ? "Failed" : progress.stageOneStatus === "draft" ? "Draft" : "Pending"}
+                        </span>
+                        <span className={`badge ${stageTwoBadge.color}`}>
+                          Stage 2 {stageTwoBadge.label}
+                        </span>
+                      </div>
+                      <p className="mt-3 text-sm font-semibold text-slate-900">{progress.primaryMessage}</p>
+                      <p className="mt-1 text-xs text-slate-600">{progress.secondaryMessage}</p>
+                    </div>
+                    {editableDraft?.stage_key === "site_specific" && latestSubmitted?.submitted_at && (
+                      <div className="rounded-xl border border-emerald-100 bg-emerald-50 px-3 py-2 text-xs text-emerald-800">
+                        Stage 1 was submitted on {new Date(latestSubmitted.submitted_at).toLocaleString()}. Stage 2 is unlocked and editable here.
+                      </div>
+                    )}
+                    {!editableDraft?.stage_two_unlocked && latestSubmitted?.status === BidStatus.SUBMITTED && (
+                      <div className="rounded-xl border border-amber-100 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                        Stage 1 is submitted and waiting for technical review before Stage 2 unlocks.
+                      </div>
+                    )}
+                    {display.rejection_reason && (
+                      <div className="rounded-xl border border-rose-100 bg-rose-50 px-3 py-2 text-xs text-rose-700">Rejection: {display.rejection_reason}</div>
                     )}
                   </div>
-                  <div className="flex items-center gap-3">
-                    <span className={`badge ${statusColor}`}>{latest.status}</span>
-                    <button onClick={() => openViewBid(latest)} className="btn-secondary text-xs">View</button>
-                    {(latest.status === BidStatus.DRAFT || latest.status === BidStatus.SUBMITTED) && (
-                      <button onClick={() => onOpenBid(latest)} className="btn-primary text-xs">Edit</button>
+                  <div className="flex flex-col sm:flex-row xl:flex-col gap-3 xl:min-w-[180px]">
+                    <button onClick={() => openViewBid(display)} className="btn-secondary text-xs">View</button>
+                    {(progress.canProceed || display.status === BidStatus.SUBMITTED) && (
+                      <button onClick={() => onOpenBid(display)} className="btn-primary text-xs">
+                        {progress.proceedLabel || getBidActionLabel(display, editableDraft)}
+                      </button>
                     )}
                   </div>
                 </div>
@@ -7074,6 +7508,13 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
 
       <AnimatePresence>
         {viewBid && (
+          (() => {
+            const resolvedVersions = resolveVendorBidVersions(viewBidVersions.length ? viewBidVersions : [viewBid]);
+            const viewEditableDraft = resolvedVersions.editableDraft;
+            const viewLatestSubmitted = resolvedVersions.latestSubmitted || (viewBid.status !== BidStatus.DRAFT ? viewBid : null);
+            const viewProgress = getBidProgress(viewBid, viewEditableDraft, viewLatestSubmitted);
+            const viewStageTwoBadge = getStageTwoBadge(viewProgress.stageTwoStatus);
+            return (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -7117,6 +7558,51 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
                   <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Version</p>
                   <p className="text-base font-bold text-slate-900 mt-2">{viewBid.version_number}</p>
                   <p className="text-xs text-slate-500 mt-1">Submission version</p>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+                <div>
+                  <p className="text-sm font-semibold text-slate-900">Next step</p>
+                  <p className="text-xs text-slate-600">
+                    {viewProgress.secondaryMessage}
+                  </p>
+                </div>
+                {(viewProgress.canProceed || viewBid.status === BidStatus.SUBMITTED) && (
+                  <button onClick={() => onOpenBid(viewBid)} className="btn-primary text-sm">
+                    {viewProgress.proceedLabel || (viewBid.status === BidStatus.DRAFT ? "Continue Editing" : "Open Bid")}
+                  </button>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div className="rounded-2xl border border-slate-200 bg-white px-4 py-4">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Stage Progress</p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <span className={`badge ${viewProgress.stageOnePassed ? "bg-emerald-100 text-emerald-700" : viewProgress.stageOneStatus === "in_review" ? "bg-amber-100 text-amber-700" : viewProgress.stageOneStatus === "failed" ? "bg-rose-100 text-rose-700" : "bg-slate-100 text-slate-700"}`}>
+                      Stage 1 {viewProgress.stageOnePassed ? "Passed" : viewProgress.stageOneStatus === "in_review" ? "In Review" : viewProgress.stageOneStatus === "failed" ? "Failed" : viewProgress.stageOneStatus === "draft" ? "Draft" : "Pending"}
+                    </span>
+                    <span className={`badge ${viewStageTwoBadge.color}`}>
+                      Stage 2 {viewStageTwoBadge.label}
+                    </span>
+                  </div>
+                  <p className="mt-3 text-sm font-semibold text-slate-900">{viewProgress.primaryMessage}</p>
+                  <p className="mt-1 text-xs text-slate-600">{viewProgress.secondaryMessage}</p>
+                </div>
+                <div className="rounded-2xl border border-slate-200 bg-white px-4 py-4">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Proceeding</p>
+                  <p className="mt-3 text-sm font-semibold text-slate-900">
+                    {viewProgress.proceedLabel ? viewProgress.proceedLabel : "No vendor action required right now"}
+                  </p>
+                  <p className="mt-1 text-xs text-slate-600">
+                    {viewProgress.proceedLabel
+                      ? "You can move this bid forward from here using the action button."
+                      : viewBid.status === BidStatus.ACCEPTED
+                        ? "This bid has already passed the final evaluation."
+                        : viewBid.status === BidStatus.REJECTED
+                          ? "This bid has reached an unsuccessful outcome."
+                          : "The bid is currently waiting for a review decision before the next step becomes available."}
+                  </p>
                 </div>
               </div>
 
@@ -7171,15 +7657,23 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
                     )}
                     {!viewBidLoading && viewBidVersions.length > 0 && (
                       <div className="space-y-3">
-                        {viewBidVersions.map((version) => (
+                        {viewBidVersions.map((version) => {
+                          const versionProgress = getBidProgress(version, version.stage_two_unlocked ? version : null, version.status !== BidStatus.DRAFT ? version : viewLatestSubmitted);
+                          return (
                           <div key={version.id} className="flex items-center justify-between rounded-lg border border-slate-100 bg-slate-50 px-3 py-2">
                             <div>
                               <p className="text-sm font-medium text-slate-900">Version {version.version_number}</p>
                               <p className="text-xs text-slate-500">{version.submitted_at ? new Date(version.submitted_at).toLocaleString() : "Draft"}</p>
+                              <p className="text-[11px] text-slate-500 mt-1">
+                                {versionProgress.primaryMessage}
+                              </p>
                             </div>
-                            <span className="badge bg-slate-100 text-slate-700">{version.status}</span>
+                            <div className="flex flex-col items-end gap-1">
+                              <span className="badge bg-slate-100 text-slate-700">{version.status}</span>
+                              <span className="text-[11px] text-slate-500">{version.stage_badge || version.stage || "Bid"}</span>
+                            </div>
                           </div>
-                        ))}
+                        )})}
                       </div>
                     )}
                   </div>
@@ -7263,6 +7757,8 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
               </div>
             </motion.div>
           </motion.div>
+            );
+          })()
         )}
       </AnimatePresence>
     </div>
@@ -7295,20 +7791,70 @@ const VendorDashboard = ({
   const [bidTender, setBidTender] = useState<Tender | null>(null);
   const [bidVersions, setBidVersions] = useState<TenderBid[]>([]);
   const [bidMessage, setBidMessage] = useState<string | null>(null);
+  const [bidSubmitError, setBidSubmitError] = useState<string | null>(null);
   const [editingBidId, setEditingBidId] = useState<string | null>(null);
   const [editingBidStatus, setEditingBidStatus] = useState<BidStatus | null>(null);
   const [bidHistory, setBidHistory] = useState<TenderBid[]>([]);
   const [contracts, setContracts] = useState<TenderContract[]>([]);
+  const [installationReports, setInstallationReports] = useState<InstallationReport[]>([]);
   const [contractFiles, setContractFiles] = useState<Record<string, File | null>>({});
   const [contractMessage, setContractMessage] = useState<string | null>(null);
   const [isContractSubmitting, setIsContractSubmitting] = useState(false);
   const [isBidSubmitting, setIsBidSubmitting] = useState(false);
+  const [latestApprovedPrequal, setLatestApprovedPrequal] = useState<VendorPrequalification | null>(null);
   const [bidForm, setBidForm] = useState({
     bidAmount: "",
-    stage: "Pre-Qualification",
+    subsidyRequested: "",
+    coFinancingAmount: "",
     conceptNote: "",
     technicalProposal: "",
     financialProposal: "",
+    deviceBrand: "",
+    deviceModel: "",
+    deviceBrandModel: "",
+    techTier: "Tier 1",
+    energyTarget: "",
+    systemCapacity: "",
+    systemCapacityUnit: "Wh",
+    systemConfiguration: {
+      technologyType: "",
+      ratedPowerW: "",
+      batteryCapacityWh: "",
+      pvPanelSizeW: "",
+      inverterType: "",
+    },
+    boqItems: [
+      { itemNumber: 1, description: "", qty: "", unit: "", unitPrice: "", total: 0 },
+    ],
+    femaleTargetPct: "50",
+    vulnerableTargetPct: "30",
+    lowIncomeTargetPct: "60",
+    inclusionCommitmentConfirmed: false,
+    omStrategySummary: "",
+    aftersalesDescription: "",
+    inclusionStrategy: "",
+    localTechniciansToBeTrained: "",
+    warrantyPeriodMonths: "",
+    offerPaygo: false,
+    paygoPlatform: "",
+    dailyPaymentAmountLsl: "",
+    collectionMethod: "Mobile Money",
+    sites: [
+      {
+        siteName: "",
+        district: "Maseru",
+        villageSubDistrict: "",
+        latitude: "",
+        longitude: "",
+        estimatedHouseholds: "",
+        numberOfHouseholds: "",
+        targetTechnology: "",
+        targetBeneficiaryType: "standard",
+        estimatedEnergyDemandKwhMonth: "",
+        roadAccessAvailable: false,
+        notes: "",
+      },
+    ],
   });
   const [bidFiles, setBidFiles] = useState<{
     technicalProposal: File | null;
@@ -7316,18 +7862,19 @@ const VendorDashboard = ({
     boq: File | null;
     genderActionPlan: File | null;
     implementationPlan: File | null;
-    reportingTemplates: File | null;
+    omPlan: File | null;
+    distributionMap: File | null;
   }>({
     technicalProposal: null,
     financialProposal: null,
     boq: null,
     genderActionPlan: null,
     implementationPlan: null,
-    reportingTemplates: null,
+    omPlan: null,
+    distributionMap: null,
   });
-  const [bidSites, setBidSites] = useState<TenderBidSite[]>([
-    { siteName: "", district: "", latitude: undefined, longitude: undefined, systemConfiguration: {}, boqItems: [], notes: "" },
-  ]);
+  const [bidConfirmOpen, setBidConfirmOpen] = useState(false);
+  const [bidSubmissionConfirmed, setBidSubmissionConfirmed] = useState(false);
   const [applicationStep, setApplicationStep] = useState(1);
   const [claimStep, setClaimStep] = useState(1);
   const [isClaimSubmitting, setIsClaimSubmitting] = useState(false);
@@ -7359,28 +7906,34 @@ const VendorDashboard = ({
 
   const loadVendorData = React.useCallback(async () => {
     try {
-      const [prequals, projectRows, milestoneRows, tenders, contractRows, bids] = await Promise.all([
+      const [prequals, projectRows, milestoneRows, tenders, contractRows, bids, reportRows] = await Promise.all([
         fetchVendorPrequalifications(),
         fetchProjects(),
         fetchMilestones(),
         fetchTenders(),
         fetchTenderContracts(),
         fetchTenderBids(),
+        fetchInstallationReports(),
       ]);
       const latestPrequal = getLatestPrequalification(prequals);
-      const anyApproved = prequals.some(item => String(item.status || "").toLowerCase() === "approved");
-      setIsPreQualified(anyApproved);
+      const latestApproved = getLatestApprovedPrequalification(prequals);
+      const latestStatus = String(latestPrequal?.status || "").toLowerCase();
+      setIsPreQualified(latestStatus === "approved");
+      setLatestApprovedPrequal(latestApproved);
       setProjects(projectRows);
       setActiveTenders(tenders.filter(t => t.status === TenderStatus.PUBLISHED));
       const projectIds = new Set(projectRows.map(item => item.id));
       setMilestones(milestoneRows.filter(item => projectIds.has(item.projectId)));
       setContracts(contractRows);
       setBidHistory(bids);
+      setInstallationReports(reportRows.filter(item => projectIds.has(item.projectId)));
     } catch {
+      setLatestApprovedPrequal(null);
       setProjects([]);
       setMilestones([]);
       setContracts([]);
       setBidHistory([]);
+      setInstallationReports([]);
     }
   }, []);
 
@@ -7433,6 +7986,28 @@ const VendorDashboard = ({
     if (!contracts.length) return [];
     return [...contracts].sort((a, b) => (b.generatedAt || "").localeCompare(a.generatedAt || ""));
   }, [contracts]);
+  const awardedBidPendingContract = useMemo(
+    () => bidHistory.find(
+      (bid) => (
+        bid.status === BidStatus.AWARDED
+        || (bid.tender_status === TenderStatus.AWARDED && bid.tender_awarded_vendor_id === bid.vendor_id)
+      )
+    ),
+    [bidHistory]
+  );
+  const intentToAwardPendingFinal = useMemo(
+    () => bidHistory.find(
+      (bid) => Boolean(
+        bid.tender_intent_to_award_at
+        && bid.tender_status !== TenderStatus.AWARDED
+        && (
+          bid.tender_intent_to_award_bid_id === bid.id
+          || (bid.tender_awarded_vendor_id && bid.tender_awarded_vendor_id === bid.vendor_id)
+        )
+      )
+    ),
+    [bidHistory]
+  );
 
   const contractTone = (status: TenderContract["status"]) => {
     if (status === "Approved") return "bg-emerald-100 text-emerald-800";
@@ -7446,6 +8021,125 @@ const VendorDashboard = ({
   const averageKpiScore = projects.length
     ? (projects.reduce((sum, item) => sum + Number(item.uptime || 0), 0) / projects.length).toFixed(1)
     : "0.0";
+  const vendorDashboardMapProjectId = useMemo(() => {
+    const latestReportedProjectId = [...installationReports]
+      .sort((a, b) => (b.submittedAt || "").localeCompare(a.submittedAt || ""))
+      .find((report) => report.projectId)?.projectId;
+    if (latestReportedProjectId) return latestReportedProjectId;
+    const activeSetupCompleteProject = projects.find((project) => isProjectSetupComplete(project) && project.status === ProjectStatus.ACTIVE);
+    if (activeSetupCompleteProject) return activeSetupCompleteProject.id;
+    return projects[0]?.id;
+  }, [installationReports, projects]);
+  const pickLatestVendorDashboardBidByVersion = (items: TenderBid[]) =>
+    items.slice().sort((a, b) => (b.version_number || 0) - (a.version_number || 0))[0] || null;
+  const stageTwoDraftsByTender = useMemo(() => {
+    const map = new Map<string, TenderBid>();
+    const submittedStageTwoTenders = new Set(
+      bidHistory
+        .filter((bid) => bid.stage_key === "site_specific" && bid.status !== BidStatus.DRAFT)
+        .map((bid) => bid.tender)
+    );
+    bidHistory.forEach((bid) => {
+      if (!bid.stage_two_unlocked || bid.status !== BidStatus.DRAFT) return;
+      if (submittedStageTwoTenders.has(bid.tender)) return;
+      const existing = map.get(bid.tender);
+      if (!existing || (bid.version_number || 0) > (existing.version_number || 0)) {
+        map.set(bid.tender, bid);
+      }
+    });
+    return map;
+  }, [bidHistory]);
+  const latestBidByTender = useMemo(() => {
+    const map = new Map<string, TenderBid>();
+    bidHistory.forEach((bid) => {
+      const existing = map.get(bid.tender);
+      if (!existing || (bid.version_number || 0) > (existing.version_number || 0)) {
+        map.set(bid.tender, bid);
+      }
+    });
+    return map;
+  }, [bidHistory]);
+
+  function getDashboardBidActivityTimestamp(bid: TenderBid) {
+    return bid.updated_at || bid.submitted_at || bid.reviewed_at || bid.created_at || "";
+  }
+
+  const resolveDashboardBidVersions = (items: TenderBid[]) => {
+    const sorted = items.slice().sort((a, b) => (b.version_number || 0) - (a.version_number || 0));
+    const latestStageTwoSubmitted = pickLatestVendorDashboardBidByVersion(
+      sorted.filter((item) => item.stage_key === "site_specific" && item.status !== BidStatus.DRAFT)
+    );
+    const stageTwoDraft = latestStageTwoSubmitted
+      ? null
+      : (sorted.find((item) => item.stage_key === "site_specific" && item.status === BidStatus.DRAFT) || null);
+    const stageOneDraft = sorted.find((item) => item.stage_key !== "site_specific" && item.status === BidStatus.DRAFT) || null;
+    const latestSubmitted = latestStageTwoSubmitted || sorted.find((item) => item.status !== BidStatus.DRAFT) || null;
+    const editableDraft = stageTwoDraft || (!latestSubmitted ? stageOneDraft : null);
+    const display = editableDraft || latestSubmitted || stageOneDraft || sorted[0] || null;
+    return {
+      sorted,
+      editableDraft,
+      latestSubmitted,
+      display,
+    };
+  };
+
+  const dashboardBidGroups = useMemo(() => {
+    const byTender = new Map<string, TenderBid[]>();
+    bidHistory.forEach((bid) => {
+      const existing = byTender.get(bid.tender) || [];
+      existing.push(bid);
+      byTender.set(bid.tender, existing);
+    });
+    return Array.from(byTender.values())
+      .map((items) => {
+        const { sorted, editableDraft, latestSubmitted, display } = resolveDashboardBidVersions(items);
+        return {
+          display,
+          editableDraft,
+          latestSubmitted,
+          versions: sorted,
+        };
+      })
+      .filter((group) => Boolean(group.display))
+      .sort((a, b) => getDashboardBidActivityTimestamp(b.display).localeCompare(getDashboardBidActivityTimestamp(a.display)));
+  }, [bidHistory]);
+
+  const getDashboardBidStatusColor = (bid: TenderBid) =>
+    bid.status === BidStatus.SUBMITTED ? "bg-blue-100 text-blue-700" :
+    bid.status === BidStatus.UNDER_REVIEW ? "bg-amber-100 text-amber-700" :
+    bid.status === BidStatus.ACCEPTED ? "bg-emerald-100 text-emerald-700" :
+    bid.status === BidStatus.REJECTED ? "bg-rose-100 text-rose-700" :
+    "bg-slate-100 text-slate-700";
+
+  const getDashboardVendorVisibleStatus = (display: TenderBid, editableDraft: TenderBid | null, latestSubmitted: TenderBid | null) => {
+    const stageOnePassed = Boolean(editableDraft?.stage_two_unlocked || display.stage_two_ready || display.stage_key === "site_specific");
+    const finalAccepted = display.status === BidStatus.ACCEPTED;
+    const rejected = display.status === BidStatus.REJECTED;
+
+    if (display.stage_key === "site_specific" && display.evaluation_status === "evaluated") {
+      return { label: "Stage 2 Evaluated", color: "bg-emerald-100 text-emerald-700" };
+    }
+    if (display.stage_key === "site_specific" && display.evaluation_status === "technical_scored") {
+      return { label: "Stage 2 Technical Score Saved", color: "bg-blue-100 text-blue-700" };
+    }
+    if (finalAccepted) {
+      return { label: "Final Evaluation Passed", color: "bg-emerald-100 text-emerald-700" };
+    }
+    if (rejected && !stageOnePassed) {
+      return { label: "Stage 1 Failed", color: "bg-rose-100 text-rose-700" };
+    }
+    if (display.stage_key !== "site_specific" && (editableDraft?.stage_key === "site_specific" || stageOnePassed)) {
+      return { label: "Stage 1 Passed", color: "bg-emerald-100 text-emerald-700" };
+    }
+    if (display.status === BidStatus.DRAFT) {
+      return { label: "Draft", color: "bg-slate-100 text-slate-700" };
+    }
+    if (latestSubmitted?.status === BidStatus.SUBMITTED || display.status === BidStatus.UNDER_REVIEW) {
+      return { label: "Under Review", color: "bg-amber-100 text-amber-700" };
+    }
+    return { label: display.status, color: getDashboardBidStatusColor(display) };
+  };
 
   const handleStartApplication = () => {
     if (!isPreQualified) {
@@ -7472,35 +8166,104 @@ const VendorDashboard = ({
   const resetBidForm = () => {
     setBidForm({
       bidAmount: "",
-      stage: "Pre-Qualification",
+      subsidyRequested: "",
+      coFinancingAmount: "",
       conceptNote: "",
       technicalProposal: "",
       financialProposal: "",
+      deviceBrand: "",
+      deviceModel: "",
+      deviceBrandModel: "",
+      techTier: "Tier 1",
+      energyTarget: "",
+      systemCapacity: "",
+      systemCapacityUnit: isMiniGridTender ? "kW" : "Wh",
+      systemConfiguration: {
+        technologyType: Array.isArray(bidTender?.technologyTypes) ? (bidTender?.technologyTypes?.[0] || "") : "",
+        ratedPowerW: "",
+        batteryCapacityWh: "",
+        pvPanelSizeW: "",
+        inverterType: "",
+      },
+      boqItems: [
+        { itemNumber: 1, description: "", qty: "", unit: "", unitPrice: "", total: 0 },
+      ],
+      femaleTargetPct: String(Math.max(50, latestApprovedPrequal?.femaleBeneficiaryTarget ?? 50)),
+      vulnerableTargetPct: String(Math.max(30, latestApprovedPrequal?.vulnerableGroupTarget ?? 30)),
+      lowIncomeTargetPct: "60",
+      inclusionCommitmentConfirmed: false,
+      omStrategySummary: "",
+      aftersalesDescription: "",
+      inclusionStrategy: "",
+      localTechniciansToBeTrained: "",
+      warrantyPeriodMonths: "",
+      offerPaygo: false,
+      paygoPlatform: "",
+      dailyPaymentAmountLsl: "",
+      collectionMethod: "Mobile Money",
+      sites: [
+        {
+          siteName: "",
+          district: "Maseru",
+          villageSubDistrict: "",
+          latitude: "",
+          longitude: "",
+          estimatedHouseholds: "",
+          numberOfHouseholds: "",
+          targetTechnology: bidTender?.technologyTypes?.[0] || "",
+          targetBeneficiaryType: "standard",
+          estimatedEnergyDemandKwhMonth: "",
+          roadAccessAvailable: false,
+          notes: "",
+        },
+      ],
     });
     setEditingBidId(null);
     setEditingBidStatus(null);
-    setBidSites([{ siteName: "", district: "", latitude: undefined, longitude: undefined, systemConfiguration: {}, boqItems: [], notes: "" }]);
     setBidFiles({
       technicalProposal: null,
       financialProposal: null,
       boq: null,
       genderActionPlan: null,
       implementationPlan: null,
-      reportingTemplates: null,
+      omPlan: null,
+      distributionMap: null,
     });
+    setBidConfirmOpen(false);
+    setBidSubmissionConfirmed(false);
   };
 
   const openBidForm = async (tender: Tender, selectedBidId?: string | null) => {
+    if (!isPreQualified || !latestApprovedPrequal) {
+      setBidMessage("Complete pre-qualification first");
+      onGoToPrequal?.();
+      return;
+    }
     setBidTender(tender);
     setBidMessage(null);
     resetBidForm();
     try {
       const versions = await fetchTenderBids(tender.id);
       setBidVersions(versions);
-      if (selectedBidId) {
-        const match = versions.find(v => v.id === selectedBidId);
-        if (match) {
-          useBidVersion(match);
+      const latestStageTwoSubmitted = pickLatestVendorDashboardBidByVersion(
+        versions.filter(v => v.stage_key === "site_specific" && v.status !== BidStatus.DRAFT)
+      );
+      const stageTwoDraft = latestStageTwoSubmitted
+        ? null
+        : (versions.find(v => v.stage_key === "site_specific" && v.status === BidStatus.DRAFT) || null);
+      const selectedVersion = selectedBidId ? versions.find(v => v.id === selectedBidId) : undefined;
+      const preferredVersion =
+        (selectedVersion?.stage_key === "site_specific" ? selectedVersion : undefined)
+        || latestStageTwoSubmitted
+        || stageTwoDraft
+        || selectedVersion
+        || versions.find(v => v.status === BidStatus.REVISION_REQUIRED)
+        || versions.find(v => v.status === BidStatus.DRAFT)
+        || versions.sort((a, b) => (b.version_number || 0) - (a.version_number || 0))[0];
+      if (preferredVersion) {
+        useBidVersion(preferredVersion);
+        if (preferredVersion.stage_key !== "site_specific" && preferredVersion.status !== BidStatus.DRAFT) {
+          setBidMessage("Stage 1 has been submitted. Stage 2 will unlock only if you are shortlisted.");
         }
       }
     } catch {
@@ -7519,14 +8282,84 @@ const VendorDashboard = ({
   }, [pendingBidTenderId, pendingBidId, activeTenders]);
 
   const useBidVersion = (version: TenderBid) => {
+    const coFinancingAmount =
+      version.system_configuration?.co_financing_amount_lsl != null
+        ? Number(version.system_configuration.co_financing_amount_lsl)
+        : Math.max(0, Number(version.bid_amount || 0) - Number(version.subsidy_requested || 0));
     setEditingBidId(version.id);
     setEditingBidStatus(version.status);
     setBidForm({
       bidAmount: version.bid_amount != null ? String(version.bid_amount) : "",
-      stage: version.stage ?? "Pre-Qualification",
+      subsidyRequested: version.subsidy_requested != null ? String(version.subsidy_requested) : "",
+      coFinancingAmount: coFinancingAmount ? String(coFinancingAmount) : "",
       conceptNote: version.concept_note ?? "",
       technicalProposal: version.technical_proposal ?? "",
       financialProposal: version.financial_proposal ?? "",
+      deviceBrand: version.system_configuration?.device_brand ?? "",
+      deviceModel: version.system_configuration?.device_model ?? "",
+      deviceBrandModel: version.device_brand_model ?? "",
+      techTier: version.tech_tier ?? "Tier 1",
+      energyTarget: version.energy_target != null ? String(version.energy_target) : (version.energy_target_kwh_month != null ? String(version.energy_target_kwh_month) : ""),
+      systemCapacity: version.system_configuration?.system_capacity != null ? String(version.system_configuration.system_capacity) : "",
+      systemCapacityUnit: version.system_configuration?.system_capacity_unit || (isMiniGridTender ? "kW" : "Wh"),
+      systemConfiguration: {
+        technologyType: version.system_configuration?.technology_type || version.technology_type || bidTender?.technologyTypes?.[0] || "",
+        ratedPowerW: version.system_configuration?.rated_power_w != null ? String(version.system_configuration.rated_power_w) : "",
+        batteryCapacityWh: version.system_configuration?.battery_capacity_wh != null ? String(version.system_configuration.battery_capacity_wh) : "",
+        pvPanelSizeW: version.system_configuration?.pv_panel_size_w != null ? String(version.system_configuration.pv_panel_size_w) : "",
+        inverterType: version.system_configuration?.inverter_type ?? "",
+      },
+      boqItems: (version.boq_items && version.boq_items.length > 0
+        ? version.boq_items.map((item, index) => ({
+            itemNumber: item.item_number ?? index + 1,
+            description: item.description ?? "",
+            qty: item.qty != null ? String(item.qty) : "",
+            unit: item.unit ?? "",
+            unitPrice: item.unit_price != null ? String(item.unit_price) : "",
+            total: item.total != null ? Number(item.total) : Number(item.qty || 0) * Number(item.unit_price || 0),
+          }))
+        : [{ itemNumber: 1, description: "", qty: "", unit: "", unitPrice: "", total: 0 }]),
+      femaleTargetPct: version.female_target_pct != null ? String(version.female_target_pct) : "50",
+      vulnerableTargetPct: version.vulnerable_target_pct != null ? String(version.vulnerable_target_pct) : "30",
+      lowIncomeTargetPct: version.low_income_target_pct != null ? String(version.low_income_target_pct) : "60",
+      inclusionCommitmentConfirmed: Boolean(version.inclusion_commitment_confirmed),
+      omStrategySummary: version.om_strategy_summary ?? "",
+      aftersalesDescription: version.aftersales_description ?? "",
+      inclusionStrategy: version.om_strategy_summary ?? "",
+      localTechniciansToBeTrained: version.local_technicians_to_be_trained != null ? String(version.local_technicians_to_be_trained) : "",
+      warrantyPeriodMonths: version.warranty_period_months != null ? String(version.warranty_period_months) : "",
+      offerPaygo: Boolean(version.offer_paygo),
+      paygoPlatform: version.paygo_platform ?? "",
+      dailyPaymentAmountLsl: version.daily_payment_amount_lsl != null ? String(version.daily_payment_amount_lsl) : "",
+      collectionMethod: version.collection_method ?? "Mobile Money",
+      sites: (version.sites && version.sites.length > 0
+        ? version.sites.map((site) => ({
+            siteName: site.siteName ?? "",
+            district: site.district ?? "Maseru",
+            villageSubDistrict: site.villageSubDistrict ?? "",
+            latitude: site.latitude != null ? String(site.latitude) : "",
+            longitude: site.longitude != null ? String(site.longitude) : "",
+            estimatedHouseholds: site.estimatedHouseholds != null ? String(site.estimatedHouseholds) : (site.numberOfHouseholds != null ? String(site.numberOfHouseholds) : ""),
+            numberOfHouseholds: site.numberOfHouseholds != null ? String(site.numberOfHouseholds) : "",
+            targetTechnology: site.targetTechnology ?? version.system_configuration?.technology_type ?? bidTender?.technologyTypes?.[0] ?? "",
+            targetBeneficiaryType: site.targetBeneficiaryType ?? "standard",
+            estimatedEnergyDemandKwhMonth: site.estimatedEnergyDemandKwhMonth != null ? String(site.estimatedEnergyDemandKwhMonth) : "",
+            roadAccessAvailable: Boolean(site.roadAccessAvailable),
+            notes: site.notes ?? "",
+          }))
+        : [{
+            siteName: "",
+            district: "Maseru",
+            villageSubDistrict: "",
+            latitude: "",
+            longitude: "",
+            numberOfHouseholds: "",
+            targetTechnology: bidTender?.technologyTypes?.[0] || "",
+            targetBeneficiaryType: "standard",
+            estimatedEnergyDemandKwhMonth: "",
+            roadAccessAvailable: false,
+            notes: "",
+          }]),
     });
     setBidFiles({
       technicalProposal: null,
@@ -7534,82 +8367,459 @@ const VendorDashboard = ({
       boq: null,
       genderActionPlan: null,
       implementationPlan: null,
-      reportingTemplates: null,
+      omPlan: null,
+      distributionMap: null,
     });
-    const sites = (version.sites || []).map(site => ({
-      siteName: site.siteName,
-      district: site.district,
-      latitude: site.latitude,
-      longitude: site.longitude,
-      systemConfiguration: site.systemConfiguration ?? {},
-      boqItems: site.boqItems ?? [],
-      notes: site.notes ?? "",
-    }));
-    setBidSites(sites.length ? sites : [{ siteName: "", district: "", latitude: undefined, longitude: undefined, systemConfiguration: {}, boqItems: [], notes: "" }]);
+    setBidConfirmOpen(false);
+    setBidSubmissionConfirmed(false);
   };
 
-  const updateBidSite = (index: number, patch: Partial<TenderBidSite>) => {
-    setBidSites(prev => prev.map((site, i) => (i === index ? { ...site, ...patch } : site)));
+  const currentEditingBidVersion = bidVersions.find(version => version.id === editingBidId);
+  const activeBidVersionForStage =
+    currentEditingBidVersion
+    || pickLatestVendorDashboardBidByVersion(bidVersions.filter(v => v.stage_key === "site_specific" && v.status !== BidStatus.DRAFT))
+    || bidVersions.find(v => v.stage_key === "site_specific" && v.status === BidStatus.DRAFT)
+    || bidVersions[0];
+  const bidStageKey = useMemo(() => {
+    const raw = String(activeBidVersionForStage?.stage_key || bidTender?.stageType || "").toLowerCase().replace(/\s+/g, "_");
+    if (raw.includes("site") || raw.includes("detailed") || raw.includes("stage_2") || raw.includes("stage2")) return "site_specific";
+    return "pre_qualification";
+  }, [activeBidVersionForStage, bidTender]);
+  const bidStageLabel = bidStageKey === "site_specific" ? "Stage 2: Detailed" : "Stage 1: Concept";
+  const isPreQualificationStage = bidStageKey === "pre_qualification";
+  const isSiteSpecificStage = bidStageKey === "site_specific";
+  const isShsTender = (bidTender?.technologyTypes || []).some((tech) => String(tech).toUpperCase() === "SHS" || String(tech).toLowerCase().includes("solar home"));
+  const isMiniGridTender = (bidTender?.technologyTypes || []).some((tech) => {
+    const normalized = String(tech || "").toLowerCase();
+    return normalized === "gmg" || normalized.includes("mini-grid") || normalized.includes("mini grid");
+  }) || String(bidTender?.category || "").toLowerCase().includes("mini-grid") || String(bidTender?.category || "").toLowerCase().includes("mini grid");
+  const bidDeadlineLabel = bidTender?.lastDateSubmission || bidTender?.deadline || "";
+  const bidDeadlineCountdown = useMemo(() => {
+    if (!bidDeadlineLabel) return "Deadline unavailable";
+    const deadlineMs = Date.parse(bidDeadlineLabel);
+    if (Number.isNaN(deadlineMs)) return "Deadline unavailable";
+    const diffMs = deadlineMs - Date.now();
+    if (diffMs <= 0) return "Deadline passed";
+    const totalMinutes = Math.floor(diffMs / 60000);
+    const days = Math.floor(totalMinutes / (60 * 24));
+    const hours = Math.floor((totalMinutes % (60 * 24)) / 60);
+    const minutes = totalMinutes % 60;
+    if (days > 0) return `${days}d ${hours}h ${minutes}m remaining`;
+    if (hours > 0) return `${hours}h ${minutes}m remaining`;
+    return `${minutes}m remaining`;
+  }, [bidDeadlineLabel]);
+  const existingStageTwoDocuments = {
+    technicalProposal: currentEditingBidVersion?.technical_proposal_file,
+    financialProposal: currentEditingBidVersion?.financial_proposal_file,
+    boq: currentEditingBidVersion?.boq_file,
+    genderActionPlan: currentEditingBidVersion?.gender_action_plan_file,
+    implementationPlan: currentEditingBidVersion?.implementation_plan_file,
+    omPlan: currentEditingBidVersion?.om_plan_file || currentEditingBidVersion?.om_plan_document,
+    distributionMap: currentEditingBidVersion?.distribution_map_file,
+  };
+  const stageTwoDocuments = [
+    { key: "technicalProposal", label: "Technical Proposal", hint: "PDF/DOCX" },
+    { key: "financialProposal", label: "Financial Proposal", hint: "PDF/DOCX/XLSX" },
+    { key: "boq", label: "Bill of Quantities", hint: "PDF/DOCX/XLSX" },
+    { key: "genderActionPlan", label: "Gender Action Plan", hint: "PDF/DOCX/XLSX" },
+    { key: "implementationPlan", label: "Implementation Plan", hint: "PDF/DOCX/XLSX" },
+    { key: "omPlan", label: "O&M Plan", hint: "PDF/DOCX/XLSX" },
+  ] as const;
+  const uploadedStageTwoDocumentCount = stageTwoDocuments.filter(doc => Boolean((bidFiles as any)[doc.key] || (existingStageTwoDocuments as any)[doc.key])).length;
+  const bidSiteCount = bidForm.sites.filter(site => site.siteName.trim()).length;
+  const requiredFemaleTarget = Math.max(50, latestApprovedPrequal?.femaleBeneficiaryTarget ?? 50);
+  const requiredVulnerableTarget = Math.max(30, latestApprovedPrequal?.vulnerableGroupTarget ?? 30);
+  const approvedTierLevel = parseTierLevel(latestApprovedPrequal?.techTier);
+  const selectedTierLevel = parseTierLevel(bidForm.techTier);
+  const implementationStrategyCharCount = bidForm.conceptNote.trim().length;
+  const roundCurrency = (value: number) => Math.round((value + Number.EPSILON) * 100) / 100;
+  const totalProjectValue = Number(bidForm.bidAmount || 0);
+  const subsidyValue = Number(bidForm.subsidyRequested || 0);
+  const coFinancingValue = Number(bidForm.coFinancingAmount || 0);
+  const boqGrandTotal = roundCurrency(bidForm.boqItems.reduce((sum, item) => sum + (Number(item.qty || 0) * Number(item.unitPrice || 0)), 0));
+  const fundingDelta = roundCurrency(isSiteSpecificStage ? totalProjectValue - boqGrandTotal : totalProjectValue - subsidyValue);
+  const boqUploaded = Boolean(bidFiles.boq || existingStageTwoDocuments.boq);
+  const genderActionPlanUploaded = Boolean(bidFiles.genderActionPlan || existingStageTwoDocuments.genderActionPlan);
+  const stageTwoDocumentsComplete = uploadedStageTwoDocumentCount === stageTwoDocuments.length;
+  const geographyRows = bidForm.sites.filter(site => site.siteName.trim() || site.estimatedHouseholds || site.latitude || site.longitude);
+  const installationTarget = geographyRows.reduce((sum, site) => sum + Number(site.estimatedHouseholds || site.numberOfHouseholds || 0), 0);
+  const primaryDistrict = geographyRows.find((site) => site.district?.trim())?.district || bidForm.sites[0]?.district || "Maseru";
+  const costPerConnection = subsidyValue > 0 && installationTarget > 0 ? subsidyValue / installationTarget : null;
+  const stageOneSiteRows = geographyRows;
+  const allStageOneSitesComplete = stageOneSiteRows.length > 0 && stageOneSiteRows.every((site) => (
+    site.siteName.trim()
+    && site.district?.trim()
+    && Number(site.estimatedHouseholds || site.numberOfHouseholds || 0) > 0
+    && site.targetBeneficiaryType?.trim()
+  ));
+  const stageTwoSiteRows = geographyRows;
+  const allStageTwoSitesComplete = stageTwoSiteRows.length > 0 && stageTwoSiteRows.every((site) => (
+    site.siteName.trim()
+    && site.district?.trim()
+    && Number(site.estimatedHouseholds || site.numberOfHouseholds || 0) > 0
+    && site.targetBeneficiaryType?.trim()
+    && site.latitude
+    && site.longitude
+    && typeof site.roadAccessAvailable === "boolean"
+  ));
+  const financialSectionComplete =
+    totalProjectValue > 0
+    && subsidyValue > 0
+    && subsidyValue <= totalProjectValue
+    && (!isSiteSpecificStage || (Math.abs(fundingDelta) < 0.01 && boqUploaded));
+  const geographySectionComplete = isPreQualificationStage ? allStageOneSitesComplete : allStageTwoSitesComplete;
+  const hardwareSectionComplete = !isSiteSpecificStage || (
+    bidForm.systemConfiguration.technologyType.trim()
+    && bidForm.deviceBrand.trim()
+    && bidForm.deviceModel.trim()
+    && bidForm.techTier
+    && (!approvedTierLevel || !selectedTierLevel || selectedTierLevel <= approvedTierLevel)
+  );
+  const inclusionSectionComplete =
+    Number(bidForm.femaleTargetPct || 0) >= requiredFemaleTarget
+    && Number(bidForm.vulnerableTargetPct || 0) >= requiredVulnerableTarget
+    && Number(bidForm.lowIncomeTargetPct || 0) >= 60
+    && bidForm.inclusionCommitmentConfirmed;
+  const inclusionSectionReady = inclusionSectionComplete && (!isSiteSpecificStage || genderActionPlanUploaded);
+  const narrativeSectionComplete = !isPreQualificationStage || implementationStrategyCharCount >= 200;
+  const documentSectionComplete = !isSiteSpecificStage || stageTwoDocumentsComplete;
+  const proposalSections = [
+    { id: "financial", label: "Financial", icon: CreditCard, complete: financialSectionComplete, note: isSiteSpecificStage ? (boqUploaded ? "BoQ attached" : "BoQ required") : "Concept-stage budget check" },
+    ...(isSiteSpecificStage ? [{ id: "technical", label: "Technical", icon: Database, complete: Boolean(hardwareSectionComplete), note: approvedTierLevel ? `Tier ceiling: ${latestApprovedPrequal?.techTier}` : "Specs required" }] : []),
+    { id: "geography", label: "Geography", icon: MapPin, complete: geographySectionComplete, note: `${installationTarget || 0} household target` },
+    { id: "inclusion", label: "Inclusion", icon: ShieldCheck, complete: inclusionSectionReady, note: `${bidForm.femaleTargetPct || 0}% female / ${bidForm.vulnerableTargetPct || 0}% vulnerable / ${bidForm.lowIncomeTargetPct || 0}% low-income` },
+    { id: "narrative", label: "Narrative", icon: FileText, complete: narrativeSectionComplete, note: isPreQualificationStage ? `${implementationStrategyCharCount}/200 chars` : "Summaries optional" },
+    ...(isSiteSpecificStage ? [{ id: "documents", label: "Documents", icon: Upload, complete: documentSectionComplete, note: `${uploadedStageTwoDocumentCount}/${stageTwoDocuments.length} uploaded` }] : []),
+  ];
+  const completedProposalSections = proposalSections.filter(section => section.complete).length;
+  const inclusionTargetWarning =
+    Number(bidForm.femaleTargetPct || 0) < requiredFemaleTarget || Number(bidForm.vulnerableTargetPct || 0) < requiredVulnerableTarget || Number(bidForm.lowIncomeTargetPct || 0) < 60
+      ? `Minimum submission targets are ${requiredFemaleTarget}% female-headed households, ${requiredVulnerableTarget}% vulnerable-group households, and 60% low-income households.`
+      : null;
+  const femaleTargetInvalid = Number(bidForm.femaleTargetPct || 0) < requiredFemaleTarget;
+  const vulnerableTargetInvalid = Number(bidForm.vulnerableTargetPct || 0) < requiredVulnerableTarget;
+  const lowIncomeTargetInvalid = Number(bidForm.lowIncomeTargetPct || 0) < 60;
+  const inclusionInputClass = (invalid: boolean) => `input-field text-lg font-bold ${invalid ? "border-rose-400 focus:border-rose-500 focus:ring-rose-200" : ""}`;
+
+  const updateBoqItem = (index: number, field: string, value: string) => {
+    setBidForm(prev => {
+      const nextItems = prev.boqItems.map((item, itemIndex) => {
+        if (itemIndex !== index) return item;
+        const nextItem = { ...item, [field]: value };
+        nextItem.total = Number(nextItem.qty || 0) * Number(nextItem.unitPrice || 0);
+        return nextItem;
+      });
+      return { ...prev, boqItems: nextItems };
+    });
+  };
+
+  const addBoqItem = () => {
+    setBidForm(prev => ({
+      ...prev,
+      boqItems: [
+        ...prev.boqItems,
+        { itemNumber: prev.boqItems.length + 1, description: "", qty: "", unit: "", unitPrice: "", total: 0 },
+      ],
+    }));
+  };
+
+  const removeBoqItem = (index: number) => {
+    setBidForm(prev => {
+      const nextItems = prev.boqItems.filter((_, itemIndex) => itemIndex !== index).map((item, itemIndex) => ({
+        ...item,
+        itemNumber: itemIndex + 1,
+      }));
+      return {
+        ...prev,
+        boqItems: nextItems.length > 0 ? nextItems : [{ itemNumber: 1, description: "", qty: "", unit: "", unitPrice: "", total: 0 }],
+      };
+    });
+  };
+
+  const updateBidSite = (index: number, field: string, value: string | boolean) => {
+    setBidForm(prev => ({
+      ...prev,
+      sites: prev.sites.map((site, siteIndex) => siteIndex === index ? { ...site, [field]: value } : site),
+    }));
+  };
+
+  const updatePrimaryDistrict = (value: string) => {
+    setBidForm(prev => ({
+      ...prev,
+      sites: prev.sites.map((site, siteIndex) => (
+        siteIndex === 0 || !site.siteName.trim() ? { ...site, district: value } : site
+      )),
+    }));
   };
 
   const addBidSite = () => {
-    setBidSites(prev => [...prev, { siteName: "", district: "", latitude: undefined, longitude: undefined, systemConfiguration: {}, boqItems: [], notes: "" }]);
+    setBidForm(prev => ({
+      ...prev,
+      sites: [
+        ...prev.sites,
+        {
+          siteName: "",
+          district: "Maseru",
+          villageSubDistrict: "",
+          latitude: "",
+          longitude: "",
+          estimatedHouseholds: "",
+          numberOfHouseholds: "",
+          targetTechnology: bidTender?.technologyTypes?.[0] || "",
+          targetBeneficiaryType: "standard",
+          estimatedEnergyDemandKwhMonth: "",
+          roadAccessAvailable: false,
+          notes: "",
+        },
+      ],
+    }));
   };
 
   const removeBidSite = (index: number) => {
-    setBidSites(prev => prev.filter((_, i) => i !== index));
+    setBidForm(prev => ({
+      ...prev,
+      sites: prev.sites.length === 1
+        ? prev.sites
+        : prev.sites.filter((_, siteIndex) => siteIndex !== index),
+    }));
+  };
+
+  const getBidGeolocationErrorMessage = (error: GeolocationPositionError) => {
+    if (error.code === error.PERMISSION_DENIED) {
+      return "Location access was denied. Please allow location access in your browser and try again.";
+    }
+    if (error.code === error.TIMEOUT) {
+      return "Location request timed out. Please try again outdoors or enter the coordinates manually.";
+    }
+    if (typeof window !== "undefined" && !window.isSecureContext && window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1") {
+      return "Location access requires HTTPS or localhost in this browser.";
+    }
+    return "Unable to retrieve your current location. Please check your browser location settings or enter coordinates manually.";
+  };
+
+  const useCurrentLocationForSite = (index: number) => {
+    if (!navigator.geolocation) {
+      setBidMessage("Geolocation is not supported in this browser.");
+      return;
+    }
+    setBidMessage(null);
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        updateBidSite(index, "latitude", position.coords.latitude.toFixed(6));
+        updateBidSite(index, "longitude", position.coords.longitude.toFixed(6));
+        setBidMessage("Current location added to this site.");
+      },
+      (error) => setBidMessage(getBidGeolocationErrorMessage(error)),
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 }
+    );
   };
 
   const submitBid = async (status: BidStatus) => {
     if (!bidTender) return;
-    if (editingBidStatus && ![BidStatus.DRAFT, BidStatus.SUBMITTED].includes(editingBidStatus)) {
-      setBidMessage("This bid is under review or finalized and can no longer be edited.");
+    setBidSubmitError(null);
+    if (editingBidStatus && editingBidStatus !== BidStatus.DRAFT && editingBidStatus !== BidStatus.REVISION_REQUIRED) {
+      setBidMessage("Submitted bids are locked. Open a draft version to make changes.");
       return;
     }
     if (!isPreQualified) {
-      setBidMessage("You must be pre-qualified before submitting bids.");
+      setBidMessage("Complete pre-qualification first");
+      onGoToPrequal?.();
       return;
     }
     if (vendorRestricted) {
       setBidMessage(vendorRestrictionMessage);
       return;
     }
-    if (!bidForm.bidAmount) {
-      setBidMessage("Bid amount is required.");
+    if (status === BidStatus.SUBMITTED && !bidSubmissionConfirmed) {
+      setBidConfirmOpen(true);
       return;
     }
-    if (bidForm.stage === "Site-Specific") {
-      if (!bidFiles.technicalProposal || !bidFiles.financialProposal) {
-        setBidMessage("Upload both technical and financial proposal documents for site-specific submissions.");
+    if (status === BidStatus.SUBMITTED && !bidForm.bidAmount) {
+      setBidSubmitError("Bid amount is required.");
+      return;
+    }
+    if (status === BidStatus.SUBMITTED && !bidForm.subsidyRequested) {
+      setBidSubmitError("Subsidy requested is required.");
+      return;
+    }
+    if (
+      status === BidStatus.SUBMITTED
+      && Number(bidForm.subsidyRequested || 0) > Number(bidForm.bidAmount || 0)
+    ) {
+      setBidSubmitError("Subsidy requested must be less than or equal to the bid amount.");
+      return;
+    }
+    if (status === BidStatus.SUBMITTED && isPreQualificationStage && !bidForm.conceptNote.trim()) {
+      setBidSubmitError("Concept note is required for Stage 1 submissions.");
+      return;
+    }
+    if (status === BidStatus.SUBMITTED && isPreQualificationStage && implementationStrategyCharCount < 200) {
+      setBidSubmitError("Concept note must contain at least 200 characters before submission.");
+      return;
+    }
+    if (status === BidStatus.SUBMITTED && isSiteSpecificStage) {
+      const missingDocument = stageTwoDocuments.find(doc => !(bidFiles as any)[doc.key] && !(existingStageTwoDocuments as any)[doc.key]);
+      if (missingDocument) {
+        setBidSubmitError(`Upload ${missingDocument.label} before submitting the site-specific proposal.`);
         return;
       }
-      if (!bidFiles.boq) {
-        setBidMessage("BOQ document is required for site-specific submissions.");
+      if (!bidForm.omStrategySummary.trim()) {
+        setBidSubmitError("O&M strategy summary is required for Stage 2 submissions.");
+        return;
+      }
+      if (isShsTender && bidForm.offerPaygo) {
+        if (!bidForm.paygoPlatform.trim() || !bidForm.dailyPaymentAmountLsl || !bidForm.collectionMethod.trim()) {
+          setBidSubmitError("Complete all PAYGO fields before submitting this SHS proposal.");
+          return;
+        }
+      }
+    }
+    if (
+      status === BidStatus.SUBMITTED
+      && isSiteSpecificStage
+      && (!bidForm.systemConfiguration.technologyType.trim() || !bidForm.deviceBrand.trim() || !bidForm.deviceModel.trim() || !bidForm.techTier)
+    ) {
+      setBidSubmitError("Complete the hardware and technology section before submitting.");
+      return;
+    }
+    if (status === BidStatus.SUBMITTED && approvedTierLevel && selectedTierLevel && selectedTierLevel > approvedTierLevel) {
+      setBidSubmitError(`Technology tier cannot exceed your approved pre-qualification tier (${latestApprovedPrequal?.techTier}).`);
+      return;
+    }
+    if (Number(bidForm.femaleTargetPct || 0) < requiredFemaleTarget || Number(bidForm.vulnerableTargetPct || 0) < requiredVulnerableTarget || Number(bidForm.lowIncomeTargetPct || 0) < 60) {
+      if (status === BidStatus.SUBMITTED) {
+        setBidSubmitError(`Inclusion targets must be at least ${requiredFemaleTarget}% female-headed, ${requiredVulnerableTarget}% vulnerable-group, and 60% low-income households.`);
         return;
       }
     }
-    if (bidSites.some(site => !site.siteName)) {
-      setBidMessage("All sites must have a name.");
+    if (status === BidStatus.SUBMITTED && !bidForm.inclusionCommitmentConfirmed) {
+      setBidSubmitError("You must confirm the inclusion commitment before submitting.");
+      return;
+    }
+    if (status === BidStatus.SUBMITTED && bidSiteCount < 1) {
+      setBidSubmitError(`Add at least one ${isSiteSpecificStage ? "project" : "village"} site before submitting.`);
       return;
     }
     setIsBidSubmitting(true);
     setBidMessage(null);
     try {
+      const payloadSites = bidForm.sites
+        .filter((site) => site.siteName.trim() || site.district?.trim() || site.estimatedHouseholds || site.numberOfHouseholds || site.targetTechnology?.trim() || site.latitude || site.longitude)
+        .map((site) => ({
+        siteName: site.siteName,
+        district: site.district,
+        villageSubDistrict: site.villageSubDistrict,
+        latitude: site.latitude ? Number(site.latitude) : undefined,
+        longitude: site.longitude ? Number(site.longitude) : undefined,
+        estimatedHouseholds: site.estimatedHouseholds ? Number(site.estimatedHouseholds) : (site.numberOfHouseholds ? Number(site.numberOfHouseholds) : undefined),
+        numberOfHouseholds: site.numberOfHouseholds ? Number(site.numberOfHouseholds) : (site.estimatedHouseholds ? Number(site.estimatedHouseholds) : undefined),
+        targetTechnology: site.targetTechnology?.trim() || bidForm.systemConfiguration.technologyType || bidTender?.technologyTypes?.[0] || "",
+        targetBeneficiaryType: site.targetBeneficiaryType,
+        estimatedEnergyDemandKwhMonth: site.estimatedEnergyDemandKwhMonth ? Number(site.estimatedEnergyDemandKwhMonth) : undefined,
+        roadAccessAvailable: site.roadAccessAvailable,
+        notes: site.notes,
+      }));
+      const filteredBoqItems = bidForm.boqItems
+        .filter(item => item.description.trim() || item.qty || item.unit.trim() || item.unitPrice)
+        .map(item => ({
+          item_number: item.itemNumber,
+          description: item.description,
+          qty: Number(item.qty || 0),
+          unit: item.unit,
+          unit_price: Number(item.unitPrice || 0),
+          total: roundCurrency(Number(item.qty || 0) * Number(item.unitPrice || 0)),
+        }));
+      if (status === BidStatus.SUBMITTED && isSiteSpecificStage) {
+        const incompleteBoqItem = filteredBoqItems.find((item) =>
+          !String(item.description || "").trim()
+          || !(Number(item.qty || 0) > 0)
+          || !String(item.unit || "").trim()
+          || Number(item.unit_price || 0) < 0
+        );
+        if (incompleteBoqItem) {
+          setBidSubmitError("Each BOQ row needs a description, quantity, unit, and unit price before submission.");
+          setIsBidSubmitting(false);
+          return;
+        }
+        const incompleteSite = payloadSites.find((site) =>
+          !site.siteName?.trim()
+          || !site.district?.trim()
+          || !(site.estimatedHouseholds || site.numberOfHouseholds)
+          || !site.targetBeneficiaryType?.trim()
+          || site.latitude == null
+          || site.longitude == null
+        );
+        if (incompleteSite) {
+          setBidSubmitError("Each Stage 2 site needs a site name, district, households, primary beneficiary type, and GPS coordinates.");
+          setIsBidSubmitting(false);
+          return;
+        }
+        const filteredBoqGrandTotal = roundCurrency(filteredBoqItems.reduce((sum, item) => sum + Number(item.total || 0), 0));
+        if (Math.abs(roundCurrency(Number(bidForm.bidAmount || 0)) - filteredBoqGrandTotal) > 0.01) {
+          setBidSubmitError(`BOQ grand total must match the bid amount before submission. Current total: LSL ${filteredBoqGrandTotal.toLocaleString()}.`);
+          setIsBidSubmitting(false);
+          return;
+        }
+      }
+      if (status === BidStatus.SUBMITTED && isPreQualificationStage) {
+        const incompleteConceptSite = payloadSites.find((site) =>
+          !site.siteName?.trim()
+          || !site.district?.trim()
+          || !site.targetBeneficiaryType?.trim()
+          || !site.estimatedHouseholds
+        );
+        if (incompleteConceptSite) {
+          setBidSubmitError("Each Stage 1 site needs a site name, district, primary beneficiary type, and estimated households.");
+          setIsBidSubmitting(false);
+          return;
+        }
+      }
       const payload = {
         tender: bidTender.id,
-        bid_amount: Number(bidForm.bidAmount),
-        stage: bidForm.stage,
+        bid_amount: bidForm.bidAmount ? Number(bidForm.bidAmount) : undefined,
+        subsidy_requested: bidForm.subsidyRequested ? Number(bidForm.subsidyRequested) : undefined,
         concept_note: bidForm.conceptNote,
         technical_proposal: bidForm.technicalProposal,
         financial_proposal: bidForm.financialProposal,
+        device_brand_model: [bidForm.deviceBrand.trim(), bidForm.deviceModel.trim()].filter(Boolean).join(" ").trim() || bidForm.deviceBrandModel,
+        tech_tier: bidForm.techTier as TenderBid["tech_tier"],
+        energy_target: bidForm.energyTarget ? Number(bidForm.energyTarget) : undefined,
+        system_configuration: {
+          technology_type: bidForm.systemConfiguration.technologyType || bidTender.technologyTypes?.[0] || "",
+          co_financing_amount_lsl: bidForm.coFinancingAmount ? Number(bidForm.coFinancingAmount) : undefined,
+          device_brand: bidForm.deviceBrand,
+          device_model: bidForm.deviceModel,
+          system_capacity: bidForm.systemCapacity ? Number(bidForm.systemCapacity) : undefined,
+          system_capacity_unit: bidForm.systemCapacityUnit,
+          rated_power_w: bidForm.systemConfiguration.ratedPowerW ? Number(bidForm.systemConfiguration.ratedPowerW) : undefined,
+          battery_capacity_wh: bidForm.systemConfiguration.batteryCapacityWh ? Number(bidForm.systemConfiguration.batteryCapacityWh) : undefined,
+          pv_panel_size_w: bidForm.systemConfiguration.pvPanelSizeW ? Number(bidForm.systemConfiguration.pvPanelSizeW) : undefined,
+          inverter_type: bidForm.systemConfiguration.inverterType,
+        },
+        boq_details: filteredBoqItems.length ? filteredBoqItems : undefined,
         technical_proposal_file: bidFiles.technicalProposal ?? undefined,
         financial_proposal_file: bidFiles.financialProposal ?? undefined,
         boq_file: bidFiles.boq ?? undefined,
         gender_action_plan_file: bidFiles.genderActionPlan ?? undefined,
         implementation_plan_file: bidFiles.implementationPlan ?? undefined,
-        reporting_templates_file: bidFiles.reportingTemplates ?? undefined,
+        gender_inclusion_target: Number(bidForm.femaleTargetPct),
+        vulnerable_group_target: Number(bidForm.vulnerableTargetPct),
+        low_income_target: Number(bidForm.lowIncomeTargetPct),
+        inclusion_commitment_confirmed: bidForm.inclusionCommitmentConfirmed,
+        om_strategy_summary: bidForm.omStrategySummary,
+        aftersales_description: bidForm.aftersalesDescription,
+        local_technicians_to_be_trained: bidForm.localTechniciansToBeTrained ? Number(bidForm.localTechniciansToBeTrained) : undefined,
+        warranty_period: bidForm.warrantyPeriodMonths ? Number(bidForm.warrantyPeriodMonths) : undefined,
+        offer_paygo: bidForm.offerPaygo,
+        paygo_platform: bidForm.offerPaygo ? bidForm.paygoPlatform : "",
+        daily_payment_amount_lsl: bidForm.offerPaygo && bidForm.dailyPaymentAmountLsl ? Number(bidForm.dailyPaymentAmountLsl) : undefined,
+        collection_method: bidForm.offerPaygo ? bidForm.collectionMethod : "",
+        om_plan_file: bidFiles.omPlan ?? undefined,
+        om_plan_document: bidFiles.omPlan ?? undefined,
+        distribution_map_file: bidFiles.distributionMap ?? undefined,
+        service_tier: bidForm.techTier as TenderBid["service_tier"],
+        sites: payloadSites,
         status,
-        sites: bidSites,
       };
       const created = editingBidId
         ? await updateTenderBid(editingBidId, payload)
@@ -7624,16 +8834,20 @@ const VendorDashboard = ({
       });
       window.dispatchEvent(new Event("rbf-bid-updated"));
       window.dispatchEvent(new Event("rbf-notifications-refresh"));
-      resetBidForm();
+      useBidVersion(created);
       if (status === BidStatus.DRAFT) {
-        setBidMessage("Draft saved as a new version.");
+        const savedAt = created.updated_at ? new Date(created.updated_at).toLocaleTimeString() : new Date().toLocaleTimeString();
+        setBidMessage(`Draft saved: ${savedAt}`);
       } else {
         const submittedAt = created.submitted_at ? new Date(created.submitted_at).toLocaleString() : "now";
         setBidMessage(`Bid submitted. Ref: ${bidTender.referenceNumber} • Version ${created.version_number} • ${submittedAt}.`);
       }
+      setBidSubmitError(null);
+      setBidConfirmOpen(false);
+      setBidSubmissionConfirmed(false);
     } catch (err: any) {
       const raw = String(err?.message || "");
-      setBidMessage(isConnectivityError(raw) ? `Cannot connect to backend (${API_BASE}).` : (toFriendlyApiMessage(raw) || "Failed to submit bid."));
+      setBidSubmitError(isConnectivityError(raw) ? `Cannot connect to backend (${API_BASE}).` : (toFriendlyApiMessage(raw) || "Failed to submit bid."));
     } finally {
       setIsBidSubmitting(false);
     }
@@ -7690,6 +8904,10 @@ const VendorDashboard = ({
       setContractMessage("Please select a signed contract file.");
       return;
     }
+    if (file.size > 10 * 1024 * 1024) {
+      setContractMessage("Signed contract PDF must not exceed 10MB.");
+      return;
+    }
     setIsContractSubmitting(true);
     setContractMessage(null);
     try {
@@ -7698,7 +8916,7 @@ const VendorDashboard = ({
       });
       setContracts(prev => prev.map(item => item.id === updated.id ? updated : item));
       setContractFiles(prev => ({ ...prev, [contractId]: null }));
-      setContractMessage("Signed contract uploaded successfully.");
+      setContractMessage("Signed contract submitted. RMT has been notified for review.");
     } catch (err: any) {
       const raw = String(err?.message || "");
       setContractMessage(toFriendlyApiMessage(raw) || "Failed to upload signed contract.");
@@ -7709,21 +8927,9 @@ const VendorDashboard = ({
 
   if (view === "bid" && bidTender) {
     const versionsSorted = [...bidVersions].sort((a, b) => (b.version_number || 0) - (a.version_number || 0));
-    const canEdit = !editingBidStatus || [BidStatus.DRAFT, BidStatus.SUBMITTED].includes(editingBidStatus);
-    const parseJsonInput = (value: string, fallbackKey: string) => {
-      try {
-        return JSON.parse(value);
-      } catch {
-        return { [fallbackKey]: value };
-      }
-    };
-    const parseBoqItems = (value: string) => {
-      const parsed = parseJsonInput(value, "items");
-      return Array.isArray(parsed) ? parsed : [parsed];
-    };
-
+    const canEdit = !editingBidStatus || editingBidStatus === BidStatus.DRAFT || editingBidStatus === BidStatus.REVISION_REQUIRED;
     return (
-      <div className="space-y-6 max-w-5xl mx-auto pb-20">
+      <div className="space-y-6 max-w-6xl mx-auto pb-20">
         <div className="flex items-center gap-4 mb-6">
           <button onClick={() => setView("dashboard")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
             <ChevronRight className="rotate-180" size={20} />
@@ -7734,202 +8940,761 @@ const VendorDashboard = ({
           </div>
         </div>
 
-        {editingBidStatus && ![BidStatus.DRAFT, BidStatus.SUBMITTED].includes(editingBidStatus) && (
+        {editingBidStatus && editingBidStatus !== BidStatus.DRAFT && (
           <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700 font-medium">
-            This bid is under review or finalized and can no longer be edited.
+            {editingBidStatus === BidStatus.REVISION_REQUIRED
+              ? "Revision required. Update this Stage 1 submission using the review feedback, then resubmit."
+              : "This bid has already been submitted and is now locked for editing."}
           </div>
         )}
-        {bidMessage && (
+        <div className="overflow-hidden rounded-[28px] border border-slate-200 bg-gradient-to-br from-slate-950 via-slate-900 to-emerald-900 text-white shadow-xl shadow-slate-200">
+          <div className="grid gap-6 px-6 py-6 lg:grid-cols-[1.5fr,1fr] lg:px-8">
+            <div className="space-y-5">
+              <div className="flex flex-wrap items-center gap-3">
+                <span className="inline-flex items-center rounded-full border border-white/20 bg-white/10 px-3 py-1 text-xs font-bold uppercase tracking-[0.18em] text-emerald-100">
+                  {bidStageLabel}
+                </span>
+                <span className="inline-flex items-center rounded-full border border-white/20 bg-white/10 px-3 py-1 text-xs font-bold uppercase tracking-[0.18em] text-slate-100">
+                  {bidTender.technologyTypes?.join(" / ") || "Technology not set"}
+                </span>
+              </div>
+              <div>
+                <h2 className="text-3xl font-black tracking-tight">{bidTender.name}</h2>
+                <p className="mt-2 max-w-2xl text-sm text-slate-200">
+                  Build the proposal section by section. This flow is designed to feel ready for real procurement work, with clear completion states, document checks, and a live readiness summary.
+                </p>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                {proposalSections.map((section) => {
+                  const Icon = section.icon;
+                  return (
+                    <div key={section.id} className={`rounded-2xl border px-4 py-4 ${section.complete ? "border-emerald-300/40 bg-emerald-400/10" : "border-white/10 bg-white/5"}`}>
+                      <div className="flex items-start justify-between gap-3">
+                        <div className={`rounded-xl p-2 ${section.complete ? "bg-emerald-400/20 text-emerald-100" : "bg-white/10 text-slate-200"}`}>
+                          <Icon size={16} />
+                        </div>
+                        {section.complete ? <CheckCircle2 size={18} className="text-emerald-200" /> : <Clock size={18} className="text-amber-200" />}
+                      </div>
+                      <p className="mt-4 text-sm font-bold text-white">{section.label}</p>
+                      <p className="mt-1 text-xs text-slate-300">{section.note}</p>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+            <div className="rounded-3xl border border-white/10 bg-white/10 p-5 backdrop-blur">
+              <p className="text-xs font-bold uppercase tracking-[0.18em] text-emerald-100">Submission Readiness</p>
+              <div className="mt-4 flex items-end justify-between gap-4">
+                <div>
+                  <p className="text-4xl font-black">{completedProposalSections}/{proposalSections.length}</p>
+                  <p className="mt-1 text-sm text-slate-200">Sections complete</p>
+                </div>
+                <div className="text-right">
+                  <p className="text-xs uppercase tracking-[0.18em] text-slate-300">Deadline</p>
+                  <p className="mt-1 text-lg font-bold text-white">{bidDeadlineCountdown}</p>
+                </div>
+              </div>
+              <div className="mt-5 h-2 overflow-hidden rounded-full bg-white/10">
+                <div className="h-full rounded-full bg-gradient-to-r from-emerald-300 via-emerald-400 to-cyan-300" style={{ width: `${proposalSections.length ? (completedProposalSections / proposalSections.length) * 100 : 0}%` }} />
+              </div>
+              <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                <div className="rounded-2xl border border-white/10 bg-slate-950/20 px-4 py-3">
+                  <p className="text-xs uppercase tracking-[0.16em] text-slate-300">Tender Reference</p>
+                  <p className="mt-1 text-sm font-bold text-white">{bidTender.referenceNumber}</p>
+                </div>
+                <div className="rounded-2xl border border-white/10 bg-slate-950/20 px-4 py-3">
+                  <p className="text-xs uppercase tracking-[0.16em] text-slate-300">Submission Window</p>
+                  <p className="mt-1 text-sm font-bold text-white">{bidDeadlineLabel || "N/A"}</p>
+                </div>
+                <div className="rounded-2xl border border-white/10 bg-slate-950/20 px-4 py-3">
+                  <p className="text-xs uppercase tracking-[0.16em] text-slate-300">Technology</p>
+                  <p className="mt-1 text-sm font-bold text-white">{bidTender.technologyTypes?.join(" / ") || "Not set"}</p>
+                </div>
+                <div className="rounded-2xl border border-white/10 bg-slate-950/20 px-4 py-3">
+                  <p className="text-xs uppercase tracking-[0.16em] text-slate-300">Primary District</p>
+                  <p className="mt-1 text-sm font-bold text-white">{primaryDistrict || "Maseru"}</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        {bidMessage && !bidSubmitError && (
           <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 font-medium">
             {bidMessage}
           </div>
         )}
+        {inclusionTargetWarning && (
+          <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 font-medium">
+            {inclusionTargetWarning}
+          </div>
+        )}
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <div className="lg:col-span-2 space-y-6">
-            <div className="card p-6 space-y-6">
-              <h3 className="text-lg font-bold text-slate-900">Proposal Details</h3>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div className="space-y-1">
-                  <label className="text-sm font-bold text-slate-700 ml-1">Bid Amount (LSL) *</label>
-                  <input
-                    type="number"
-                    className="input-field"
-                    value={bidForm.bidAmount}
-                    onChange={(e) => setBidForm(prev => ({ ...prev, bidAmount: e.target.value }))}
-                  />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-sm font-bold text-slate-700 ml-1">Stage</label>
-                  <select
-                    className="input-field"
-                    value={bidForm.stage}
-                    onChange={(e) => setBidForm(prev => ({ ...prev, stage: e.target.value }))}
-                  >
-                    <option>Pre-Qualification</option>
-                    <option>Site-Specific</option>
-                  </select>
+        <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr),320px]">
+          <div className="space-y-6">
+            <div className="card overflow-hidden border-slate-200">
+              <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
+                <div className="flex items-center gap-3">
+                  <div className="rounded-2xl bg-slate-900 p-3 text-white">
+                    <FileText size={18} />
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-bold text-slate-900">Header & Identity</h3>
+                    <p className="text-sm text-slate-500">Auto-populated tender context and submission identity.</p>
+                  </div>
                 </div>
               </div>
-
-              <div className="space-y-2">
-                <label className="text-sm font-bold text-slate-700 ml-1">Concept Note</label>
-                <textarea
-                  className="input-field min-h-[120px]"
-                  value={bidForm.conceptNote}
-                  onChange={(e) => setBidForm(prev => ({ ...prev, conceptNote: e.target.value }))}
-                />
-              </div>
-
-              <div className="space-y-3">
-                <label className="text-sm font-bold text-slate-700 ml-1">Proposal Documents (Stage 2)</label>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {[
-                    { key: "technicalProposal", label: "Technical Proposal", hint: "PDF/DOCX" },
-                    { key: "financialProposal", label: "Financial Proposal", hint: "PDF/DOCX/XLSX" },
-                    { key: "boq", label: "BOQ / Bill of Quantities", hint: "XLSX/PDF" },
-                    { key: "genderActionPlan", label: "Gender Action Plan", hint: "PDF/DOCX" },
-                    { key: "implementationPlan", label: "Implementation Plan", hint: "PDF/DOCX" },
-                    { key: "reportingTemplates", label: "Reporting Templates", hint: "PDF/DOCX/XLSX" },
-                  ].map((doc, idx) => (
-                    <div key={doc.key} className="p-4 border-2 border-dashed border-slate-200 rounded-xl text-center bg-slate-50">
-                      <label htmlFor={`bid-doc-${doc.key}-${idx}`} className="cursor-pointer block">
-                        <FileText size={22} className="mx-auto text-slate-400 mb-2" />
-                        <p className="text-xs font-bold text-slate-700">{doc.label}</p>
-                        <p className="text-[10px] text-slate-400 mt-1">{doc.hint}</p>
-                        <p className="text-[10px] text-slate-400 mt-1">
-                          {(bidFiles as any)[doc.key]?.name || "Click to upload"}
-                        </p>
-                      </label>
-                      <input
-                        id={`bid-doc-${doc.key}-${idx}`}
-                        type="file"
-                        accept=".pdf,.doc,.docx,.xls,.xlsx"
-                        className="hidden"
-                        onChange={(e) => {
-                          const file = e.target.files?.[0] || null;
-                          setBidFiles(prev => ({ ...prev, [doc.key]: file }));
-                        }}
-                      />
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <div className="space-y-2">
-                <label className="text-sm font-bold text-slate-700 ml-1">Technical Summary (optional)</label>
-                <textarea
-                  className="input-field min-h-[140px]"
-                  value={bidForm.technicalProposal}
-                  onChange={(e) => setBidForm(prev => ({ ...prev, technicalProposal: e.target.value }))}
-                />
-              </div>
-
-              <div className="space-y-2">
-                <label className="text-sm font-bold text-slate-700 ml-1">Financial Summary (optional)</label>
-                <textarea
-                  className="input-field min-h-[140px]"
-                  value={bidForm.financialProposal}
-                  onChange={(e) => setBidForm(prev => ({ ...prev, financialProposal: e.target.value }))}
-                />
+              <div className="grid grid-cols-1 gap-4 p-6 md:grid-cols-2">
+                {[
+                  { label: "Tender Title", value: bidTender.name },
+                  { label: "Tender ID", value: bidTender.referenceNumber },
+                  { label: "Vendor Name", value: currentUser?.fullName || currentUser?.username || "Unknown" },
+                  { label: "Application Stage", value: bidStageLabel },
+                  { label: "Deadline Timer", value: bidDeadlineCountdown },
+                  { label: "Technology Type", value: bidTender.technologyTypes?.join(" / ") || "Not set" },
+                  { label: "District", value: primaryDistrict || "Maseru" },
+                ].map((item) => (
+                  <div key={item.label} className="space-y-1">
+                    <label className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">{item.label}</label>
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-medium text-slate-700">{item.value}</div>
+                  </div>
+                ))}
               </div>
             </div>
 
-            <div className="card p-6 space-y-6">
-              <div className="flex items-center justify-between">
-                <h3 className="text-lg font-bold text-slate-900">Project Sites</h3>
-                <button onClick={addBidSite} className="btn-secondary text-sm">Add Site</button>
+            <div className="card overflow-hidden border-slate-200">
+              <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
+                <div className="flex items-center justify-between gap-4">
+                  <div className="flex items-center gap-3">
+                    <div className={`rounded-2xl p-3 ${financialSectionComplete ? "bg-emerald-100 text-emerald-700" : "bg-slate-900 text-white"}`}>
+                      <CreditCard size={18} />
+                    </div>
+                    <div>
+                      <h3 className="text-lg font-bold text-slate-900">Section A: Financial Proposal (Value for Money)</h3>
+                      <p className="text-sm text-slate-500">This section tells the RMT if the project is affordable and efficient.</p>
+                    </div>
+                  </div>
+                  {financialSectionComplete ? <CheckCircle2 size={18} className="text-emerald-600" /> : <AlertTriangle size={18} className="text-amber-500" />}
+                </div>
               </div>
+              <div className="space-y-6 p-6">
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                  <div className="space-y-1">
+                    <label className="text-sm font-bold text-slate-700 ml-1">Bid Amount (LSL) *</label>
+                    <input type="number" className="input-field" value={bidForm.bidAmount} onChange={(e) => setBidForm(prev => ({ ...prev, bidAmount: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-sm font-bold text-slate-700 ml-1">Subsidy Requested (LSL) *</label>
+                    <input type="number" className="input-field" value={bidForm.subsidyRequested} onChange={(e) => setBidForm(prev => ({ ...prev, subsidyRequested: e.target.value }))} />
+                  </div>
+                  {isSiteSpecificStage && (
+                    <div className="space-y-1">
+                      <label className="text-sm font-bold text-slate-700 ml-1">Co-financing Amount (LSL)</label>
+                      <input type="number" className="input-field" value={bidForm.coFinancingAmount} onChange={(e) => setBidForm(prev => ({ ...prev, coFinancingAmount: e.target.value }))} />
+                    </div>
+                  )}
+                </div>
+                <div className="grid gap-4 lg:grid-cols-[1.15fr,0.85fr]">
+                  {isSiteSpecificStage ? (
+                    <div className="rounded-3xl border border-dashed border-slate-300 bg-slate-50 p-5 text-center">
+                      <label htmlFor="bid-doc-boq" className="cursor-pointer block">
+                        <Upload size={22} className="mx-auto text-slate-400" />
+                        <p className="mt-3 text-sm font-bold text-slate-800">Itemized Bill of Quantities (BoQ)</p>
+                        <p className="mt-1 text-xs text-slate-500">Accepted formats: PDF, DOCX, or XLSX</p>
+                        <p className="mt-3 text-xs font-medium text-slate-500">{bidFiles.boq?.name || existingStageTwoDocuments.boq ? "Uploaded and ready" : "Click to upload supporting BoQ"}</p>
+                      </label>
+                      <input id="bid-doc-boq" type="file" accept=".pdf,.docx,.xlsx" className="hidden" onChange={(e) => setBidFiles(prev => ({ ...prev, boq: e.target.files?.[0] || null }))} />
+                    </div>
+                  ) : (
+                    <div className="rounded-3xl border border-slate-200 bg-slate-50 p-5">
+                      <p className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Stage 1 Scope</p>
+                      <p className="mt-3 text-sm text-slate-700">Stage 1 only checks the headline bid amount, requested subsidy, and concept readiness. Detailed costing opens in Stage 2.</p>
+                    </div>
+                  )}
+                  <div className={`rounded-3xl border px-5 py-5 ${Math.abs(fundingDelta) < 0.01 ? "border-emerald-200 bg-emerald-50" : "border-amber-200 bg-amber-50"}`}>
+                    <p className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Internal Metrics</p>
+                    <div className="mt-4 space-y-3 text-sm">
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-600">Bid Amount</span>
+                        <span className="font-bold text-slate-900">LSL {totalProjectValue.toLocaleString()}</span>
+                      </div>
+                      {isSiteSpecificStage ? (
+                        <div className="flex items-center justify-between">
+                          <span className="text-slate-600">BOQ Grand Total</span>
+                          <span className="font-bold text-slate-900">LSL {boqGrandTotal.toLocaleString()}</span>
+                        </div>
+                      ) : (
+                        <div className="flex items-center justify-between">
+                          <span className="text-slate-600">Subsidy Requested</span>
+                          <span className="font-bold text-slate-900">LSL {subsidyValue.toLocaleString()}</span>
+                        </div>
+                      )}
+                      <div className="border-t border-current/10 pt-3 flex items-center justify-between">
+                        <span className="font-medium text-slate-700">{isSiteSpecificStage ? "Live Difference" : "Vendor Co-financing"}</span>
+                        <span className={`font-black ${Math.abs(fundingDelta) < 0.01 ? "text-emerald-700" : "text-amber-700"}`}>
+                          {Math.abs(fundingDelta).toLocaleString()} {fundingDelta >= 0 ? "under" : "over"}
+                        </span>
+                      </div>
+                      <div className="border-t border-current/10 pt-3 flex items-center justify-between">
+                        <span className="font-medium text-slate-700">Cost per Connection</span>
+                        <span className="font-black text-slate-900">{costPerConnection != null ? `LSL ${costPerConnection.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : "Awaiting household target"}</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
 
-              {bidSites.map((site, index) => (
-                <div key={index} className="border border-slate-200 rounded-xl p-4 space-y-4">
-                  <div className="flex items-center justify-between">
-                    <h4 className="font-bold text-slate-900">Site {index + 1}</h4>
-                    {bidSites.length > 1 && (
-                      <button onClick={() => removeBidSite(index)} className="text-rose-600 text-sm">Remove</button>
+            <div className="card overflow-hidden border-slate-200">
+              <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
+                <div className="flex items-center justify-between gap-4">
+                  <div className="flex items-center gap-3">
+                    <div className={`rounded-2xl p-3 ${geographySectionComplete ? "bg-emerald-100 text-emerald-700" : "bg-slate-900 text-white"}`}>
+                      <MapPin size={18} />
+                    </div>
+                    <div>
+                      <h3 className="text-lg font-bold text-slate-900">Section C: Project Sites &amp; Scope (Geography)</h3>
+                      <p className="text-sm text-slate-500">This section pre-fills the district and installation target used later in milestone assignment.</p>
+                    </div>
+                  </div>
+                  {geographySectionComplete ? <CheckCircle2 size={18} className="text-emerald-600" /> : <AlertTriangle size={18} className="text-amber-500" />}
+                </div>
+              </div>
+              <div className="p-6">
+                <div className="space-y-5">
+                  <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                    <div className="space-y-1">
+                      <label className="text-sm font-bold text-slate-700 ml-1">Primary District *</label>
+                      <select className="input-field" value={primaryDistrict} onChange={(e) => updatePrimaryDistrict(e.target.value)}>
+                        {districts.map((district) => (
+                          <option key={district} value={district}>{district}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-sm font-bold text-slate-700 ml-1">Installation Target</label>
+                      <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-medium text-slate-700">
+                        {installationTarget > 0 ? `${installationTarget.toLocaleString()} households` : "Add village rows to calculate target"}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between gap-4">
+                    <div>
+                      <h4 className="text-sm font-bold text-slate-900">Village Site List</h4>
+                      <p className="mt-1 text-xs text-slate-500">
+                        {isPreQualificationStage ? "Stage 1 requires site name, district, primary beneficiary type, and estimated households. GPS is optional at this stage." : "Stage 2 requires the exact village list with mandatory GPS coordinates, households, and access details for field verification."}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={() => submitBid(BidStatus.DRAFT)}
+                        disabled={isBidSubmitting || !canEdit}
+                        className="btn-secondary disabled:opacity-60"
+                      >
+                        {isBidSubmitting ? "Saving..." : "Save Site List"}
+                      </button>
+                      <button type="button" onClick={addBidSite} className="btn-secondary">+ Add Site</button>
+                    </div>
+                  </div>
+                  <div className="space-y-4">
+                    {bidForm.sites.map((site, index) => {
+                      const siteReady = isPreQualificationStage
+                        ? Boolean(site.siteName && site.district && site.targetBeneficiaryType && site.estimatedHouseholds)
+                        : Boolean(site.siteName && site.district && site.targetBeneficiaryType && site.estimatedHouseholds && site.latitude && site.longitude);
+                      return (
+                        <div key={`site-${index}`} className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+                          <div className="flex items-center justify-between gap-3">
+                            <div>
+                              <p className="text-sm font-bold text-slate-900">Site {index + 1}</p>
+                              <p className="text-xs text-slate-500">{site.siteName ? site.siteName : "Unnamed site draft"}</p>
+                            </div>
+                            <div className="flex items-center gap-3">
+                              {siteReady ? (
+                                <span className="inline-flex items-center rounded-full bg-emerald-100 px-3 py-1 text-xs font-bold text-emerald-700">Ready</span>
+                              ) : (
+                                <span className="inline-flex items-center rounded-full bg-amber-100 px-3 py-1 text-xs font-bold text-amber-700">Incomplete</span>
+                              )}
+                              {bidForm.sites.length > 1 && (
+                                <button type="button" onClick={() => removeBidSite(index)} className="text-sm font-bold text-rose-600">Remove</button>
+                              )}
+                            </div>
+                          </div>
+                          <div className="mt-5 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+                            <div className="space-y-1">
+                              <label className="text-sm font-bold text-slate-700 ml-1">Site Name *</label>
+                              <input className="input-field" value={site.siteName} onChange={(e) => updateBidSite(index, "siteName", e.target.value)} />
+                            </div>
+                            <div className="space-y-1">
+                              <label className="text-sm font-bold text-slate-700 ml-1">District *</label>
+                              <select className="input-field" value={site.district} onChange={(e) => updateBidSite(index, "district", e.target.value)}>
+                                {districts.map((district) => (
+                                  <option key={district} value={district}>{district}</option>
+                                ))}
+                              </select>
+                            </div>
+                            <div className="space-y-1">
+                              <label className="text-sm font-bold text-slate-700 ml-1">{isSiteSpecificStage ? "Number of Households *" : "Estimated Households *"}</label>
+                              <input type="number" className="input-field" value={site.estimatedHouseholds} onChange={(e) => {
+                                updateBidSite(index, "estimatedHouseholds", e.target.value);
+                                updateBidSite(index, "numberOfHouseholds", e.target.value);
+                              }} />
+                            </div>
+                            <div className="space-y-1">
+                              <label className="text-sm font-bold text-slate-700 ml-1">Primary Beneficiary Type *</label>
+                              <select className="input-field" value={site.targetBeneficiaryType} onChange={(e) => updateBidSite(index, "targetBeneficiaryType", e.target.value)}>
+                                <option value="standard">Standard</option>
+                                <option value="female_headed">Female-headed</option>
+                                <option value="vulnerable">Vulnerable</option>
+                                <option value="low_income">Low-income</option>
+                              </select>
+                            </div>
+                            <div className="space-y-1">
+                              <label className="text-sm font-bold text-slate-700 ml-1">Latitude {isSiteSpecificStage ? "*" : "(Optional)"}</label>
+                              <input type="number" className="input-field" value={site.latitude} onChange={(e) => updateBidSite(index, "latitude", e.target.value)} />
+                            </div>
+                            <div className="space-y-1">
+                              <label className="text-sm font-bold text-slate-700 ml-1">Longitude {isSiteSpecificStage ? "*" : "(Optional)"}</label>
+                              <input type="number" className="input-field" value={site.longitude} onChange={(e) => updateBidSite(index, "longitude", e.target.value)} />
+                            </div>
+                            <div className="space-y-1">
+                              <label className="text-sm font-bold text-slate-700 ml-1">Village / Community</label>
+                              <input className="input-field" value={site.villageSubDistrict} onChange={(e) => updateBidSite(index, "villageSubDistrict", e.target.value)} />
+                            </div>
+                            {isSiteSpecificStage && (
+                              <>
+                                <div className="space-y-1">
+                                  <label className="text-sm font-bold text-slate-700 ml-1">Estimated Energy Demand (kWh)</label>
+                                  <input type="number" className="input-field" value={site.estimatedEnergyDemandKwhMonth} onChange={(e) => updateBidSite(index, "estimatedEnergyDemandKwhMonth", e.target.value)} />
+                                </div>
+                                <div className="space-y-1">
+                                  <label className="text-sm font-bold text-slate-700 ml-1">Road Access *</label>
+                                  <select className="input-field" value={site.roadAccessAvailable ? "yes" : "no"} onChange={(e) => updateBidSite(index, "roadAccessAvailable", e.target.value === "yes")}>
+                                    <option value="yes">Yes</option>
+                                    <option value="no">No</option>
+                                  </select>
+                                </div>
+                              </>
+                            )}
+                          </div>
+                          <button type="button" onClick={() => useCurrentLocationForSite(index)} className="mt-4 inline-flex items-center gap-2 rounded-xl border border-slate-200 px-4 py-3 text-sm font-medium text-slate-700 hover:bg-slate-50">
+                            <MapPin size={16} />
+                            Use My Location
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {isSiteSpecificStage && (
+              <div className="card overflow-hidden border-slate-200">
+                <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="flex items-center gap-3">
+                      <div className={`rounded-2xl p-3 ${hardwareSectionComplete ? "bg-emerald-100 text-emerald-700" : "bg-slate-900 text-white"}`}>
+                        <Database size={18} />
+                      </div>
+                      <div>
+                        <h3 className="text-lg font-bold text-slate-900">Section B: Technical Specification (Hardware Baseline)</h3>
+                        <p className="text-sm text-slate-500">This section sets the technology and energy baseline used during technical review and downstream project setup.</p>
+                      </div>
+                    </div>
+                    {hardwareSectionComplete ? <CheckCircle2 size={18} className="text-emerald-600" /> : <AlertTriangle size={18} className="text-amber-500" />}
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 gap-4 p-6 md:grid-cols-2">
+                  <div className="space-y-1">
+                    <label className="text-sm font-bold text-slate-700 ml-1">Technology Type *</label>
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-medium text-slate-700">
+                      {bidForm.systemConfiguration.technologyType || bidTender.technologyTypes?.[0] || "N/A"}
+                    </div>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-sm font-bold text-slate-700 ml-1">Device Brand *</label>
+                    <input className="input-field" value={bidForm.deviceBrand} onChange={(e) => setBidForm(prev => ({ ...prev, deviceBrand: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-sm font-bold text-slate-700 ml-1">Device Model *</label>
+                    <input className="input-field" value={bidForm.deviceModel} onChange={(e) => setBidForm(prev => ({ ...prev, deviceModel: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-sm font-bold text-slate-700 ml-1">Service Tier *</label>
+                    <select className="input-field" value={bidForm.techTier} onChange={(e) => setBidForm(prev => ({ ...prev, techTier: e.target.value }))}>
+                      {["Tier 1", "Tier 2", "Tier 3", "Tier 4", "Tier 5"].map((tier) => (
+                        <option key={tier} value={tier}>{tier}</option>
+                      ))}
+                    </select>
+                    {latestApprovedPrequal?.techTier && (
+                      <p className={`text-xs mt-1 ${approvedTierLevel && selectedTierLevel && selectedTierLevel > approvedTierLevel ? "text-amber-700" : "text-slate-500"}`}>
+                        Approved pre-qualification ceiling: {latestApprovedPrequal.techTier}
+                      </p>
                     )}
                   </div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div className="space-y-1">
-                      <label className="text-sm font-bold text-slate-700 ml-1">Site Name *</label>
-                      <input
-                        className="input-field"
-                        value={site.siteName}
-                        onChange={(e) => updateBidSite(index, { siteName: e.target.value })}
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-sm font-bold text-slate-700 ml-1">District</label>
-                      <input
-                        className="input-field"
-                        value={site.district || ""}
-                        onChange={(e) => updateBidSite(index, { district: e.target.value })}
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-sm font-bold text-slate-700 ml-1">Latitude</label>
-                      <input
-                        className="input-field"
-                        value={site.latitude ?? ""}
-                        onChange={(e) => updateBidSite(index, { latitude: e.target.value === "" ? undefined : Number(e.target.value) })}
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-sm font-bold text-slate-700 ml-1">Longitude</label>
-                      <input
-                        className="input-field"
-                        value={site.longitude ?? ""}
-                        onChange={(e) => updateBidSite(index, { longitude: e.target.value === "" ? undefined : Number(e.target.value) })}
-                      />
-                    </div>
+                  <div className="space-y-1">
+                    <label className="text-sm font-bold text-slate-700 ml-1">Rated Power (W)</label>
+                    <input type="number" className="input-field" value={bidForm.systemConfiguration.ratedPowerW} onChange={(e) => setBidForm(prev => ({ ...prev, systemConfiguration: { ...prev.systemConfiguration, ratedPowerW: e.target.value } }))} />
                   </div>
-                  <div className="space-y-2">
-                    <label className="text-sm font-bold text-slate-700 ml-1">System Configuration (JSON)</label>
-                    <textarea
-                      className="input-field min-h-[90px] font-mono text-xs"
-                      value={JSON.stringify(site.systemConfiguration ?? {}, null, 2)}
-                      onChange={(e) => updateBidSite(index, { systemConfiguration: parseJsonInput(e.target.value, "raw") })}
-                    />
+                  <div className="space-y-1">
+                    <label className="text-sm font-bold text-slate-700 ml-1">Battery Capacity (Wh)</label>
+                    <input type="number" className="input-field" value={bidForm.systemConfiguration.batteryCapacityWh} onChange={(e) => setBidForm(prev => ({ ...prev, systemConfiguration: { ...prev.systemConfiguration, batteryCapacityWh: e.target.value } }))} />
                   </div>
-                  <div className="space-y-2">
-                    <label className="text-sm font-bold text-slate-700 ml-1">BOQ Items (JSON Array)</label>
-                    <textarea
-                      className="input-field min-h-[90px] font-mono text-xs"
-                      value={JSON.stringify(site.boqItems ?? [], null, 2)}
-                      onChange={(e) => updateBidSite(index, { boqItems: parseBoqItems(e.target.value) })}
-                    />
+                  <div className="space-y-1">
+                    <label className="text-sm font-bold text-slate-700 ml-1">PV Panel Size (W)</label>
+                    <input type="number" className="input-field" value={bidForm.systemConfiguration.pvPanelSizeW} onChange={(e) => setBidForm(prev => ({ ...prev, systemConfiguration: { ...prev.systemConfiguration, pvPanelSizeW: e.target.value } }))} />
                   </div>
-                  <div className="space-y-2">
-                    <label className="text-sm font-bold text-slate-700 ml-1">Notes</label>
-                    <textarea
-                      className="input-field min-h-[70px]"
-                      value={site.notes || ""}
-                      onChange={(e) => updateBidSite(index, { notes: e.target.value })}
-                    />
+                  <div className="space-y-1">
+                    <label className="text-sm font-bold text-slate-700 ml-1">Inverter Type</label>
+                    <input className="input-field" value={bidForm.systemConfiguration.inverterType} onChange={(e) => setBidForm(prev => ({ ...prev, systemConfiguration: { ...prev.systemConfiguration, inverterType: e.target.value } }))} />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-sm font-bold text-slate-700 ml-1">Estimated Monthly Energy Demand (kWh/month)</label>
+                    <input type="number" className="input-field" value={bidForm.energyTarget} onChange={(e) => setBidForm(prev => ({ ...prev, energyTarget: e.target.value }))} />
                   </div>
                 </div>
-              ))}
+                {isShsTender && (
+                  <div className="border-t border-slate-200 px-6 py-6">
+                    <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                      <div className="space-y-1">
+                        <label className="text-sm font-bold text-slate-700 ml-1">PAYGO Offered *</label>
+                        <select className="input-field" value={bidForm.offerPaygo ? "yes" : "no"} onChange={(e) => setBidForm(prev => ({ ...prev, offerPaygo: e.target.value === "yes" }))}>
+                          <option value="no">No</option>
+                          <option value="yes">Yes</option>
+                        </select>
+                      </div>
+                      {bidForm.offerPaygo && (
+                        <>
+                          <div className="space-y-1">
+                            <label className="text-sm font-bold text-slate-700 ml-1">PAYGO Platform *</label>
+                            <input className="input-field" value={bidForm.paygoPlatform} onChange={(e) => setBidForm(prev => ({ ...prev, paygoPlatform: e.target.value }))} />
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-sm font-bold text-slate-700 ml-1">Minimum Daily Payment (LSL) *</label>
+                            <input type="number" className="input-field" value={bidForm.dailyPaymentAmountLsl} onChange={(e) => setBidForm(prev => ({ ...prev, dailyPaymentAmountLsl: e.target.value }))} />
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-sm font-bold text-slate-700 ml-1">Collection Method *</label>
+                            <input className="input-field" value={bidForm.collectionMethod} onChange={(e) => setBidForm(prev => ({ ...prev, collectionMethod: e.target.value }))} />
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {isSiteSpecificStage && (
+              <div className="card overflow-hidden border-slate-200">
+                <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
+                  <div className="flex items-center justify-between gap-4">
+                    <div>
+                      <h3 className="text-lg font-bold text-slate-900">Section B2: Bill of Quantities</h3>
+                      <p className="text-sm text-slate-500">Each row updates the grand total automatically. The grand total must equal the bid amount.</p>
+                    </div>
+                    <button type="button" onClick={addBoqItem} className="btn-secondary">+ Add Row</button>
+                  </div>
+                </div>
+                <div className="space-y-4 p-6">
+                  {bidForm.boqItems.map((item, index) => (
+                    <div key={`boq-${index}`} className="grid grid-cols-1 gap-4 rounded-3xl border border-slate-200 p-4 md:grid-cols-6">
+                      <input className="input-field md:col-span-2" placeholder="Description" value={item.description} onChange={(e) => updateBoqItem(index, "description", e.target.value)} />
+                      <input type="number" className="input-field" placeholder="Qty" value={item.qty} onChange={(e) => updateBoqItem(index, "qty", e.target.value)} />
+                      <input className="input-field" placeholder="Unit" value={item.unit} onChange={(e) => updateBoqItem(index, "unit", e.target.value)} />
+                      <input type="number" className="input-field" placeholder="Unit Price" value={item.unitPrice} onChange={(e) => updateBoqItem(index, "unitPrice", e.target.value)} />
+                      <div className="flex items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-700">
+                        <span>LSL {Number(item.total || 0).toLocaleString()}</span>
+                        <button type="button" onClick={() => removeBoqItem(index)} className="text-rose-600">Remove</button>
+                      </div>
+                    </div>
+                  ))}
+                  <div className={`rounded-3xl border px-5 py-4 ${Math.abs(fundingDelta) < 0.01 ? "border-emerald-200 bg-emerald-50" : "border-amber-200 bg-amber-50"}`}>
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="font-medium text-slate-700">Grand Total</span>
+                      <span className="font-black text-slate-900">LSL {boqGrandTotal.toLocaleString()}</span>
+                    </div>
+                    <div className="mt-2 flex items-center justify-between text-sm">
+                      <span className="font-medium text-slate-700">Difference vs Bid Amount</span>
+                      <span className={`font-black ${Math.abs(fundingDelta) < 0.01 ? "text-emerald-700" : "text-amber-700"}`}>
+                        M {Math.abs(fundingDelta).toLocaleString()} {fundingDelta >= 0 ? "under" : "over"}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {isSiteSpecificStage && (
+              <div className="card overflow-hidden border-slate-200">
+                <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
+                  <div>
+                    <h3 className="text-lg font-bold text-slate-900">Section B3: O&amp;M Plan</h3>
+                    <p className="text-sm text-slate-500">Summarize how the system will be maintained after installation.</p>
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 gap-4 p-6 md:grid-cols-2">
+                  <div className="space-y-1 md:col-span-2">
+                    <label className="text-sm font-bold text-slate-700 ml-1">O&amp;M Strategy Summary *</label>
+                    <textarea className="input-field min-h-[140px]" value={bidForm.omStrategySummary} onChange={(e) => setBidForm(prev => ({ ...prev, omStrategySummary: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-sm font-bold text-slate-700 ml-1">Local Technicians Count</label>
+                    <input type="number" className="input-field" value={bidForm.localTechniciansToBeTrained} onChange={(e) => setBidForm(prev => ({ ...prev, localTechniciansToBeTrained: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-sm font-bold text-slate-700 ml-1">Warranty Months</label>
+                    <input type="number" className="input-field" value={bidForm.warrantyPeriodMonths} onChange={(e) => setBidForm(prev => ({ ...prev, warrantyPeriodMonths: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1 md:col-span-2">
+                    <label className="text-sm font-bold text-slate-700 ml-1">After-sales Description</label>
+                    <textarea className="input-field min-h-[120px]" value={bidForm.aftersalesDescription} onChange={(e) => setBidForm(prev => ({ ...prev, aftersalesDescription: e.target.value }))} />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div className="card overflow-hidden border-slate-200">
+              <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
+                <div className="flex items-center justify-between gap-4">
+                  <div className="flex items-center gap-3">
+                    <div className={`rounded-2xl p-3 ${inclusionSectionReady ? "bg-emerald-100 text-emerald-700" : "bg-slate-900 text-white"}`}>
+                      <ShieldCheck size={18} />
+                    </div>
+                    <div>
+                      <h3 className="text-lg font-bold text-slate-900">Section D: Social Inclusion Commitments (Impact)</h3>
+                      <p className="text-sm text-slate-500">These targets pre-fill the milestone inclusion percentages and establish the minimum impact commitments.</p>
+                    </div>
+                  </div>
+                  {inclusionSectionReady ? <CheckCircle2 size={18} className="text-emerald-600" /> : <AlertTriangle size={18} className="text-amber-500" />}
+                </div>
+              </div>
+              <div className="space-y-5 p-6">
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                  <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
+                    <label className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Female-Headed Household Target</label>
+                    <div className="mt-3 flex items-end gap-3">
+                      <input type="number" min={requiredFemaleTarget} className={inclusionInputClass(femaleTargetInvalid)} value={bidForm.femaleTargetPct} onChange={(e) => setBidForm(prev => ({ ...prev, femaleTargetPct: e.target.value }))} />
+                      <span className="pb-3 text-sm font-bold text-slate-500">%</span>
+                    </div>
+                    {femaleTargetInvalid && <p className="mt-2 text-xs font-semibold text-rose-600">Minimum {requiredFemaleTarget}% required.</p>}
+                  </div>
+                  <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
+                    <label className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Vulnerable Group Inclusion</label>
+                    <div className="mt-3 flex items-end gap-3">
+                      <input type="number" min={requiredVulnerableTarget} className={inclusionInputClass(vulnerableTargetInvalid)} value={bidForm.vulnerableTargetPct} onChange={(e) => setBidForm(prev => ({ ...prev, vulnerableTargetPct: e.target.value }))} />
+                      <span className="pb-3 text-sm font-bold text-slate-500">%</span>
+                    </div>
+                    {vulnerableTargetInvalid && <p className="mt-2 text-xs font-semibold text-rose-600">Minimum {requiredVulnerableTarget}% required.</p>}
+                  </div>
+                  <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
+                    <label className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Low-Income Household Target</label>
+                    <div className="mt-3 flex items-end gap-3">
+                      <input type="number" min={60} className={inclusionInputClass(lowIncomeTargetInvalid)} value={bidForm.lowIncomeTargetPct} onChange={(e) => setBidForm(prev => ({ ...prev, lowIncomeTargetPct: e.target.value }))} />
+                      <span className="pb-3 text-sm font-bold text-slate-500">%</span>
+                    </div>
+                    {lowIncomeTargetInvalid && <p className="mt-2 text-xs font-semibold text-rose-600">Minimum 60% required.</p>}
+                  </div>
+                </div>
+                {isSiteSpecificStage && (
+                  <div className={`rounded-3xl border p-5 ${genderActionPlanUploaded ? "border-emerald-200 bg-emerald-50" : "border-slate-200 bg-white"}`}>
+                    <label htmlFor="bid-doc-gap" className="cursor-pointer block">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className={`rounded-2xl p-3 ${genderActionPlanUploaded ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>
+                          <FileText size={18} />
+                        </div>
+                        {genderActionPlanUploaded ? <CheckCircle2 size={18} className="text-emerald-600" /> : <Upload size={18} className="text-slate-400" />}
+                      </div>
+                      <p className="mt-4 text-sm font-bold text-slate-900">Gender Action Plan</p>
+                      <p className="mt-1 text-xs text-slate-500">Upload the file showing how these commitments will be reached and verified.</p>
+                      <p className="mt-3 text-xs font-medium text-slate-500">{genderActionPlanUploaded ? "Uploaded and ready" : "Click to upload"}</p>
+                    </label>
+                    <input id="bid-doc-gap" type="file" accept=".pdf,.docx,.xlsx" className="hidden" onChange={(e) => setBidFiles(prev => ({ ...prev, genderActionPlan: e.target.files?.[0] || null }))} />
+                  </div>
+                )}
+                <label className="flex items-start gap-3 rounded-3xl border border-slate-200 bg-slate-50 p-4">
+                  <input type="checkbox" checked={bidForm.inclusionCommitmentConfirmed} onChange={(e) => setBidForm(prev => ({ ...prev, inclusionCommitmentConfirmed: e.target.checked }))} className="mt-1" />
+                  <span className="text-sm text-slate-700">I confirm these inclusion commitments are part of this proposal and will be honored if the tender is awarded.</span>
+                </label>
+              </div>
             </div>
 
-            <div className="flex gap-3">
-              <button
-                onClick={() => submitBid(BidStatus.DRAFT)}
-                disabled={isBidSubmitting || !canEdit}
-                className="btn-secondary flex-1 disabled:opacity-60"
-              >
-                {isBidSubmitting ? "Saving..." : "Save Draft Version"}
+            {isSiteSpecificStage && (
+              <div className="card overflow-hidden border-slate-200">
+                <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="flex items-center gap-3">
+                      <div className={`rounded-2xl p-3 ${documentSectionComplete ? "bg-emerald-100 text-emerald-700" : "bg-slate-900 text-white"}`}>
+                        <Upload size={18} />
+                      </div>
+                      <div>
+                        <h3 className="text-lg font-bold text-slate-900">Stage 2 Supporting Documents</h3>
+                        <p className="text-sm text-slate-500">Upload the remaining proposal files used during the detailed evaluation workflow.</p>
+                      </div>
+                    </div>
+                    {documentSectionComplete ? <CheckCircle2 size={18} className="text-emerald-600" /> : <AlertTriangle size={18} className="text-amber-500" />}
+                  </div>
+                </div>
+                <div className="space-y-4 p-6">
+                  <div className="flex items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                    <span className="text-sm font-medium text-slate-700">Stage 2 document checklist</span>
+                    <span className="text-xs font-bold text-slate-500">{uploadedStageTwoDocumentCount} of {stageTwoDocuments.length} uploaded</span>
+                  </div>
+                  <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                    {stageTwoDocuments.map((doc, idx) => {
+                      const uploaded = Boolean((bidFiles as any)[doc.key]?.name || (existingStageTwoDocuments as any)[doc.key]);
+                      return (
+                        <div key={doc.key} className={`rounded-3xl border p-5 ${uploaded ? "border-emerald-200 bg-emerald-50" : "border-slate-200 bg-white"}`}>
+                          <label htmlFor={`bid-doc-${doc.key}-${idx}`} className="cursor-pointer block">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className={`rounded-2xl p-3 ${uploaded ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>
+                                <FileText size={18} />
+                              </div>
+                              {uploaded ? <CheckCircle2 size={18} className="text-emerald-600" /> : <Upload size={18} className="text-slate-400" />}
+                            </div>
+                            <p className="mt-4 text-sm font-bold text-slate-900">{doc.label}</p>
+                            <p className="mt-1 text-xs text-slate-500">{doc.hint}</p>
+                            <p className="mt-3 text-xs font-medium text-slate-500">{uploaded ? "Uploaded and ready" : "Click to upload"}</p>
+                          </label>
+                          <input
+                            id={`bid-doc-${doc.key}-${idx}`}
+                            type="file"
+                            accept=".pdf,.docx,.xlsx"
+                            className="hidden"
+                            onChange={(e) => setBidFiles(prev => ({ ...prev, [doc.key]: e.target.files?.[0] || null }))}
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div className="card">
+              <div className="border-b border-slate-100 p-6">
+                <div className="flex items-center justify-between gap-4">
+                  <div className="flex items-center gap-3">
+                    <div className={`rounded-2xl p-3 ${narrativeSectionComplete ? "bg-emerald-100 text-emerald-700" : "bg-slate-900 text-white"}`}>
+                      <Settings size={18} />
+                    </div>
+                    <div>
+                      <h3 className="text-lg font-bold text-slate-900">Section E: Project Narrative (Concept Note)</h3>
+                      <p className="text-sm text-slate-500">Stage 1 uses this concept note as the main narrative gate for shortlisting.</p>
+                    </div>
+                  </div>
+                  {narrativeSectionComplete ? <CheckCircle2 size={18} className="text-emerald-600" /> : <AlertTriangle size={18} className="text-amber-500" />}
+                </div>
+              </div>
+              <div className="space-y-4 p-6">
+                <div className="flex items-center justify-between gap-3">
+                  <label className="text-sm font-bold text-slate-700 ml-1">Concept Note {isPreQualificationStage ? "*" : ""}</label>
+                  <span className={`inline-flex rounded-full px-3 py-1 text-xs font-bold ${implementationStrategyCharCount >= 200 ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
+                    {implementationStrategyCharCount}/200 chars
+                  </span>
+                </div>
+                <textarea className="input-field min-h-[220px]" value={bidForm.conceptNote} onChange={(e) => setBidForm(prev => ({ ...prev, conceptNote: e.target.value }))} placeholder="Explain the approach, logistics, implementation sequence, and community engagement strategy for this tender." />
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+                  {isPreQualificationStage ? "This is the main Stage 1 concept note reviewed by the RMT before detailed documents are unlocked." : "Keep the narrative aligned with the approved concept and use it to give evaluators context for the detailed submission."}
+                </div>
+              </div>
+            </div>
+
+            {isSiteSpecificStage && (
+              <div className="card overflow-hidden border-slate-200">
+                <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
+                  <div>
+                    <h3 className="text-lg font-bold text-slate-900">Section F: Optional Summaries</h3>
+                    <p className="text-sm text-slate-500">These summaries help evaluators scan the proposal quickly.</p>
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 gap-4 p-6 md:grid-cols-2">
+                  <div className="space-y-1">
+                    <label className="text-sm font-bold text-slate-700 ml-1">Technical Summary</label>
+                    <textarea className="input-field min-h-[140px]" value={bidForm.technicalProposal} onChange={(e) => setBidForm(prev => ({ ...prev, technicalProposal: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-sm font-bold text-slate-700 ml-1">Financial Summary</label>
+                    <textarea className="input-field min-h-[140px]" value={bidForm.financialProposal} onChange={(e) => setBidForm(prev => ({ ...prev, financialProposal: e.target.value }))} />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {bidSubmitError && (
+              <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 font-medium">
+                {bidSubmitError}
+              </div>
+            )}
+            <div className="flex flex-col gap-3 sm:flex-row">
+              <button onClick={() => submitBid(BidStatus.DRAFT)} disabled={isBidSubmitting || !canEdit} className="btn-secondary flex-1 py-3 disabled:opacity-60">
+                {isBidSubmitting ? "Saving..." : "Save Draft"}
               </button>
               <button
-                onClick={() => submitBid(BidStatus.SUBMITTED)}
+                onClick={() => {
+                  setBidSubmissionConfirmed(false);
+                  setBidConfirmOpen(true);
+                }}
                 disabled={isBidSubmitting || !canEdit}
-                className="btn-primary flex-1 disabled:opacity-60"
+                className="btn-primary flex-1 py-3 disabled:opacity-60"
               >
                 {isBidSubmitting ? "Submitting..." : "Submit Final Proposal"}
               </button>
             </div>
           </div>
 
-          <div className="space-y-6">
+          <div className="space-y-6 xl:sticky xl:top-6 xl:self-start">
+            <div className="card p-6">
+              <div className="flex items-center gap-3">
+                <div className="rounded-2xl bg-emerald-100 p-3 text-emerald-700">
+                  <CheckCircle2 size={18} />
+                </div>
+                <div>
+                  <h3 className="font-bold text-slate-900">Submission Summary</h3>
+                  <p className="text-sm text-slate-500">See what is ready and what still needs work before final submission.</p>
+                </div>
+              </div>
+              <div className="mt-5 space-y-3">
+                {proposalSections.map((section) => {
+                  const Icon = section.icon;
+                  return (
+                    <div key={section.id} className="flex items-center gap-3 rounded-2xl border border-slate-200 px-4 py-3">
+                      <div className={`rounded-xl p-2 ${section.complete ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
+                        <Icon size={15} />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-bold text-slate-900">{section.label}</p>
+                        <p className="truncate text-xs text-slate-500">{section.note}</p>
+                      </div>
+                      {section.complete ? <CheckCircle2 size={16} className="text-emerald-600" /> : <Clock size={16} className="text-amber-500" />}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="card p-6">
+              <h3 className="font-bold text-slate-900">Proposal Snapshot</h3>
+              <div className="mt-4 space-y-3 text-sm">
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-500">Project value</span>
+                  <span className="font-bold text-slate-900">LSL {totalProjectValue.toLocaleString()}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-500">Subsidy ask</span>
+                  <span className="font-bold text-slate-900">LSL {subsidyValue.toLocaleString()}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-500">Co-financing</span>
+                  <span className="font-bold text-slate-900">LSL {coFinancingValue.toLocaleString()}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-500">{isPreQualificationStage ? "Implementation strategy" : "Configured sites"}</span>
+                  <span className="font-bold text-slate-900">{isPreQualificationStage ? `${implementationStrategyCharCount} chars` : `${stageTwoSiteRows.length} site${stageTwoSiteRows.length === 1 ? "" : "s"}`}</span>
+                </div>
+              </div>
+            </div>
+
             <div className="card p-6">
               <h3 className="font-bold text-slate-900 mb-4">Version History</h3>
               {versionsSorted.length === 0 && (
@@ -7937,69 +9702,80 @@ const VendorDashboard = ({
               )}
               <div className="space-y-3">
                 {versionsSorted.map((version) => (
-                  <div key={version.id} className="p-3 border border-slate-200 rounded-lg">
-                    <div className="flex items-center justify-between">
+                  <div key={version.id} className="rounded-2xl border border-slate-200 p-4">
+                    <div className="flex items-start justify-between gap-4">
                       <div>
                         <p className="text-sm font-bold text-slate-900">Version {version.version_number}</p>
                         <p className="text-xs text-slate-500">{version.status}</p>
                       </div>
-                      <button
-                        onClick={() => useBidVersion(version)}
-                        className="text-emerald-600 text-xs font-bold"
-                      >
-                        Use Version
-                      </button>
+                      <button onClick={() => useBidVersion(version)} className="text-emerald-600 text-xs font-bold">Use Version</button>
                     </div>
                     {version.submitted_at && (
-                      <p className="text-[10px] text-slate-400 mt-2">
-                        Submitted: {new Date(version.submitted_at).toLocaleString()}
-                      </p>
+                      <p className="mt-2 text-[11px] text-slate-400">Saved: {new Date(version.submitted_at).toLocaleString()}</p>
                     )}
-                    <div className="mt-3 space-y-1 text-[11px]">
-                        {[
-                          { label: "Technical Proposal", url: version.technical_proposal_file },
-                          { label: "Financial Proposal", url: version.financial_proposal_file },
-                          { label: "BOQ", url: version.boq_file },
-                          { label: "Gender Action Plan", url: version.gender_action_plan_file },
-                          { label: "Implementation Plan", url: version.implementation_plan_file },
-                          { label: "Reporting Templates", url: version.reporting_templates_file },
-                        ].filter(doc => Boolean(doc.url)).length === 0 ? (
-                        <p className="text-slate-400">No documents uploaded.</p>
-                      ) : (
-                        <div className="flex flex-wrap gap-2">
-                          {[
-                            { label: "Technical Proposal", url: version.technical_proposal_file },
-                            { label: "Financial Proposal", url: version.financial_proposal_file },
-                            { label: "BOQ", url: version.boq_file },
-                            { label: "Gender Action Plan", url: version.gender_action_plan_file },
-                            { label: "Implementation Plan", url: version.implementation_plan_file },
-                            { label: "Reporting Templates", url: version.reporting_templates_file },
-                          ]
-                            .filter(doc => Boolean(doc.url))
-                            .map(doc => (
-                              <a
-                                key={doc.label}
-                                href={doc.url as string}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="px-2 py-1 rounded-full bg-slate-100 text-slate-600 hover:text-emerald-700 hover:bg-emerald-50"
-                              >
-                                {doc.label}
-                              </a>
-                            ))}
-                        </div>
-                      )}
-                    </div>
                   </div>
                 ))}
               </div>
             </div>
+
             <div className="card p-6">
               <h3 className="font-bold text-slate-900 mb-3">Tender Deadline</h3>
-              <p className="text-sm text-slate-600">{bidTender.lastDateSubmission || bidTender.deadline}</p>
+              <div className="flex items-center gap-3 rounded-2xl bg-slate-50 px-4 py-4">
+                <div className="rounded-xl bg-slate-900 p-2 text-white">
+                  <Calendar size={16} />
+                </div>
+                <div>
+                  <p className="text-sm font-bold text-slate-900">{bidDeadlineCountdown}</p>
+                  <p className="text-xs text-slate-500">{bidTender.lastDateSubmission || bidTender.deadline}</p>
+                </div>
+              </div>
             </div>
           </div>
         </div>
+
+        {bidConfirmOpen && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+            <div className="bg-white rounded-2xl max-w-md w-full p-6">
+              <h3 className="text-lg font-bold text-slate-900 mb-2">Confirm Final Submission</h3>
+              <div className="space-y-3 text-sm text-slate-600">
+                <p>You are about to submit the final proposal. Once submitted, the form will be locked.</p>
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                  <div className="flex items-center justify-between"><span>Bid Amount</span><span className="font-bold text-slate-900">LSL {totalProjectValue.toLocaleString()}</span></div>
+                  <div className="mt-2 flex items-center justify-between"><span>Stage</span><span className="font-bold text-slate-900">{bidStageLabel}</span></div>
+                  <div className="mt-2 flex items-center justify-between"><span>Sites</span><span className="font-bold text-slate-900">{bidSiteCount}</span></div>
+                  <div className="mt-2 flex items-center justify-between"><span>Documents</span><span className="font-bold text-slate-900">{uploadedStageTwoDocumentCount} of 6 uploaded</span></div>
+                  <div className="mt-2 flex items-center justify-between"><span>Inclusion</span><span className="font-bold text-slate-900">{bidForm.femaleTargetPct || 0}% / {bidForm.vulnerableTargetPct || 0}% / {bidForm.lowIncomeTargetPct || 0}%</span></div>
+                </div>
+                {isSiteSpecificStage && uploadedStageTwoDocumentCount < 6 && (
+                  <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-amber-800">
+                    Warning: some required documents are still missing.
+                  </div>
+                )}
+                <label className="flex items-start gap-3 rounded-xl border border-slate-200 p-3">
+                  <input type="checkbox" checked={bidSubmissionConfirmed} onChange={(e) => setBidSubmissionConfirmed(e.target.checked)} className="mt-1" />
+                  <span>I confirm this proposal is complete and ready for final submission.</span>
+                </label>
+              </div>
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setBidConfirmOpen(false)}
+                  className="flex-1 btn-secondary"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => {
+                    submitBid(BidStatus.SUBMITTED);
+                  }}
+                  disabled={!bidSubmissionConfirmed}
+                  className="flex-1 btn-primary"
+                >
+                  Confirm &amp; Submit
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -8037,6 +9813,9 @@ const VendorDashboard = ({
         </div>
 
         <div className="card p-8">
+          <div className="mb-6 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">
+            Claim approval chain: Vendor submission, then RMT verification, then TAC approval, then PSC payment approval.
+          </div>
           <form onSubmit={handleSubmitClaim} className="space-y-8">
             {claimStep === 1 && (
               <div className="space-y-6">
@@ -8333,7 +10112,7 @@ const VendorDashboard = ({
             <div>
               <p className="text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-400">Contract Workflow</p>
               <h3 className="text-2xl font-bold text-slate-900 mt-2">Contracting & Project Setup</h3>
-              <p className="text-sm text-slate-500">After final award, the generated PBA appears here. Download it, review the locked Annexes A-E, sign it digitally or by scanned wet-signature PDF, upload it, and wait for final admin approval.</p>
+              <p className="text-sm text-slate-500">After final award, the generated PBA appears here. Download it, review the locked Annexes A-E, sign it digitally or by scanned wet-signature PDF, upload it, and wait for RMT approval before project setup opens.</p>
             </div>
             <div className="flex flex-wrap gap-2 text-[11px]">
               <span className="badge bg-slate-100 text-slate-700">Generated</span>
@@ -8347,7 +10126,11 @@ const VendorDashboard = ({
         <div className="p-6">
           {sortedContracts.length === 0 && (
             <div className="rounded-2xl border border-dashed border-slate-200 bg-white/70 p-8 text-sm text-slate-500">
-              No contracts available yet. You will be notified after award.
+              {awardedBidPendingContract
+                ? "Final award has been recorded for your bid, but the contract package is not visible yet. Refresh in a moment and check again."
+                : intentToAwardPendingFinal
+                  ? "An Intent to Award has been issued for your bid. The contract will appear here after the final award is confirmed."
+                  : "No contracts available yet. You will be notified after award."}
             </div>
           )}
 
@@ -8360,6 +10143,7 @@ const VendorDashboard = ({
                       <p className="text-xs font-semibold text-slate-400">Contract Reference</p>
                       <p className="text-base font-bold text-slate-900">{contract.referenceNumber}</p>
                       <p className="text-xs text-slate-500 mt-1">Status: {contract.status}</p>
+                      <p className="text-xs text-slate-500">Signature: {contract.signatureStatus || "awaiting"}</p>
                     </div>
                     <span className={`badge ${contractTone(contract.status)}`}>{contract.status}</span>
                   </div>
@@ -8409,7 +10193,7 @@ const VendorDashboard = ({
 
                   {contract.status === "Generated" && (
                     <div className="mt-5 space-y-3">
-                      <label className="text-xs font-semibold text-slate-600">Upload signed agreement</label>
+                      <label className="text-xs font-semibold text-slate-600">Upload Signed Contract</label>
                       <input
                         type="file"
                         accept=".pdf,application/pdf"
@@ -8422,6 +10206,7 @@ const VendorDashboard = ({
                       <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600 space-y-1">
                         <p className="font-semibold text-slate-700">Locked Contract Annexes</p>
                         <p>Upload a signed PDF only. Digitally signed PDFs and scanned wet-signature PDFs are both accepted.</p>
+                        <p>Maximum file size: 10MB.</p>
                         <p>After upload, the admin will review and finalize the contract before the project becomes active.</p>
                         <p>Annex A: {contract.annexAFile ? "Results Framework from the awarded Gender Action Plan is attached" : "Missing"}</p>
                         <p>Annex B: {contract.annexBFile ? "Implementation Schedule from the awarded Implementation Plan is attached" : "Missing"}</p>
@@ -8434,16 +10219,16 @@ const VendorDashboard = ({
                         disabled={isContractSubmitting}
                         className="btn-primary px-6 disabled:opacity-60"
                       >
-                        {isContractSubmitting ? "Uploading..." : "Submit Signed PBA"}
+                        {isContractSubmitting ? "Submitting..." : "Submit"}
                       </button>
                     </div>
                   )}
 
                   {contract.status === "Submitted" && (
-                    <p className="mt-5 text-xs text-amber-700">Signed agreement uploaded successfully. Admin can now review the complete package and finalize the contract.</p>
+                    <p className="mt-5 text-xs text-amber-700">Signed contract submitted successfully. RMT can now open the review screen, read the uploaded PDF, and approve the contract.</p>
                   )}
                   {contract.status === "Approved" && (
-                    <p className="mt-5 text-xs text-emerald-700">Contract finalized. The project is now active, the mobilization payment request has been queued, and installation reporting access is enabled.</p>
+                    <p className="mt-5 text-xs text-emerald-700">Contract approved. The vendor project is active, milestone assignments are saved, and you can now complete project setup to unlock Milestone 1.</p>
                   )}
                   {contract.status === "Rejected" && (
                     <p className="mt-5 text-xs text-rose-600">Rejected: {contract.rejectionReason || "Please contact admin."}</p>
@@ -8549,6 +10334,14 @@ const VendorDashboard = ({
         <StatCard label="Average KPI Score" value={`${averageKpiScore}%`} icon={BarChart3} color="bg-blue-600" />
       </div>
 
+      <div className="card p-6">
+        <div className="mb-4">
+          <h3 className="text-lg font-bold text-slate-900">Installation Map</h3>
+          <p className="text-sm text-slate-500">Your submitted installations appear here for quick spatial review.</p>
+        </div>
+        <GisInstallationsMap projectId={projects[0]?.id} showFilters={false} height="400px" />
+      </div>
+
       <div className="card">
         <div className="p-6 border-b border-slate-100 flex items-center justify-between">
           <div>
@@ -8589,6 +10382,12 @@ const VendorDashboard = ({
               <div>
                 <p className="font-bold text-slate-900">{tender.name}</p>
                 <p className="text-xs text-slate-500">{tender.referenceNumber} • Deadline: {tender.lastDateSubmission || tender.deadline}</p>
+                {stageTwoDraftsByTender.get(tender.id) && (
+                  <p className="text-xs text-emerald-700 mt-1">Stage 2 unlocked and ready to complete.</p>
+                )}
+                {!stageTwoDraftsByTender.get(tender.id) && latestBidByTender.get(tender.id)?.status === BidStatus.SUBMITTED && (
+                  <p className="text-xs text-amber-700 mt-1">Stage 1 submitted. Awaiting technical review to unlock Stage 2.</p>
+                )}
               </div>
               <button
                 onClick={() => openBidForm(tender)}
@@ -8600,7 +10399,7 @@ const VendorDashboard = ({
                 })()}
                 className="btn-primary py-1.5 px-4 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                Submit Proposal
+                {stageTwoDraftsByTender.get(tender.id) ? "Continue Stage 2" : "Submit Proposal"}
               </button>
             </div>
           ))}
@@ -8616,37 +10415,33 @@ const VendorDashboard = ({
           <p className="text-sm text-slate-500">Track your submissions and status updates</p>
         </div>
         <div className="p-6 space-y-4">
-          {bidHistory.length === 0 && (
+          {dashboardBidGroups.length === 0 && (
             <p className="text-sm text-slate-500">No bids submitted yet.</p>
           )}
-          {bidHistory
-            .slice()
-            .sort((a, b) => (b.submitted_at || b.reviewed_at || "").localeCompare(a.submitted_at || a.reviewed_at || ""))
+          {dashboardBidGroups
             .slice(0, 8)
-            .map((bid) => {
-              const statusColor =
-                bid.status === BidStatus.SUBMITTED ? "bg-blue-100 text-blue-700" :
-                bid.status === BidStatus.UNDER_REVIEW ? "bg-amber-100 text-amber-700" :
-                bid.status === BidStatus.ACCEPTED ? "bg-emerald-100 text-emerald-700" :
-                bid.status === BidStatus.REJECTED ? "bg-rose-100 text-rose-700" :
-                "bg-slate-100 text-slate-700";
+            .map(({ display, editableDraft, latestSubmitted, versions }) => {
+              const visibleStatus = getDashboardVendorVisibleStatus(display, editableDraft, latestSubmitted);
               return (
-                <div key={bid.id} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border border-slate-100 rounded-xl p-4">
+                <div key={display.id} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border border-slate-100 rounded-xl p-4">
                   <div>
                     <p className="text-sm font-bold text-slate-900">
-                      {bid.tender_name || `Tender ${bid.tender_reference || bid.tender}`}
+                      {display.tender_name || `Tender ${display.tender_reference || display.tender}`}
                     </p>
                     <p className="text-xs text-slate-500">
-                      Ref: {bid.tender_reference || "N/A"} • Version {bid.version_number}
+                      Ref: {display.tender_reference || "N/A"} • Latest Version {versions[0]?.version_number || display.version_number}
+                    </p>
+                    <p className="text-xs text-slate-500">
+                      {display.stage_badge || display.stage || "Bid"}{editableDraft?.stage_key === "site_specific" ? " • Stage 2 draft ready" : ""}
                     </p>
                     <p className="text-xs text-slate-400">
-                      Submitted: {bid.submitted_at ? new Date(bid.submitted_at).toLocaleString() : "Draft"}
+                      {display.status === BidStatus.DRAFT ? "Last updated" : "Submitted"}: {getDashboardBidActivityTimestamp(display) ? new Date(getDashboardBidActivityTimestamp(display)).toLocaleString() : "Draft"}
                     </p>
                   </div>
                   <div className="text-right">
-                    <span className={`badge ${statusColor}`}>{bid.status}</span>
+                    <span className={`badge ${visibleStatus.color}`}>{visibleStatus.label}</span>
                     <div className="text-xs text-slate-500 mt-2">
-                      Amount: {bid.bid_amount != null ? `M ${Number(bid.bid_amount).toLocaleString()}` : "N/A"}
+                      Amount: {display.bid_amount != null ? `M ${Number(display.bid_amount).toLocaleString()}` : "N/A"}
                     </div>
                   </div>
                 </div>
@@ -8722,8 +10517,8 @@ const VendorDashboard = ({
 const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
   const isRbfPortal = mode === "rbf";
   const projectTabs = isRbfPortal
-    ? ["overview", "milestones", "payments", "documents", "updates"] as const
-    : ["overview", "milestones", "planning", "payments", "documents", "updates", "fieldwork"] as const;
+    ? ["overview", "kpi", "map", "milestones", "payments", "documents", "updates"] as const
+    : ["overview", "planning", "map", "milestones", "fieldwork", "payments", "documents", "updates"] as const;
   const createEmptyMilestoneDraft = () => ({
     name: "",
     description: "",
@@ -8740,6 +10535,10 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
   const [projectDocuments, setProjectDocuments] = useState<ProjectDocument[]>([]);
   const [portfolioReports, setPortfolioReports] = useState<InstallationReport[]>([]);
   const [installationReports, setInstallationReports] = useState<InstallationReport[]>([]);
+  const [projectAuditLogs, setProjectAuditLogs] = useState<AuditLog[]>([]);
+  const [projectAnomalyFlags, setProjectAnomalyFlags] = useState<AnomalyFlag[]>([]);
+  const [smartMeterReadings, setSmartMeterReadings] = useState<SmartMeterReading[]>([]);
+  const [selectedProjectKpi, setSelectedProjectKpi] = useState<ProjectKpiSummary | null>(null);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState("");
   const [techFilter, setTechFilter] = useState("All");
@@ -8748,14 +10547,11 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
   const [windowFilter, setWindowFilter] = useState("All");
   const [dateRangeFilter, setDateRangeFilter] = useState("All");
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
-  const [projectTab, setProjectTab] = useState<"overview" | "milestones" | "planning" | "payments" | "documents" | "updates" | "fieldwork">("overview");
-  const [deploymentPlan, setDeploymentPlan] = useState({
-    teamRoster: "",
-    equipmentPlan: "",
-    workSchedule: "",
-  });
+  const [projectTab, setProjectTab] = useState<"overview" | "kpi" | "map" | "milestones" | "planning" | "payments" | "documents" | "updates" | "fieldwork">("overview");
+  const [projectSetupDraft, setProjectSetupDraft] = useState(createEmptyProjectSetupDraft);
   const [planSaving, setPlanSaving] = useState(false);
   const [planMessage, setPlanMessage] = useState<string | null>(null);
+  const [planConnectionTesting, setPlanConnectionTesting] = useState(false);
   const [milestoneDraft, setMilestoneDraft] = useState(createEmptyMilestoneDraft);
   const [milestoneSaving, setMilestoneSaving] = useState(false);
   const [milestoneMessage, setMilestoneMessage] = useState<string | null>(null);
@@ -8765,6 +10561,7 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
   const [documentFile, setDocumentFile] = useState<File | null>(null);
   const [documentUploading, setDocumentUploading] = useState(false);
   const [documentMessage, setDocumentMessage] = useState<string | null>(null);
+  const [documentType, setDocumentType] = useState("Other");
   const [reportDraft, setReportDraft] = useState({
     serialNumber: "",
     beneficiaryId: "",
@@ -8777,6 +10574,12 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
   const [reportReceipt, setReportReceipt] = useState<File | null>(null);
   const [reportSubmitting, setReportSubmitting] = useState(false);
   const [reportMessage, setReportMessage] = useState<string | null>(null);
+  const [requestChangeMessage, setRequestChangeMessage] = useState("");
+  const [requestChangeSubmitting, setRequestChangeSubmitting] = useState(false);
+  const [meterCsvFile, setMeterCsvFile] = useState<File | null>(null);
+  const [meterCsvUploading, setMeterCsvUploading] = useState(false);
+  const [meterCsvMessage, setMeterCsvMessage] = useState<string | null>(null);
+  const [fieldworkPage, setFieldworkPage] = useState(1);
 
   const loadData = React.useCallback(async () => {
     setLoading(true);
@@ -8812,11 +10615,7 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
       setInstallationReports([]);
       return;
     }
-    setDeploymentPlan({
-      teamRoster: selectedProject.deploymentTeamRoster || "",
-      equipmentPlan: selectedProject.deploymentEquipmentPlan || "",
-      workSchedule: selectedProject.deploymentWorkSchedule || "",
-    });
+    setProjectSetupDraft(setupDraftFromProject(selectedProject));
     setPlanMessage(null);
     setMilestoneDraft(createEmptyMilestoneDraft());
     setMilestoneMessage(null);
@@ -8825,10 +10624,15 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
     setDocumentTitle("");
     setDocumentFile(null);
     setDocumentMessage(null);
+    setDocumentType("Other");
     setReportDraft({ serialNumber: "", beneficiaryId: "", gpsLat: "", gpsLng: "", meterId: "", kwhReading: "" });
     setReportPhotos([]);
     setReportReceipt(null);
     setReportMessage(null);
+    setRequestChangeMessage("");
+    setMeterCsvFile(null);
+    setMeterCsvMessage(null);
+    setFieldworkPage(1);
   }, [selectedProject]);
 
   React.useEffect(() => {
@@ -8836,9 +10640,13 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
     let active = true;
     (async () => {
       try {
-        const [docs, updates] = await Promise.all([
+        const [docs, updates, audits, flags, readings, kpi] = await Promise.all([
           fetchProjectDocuments(selectedProject.id),
           fetchProjectUpdates(selectedProject.id),
+          fetchAuditLogs(selectedProject.id),
+          fetchAnomalyFlags(selectedProject.id),
+          fetchSmartMeterReadings(selectedProject.id),
+          fetchProjectKpiSummary(selectedProject.id),
         ]);
         if (active) {
           setProjectDocuments(docs);
@@ -8846,10 +10654,18 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
             const otherProjects = prev.filter(update => update.projectId !== selectedProject.id);
             return [...updates, ...otherProjects];
           });
+          setProjectAuditLogs(audits);
+          setProjectAnomalyFlags(flags);
+          setSmartMeterReadings(readings);
+          setSelectedProjectKpi(kpi);
         }
       } catch {
         if (active) {
           setProjectDocuments([]);
+          setProjectAuditLogs([]);
+          setProjectAnomalyFlags([]);
+          setSmartMeterReadings([]);
+          setSelectedProjectKpi(null);
         }
       }
     })();
@@ -8889,7 +10705,7 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
     return map;
   }, [tenders]);
   const activeProjects = useMemo(
-    () => projects.filter(p => [ProjectStatus.INSTALLATION, ProjectStatus.VERIFICATION].includes(p.status)),
+    () => projects.filter(p => [ProjectStatus.ACTIVE, ProjectStatus.INSTALLATION, ProjectStatus.VERIFICATION].includes(p.status)),
     [projects]
   );
   const completedProjects = useMemo(
@@ -8897,7 +10713,7 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
     [projects]
   );
   const pendingProjects = useMemo(
-    () => projects.filter(p => p.status === ProjectStatus.CONTRACTING),
+    () => projects.filter(p => [ProjectStatus.CONTRACTING, ProjectStatus.SETUP_PENDING].includes(p.status)),
     [projects]
   );
   const contractValueByProject = useMemo<Map<string, number>>(() => {
@@ -8969,6 +10785,12 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
   const milestonesForProject = (projectId: string) => milestones.filter(m => m.projectId === projectId);
   const claimsForProject = (projectId: string) => claims.filter(c => c.projectId === projectId);
   const contractForProject = (projectId: string) => contracts.find(c => c.projectId === projectId);
+  const auditLogsForProject = (projectId: string) => projectAuditLogs
+    .filter(log => log.recordId === projectId || log.entityId === projectId || String(log.details?.project_id || "") === projectId)
+    .slice()
+    .sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
+  const anomalyFlagsForProject = (projectId: string) => projectAnomalyFlags.filter(flag => flag.project === projectId);
+  const smartReadingsForProject = (projectId: string) => smartMeterReadings.filter(reading => reading.projectId === projectId);
   const updatesForProject = (projectId: string) => projectUpdates
     .filter(u => u.projectId === projectId)
     .slice()
@@ -8981,6 +10803,14 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
     .filter(r => r.projectId === projectId)
     .slice()
     .sort((a, b) => (b.submittedAt || "").localeCompare(a.submittedAt || ""));
+  const handleStartClaim = (milestone: Milestone & { projectName?: string }) => {
+    const parentProject = projects.find((project) => project.id === milestone.projectId);
+    if (parentProject) {
+      setSelectedProject(parentProject);
+    }
+    setProjectTab("payments");
+    setPlanMessage(`Prepare a payment claim for ${milestone.name}.`);
+  };
   const refreshProjectUpdates = async (projectId: string) => {
     try {
       const updates = await fetchProjectUpdates(projectId);
@@ -9016,8 +10846,8 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
         return milestoneProgress(b) - milestoneProgress(a);
       })[0];
   };
-  const milestoneStatusFromProgress = (progress: number): Milestone["status"] => {
-    if (progress >= 100) return "Verified";
+  const milestoneStatusFromProgress = (progress: number): "Pending" | "Submitted" | "Verified" | "Paid" => {
+    if (progress >= 100) return "Submitted";
     if (progress > 0) return "Submitted";
     return "Pending";
   };
@@ -9111,11 +10941,12 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
   const getMilestoneDisplayName = (milestone: Milestone, index: number) =>
     `Milestone ${index + 1} - ${milestone.percentage}%${milestone.name ? ` (${milestone.name})` : ""}`;
   const getMilestoneStateLabel = (milestone: Milestone, projectId: string) => {
-    if (milestone.status === "Paid") return "PAID";
+    if (milestone.status === "paid" || milestone.status === "Paid") return "PAID";
     const relatedClaim = claimsForProject(projectId).find(claim => claim.milestoneId === milestone.id);
     if (relatedClaim && ["Pending", "Verified", "Approved"].includes(relatedClaim.status)) return relatedClaim.status.toUpperCase();
-    if (milestone.status === "Verified") return "CLAIMABLE";
-    if (milestone.status === "Submitted") return "UNDER REVIEW";
+    if (milestone.status === "claimable" || milestone.status === "Verified") return "CLAIMABLE";
+    if (milestone.status === "claimed" || milestone.status === "Submitted") return "UNDER REVIEW";
+    if (milestone.status === "pending" || milestone.status === "Pending") return "PENDING";
     return "LOCKED";
   };
   const getMilestoneStateTone = (label: string) => {
@@ -9124,6 +10955,37 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
     if (label === "UNDER REVIEW" || label === "PENDING") return "text-amber-700";
     return "text-slate-500";
   };
+  const getSetupStatusLabel = (project: Project) => (isProjectSetupComplete(project) ? "COMPLETE" : "INCOMPLETE");
+  const getSetupBannerClass = (project: Project) =>
+    isProjectSetupComplete(project)
+      ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+      : "border-rose-200 bg-rose-50 text-rose-700";
+  const getProjectStatusTone = (project: Project) => {
+    const unresolvedFlags = anomalyFlagsForProject(project.id).filter(flag => !flag.isResolved).length;
+    if (project.status === ProjectStatus.COMPLETED) return { label: "Completed", className: "bg-slate-200 text-slate-700" };
+    if (unresolvedFlags > 0) return { label: "Flagged", className: "bg-rose-100 text-rose-700" };
+    if (!isProjectSetupComplete(project)) return { label: "Setup Incomplete", className: "bg-orange-100 text-orange-700" };
+    if (selectedProjectKpi && selectedProjectKpi.project.id === project.id) {
+      const atRisk = !selectedProjectKpi.installation_progress.on_track || !selectedProjectKpi.uptime_kpi.met || !selectedProjectKpi.energy_kpi.on_track;
+      if (atRisk) return { label: "At Risk", className: "bg-amber-100 text-amber-700" };
+    }
+    return { label: "Active", className: "bg-emerald-100 text-emerald-700" };
+  };
+  const currentMilestoneEligibility = (projectId: string) => {
+    if (!selectedProjectKpi || selectedProjectKpi.project.id !== projectId) return {};
+    return selectedProjectKpi.milestone_eligibility || {};
+  };
+  const getMilestoneConditions = (projectId: string, milestoneNumber?: number) => {
+    const key = `milestone_${milestoneNumber || 1}`;
+    const entry = currentMilestoneEligibility(projectId)[key];
+    return entry?.conditions || {};
+  };
+  const getMilestoneConditionText = (projectId: string, milestoneNumber?: number) => {
+    const conditions = Object.entries(getMilestoneConditions(projectId, milestoneNumber));
+    if (conditions.length === 0) return ["No eligibility conditions available yet."];
+    return conditions.map(([key, met]) => `${met ? "✅" : "❌"} ${key.replace(/_/g, " ")}`);
+  };
+  const latestAuditForProject = (projectId: string) => auditLogsForProject(projectId)[0];
   const exportRmtProjectsCsv = () => {
     const header = [
       "project_id",
@@ -9165,25 +11027,66 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
     triggerDownload("rbf_projects_rmt.csv", [header.join(","), ...rows].join("\n"), "text/csv;charset=utf-8");
   };
 
-  const handleSaveDeploymentPlan = async () => {
+  const handleSaveDeploymentPlan = async (mode: "draft" | "submit") => {
     if (!selectedProject) return;
     setPlanSaving(true);
     setPlanMessage(null);
     try {
-      const updated = await updateProject(selectedProject.id, {
-        deploymentTeamRoster: deploymentPlan.teamRoster,
-        deploymentEquipmentPlan: deploymentPlan.equipmentPlan,
-        deploymentWorkSchedule: deploymentPlan.workSchedule,
-      });
+      const payload = {
+        siteStatus: projectSetupDraft.siteStatus,
+        workScheduleStart: projectSetupDraft.workScheduleStart,
+        workScheduleEnd: projectSetupDraft.workScheduleEnd,
+        deviceModel: projectSetupDraft.deviceModel,
+        deviceBrand: projectSetupDraft.deviceBrand,
+        techTier: projectSetupDraft.techTier ? Number(projectSetupDraft.techTier) : undefined,
+        meterApiEndpoint: projectSetupDraft.meterApiEndpoint,
+        meterApiToken: projectSetupDraft.meterApiToken,
+        manualVerificationConfirmed: projectSetupDraft.manualVerificationConfirmed,
+        checklistTeamReady: projectSetupDraft.checklistTeamReady,
+        checklistEquipmentReady: projectSetupDraft.checklistEquipmentReady,
+        checklistSiteReady: projectSetupDraft.checklistSiteReady,
+        checklistSafetyReady: projectSetupDraft.checklistSafetyReady,
+        checklistLogisticsReady: projectSetupDraft.checklistLogisticsReady,
+        teamRosterFile: projectSetupDraft.teamRosterFile,
+        equipmentPlanFile: projectSetupDraft.equipmentPlanFile,
+        complianceDocsFile: projectSetupDraft.complianceDocsFile,
+        insuranceCertificateFile: projectSetupDraft.insuranceCertificateFile,
+      };
+      const updated = mode === "submit"
+        ? await submitProjectSetup(selectedProject.id, payload)
+        : await saveProjectSetupDraft(selectedProject.id, payload);
       setSelectedProject(updated);
       setProjects(prev => prev.map(p => (p.id === updated.id ? updated : p)));
       await refreshProjectUpdates(updated.id);
-      setPlanMessage("Deployment plan saved.");
+      setProjectSetupDraft(setupDraftFromProject(updated));
+      setPlanMessage(
+        isProjectSetupComplete(updated)
+          ? "Project setup submitted. Installation submission is now unlocked and RMT has been notified."
+          : "Project setup draft saved. Complete every section to activate the project."
+      );
     } catch (err: any) {
       const raw = String(err?.message || "");
-      setPlanMessage(toFriendlyApiMessage(raw) || "Unable to save deployment plan.");
+      setPlanMessage(toFriendlyApiMessage(raw) || "Unable to save project setup.");
     } finally {
       setPlanSaving(false);
+    }
+  };
+
+  const handleTestSetupConnection = async () => {
+    if (!selectedProject) return;
+    setPlanConnectionTesting(true);
+    setPlanMessage(null);
+    try {
+      const result = await testProjectSetupConnection(selectedProject.id, {
+        meterApiEndpoint: projectSetupDraft.meterApiEndpoint,
+        meterApiToken: projectSetupDraft.meterApiToken,
+      });
+      setPlanMessage(result.message);
+    } catch (err: any) {
+      const raw = String(err?.message || "");
+      setPlanMessage(toFriendlyApiMessage(raw) || "Unable to test the meter API connection.");
+    } finally {
+      setPlanConnectionTesting(false);
     }
   };
 
@@ -9306,13 +11209,14 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
     try {
       const uploaded = await uploadProjectDocument({
         projectId: selectedProject.id,
-        title: documentTitle.trim(),
+        title: [documentType, documentTitle.trim()].filter(Boolean).join(" — "),
         file: documentFile,
       });
       setProjectDocuments(prev => [uploaded, ...prev]);
       await refreshProjectUpdates(selectedProject.id);
       setDocumentTitle("");
       setDocumentFile(null);
+      setDocumentType("Other");
       setDocumentMessage("Document uploaded.");
     } catch (err: any) {
       const raw = String(err?.message || "");
@@ -9350,18 +11254,66 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
         receiptFile: reportReceipt,
         photoFiles: reportPhotos,
       });
-      setInstallationReports(prev => [created, ...prev]);
+      setInstallationReports(prev => [created.report, ...prev]);
       await refreshProjectUpdates(selectedProject.id);
       setReportDraft({ serialNumber: "", beneficiaryId: "", gpsLat: "", gpsLng: "", meterId: "", kwhReading: "" });
       setReportPhotos([]);
       setReportReceipt(null);
-      setReportMessage("Installation report submitted.");
+      setReportMessage(created.warning || "Installation report submitted.");
     } catch (err: any) {
       const raw = String(err?.message || "");
       setReportMessage(toFriendlyApiMessage(raw) || "Unable to submit installation report.");
     } finally {
       setReportSubmitting(false);
     }
+  };
+
+  const handleRequestSetupChange = async () => {
+    if (!selectedProject) return;
+    setRequestChangeSubmitting(true);
+    setPlanMessage(null);
+    try {
+      const response = await requestProjectSetupChange(selectedProject.id, requestChangeMessage.trim());
+      setPlanMessage(response.message);
+      setRequestChangeMessage("");
+      await refreshProjectUpdates(selectedProject.id);
+    } catch (err: any) {
+      const raw = String(err?.message || "");
+      setPlanMessage(toFriendlyApiMessage(raw) || "Unable to request a setup change.");
+    } finally {
+      setRequestChangeSubmitting(false);
+    }
+  };
+
+  const handleUploadMeterCsv = async () => {
+    if (!selectedProject || !meterCsvFile) return;
+    setMeterCsvUploading(true);
+    setMeterCsvMessage(null);
+    try {
+      const result = await uploadProjectMeterCsv(selectedProject.id, meterCsvFile);
+      setMeterCsvMessage(`Uploaded successfully. ${result.rows_ingested} rows ingested.`);
+      setMeterCsvFile(null);
+      const [readings, logs] = await Promise.all([
+        fetchSmartMeterReadings(selectedProject.id),
+        fetchAuditLogs(selectedProject.id),
+      ]);
+      setSmartMeterReadings(readings);
+      setProjectAuditLogs(logs);
+      await refreshProjectUpdates(selectedProject.id);
+    } catch (err: any) {
+      const raw = String(err?.message || "");
+      setMeterCsvMessage(toFriendlyApiMessage(raw) || "Unable to upload meter CSV.");
+    } finally {
+      setMeterCsvUploading(false);
+    }
+  };
+
+  const downloadMeterCsvTemplate = () => {
+    triggerDownload(
+      "meter_data_template.csv",
+      "meter_id,installation_id,recorded_at,kwh_generated,uptime_pct\nMETER-001,,2026-04-01T08:00:00Z,12.5,98.7\n",
+      "text/csv;charset=utf-8"
+    );
   };
 
   const handleGenerateProjectReport = (project: Project) => {
@@ -9599,750 +11551,716 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
     );
   };
 
-  const renderProjectDetail = (project: Project) => (
-    isRbfPortal ? renderRmtProjectDetail(project) :
-    <div className="mt-5 rounded-3xl border border-slate-100 bg-white shadow-[0_30px_70px_-55px_rgba(15,23,42,0.7)] overflow-hidden">
-      <div className="p-5 border-b border-slate-100 bg-[linear-gradient(120deg,#f8fafc_0%,#f1f5f9_45%,#ffffff_100%)] space-y-4">
-        <div>
-          <p className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Project Details</p>
-          <p className="text-sm text-slate-600 mt-1">
-            {isRbfPortal
-              ? "Choose a section below to review implementation, payments, documents, and recent project activity."
-              : "Choose a section below to add or view information for this project."}
-          </p>
-        </div>
-        <div className="flex items-center gap-2 overflow-x-auto pb-1">
-          {projectTabs.map(tab => (
-            <button
-              key={tab}
-              onClick={() => setProjectTab(tab as typeof projectTab)}
-              className={`text-xs font-semibold rounded-full px-4 py-2 border transition whitespace-nowrap ${
-                projectTab === tab
-                  ? "bg-emerald-600 text-white border-emerald-600 shadow-sm"
-                  : "bg-white text-slate-600 border-slate-200 hover:border-slate-300"
-              }`}
-            >
-              {tab === "fieldwork" ? "Field Work" : tab.charAt(0).toUpperCase() + tab.slice(1)}
-            </button>
-          ))}
-        </div>
-        {!isRbfPortal && (
-          <div className="flex flex-wrap gap-2 text-[11px]">
-            <button
-              onClick={() => setProjectTab("milestones")}
-              className="px-3 py-1.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-100 font-semibold"
-            >
-              Add Milestone
-            </button>
-            <button
-              onClick={() => setProjectTab("documents")}
-              className="px-3 py-1.5 rounded-full bg-slate-100 text-slate-700 border border-slate-200 font-semibold"
-            >
-              Upload Document
-            </button>
-            <button
-              onClick={() => setProjectTab("updates")}
-              className="px-3 py-1.5 rounded-full bg-slate-100 text-slate-700 border border-slate-200 font-semibold"
-            >
-              View Updates
-            </button>
-            <button
-              onClick={() => setProjectTab("fieldwork")}
-              className="px-3 py-1.5 rounded-full bg-blue-50 text-blue-700 border border-blue-100 font-semibold"
-            >
-              Report Installation
-            </button>
-          </div>
-        )}
-      </div>
-      <div className="px-6 pt-5">
-        {isRbfPortal && (
-          <div className="mb-4 rounded-2xl border border-emerald-100 bg-emerald-50/80 p-4">
-            <p className="text-[11px] font-bold uppercase tracking-[0.24em] text-emerald-700">Assigned Vendor</p>
-            <div className="mt-2 flex flex-wrap items-center gap-3">
-              <p className="text-lg font-semibold text-slate-900">{project.vendorName || "Unassigned Vendor"}</p>
-              <span className="rounded-full border border-emerald-200 bg-white px-3 py-1 text-xs font-medium text-emerald-700">
-                Vendor ID: {project.vendorId || "N/A"}
-              </span>
+  const renderProjectDetail = (project: Project) => {
+    if (isRbfPortal) return renderRmtProjectDetail(project);
+
+    const projectMilestones = milestonesForProject(project.id).slice().sort((a, b) => (a.milestoneNumber || 0) - (b.milestoneNumber || 0));
+    const projectClaims = claimsForProject(project.id);
+    const contract = contractForProject(project.id);
+    const projectReports = reportsForProject(project.id);
+    const projectAuditTrail = auditLogsForProject(project.id);
+    const projectDocumentsList = documentsForProject(project.id);
+    const verifiedCount = projectReports.filter(report => report.status === "Verified").length;
+    const flaggedCount = projectReports.filter(report => report.status === "Flagged").length;
+    const pendingCount = projectReports.filter(report => report.status === "Submitted").length;
+    const targetInstallations = Number(project.targetInstallations || 0);
+    const overallProgress = typeof project.progress === "number" ? project.progress : 0;
+    const setupComplete = isProjectSetupComplete(project);
+    const setupReadOnly = Boolean(project.projectSetup?.setupCompletedAt);
+    const planningReadOnly = setupReadOnly;
+    const statusTone = getProjectStatusTone(project);
+    const contractValue = Number(project.contractValue ?? budgetForProject(project) ?? 0);
+    const paidAmount = projectClaims.filter(claim => claim.status === "Paid").reduce((sum, claim) => sum + Number(claim.claimAmount || 0), 0);
+    const pendingAmount = projectClaims
+      .filter(claim => claim.status !== "Paid" && claim.status !== "Rejected")
+      .reduce((sum, claim) => sum + Number(claim.claimAmount || 0), 0);
+    const nextMilestone = nextOpenMilestoneForProject(project.id);
+    const latestAudit = latestAuditForProject(project.id) || project.latestAuditEntry;
+    const latestCsvAudit = projectAuditTrail.find(log => log.action === "meter_csv_uploaded");
+    const installationPageSize = 20;
+    const totalPages = Math.max(1, Math.ceil(projectReports.length / installationPageSize));
+    const safePage = Math.min(fieldworkPage, totalPages);
+    const paginatedReports = projectReports.slice((safePage - 1) * installationPageSize, safePage * installationPageSize);
+
+    const installationBadge = (report: InstallationReport) => {
+      const raw = String(report.verificationStatus || report.status || "").toLowerCase();
+      if (raw.includes("verified")) return "bg-emerald-100 text-emerald-700";
+      if (raw.includes("flagged")) return "bg-rose-100 text-rose-700";
+      if (raw.includes("partial")) return "bg-orange-100 text-orange-700";
+      return "bg-amber-100 text-amber-700";
+    };
+
+    return (
+      <div className="mt-5 overflow-hidden rounded-3xl border border-slate-100 bg-white shadow-[0_30px_70px_-55px_rgba(15,23,42,0.7)]">
+        <div className="space-y-4 border-b border-slate-100 bg-[linear-gradient(120deg,#f8fafc_0%,#f1f5f9_45%,#ffffff_100%)] p-5">
+          <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
+            <div className="space-y-3">
+              <div>
+                <p className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Project ID</p>
+                <h3 className="mt-1 text-2xl font-semibold text-slate-900">{project.projectReference || `PRJ-${project.id}`}</h3>
+                <p className="mt-1 text-base text-slate-700">{project.tenderName || project.projectTitle || "Project"}</p>
+                <p className="mt-1 text-sm text-slate-500">{project.techType || "N/A"} • District: {project.district || project.region || "N/A"}</p>
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="h-3 w-56 overflow-hidden rounded-full bg-slate-100">
+                  <div className="h-full rounded-full bg-gradient-to-r from-emerald-500 via-teal-400 to-sky-500" style={{ width: `${overallProgress}%` }} />
+                </div>
+                <span className="text-sm font-semibold text-slate-700">{overallProgress}%</span>
+                <span className={`rounded-full px-3 py-1 text-xs font-semibold ${statusTone.className}`}>{statusTone.label}</span>
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <a
+                href={toFileUrl(contract?.signedFile || project.contractSignedFile) || "#"}
+                target="_blank"
+                rel="noreferrer"
+                className={`btn-secondary text-xs ${toFileUrl(contract?.signedFile || project.contractSignedFile) ? "" : "pointer-events-none opacity-50"}`}
+              >
+                View Contract
+              </a>
+              <button onClick={() => setProjectTab("documents")} className="btn-secondary text-xs">Upload Document</button>
+              <button onClick={() => setProjectTab("planning")} className="btn-secondary text-xs">Complete Setup</button>
+              <button
+                onClick={() => setProjectTab("fieldwork")}
+                disabled={!setupComplete}
+                title={!setupComplete ? "Complete project setup before submitting installations." : ""}
+                className={`rounded-xl px-4 py-2 text-xs font-semibold ${setupComplete ? "bg-blue-600 text-white" : "cursor-not-allowed bg-slate-100 text-slate-400"}`}
+              >
+                Submit Installation
+              </button>
             </div>
           </div>
-        )}
-        <div className="grid grid-cols-2 gap-3 text-[11px] text-slate-500 sm:grid-cols-4">
-          {isRbfPortal && (
-            <>
-              <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
-                <p className="uppercase tracking-wider text-slate-400">Project Status</p>
-                <p className="font-semibold text-slate-700">{project.status || "N/A"}</p>
+
+          <div className="grid grid-cols-2 gap-3 text-[11px] text-slate-500 sm:grid-cols-3 xl:grid-cols-6">
+            <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">Start</p><p className="font-semibold text-slate-700">{formatDate(startDateForProject(project))}</p></div>
+            <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">End</p><p className="font-semibold text-slate-700">{formatDate(endDateForProject(project))}</p></div>
+            <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">District</p><p className="font-semibold text-slate-700">{project.district || project.region || "N/A"}</p></div>
+            <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">Budget</p><p className="font-semibold text-slate-700">{formatCurrency(project.budget ?? null)}</p></div>
+            <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">Tender</p><p className="font-semibold text-slate-700">{project.tenderReferenceNumber || "N/A"}</p></div>
+            <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">Value</p><p className="font-semibold text-slate-700">{formatCurrency(contractValue || null)}</p></div>
+          </div>
+
+          <div className="grid grid-cols-3 gap-3 text-[11px] text-slate-500">
+            <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">Milestones</p><p className="font-semibold text-slate-700">{projectMilestones.length}</p></div>
+            <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">Overall Progress</p><p className="font-semibold text-slate-700">{overallProgress}%</p></div>
+            <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">Claims</p><p className="font-semibold text-slate-700">{projectClaims.length}</p></div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3 text-[11px] text-slate-500 sm:grid-cols-4">
+            <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">Contract Ref</p><p className="font-semibold text-slate-700">{project.contractReference || "N/A"}</p></div>
+            <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">Tender Status</p><p className="font-semibold text-slate-700">{project.tenderStatus || "N/A"}</p></div>
+            <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">Start</p><p className="font-semibold text-slate-700">{formatDate(startDateForProject(project))}</p></div>
+            <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">End</p><p className="font-semibold text-slate-700">{formatDate(endDateForProject(project))}</p></div>
+          </div>
+
+          <div className="flex items-center gap-2 overflow-x-auto pb-1">
+            {projectTabs.map(tab => (
+              <button
+                key={tab}
+                onClick={() => setProjectTab(tab as typeof projectTab)}
+                className={`whitespace-nowrap rounded-full border px-4 py-2 text-xs font-semibold transition ${
+                  projectTab === tab
+                    ? "border-emerald-600 bg-emerald-600 text-white shadow-sm"
+                    : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"
+                }`}
+              >
+                {tab === "fieldwork" ? "Field Work" : tab === "map" ? "Map View" : tab === "planning" ? "Planning" : tab.charAt(0).toUpperCase() + tab.slice(1)}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="p-6">
+          {projectTab === "overview" && (
+            <div className="space-y-4">
+              {!setupComplete && (
+                <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-rose-700">
+                  <p className="font-semibold">Project Setup Required</p>
+                  <p className="mt-1 text-sm">Complete your project setup before submitting installations or claiming payments.</p>
+                  <button onClick={() => setProjectTab("planning")} className="mt-3 btn-primary text-xs">Complete Project Setup</button>
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                <div className="rounded-2xl border border-emerald-100 bg-emerald-50 p-5">
+                  <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-emerald-700">Next To Finish</p>
+                  <p className="mt-3 text-lg font-semibold text-slate-900">{nextMilestone?.name || "All milestones completed"}</p>
+                  <div className="mt-2 space-y-1 text-sm text-slate-600">
+                    {(nextMilestone ? getMilestoneConditionText(project.id, nextMilestone.milestoneNumber) : ["No outstanding milestone conditions."]).map(line => (
+                      <p key={line}>{line}</p>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
+                  <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-slate-500">What You Can Do Now</p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {!setupComplete && <button onClick={() => setProjectTab("planning")} className="btn-primary text-xs">Complete Setup</button>}
+                    {setupComplete && <button onClick={() => setProjectTab("fieldwork")} className="btn-primary text-xs">Submit Installation</button>}
+                    {nextMilestone && getMilestoneStateLabel(nextMilestone, project.id) === "CLAIMABLE" && (
+                      <button onClick={() => handleStartClaim({ ...nextMilestone, projectName: project.tenderName || project.projectReference || project.id })} className="btn-primary text-xs">
+                        Submit Milestone {nextMilestone.milestoneNumber || 1} Claim
+                      </button>
+                    )}
+                    <button onClick={() => setProjectTab("documents")} className="btn-secondary text-xs">Upload Document</button>
+                    <a href={toFileUrl(contract?.signedFile || project.contractSignedFile) || "#"} target="_blank" rel="noreferrer" className={`btn-secondary text-xs ${toFileUrl(contract?.signedFile || project.contractSignedFile) ? "" : "pointer-events-none opacity-50"}`}>View Contract</a>
+                  </div>
+                  <p className="mt-3 text-sm text-slate-500">
+                    Latest update: {latestAudit ? `${latestAudit.action}${latestAudit.notes ? ` — ${latestAudit.notes}` : ""}` : "No audit activity recorded yet"}
+                  </p>
+                </div>
               </div>
-              <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
-                <p className="uppercase tracking-wider text-slate-400">Vendor</p>
-                <p className="font-semibold text-slate-700">{project.vendorName || "N/A"}</p>
+
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
+                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-[11px] uppercase tracking-wide text-slate-500">Installations</p><p className="mt-1 text-lg font-semibold text-slate-900">{targetInstallations > 0 ? `${verifiedCount}/${targetInstallations}` : "—"}</p></div>
+                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-[11px] uppercase tracking-wide text-slate-500">Female</p><p className="mt-1 text-lg font-semibold text-slate-900">{selectedProjectKpi?.project.id === project.id && selectedProjectKpi.gender_kpi?.female_headed?.percentage != null ? `${selectedProjectKpi.gender_kpi.female_headed.percentage.toFixed(1)}%` : "—"}</p></div>
+                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-[11px] uppercase tracking-wide text-slate-500">Uptime</p><p className="mt-1 text-lg font-semibold text-slate-900">{selectedProjectKpi?.project.id === project.id ? `${selectedProjectKpi.uptime_kpi.average_uptime_pct.toFixed(1)}%` : "—"}</p></div>
+                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-[11px] uppercase tracking-wide text-slate-500">Energy</p><p className="mt-1 text-lg font-semibold text-slate-900">{selectedProjectKpi?.project.id === project.id ? `${selectedProjectKpi.energy_kpi.current_month_kwh.toLocaleString()} kWh` : "—"}</p></div>
               </div>
-            </>
+
+              <div className="space-y-3">
+                {projectMilestones.map((milestone, index) => {
+                  const label = getMilestoneStateLabel(milestone, project.id);
+                  return (
+                    <div key={milestone.id} className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
+                      <div className="flex items-center justify-between">
+                        <p className="font-semibold text-slate-900">M{milestone.milestoneNumber || index + 1} ({milestone.disbursementPct || milestone.percentage}%)</p>
+                        <p className={`text-sm font-bold ${getMilestoneStateTone(label)}`}>{label === "PAID" ? "✅ PAID" : label === "CLAIMABLE" ? "🟢 CLAIMABLE" : label === "PENDING" ? "⏳ Pending" : label}</p>
+                      </div>
+                      <div className="mt-2 space-y-1 text-sm text-slate-600">
+                        {getMilestoneConditionText(project.id, milestone.milestoneNumber).map(line => <p key={line}>{line}</p>)}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
           )}
-          <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
-            <p className="uppercase tracking-wider text-slate-400">Contract Ref</p>
-            <p className="font-semibold text-slate-700">{project.contractReference || "N/A"}</p>
-          </div>
-          <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
-            <p className="uppercase tracking-wider text-slate-400">Tender Status</p>
-            <p className="font-semibold text-slate-700">{project.tenderStatus || "N/A"}</p>
-          </div>
-          <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
-            <p className="uppercase tracking-wider text-slate-400">Start Date</p>
-            <p className="font-semibold text-slate-700">{formatDate(startDateForProject(project))}</p>
-          </div>
-          <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
-            <p className="uppercase tracking-wider text-slate-400">End Date</p>
-            <p className="font-semibold text-slate-700">{formatDate(endDateForProject(project))}</p>
-          </div>
-        </div>
-      </div>
-      <div className="p-6 space-y-4">
-        {projectTab === "overview" && (
-          <div className="space-y-4">
-            <div>
-              <h4 className="text-sm font-semibold text-slate-800">Overview</h4>
-              <p className="text-xs text-slate-500">
-                {isRbfPortal ? "See the next milestone at risk and the oversight actions available from this workspace." : "See the next thing to finish and the actions you can take right now."}
-              </p>
-            </div>
-            {isRbfPortal && (
-              <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
-                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
-                  <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Project Reference</p>
-                  <p className="mt-1 text-sm font-semibold text-slate-900">{project.projectReference || `Project ${project.id}`}</p>
-                </div>
-                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
-                  <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Assigned Vendor</p>
-                  <p className="mt-1 text-sm font-semibold text-slate-900">{project.vendorName || "N/A"}</p>
-                </div>
-                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
-                  <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Technology</p>
-                  <p className="mt-1 text-sm font-semibold text-slate-900">{project.techType || "N/A"}</p>
-                </div>
-                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
-                  <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Location</p>
-                  <p className="mt-1 text-sm font-semibold text-slate-900">{[project.region, project.district].filter(Boolean).join(", ") || "N/A"}</p>
-                </div>
-                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
-                  <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Budget</p>
-                  <p className="mt-1 text-sm font-semibold text-slate-900">
-                    {budgetForProject(project) != null ? `M ${Number(budgetForProject(project)).toLocaleString()}` : "N/A"}
-                  </p>
-                </div>
-                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
-                  <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Target Installations</p>
-                  <p className="mt-1 text-sm font-semibold text-slate-900">{formatMetricValue(project.targetInstallations)}</p>
-                </div>
-                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
-                  <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Target Beneficiaries</p>
-                  <p className="mt-1 text-sm font-semibold text-slate-900">{formatMetricValue(project.targetBeneficiaries)}</p>
-                </div>
-                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
-                  <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Target Female / Vulnerable</p>
-                  <p className="mt-1 text-sm font-semibold text-slate-900">
-                    {typeof project.targetFemalePct === "number" || typeof project.targetVulnerablePct === "number"
-                      ? `${formatMetricValue(project.targetFemalePct, "%")} / ${formatMetricValue(project.targetVulnerablePct, "%")}`
-                      : "N/A"}
-                  </p>
-                </div>
-              </div>
-            )}
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-              <div className="rounded-2xl border border-emerald-100 bg-emerald-50 p-5">
-                <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-emerald-700">Next To Finish</p>
-                <p className="mt-3 text-lg font-semibold text-slate-900">
-                  {nextOpenMilestoneForProject(project.id)?.name || "All milestones completed"}
-                </p>
-                <p className="mt-2 text-sm text-slate-600">
-                  {nextOpenMilestoneForProject(project.id)?.targetDate
-                    ? `Target date: ${formatDate(nextOpenMilestoneForProject(project.id)?.targetDate)}`
-                    : nextOpenMilestoneForProject(project.id)?.description?.trim() || "No open milestone description is available."}
-                </p>
-              </div>
-              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
-                <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-slate-500">
-                  {isRbfPortal ? "Oversight Actions" : "What You Can Do Now"}
-                </p>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <button
-                    onClick={() => setProjectTab(isRbfPortal ? "updates" : "milestones")}
-                    className="btn-primary text-xs"
-                  >
-                    {isRbfPortal ? "Review Updates" : "Update Milestones"}
-                  </button>
-                  <button
-                    onClick={() => setProjectTab("documents")}
-                    className="btn-secondary text-xs"
-                  >
-                    {isRbfPortal ? "View Documents" : "Upload Document"}
-                  </button>
-                  {!isRbfPortal && <button
-                    onClick={() => setProjectTab("fieldwork")}
-                    className="btn-secondary text-xs"
-                  >
-                    Report Field Work
-                  </button>}
-                  {isRbfPortal && <button
-                    onClick={() => setProjectTab("payments")}
-                    className="btn-secondary text-xs"
-                  >
-                    Review Payments
-                  </button>}
-                  <button
-                    onClick={() => handleGenerateProjectReport(project)}
-                    className="btn-secondary text-xs"
-                  >
-                    Generate Report
-                  </button>
-                </div>
-                <p className="mt-3 text-sm text-slate-500">
-                  Latest update: {updatesForProject(project.id)[0]?.title || "No updates recorded yet"}
-                </p>
-              </div>
-            </div>
-          </div>
-        )}
-        {projectTab === "planning" && (
-          <div className="space-y-4">
-            <div>
-              <h4 className="text-sm font-semibold text-slate-800">Deployment Planning</h4>
-              <p className="text-xs text-slate-500">
-                {isRbfPortal ? "Deployment planning is shown here for oversight only." : "Provide team, equipment, and schedule details."}
-              </p>
-            </div>
+
+          {projectTab === "planning" && (
             <div className="space-y-6">
-              <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
-                <p className="text-xs text-slate-500">
-                  {isRbfPortal
-                    ? "Core project parameters and vendor planning inputs are available here for review."
-                    : "Core project parameters are locked because they are inherited from the awarded bid and tender. Use this section to provide your deployment-level planning."}
+              <div>
+                <h4 className="text-sm font-semibold text-slate-800">Planning</h4>
+                <p className="text-xs text-slate-500">Setup: {setupReadOnly ? "Complete ✅" : "Incomplete ⚠"}</p>
+              </div>
+
+              <div className={`rounded-2xl border p-4 ${getSetupBannerClass(project)}`}>
+                <p className="text-sm font-semibold">Setup status: {getSetupStatusLabel(project)}</p>
+                <p className="mt-1 text-xs">
+                  {setupReadOnly
+                    ? "Project setup is complete. Submitted information is shown below in read-only mode."
+                    : "Complete all sections, save as draft when needed, and submit when ready."}
                 </p>
               </div>
-              <div className="grid grid-cols-1 gap-4">
-                <div className="space-y-2">
-                  <label className="text-sm font-semibold text-slate-700">Field Team Roster</label>
-                  {isRbfPortal ? (
-                    <div className="rounded-2xl border border-slate-200 bg-white p-4 text-sm text-slate-600 min-h-[90px] whitespace-pre-wrap">
-                      {deploymentPlan.teamRoster || "No field team roster has been submitted."}
-                    </div>
-                  ) : (
-                    <textarea
-                      className="input-field min-h-[90px]"
-                      placeholder="List roles, headcount, and deployment leads"
-                      value={deploymentPlan.teamRoster}
-                      onChange={(e) => setDeploymentPlan(prev => ({ ...prev, teamRoster: e.target.value }))}
-                    />
-                  )}
+
+              {setupReadOnly && (
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 space-y-3">
+                  <p className="text-sm font-semibold text-slate-800">Request Change</p>
+                  <textarea className="input-field min-h-[96px]" value={requestChangeMessage} onChange={(e) => setRequestChangeMessage(e.target.value)} placeholder="Explain what needs to be changed in the submitted setup." />
+                  <div className="flex items-center gap-3">
+                    <button onClick={handleRequestSetupChange} className="btn-secondary text-xs" disabled={requestChangeSubmitting}>
+                      {requestChangeSubmitting ? "Sending..." : "Request Change"}
+                    </button>
+                    {planMessage && <span className="text-xs text-slate-500">{planMessage}</span>}
+                  </div>
                 </div>
-                <div className="space-y-2">
-                  <label className="text-sm font-semibold text-slate-700">Equipment Sourcing Plan</label>
-                  {isRbfPortal ? (
-                    <div className="rounded-2xl border border-slate-200 bg-white p-4 text-sm text-slate-600 min-h-[90px] whitespace-pre-wrap">
-                      {deploymentPlan.equipmentPlan || "No equipment sourcing plan has been submitted."}
+              )}
+
+              <div className="grid gap-4">
+                <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-4">
+                  <div>
+                    <p className="text-sm font-semibold text-slate-800">Section A — Team & Resources</p>
+                    <p className="text-xs text-slate-500">Upload your deployment roster and sourcing plan, then complete the checklist.</p>
+                  </div>
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <div className="space-y-2">
+                      <label className="text-sm font-semibold text-slate-700">Team roster file</label>
+                      {planningReadOnly ? <a className="text-sm text-emerald-700 underline" href={project.projectSetup?.teamRosterFileUrl || "#"} target="_blank" rel="noreferrer">{project.projectSetup?.teamRosterFileUrl ? "Open uploaded file" : "No file uploaded"}</a> : <input className="input-field" type="file" accept=".pdf,.doc,.docx" onChange={(e) => setProjectSetupDraft(prev => ({ ...prev, teamRosterFile: e.target.files?.[0] || null }))} />}
                     </div>
-                  ) : (
-                    <textarea
-                      className="input-field min-h-[90px]"
-                      placeholder="Describe suppliers, lead times, and logistics"
-                      value={deploymentPlan.equipmentPlan}
-                      onChange={(e) => setDeploymentPlan(prev => ({ ...prev, equipmentPlan: e.target.value }))}
-                    />
-                  )}
+                    <div className="space-y-2">
+                      <label className="text-sm font-semibold text-slate-700">Equipment sourcing plan</label>
+                      {planningReadOnly ? <a className="text-sm text-emerald-700 underline" href={project.projectSetup?.equipmentPlanFileUrl || "#"} target="_blank" rel="noreferrer">{project.projectSetup?.equipmentPlanFileUrl ? "Open uploaded file" : "No file uploaded"}</a> : <input className="input-field" type="file" accept=".pdf,.doc,.docx" onChange={(e) => setProjectSetupDraft(prev => ({ ...prev, equipmentPlanFile: e.target.files?.[0] || null }))} />}
+                    </div>
+                  </div>
+                  <div className="grid gap-3 md:grid-cols-2">
+                    {[
+                      ["Team roster finalized", "checklistTeamReady"],
+                      ["Equipment sourcing confirmed", "checklistEquipmentReady"],
+                      ["Deployment sites confirmed", "checklistSiteReady"],
+                      ["Safety briefing completed", "checklistSafetyReady"],
+                      ["Logistics mobilization confirmed", "checklistLogisticsReady"],
+                    ].map(([label, key]) => (
+                      <label key={key} className="flex items-start gap-3 rounded-xl border border-slate-100 bg-slate-50 p-3 text-sm text-slate-700">
+                        <input
+                          type="checkbox"
+                          className="mt-1 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                          checked={Boolean((planningReadOnly ? project.projectSetup : projectSetupDraft)?.[key as keyof (ProjectSetup & typeof projectSetupDraft)])}
+                          disabled={planningReadOnly}
+                          onChange={(e) => setProjectSetupDraft(prev => ({ ...prev, [key]: e.target.checked }))}
+                        />
+                        <span>{label}</span>
+                      </label>
+                    ))}
+                  </div>
                 </div>
-                <div className="space-y-2">
-                  <label className="text-sm font-semibold text-slate-700">Work Schedule</label>
-                  {isRbfPortal ? (
-                    <div className="rounded-2xl border border-slate-200 bg-white p-4 text-sm text-slate-600 min-h-[90px] whitespace-pre-wrap">
-                      {deploymentPlan.workSchedule || "No work schedule has been submitted."}
+
+                <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-4">
+                  <div>
+                    <p className="text-sm font-semibold text-slate-800">Section B — Site Preparation</p>
+                    <p className="text-xs text-slate-500">Capture readiness, work schedule, and compliance evidence.</p>
+                  </div>
+                  <div className="grid gap-4 md:grid-cols-3">
+                    <div className="space-y-2">
+                      <label className="text-sm font-semibold text-slate-700">Site status</label>
+                      {planningReadOnly ? <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2 text-sm text-slate-700">{project.projectSetup?.siteStatus || "not_started"}</div> : (
+                        <select className="input-field" value={projectSetupDraft.siteStatus} onChange={(e) => setProjectSetupDraft(prev => ({ ...prev, siteStatus: e.target.value }))}>
+                          <option value="not_started">Not started</option>
+                          <option value="in_progress">In progress</option>
+                          <option value="ready">Ready</option>
+                        </select>
+                      )}
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-semibold text-slate-700">Work schedule start</label>
+                      {planningReadOnly ? <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2 text-sm text-slate-700">{formatDate(project.projectSetup?.workScheduleStart)}</div> : <input className="input-field" type="date" value={projectSetupDraft.workScheduleStart} onChange={(e) => setProjectSetupDraft(prev => ({ ...prev, workScheduleStart: e.target.value }))} />}
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-semibold text-slate-700">Work schedule end</label>
+                      {planningReadOnly ? <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2 text-sm text-slate-700">{formatDate(project.projectSetup?.workScheduleEnd)}</div> : <input className="input-field" type="date" value={projectSetupDraft.workScheduleEnd} onChange={(e) => setProjectSetupDraft(prev => ({ ...prev, workScheduleEnd: e.target.value }))} />}
+                    </div>
+                  </div>
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <div className="space-y-2">
+                      <label className="text-sm font-semibold text-slate-700">Permits / compliance docs</label>
+                      {planningReadOnly ? <a className="text-sm text-emerald-700 underline" href={project.projectSetup?.complianceDocsFileUrl || "#"} target="_blank" rel="noreferrer">{project.projectSetup?.complianceDocsFileUrl ? "Open uploaded file" : "No file uploaded"}</a> : <input className="input-field" type="file" accept=".pdf,.doc,.docx" onChange={(e) => setProjectSetupDraft(prev => ({ ...prev, complianceDocsFile: e.target.files?.[0] || null }))} />}
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-semibold text-slate-700">Insurance certificate</label>
+                      {planningReadOnly ? <a className="text-sm text-emerald-700 underline" href={project.projectSetup?.insuranceCertificateFileUrl || "#"} target="_blank" rel="noreferrer">{project.projectSetup?.insuranceCertificateFileUrl ? "Open uploaded file" : "No file uploaded"}</a> : <input className="input-field" type="file" accept=".pdf,.doc,.docx" onChange={(e) => setProjectSetupDraft(prev => ({ ...prev, insuranceCertificateFile: e.target.files?.[0] || null }))} />}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-4">
+                  <div>
+                    <p className="text-sm font-semibold text-slate-800">Section C — Technology Details</p>
+                    <p className="text-xs text-slate-500">Record device brand, model, and technology tier.</p>
+                  </div>
+                  <div className="grid gap-4 md:grid-cols-3">
+                    <div className="space-y-2">
+                      <label className="text-sm font-semibold text-slate-700">Device brand</label>
+                      {planningReadOnly ? <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2 text-sm text-slate-700">{project.projectSetup?.deviceBrand || "N/A"}</div> : <input className="input-field" value={projectSetupDraft.deviceBrand} onChange={(e) => setProjectSetupDraft(prev => ({ ...prev, deviceBrand: e.target.value }))} />}
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-semibold text-slate-700">Device model</label>
+                      {planningReadOnly ? <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2 text-sm text-slate-700">{project.projectSetup?.deviceModel || "N/A"}</div> : <input className="input-field" value={projectSetupDraft.deviceModel} onChange={(e) => setProjectSetupDraft(prev => ({ ...prev, deviceModel: e.target.value }))} />}
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-semibold text-slate-700">Technology tier</label>
+                      {planningReadOnly ? <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2 text-sm text-slate-700">{project.projectSetup?.techTier ?? "N/A"}</div> : (
+                        <select className="input-field" value={projectSetupDraft.techTier} onChange={(e) => setProjectSetupDraft(prev => ({ ...prev, techTier: e.target.value }))}>
+                          <option value="">Select tier</option>
+                          {[1, 2, 3, 4, 5].map(tier => <option key={tier} value={tier}>{tier}</option>)}
+                        </select>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-4">
+                  <div>
+                    <p className="text-sm font-semibold text-slate-800">Section D — Verification Method</p>
+                    <p className="text-xs text-slate-500">Assigned verification method: {project.verificationMethod || "manual"}</p>
+                  </div>
+                  {String(project.verificationMethod || "").toLowerCase() === "iot" ? (
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <div className="space-y-2">
+                        <label className="text-sm font-semibold text-slate-700">Meter API endpoint</label>
+                        {planningReadOnly ? <div className="break-all rounded-xl border border-slate-100 bg-slate-50 px-3 py-2 text-sm text-slate-700">{project.projectSetup?.meterApiEndpoint || "Not provided"}</div> : <input className="input-field" value={projectSetupDraft.meterApiEndpoint} onChange={(e) => setProjectSetupDraft(prev => ({ ...prev, meterApiEndpoint: e.target.value }))} placeholder="https://..." />}
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-sm font-semibold text-slate-700">Meter API token</label>
+                        {planningReadOnly ? <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2 text-sm text-slate-700">{project.projectSetup?.hasMeterApiToken ? "Saved" : "Not provided"}</div> : <input className="input-field" type="password" value={projectSetupDraft.meterApiToken} onChange={(e) => setProjectSetupDraft(prev => ({ ...prev, meterApiToken: e.target.value }))} placeholder={project.projectSetup?.hasMeterApiToken ? "Saved token available" : "Paste token"} />}
+                      </div>
+                      {!planningReadOnly && (
+                        <div className="md:col-span-2">
+                          <button onClick={handleTestSetupConnection} className="btn-secondary text-xs" disabled={planConnectionTesting}>
+                            {planConnectionTesting ? "Testing..." : "Test Connection"}
+                          </button>
+                        </div>
+                      )}
                     </div>
                   ) : (
-                    <textarea
-                      className="input-field min-h-[90px]"
-                      placeholder="Phases, timelines, and key milestones"
-                      value={deploymentPlan.workSchedule}
-                      onChange={(e) => setDeploymentPlan(prev => ({ ...prev, workSchedule: e.target.value }))}
-                    />
+                    <label className="flex items-start gap-3 rounded-xl border border-slate-100 bg-slate-50 p-3 text-sm text-slate-700">
+                      <input
+                        type="checkbox"
+                        className="mt-1 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                        checked={planningReadOnly ? Boolean(project.projectSetup?.manualVerificationConfirmed) : projectSetupDraft.manualVerificationConfirmed}
+                        disabled={planningReadOnly}
+                        onChange={(e) => setProjectSetupDraft(prev => ({ ...prev, manualVerificationConfirmed: e.target.checked }))}
+                      />
+                      <span>I confirm the manual verification method and readiness requirements for this project.</span>
+                    </label>
                   )}
                 </div>
               </div>
-              {!isRbfPortal && (
+
+              {!planningReadOnly && (
                 <div className="flex items-center gap-3">
-                  <button
-                    onClick={handleSaveDeploymentPlan}
-                    className="btn-primary px-6"
-                    disabled={planSaving}
-                  >
-                    {planSaving ? "Saving..." : "Save Deployment Plan"}
+                  <button onClick={() => handleSaveDeploymentPlan("draft")} className="btn-secondary px-6" disabled={planSaving}>
+                    {planSaving ? "Saving..." : "Save Draft"}
+                  </button>
+                  <button onClick={() => handleSaveDeploymentPlan("submit")} className="btn-primary px-6" disabled={planSaving}>
+                    {planSaving ? "Submitting..." : "Submit Project Setup"}
                   </button>
                   {planMessage && <span className="text-sm text-slate-500">{planMessage}</span>}
                 </div>
               )}
             </div>
-          </div>
-        )}
-        {projectTab === "milestones" && (
-          <div className="space-y-4">
-            <div>
-              <h4 className="text-sm font-semibold text-slate-800">Milestones</h4>
-              <p className="text-xs text-slate-500">
-                {isRbfPortal ? "Review milestone progress and delivery status." : "Add milestones, set target dates, and track progress from one place."}
-              </p>
+          )}
+
+          {projectTab === "map" && (
+            <div className="space-y-4">
+              <div>
+                <h4 className="text-sm font-semibold text-slate-800">Map View</h4>
+                <p className="text-xs text-slate-500">See every submitted installation for this project on the GIS map.</p>
+              </div>
+              <div className="flex gap-3 text-sm">
+                <span className="rounded-full bg-emerald-100 px-3 py-1 text-emerald-700">🟢 {verifiedCount}</span>
+                <span className="rounded-full bg-amber-100 px-3 py-1 text-amber-700">🟡 {pendingCount}</span>
+                <span className="rounded-full bg-rose-100 px-3 py-1 text-rose-700">🔴 {flaggedCount}</span>
+              </div>
+              <GisInstallationsMap projectId={project.id} showFilters={true} height="500px" />
             </div>
-            {!isRbfPortal && <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4 space-y-3">
-              <div className="flex items-center justify-between">
-                <p className="text-sm font-semibold text-slate-700">Add Milestone</p>
-                <span className="text-[11px] text-slate-400">Fields marked * are required</span>
-              </div>
-              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                <div className="space-y-1">
-                  <label className="text-xs font-semibold text-slate-600">Milestone Name *</label>
-                  <input
-                    className="input-field"
-                    placeholder="e.g. Site Assessment"
-                    value={milestoneDraft.name}
-                    onChange={(e) => setMilestoneDraft(prev => ({ ...prev, name: e.target.value }))}
-                  />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-xs font-semibold text-slate-600">Target Date</label>
-                  <input
-                    className="input-field"
-                    type="date"
-                    value={milestoneDraft.targetDate}
-                    onChange={(e) => setMilestoneDraft(prev => ({ ...prev, targetDate: e.target.value }))}
-                  />
-                </div>
-                <div className="space-y-1 md:col-span-2">
-                  <label className="text-xs font-semibold text-slate-600">Description</label>
-                  <textarea
-                    className="input-field min-h-[88px]"
-                    placeholder="Briefly explain the purpose of this milestone."
-                    value={milestoneDraft.description}
-                    onChange={(e) => setMilestoneDraft(prev => ({ ...prev, description: e.target.value }))}
-                  />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-xs font-semibold text-slate-600">Progress %</label>
-                  <input
-                    className="input-field"
-                    type="number"
-                    min={0}
-                    max={100}
-                    placeholder="0"
-                    value={milestoneDraft.progressPercentage}
-                    onChange={(e) => setMilestoneDraft(prev => ({
-                      ...prev,
-                      progressPercentage: e.target.value,
-                    }))}
-                  />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-xs font-semibold text-slate-600">Completed Date</label>
-                  <input
-                    className="input-field"
-                    type="date"
-                    value={milestoneDraft.completedDate}
-                    onChange={(e) => setMilestoneDraft(prev => ({
-                      ...prev,
-                      completedDate: e.target.value,
-                      progressPercentage: e.target.value ? "100" : prev.progressPercentage,
-                    }))}
-                  />
-                </div>
-              </div>
-              <div className="flex items-center gap-3">
-                <button
-                  onClick={handleAddMilestone}
-                  className="btn-primary text-xs"
-                  disabled={milestoneSaving}
-                >
-                  {milestoneSaving ? "Saving..." : "Add Milestone"}
-                </button>
-                {milestoneMessage && <span className="text-xs text-slate-500">{milestoneMessage}</span>}
-              </div>
-            </div>}
-            <div className="space-y-3">
-              {milestonesForProject(project.id).length === 0 && (
-                <p className="text-sm text-slate-500">No milestones added yet.</p>
-              )}
-              {milestonesForProject(project.id).map(m => {
-                const badge = milestoneBadge(m);
-                const progress = milestoneProgress(m);
-                const isEditing = editingMilestoneId === m.id;
+          )}
 
-                return (
-                  <div key={m.id} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm space-y-4">
-                    <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-                      <div className="space-y-2">
+          {projectTab === "milestones" && (
+            <div className="space-y-4">
+              <div>
+                <h4 className="text-sm font-semibold text-slate-800">Milestones</h4>
+                <p className="text-xs text-slate-500">Track milestone status, eligibility conditions, and payment history.</p>
+              </div>
+              <div className="space-y-4">
+                {projectMilestones.length === 0 && <p className="text-sm text-slate-500">No milestones added yet.</p>}
+                {projectMilestones.map((milestone, index) => {
+                  const stateLabel = getMilestoneStateLabel(milestone, project.id);
+                  const relatedClaims = projectClaims.filter(claim => claim.milestoneId === milestone.id);
+                  return (
+                    <div key={milestone.id} className="rounded-2xl border border-slate-200 bg-white p-5 space-y-4 shadow-sm">
+                      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
                         <div>
-                          <p className="text-lg font-semibold text-slate-900">{m.name}</p>
-                          <p className="text-sm text-slate-500">
-                            {m.description?.trim() || "No description added yet for this milestone."}
-                          </p>
+                          <p className="text-lg font-semibold text-slate-900">{getMilestoneDisplayName(milestone, index)}</p>
+                          <p className="mt-1 text-sm text-slate-500">{milestone.description?.trim() || "Milestone progress unlocks based on project KPIs and verification conditions."}</p>
+                        </div>
+                        <div className="text-right">
+                          <span className={`rounded-full px-3 py-1 text-xs font-semibold ${stateLabel === "PAID" ? "bg-emerald-100 text-emerald-700" : stateLabel === "CLAIMABLE" ? "bg-sky-100 text-sky-700" : stateLabel === "UNDER REVIEW" ? "bg-amber-100 text-amber-700" : "bg-slate-100 text-slate-700"}`}>{stateLabel}</span>
+                          <p className="mt-2 text-sm font-semibold text-slate-900">{formatCurrency((milestone.amountLsl ?? milestone.amount) || 0)}</p>
                         </div>
                       </div>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className={`rounded-full border px-3 py-1 text-xs font-semibold ${badge.className}`}>
-                          {badge.label}
-                        </span>
-                        {!isRbfPortal && <button
-                          onClick={() => {
-                            if (isEditing) {
-                              setEditingMilestoneId(null);
-                              setMilestoneEditDraft(createEmptyMilestoneDraft());
-                              setMilestoneMessage(null);
-                            } else {
-                              beginMilestoneEdit(m);
-                            }
-                          }}
-                          className="btn-secondary py-1.5 px-3 text-xs"
-                        >
-                          {isEditing ? "Cancel" : "Edit"}
-                        </button>}
+                      <div className="grid gap-3 md:grid-cols-3">
+                        <div className="rounded-xl border border-slate-100 bg-slate-50 p-3"><p className="text-[11px] uppercase tracking-wide text-slate-500">Milestone</p><p className="mt-1 text-sm font-medium text-slate-900">{milestone.milestoneNumber || index + 1}</p></div>
+                        <div className="rounded-xl border border-slate-100 bg-slate-50 p-3"><p className="text-[11px] uppercase tracking-wide text-slate-500">Percentage</p><p className="mt-1 text-sm font-medium text-slate-900">{milestone.disbursementPct || milestone.percentage}%</p></div>
+                        <div className="rounded-xl border border-slate-100 bg-slate-50 p-3"><p className="text-[11px] uppercase tracking-wide text-slate-500">Unlocked At</p><p className="mt-1 text-sm font-medium text-slate-900">{formatDate(milestone.unlockedAt)}</p></div>
                       </div>
-                    </div>
-
-                    <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                      <div className="rounded-xl border border-slate-100 bg-slate-50 p-3">
-                        <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Target Date</p>
-                        <p className="mt-1 text-sm font-medium text-slate-900">{formatDate(m.targetDate)}</p>
-                      </div>
-                      {milestoneCompleted(m) && m.completedDate ? (
-                        <div className="rounded-xl border border-slate-100 bg-slate-50 p-3">
-                          <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Completed Date</p>
-                          <p className="mt-1 text-sm font-medium text-slate-900">{formatDate(m.completedDate)}</p>
+                      <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
+                        <p className="text-sm font-semibold text-slate-800">Conditions checklist</p>
+                        <div className="mt-2 space-y-1 text-sm text-slate-600">
+                          {getMilestoneConditionText(project.id, milestone.milestoneNumber).map(line => <p key={line}>{line}</p>)}
                         </div>
-                      ) : (
-                        <div className="rounded-xl border border-slate-100 bg-slate-50 p-3">
-                          <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Completed Date</p>
-                          <p className="mt-1 text-sm font-medium text-slate-400">Shown when the milestone reaches 100%</p>
+                      </div>
+                      {stateLabel === "CLAIMABLE" && (
+                        <button onClick={() => handleStartClaim({ ...milestone, projectName: project.tenderName || project.projectReference || project.id })} className="btn-primary text-xs">
+                          Submit Claim
+                        </button>
+                      )}
+                      {relatedClaims.length > 0 && (
+                        <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
+                          <p className="text-sm font-semibold text-slate-800">Claim history</p>
+                          <div className="mt-3 space-y-2">
+                            {relatedClaims.map(claim => (
+                              <div key={claim.id} className="flex flex-col gap-1 rounded-xl border border-slate-100 bg-white px-3 py-2 text-sm text-slate-600 md:flex-row md:items-center md:justify-between">
+                                <span>{claim.submittedAt ? new Date(claim.submittedAt).toLocaleString() : "N/A"}</span>
+                                <span>{formatCurrency(claim.claimAmount || 0)}</span>
+                                <span className="font-semibold text-slate-900">{claim.status}</span>
+                              </div>
+                            ))}
+                          </div>
                         </div>
                       )}
                     </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between text-sm">
-                        <span className="font-medium text-slate-700">Progress</span>
-                        <span className="font-semibold text-slate-900">{progress}%</span>
-                      </div>
-                      <div className="h-3 overflow-hidden rounded-full bg-slate-100">
-                        <div className={`h-full rounded-full transition-all ${badge.barClassName}`} style={{ width: `${progress}%` }} />
-                      </div>
-                    </div>
+          {projectTab === "fieldwork" && (
+            <div className="space-y-6">
+              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <h4 className="text-sm font-semibold text-slate-800">Field Work</h4>
+                  <p className="text-xs text-slate-500">Submit installations, manage meter CSV uploads, and review site submissions.</p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    onClick={handleSubmitReport}
+                    disabled={reportSubmitting || !setupComplete}
+                    title={!setupComplete ? "Complete project setup before submitting installations." : ""}
+                    className={`rounded-xl px-4 py-2 text-xs font-semibold ${setupComplete ? "bg-blue-600 text-white" : "cursor-not-allowed bg-slate-100 text-slate-400"}`}
+                  >
+                    {reportSubmitting ? "Submitting..." : "+ Submit New Installation"}
+                  </button>
+                  <button
+                    onClick={() => document.getElementById("meter-csv-upload-section")?.scrollIntoView({ behavior: "smooth", block: "start" })}
+                    className="btn-secondary text-xs"
+                  >
+                    Upload CSV Meter Data
+                  </button>
+                </div>
+              </div>
 
-                    {!isRbfPortal && isEditing && (
-                      <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4 space-y-3">
-                        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                          <div className="space-y-1">
-                            <label className="text-xs font-semibold text-slate-600">Milestone Name *</label>
-                            <input
-                              className="input-field"
-                              value={milestoneEditDraft.name}
-                              onChange={(e) => setMilestoneEditDraft(prev => ({ ...prev, name: e.target.value }))}
-                            />
-                          </div>
-                          <div className="space-y-1">
-                            <label className="text-xs font-semibold text-slate-600">Target Date</label>
-                            <input
-                              className="input-field"
-                              type="date"
-                              value={milestoneEditDraft.targetDate}
-                              onChange={(e) => setMilestoneEditDraft(prev => ({ ...prev, targetDate: e.target.value }))}
-                            />
-                          </div>
-                          <div className="space-y-1 md:col-span-2">
-                            <label className="text-xs font-semibold text-slate-600">Description</label>
-                            <textarea
-                              className="input-field min-h-[88px]"
-                              value={milestoneEditDraft.description}
-                              onChange={(e) => setMilestoneEditDraft(prev => ({ ...prev, description: e.target.value }))}
-                            />
-                          </div>
-                          <div className="space-y-1">
-                            <label className="text-xs font-semibold text-slate-600">Progress %</label>
-                            <input
-                              className="input-field"
-                              type="number"
-                              min={0}
-                              max={100}
-                              value={milestoneEditDraft.progressPercentage}
-                              onChange={(e) => setMilestoneEditDraft(prev => ({
-                                ...prev,
-                                progressPercentage: e.target.value,
-                              }))}
-                            />
-                          </div>
-                          <div className="space-y-1">
-                            <label className="text-xs font-semibold text-slate-600">Completed Date</label>
-                            <input
-                              className="input-field"
-                              type="date"
-                              value={milestoneEditDraft.completedDate}
-                              onChange={(e) => setMilestoneEditDraft(prev => ({
-                                ...prev,
-                                completedDate: e.target.value,
-                                progressPercentage: e.target.value ? "100" : prev.progressPercentage,
-                              }))}
-                            />
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-3">
-                          <button
-                            onClick={handleSaveMilestone}
-                            className="btn-primary text-xs"
-                            disabled={milestoneSaving}
-                          >
-                            {milestoneSaving ? "Saving..." : "Save Changes"}
-                          </button>
-                          <span className="text-xs text-slate-500">Update the milestone details and progress tracking fields.</span>
-                        </div>
-                      </div>
+              {!setupComplete && (
+                <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700">
+                  Submit Installation is disabled until project setup is completed.
+                </div>
+              )}
+
+              <div className="overflow-x-auto rounded-2xl border border-slate-200">
+                <table className="min-w-full divide-y divide-slate-200 text-sm">
+                  <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
+                    <tr>
+                      <th className="px-4 py-3">ID</th>
+                      <th className="px-4 py-3">Beneficiary</th>
+                      <th className="px-4 py-3">Household</th>
+                      <th className="px-4 py-3">GPS Link</th>
+                      <th className="px-4 py-3">Submitted</th>
+                      <th className="px-4 py-3">Verified By</th>
+                      <th className="px-4 py-3">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 bg-white">
+                    {paginatedReports.length === 0 && (
+                      <tr>
+                        <td colSpan={7} className="px-4 py-6 text-center text-sm text-slate-500">No installations submitted yet.</td>
+                      </tr>
                     )}
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
-        {projectTab === "payments" && (
-          <div className="space-y-4">
-            <div>
-              <h4 className="text-sm font-semibold text-slate-800">Payments</h4>
-              <p className="text-xs text-slate-500">Track claims and disbursement status.</p>
-            </div>
-            <div className="space-y-3">
-              {claimsForProject(project.id).length === 0 && (
-                <p className="text-sm text-slate-500">No payment requests logged yet.</p>
-              )}
-              {claimsForProject(project.id).map(claim => (
-                <div key={claim.id} className="rounded-xl border border-slate-100 p-4 flex items-center justify-between">
-                  <div>
-                    <p className="font-semibold text-slate-900">{claim.milestoneName || "Payment Tranche"}</p>
-                    <p className="text-xs text-slate-500">Amount: M {Number(claim.claimAmount || 0).toLocaleString()}</p>
-                  </div>
-                  <span className="badge bg-slate-100 text-slate-700">{claim.status}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-        {projectTab === "documents" && (
-          <div className="space-y-4">
-            <div>
-              <h4 className="text-sm font-semibold text-slate-800">Documents</h4>
-              <p className="text-xs text-slate-500">
-                {isRbfPortal ? "Review contract files and supporting project documents." : "Upload project files or download existing ones."}
-              </p>
-            </div>
-            {!isRbfPortal && <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4 space-y-3">
-              <div className="flex items-center justify-between">
-                <p className="text-sm font-semibold text-slate-700">Upload Document</p>
-                <span className="text-[11px] text-slate-400">PDF, XLS, DOC, images</span>
-              </div>
-              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                <input
-                  className="input-field"
-                  placeholder="Document title (optional)"
-                  value={documentTitle}
-                  onChange={(e) => setDocumentTitle(e.target.value)}
-                />
-                <input
-                  className="input-field"
-                  type="file"
-                  onChange={(e) => setDocumentFile(e.target.files?.[0] || null)}
-                />
-              </div>
-              <div className="flex items-center gap-3">
-                <button
-                  onClick={handleUploadDocument}
-                  className="btn-primary text-xs"
-                  disabled={documentUploading}
-                >
-                  {documentUploading ? "Uploading..." : "Upload Document"}
-                </button>
-                {documentMessage && <span className="text-xs text-slate-500">{documentMessage}</span>}
-              </div>
-            </div>}
-            <div className="space-y-3">
-              {contractForProject(project.id)?.signedFile && (
-                <a
-                  href={toFileUrl(contractForProject(project.id)?.signedFile)}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-emerald-700 underline"
-                >
-                  Signed Performance-Based Agreement
-                </a>
-              )}
-              {documentsForProject(project.id).length === 0 && !contractForProject(project.id)?.signedFile && (
-                <p className="text-sm text-slate-500">No documents uploaded yet.</p>
-              )}
-              {documentsForProject(project.id).map(doc => {
-                const label = doc.title || doc.file.split("/").pop() || "Project Document";
-                return (
-                  <div key={doc.id} className="rounded-xl border border-slate-100 p-4 flex items-center justify-between">
-                    <div>
-                      <p className="font-semibold text-slate-900">{label}</p>
-                      <p className="text-xs text-slate-500">
-                        Uploaded {doc.uploadedAt ? new Date(doc.uploadedAt).toLocaleString() : "N/A"}
-                        {doc.uploadedByUsername ? ` • ${doc.uploadedByUsername}` : ""}
-                      </p>
-                    </div>
-                    <a
-                      href={toFileUrl(doc.file) ?? "#"}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-emerald-700 underline text-xs"
-                    >
-                      View
-                    </a>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
-        {projectTab === "updates" && (
-          <div className="space-y-4">
-            <div>
-              <h4 className="text-sm font-semibold text-slate-800">Updates</h4>
-              <p className="text-xs text-slate-500">
-                {isRbfPortal
-                  ? "Recent project activity across milestones, documents, planning, field verification, and payments appears here automatically."
-                  : "Recent activity from milestones, planning, documents, field work, and payments appears here automatically."}
-              </p>
-            </div>
-            <div className="space-y-3">
-              {updatesForProject(project.id).length === 0 && (
-                <p className="text-sm text-slate-500">No recent updates yet. New project activity will appear here automatically.</p>
-              )}
-              {updatesForProject(project.id).map(update => (
-                <div key={update.id} className="rounded-xl border border-slate-100 p-4 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <p className="font-semibold text-slate-900">{update.title || "Project Update"}</p>
-                    <span className="text-xs text-slate-400">
-                      {update.createdAt ? new Date(update.createdAt).toLocaleString() : "N/A"}
-                    </span>
-                  </div>
-                  <p className="text-sm text-slate-600">{update.body}</p>
-                  {update.authorUsername && (
-                    <p className="text-xs text-slate-400">Posted by {update.authorUsername}</p>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-        {projectTab === "fieldwork" && (
-          <div className="space-y-4">
-            <div>
-              <h4 className="text-sm font-semibold text-slate-800">Field Work Reporting</h4>
-              <p className="text-xs text-slate-500">
-                {isRbfPortal ? "Review submitted installation evidence and verification-ready records." : "Submit installation evidence for verification."}
-              </p>
-            </div>
-            {!isRbfPortal && <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4 space-y-3">
-              <div className="flex items-center justify-between">
-                <p className="text-sm font-semibold text-slate-700">New Installation Report</p>
-                <span className="text-[11px] text-slate-400">GPS + Photo + Receipt</span>
-              </div>
-              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                <input
-                  className="input-field"
-                  placeholder="Serial number"
-                  value={reportDraft.serialNumber}
-                  onChange={(e) => setReportDraft(prev => ({ ...prev, serialNumber: e.target.value }))}
-                />
-                <input
-                  className="input-field"
-                  placeholder="Beneficiary ID (NID)"
-                  value={reportDraft.beneficiaryId}
-                  onChange={(e) => setReportDraft(prev => ({ ...prev, beneficiaryId: e.target.value }))}
-                />
-                <input
-                  className="input-field"
-                  placeholder="GPS Latitude"
-                  value={reportDraft.gpsLat}
-                  onChange={(e) => setReportDraft(prev => ({ ...prev, gpsLat: e.target.value }))}
-                />
-                <input
-                  className="input-field"
-                  placeholder="GPS Longitude"
-                  value={reportDraft.gpsLng}
-                  onChange={(e) => setReportDraft(prev => ({ ...prev, gpsLng: e.target.value }))}
-                />
-                <input
-                  className="input-field"
-                  placeholder="Smart meter ID (optional)"
-                  value={reportDraft.meterId}
-                  onChange={(e) => setReportDraft(prev => ({ ...prev, meterId: e.target.value }))}
-                />
-                <input
-                  className="input-field"
-                  placeholder="kWh reading (optional)"
-                  value={reportDraft.kwhReading}
-                  onChange={(e) => setReportDraft(prev => ({ ...prev, kwhReading: e.target.value }))}
-                />
-              </div>
-              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                <input
-                  className="input-field"
-                  type="file"
-                  multiple
-                  onChange={(e) => setReportPhotos(Array.from(e.target.files || []))}
-                />
-                <input
-                  className="input-field"
-                  type="file"
-                  onChange={(e) => setReportReceipt(e.target.files?.[0] || null)}
-                />
-              </div>
-              <div className="flex items-center gap-3">
-                <button
-                  onClick={handleSubmitReport}
-                  className="btn-primary text-xs"
-                  disabled={reportSubmitting}
-                >
-                  {reportSubmitting ? "Submitting..." : "Submit Report"}
-                </button>
-                {reportMessage && <span className="text-xs text-slate-500">{reportMessage}</span>}
-              </div>
-            </div>}
-            <div className="space-y-3">
-              {reportsForProject(project.id).length === 0 && (
-                <p className="text-sm text-slate-500">No installation reports submitted yet.</p>
-              )}
-              {reportsForProject(project.id).map(report => (
-                <div key={report.id} className="rounded-xl border border-slate-100 p-4 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <p className="font-semibold text-slate-900">Serial: {report.serialNumber}</p>
-                    <span className="badge bg-slate-100 text-slate-700">{report.status}</span>
-                  </div>
-                  <div className="text-xs text-slate-500">
-                    Beneficiary: {report.beneficiaryId} • GPS: {report.gpsLat}, {report.gpsLng}
-                  </div>
-                  <div className="flex flex-wrap gap-2 text-xs text-emerald-700">
-                    {(report.photoFiles || []).map((file, idx) => (
-                      <a key={`${report.id}-photo-${idx}`} href={toFileUrl(file) ?? "#"} target="_blank" rel="noreferrer" className="underline">
-                        Photo {idx + 1}
-                      </a>
+                    {paginatedReports.map(report => (
+                      <tr key={report.id}>
+                        <td className="px-4 py-3 text-slate-700">{report.id}</td>
+                        <td className="px-4 py-3 text-slate-700">{report.beneficiaryName || report.beneficiaryId || "N/A"}</td>
+                        <td className="px-4 py-3 text-slate-700">{report.householdType || "—"}</td>
+                        <td className="px-4 py-3">
+                          <a href={`https://www.google.com/maps?q=${report.gpsLat},${report.gpsLng}`} target="_blank" rel="noreferrer" className="text-emerald-700 underline">
+                            Open GPS
+                          </a>
+                        </td>
+                        <td className="px-4 py-3 text-slate-700">{report.submittedAt ? new Date(report.submittedAt).toLocaleString() : "N/A"}</td>
+                        <td className="px-4 py-3 text-slate-700">{report.verifiedBy || "—"}</td>
+                        <td className="px-4 py-3"><span className={`rounded-full px-3 py-1 text-xs font-semibold ${installationBadge(report)}`}>{report.verificationStatus || report.status}</span></td>
+                      </tr>
                     ))}
-                    {(report.receiptFileUrl || report.receiptFile) && (
-                      <a href={toFileUrl(report.receiptFileUrl || report.receiptFile) ?? "#"} target="_blank" rel="noreferrer" className="underline">
-                        Receipt
-                      </a>
-                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              {totalPages > 1 && (
+                <div className="flex items-center justify-between text-sm text-slate-500">
+                  <span>Page {safePage} of {totalPages}</span>
+                  <div className="flex gap-2">
+                    <button onClick={() => setFieldworkPage(page => Math.max(1, page - 1))} className="btn-secondary text-xs" disabled={safePage === 1}>Previous</button>
+                    <button onClick={() => setFieldworkPage(page => Math.min(totalPages, page + 1))} className="btn-secondary text-xs" disabled={safePage === totalPages}>Next</button>
                   </div>
                 </div>
-              ))}
+              )}
+
+              <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm font-semibold text-slate-700">New Installation Report</p>
+                  <span className="text-[11px] text-slate-400">GPS + Photo + Receipt</span>
+                </div>
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                  <input className="input-field" placeholder="Serial number" value={reportDraft.serialNumber} onChange={(e) => setReportDraft(prev => ({ ...prev, serialNumber: e.target.value }))} />
+                  <input className="input-field" placeholder="Beneficiary ID (NID)" value={reportDraft.beneficiaryId} onChange={(e) => setReportDraft(prev => ({ ...prev, beneficiaryId: e.target.value }))} />
+                  <input className="input-field" placeholder="GPS Latitude" value={reportDraft.gpsLat} onChange={(e) => setReportDraft(prev => ({ ...prev, gpsLat: e.target.value }))} />
+                  <input className="input-field" placeholder="GPS Longitude" value={reportDraft.gpsLng} onChange={(e) => setReportDraft(prev => ({ ...prev, gpsLng: e.target.value }))} />
+                  <input className="input-field" placeholder="Smart meter ID (optional)" value={reportDraft.meterId} onChange={(e) => setReportDraft(prev => ({ ...prev, meterId: e.target.value }))} />
+                  <input className="input-field" placeholder="kWh reading (optional)" value={reportDraft.kwhReading} onChange={(e) => setReportDraft(prev => ({ ...prev, kwhReading: e.target.value }))} />
+                </div>
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                  <input className="input-field" type="file" multiple onChange={(e) => setReportPhotos(Array.from(e.target.files || []))} />
+                  <input className="input-field" type="file" onChange={(e) => setReportReceipt(e.target.files?.[0] || null)} />
+                </div>
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={handleSubmitReport}
+                    className="btn-primary text-xs"
+                    disabled={reportSubmitting || !setupComplete}
+                  >
+                    {reportSubmitting ? "Submitting..." : "Submit Installation"}
+                  </button>
+                  <span className="text-xs text-slate-500">Provide the installation evidence above, then submit.</span>
+                </div>
+                {reportMessage && <p className="text-xs text-slate-500">{reportMessage}</p>}
+              </div>
+
+              <div id="meter-csv-upload-section" className="rounded-2xl border border-slate-100 bg-slate-50 p-4 space-y-3">
+                <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                  <div>
+                    <p className="text-sm font-semibold text-slate-700">CSV upload section</p>
+                    <p className="text-xs text-slate-500">Batch upload meter data in one CSV file.</p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <button onClick={downloadMeterCsvTemplate} className="btn-secondary text-xs">Download CSV Template</button>
+                    <input type="file" accept=".csv" onChange={(e) => setMeterCsvFile(e.target.files?.[0] || null)} className="input-field max-w-xs" />
+                    <button onClick={handleUploadMeterCsv} className="btn-primary text-xs" disabled={meterCsvUploading || !meterCsvFile}>
+                      {meterCsvUploading ? "Uploading..." : "Upload Meter Data CSV"}
+                    </button>
+                  </div>
+                </div>
+                <p className="text-xs text-slate-500">Last upload: {latestCsvAudit?.createdAt ? `${new Date(latestCsvAudit.createdAt).toLocaleString()} — ${latestCsvAudit.details?.rows_ingested || 0} rows ingested` : "No CSV uploads yet"}</p>
+                {meterCsvMessage && <p className="text-xs text-slate-500">{meterCsvMessage}</p>}
+              </div>
             </div>
-          </div>
-        )}
+          )}
+
+          {projectTab === "payments" && (
+            <div className="space-y-6">
+              <div>
+                <h4 className="text-sm font-semibold text-slate-800">Payments</h4>
+                <p className="text-xs text-slate-500">Track milestone claims and payment status.</p>
+              </div>
+              <div className="grid gap-3 md:grid-cols-3">
+                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-xs text-slate-500">Total Contract Value</p><p className="mt-1 text-lg font-semibold text-slate-900">{formatCurrency(contractValue)}</p></div>
+                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-xs text-slate-500">Total Paid</p><p className="mt-1 text-lg font-semibold text-slate-900">{formatCurrency(paidAmount)}</p></div>
+                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-xs text-slate-500">Total Pending</p><p className="mt-1 text-lg font-semibold text-slate-900">{formatCurrency(pendingAmount)}</p></div>
+              </div>
+              <div className="overflow-x-auto rounded-2xl border border-slate-200">
+                <table className="min-w-full divide-y divide-slate-200 text-sm">
+                  <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
+                    <tr>
+                      <th className="px-4 py-3">Milestone</th>
+                      <th className="px-4 py-3">Amount</th>
+                      <th className="px-4 py-3">Submitted</th>
+                      <th className="px-4 py-3">Status</th>
+                      <th className="px-4 py-3">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 bg-white">
+                    {projectClaims.length === 0 && (
+                      <tr>
+                        <td colSpan={5} className="px-4 py-6 text-center text-sm text-slate-500">No payment claims submitted yet.</td>
+                      </tr>
+                    )}
+                    {projectClaims.map(claim => (
+                      <tr key={claim.id}>
+                        <td className="px-4 py-3 text-slate-700">{projectMilestones.find(m => m.id === claim.milestoneId)?.name || claim.milestoneId || "Milestone"}</td>
+                        <td className="px-4 py-3 text-slate-700">{formatCurrency(claim.claimAmount || 0)}</td>
+                        <td className="px-4 py-3 text-slate-700">{claim.submittedAt ? new Date(claim.submittedAt).toLocaleString() : "N/A"}</td>
+                        <td className="px-4 py-3 text-slate-700">{claim.status}</td>
+                        <td className="px-4 py-3 text-slate-700">{claim.disbursement?.reference || "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {projectTab === "documents" && (
+            <div className="space-y-6">
+              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <h4 className="text-sm font-semibold text-slate-800">Documents</h4>
+                  <p className="text-xs text-slate-500">Upload project support files and download the latest records.</p>
+                </div>
+                <button onClick={() => setDocumentTitle("")} className="btn-secondary text-xs">Upload Document</button>
+              </div>
+
+              <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4 space-y-3">
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                  <select className="input-field" value={documentType} onChange={(e) => setDocumentType(e.target.value)}>
+                    {["Signed Contract", "Permit", "Insurance", "Team Roster", "Equipment Plan", "Other"].map(option => (
+                      <option key={option} value={option}>{option}</option>
+                    ))}
+                  </select>
+                  <input className="input-field" placeholder="Document title (optional)" value={documentTitle} onChange={(e) => setDocumentTitle(e.target.value)} />
+                  <input className="input-field" type="file" onChange={(e) => setDocumentFile(e.target.files?.[0] || null)} />
+                </div>
+                <div className="flex items-center gap-3">
+                  <button onClick={handleUploadDocument} className="btn-primary text-xs" disabled={documentUploading}>
+                    {documentUploading ? "Uploading..." : "Upload Document"}
+                  </button>
+                  {documentMessage && <span className="text-xs text-slate-500">{documentMessage}</span>}
+                </div>
+              </div>
+
+              <div className="overflow-x-auto rounded-2xl border border-slate-200">
+                <table className="min-w-full divide-y divide-slate-200 text-sm">
+                  <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
+                    <tr>
+                      <th className="px-4 py-3">File name</th>
+                      <th className="px-4 py-3">Type</th>
+                      <th className="px-4 py-3">Uploaded</th>
+                      <th className="px-4 py-3">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 bg-white">
+                    {contract?.signedFile && (
+                      <tr>
+                        <td className="px-4 py-3 text-slate-700">Signed Performance-Based Agreement</td>
+                        <td className="px-4 py-3 text-slate-700">Signed Contract</td>
+                        <td className="px-4 py-3 text-slate-700">{formatDate(contract.approvedAt || contract.signedAt)}</td>
+                        <td className="px-4 py-3"><a href={toFileUrl(contract.signedFile) || "#"} target="_blank" rel="noreferrer" className="text-emerald-700 underline">Download</a></td>
+                      </tr>
+                    )}
+                    {projectDocumentsList.length === 0 && !contract?.signedFile && (
+                      <tr>
+                        <td colSpan={4} className="px-4 py-6 text-center text-sm text-slate-500">No documents uploaded yet.</td>
+                      </tr>
+                    )}
+                    {projectDocumentsList.map(doc => {
+                      const fileName = doc.file.split("/").pop() || "Project Document";
+                      const typeLabel = doc.title?.split("—")[0]?.trim() || doc.title?.split("-")[0]?.trim() || "Other";
+                      return (
+                        <tr key={doc.id}>
+                          <td className="px-4 py-3 text-slate-700">{doc.title || fileName}</td>
+                          <td className="px-4 py-3 text-slate-700">{typeLabel}</td>
+                          <td className="px-4 py-3 text-slate-700">{doc.uploadedAt ? new Date(doc.uploadedAt).toLocaleString() : "N/A"}</td>
+                          <td className="px-4 py-3"><a href={toFileUrl(doc.file) || "#"} target="_blank" rel="noreferrer" className="text-emerald-700 underline">Download</a></td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {projectTab === "updates" && (
+            <div className="space-y-4">
+              <div>
+                <h4 className="text-sm font-semibold text-slate-800">Updates</h4>
+                <p className="text-xs text-slate-500">Newest audit activity for this project appears here first.</p>
+              </div>
+              <div className="space-y-3">
+                {projectAuditTrail.length === 0 && <p className="text-sm text-slate-500">No recent audit activity yet.</p>}
+                {projectAuditTrail.map(log => (
+                  <div key={log.id} className="rounded-xl border border-slate-100 p-4">
+                    <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                      <p className="font-semibold text-slate-900">{log.action}</p>
+                      <span className="text-xs text-slate-400">{log.createdAt ? new Date(log.createdAt).toLocaleString() : "N/A"}</span>
+                    </div>
+                    <p className="mt-2 text-sm text-slate-600">{log.notes || log.details?.message || "No additional notes."}</p>
+                    <p className="mt-2 text-xs text-slate-400">{log.actorUsername || log.actor || "System"}{log.actorRole ? ` • ${log.actorRole}` : ""}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   return (
     <div className="space-y-8">
@@ -10458,6 +12376,16 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
           </div>
         </div>
         <div className="p-6 space-y-4">
+          {!loading && isRbfPortal && (
+            <PortfolioKpiSummary
+              onSelectProject={(projectId) => {
+                const project = projects.find((item) => item.id === projectId);
+                if (!project) return;
+                setSelectedProject(project);
+                setProjectTab("kpi");
+              }}
+            />
+          )}
           {loading && <p className="text-sm text-slate-500">Loading projects...</p>}
           {!loading && filteredProjects.length === 0 && (
             <div className="rounded-2xl border border-dashed border-slate-200 p-6 text-sm text-slate-500">
@@ -10524,22 +12452,17 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
           {!loading && !isRbfPortal && filteredProjects.map(project => (
             <div key={project.id} className="rounded-3xl border border-slate-100 bg-white p-5 shadow-[0_24px_60px_-46px_rgba(15,23,42,0.55)] space-y-4 relative overflow-hidden">
               <div className="absolute left-0 top-0 h-full w-1.5 bg-[linear-gradient(180deg,#22c55e_0%,#0ea5e9_60%,#1e293b_100%)]" />
+              <div className={`rounded-2xl border px-4 py-3 text-sm font-semibold ${getSetupBannerClass(project)}`}>
+                Setup status: {getSetupStatusLabel(project)}
+                {!isProjectSetupComplete(project) && <span className="ml-2 font-normal">Complete project setup to unlock installation reporting.</span>}
+              </div>
               <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
                 <div className="pl-2">
-                  <p className="text-base font-semibold text-slate-900">
-                    {project.projectTitle || project.tenderName || "Project Title Pending"}
-                  </p>
-                  <p className="text-xs text-slate-500 mt-1">
-                    {project.projectReference || `Project ${project.id}`}
-                  </p>
-                  {isRbfPortal && (
-                    <p className="text-sm font-medium text-emerald-700 mt-2">
-                      Assigned to vendor: {project.vendorName || "N/A"}
-                    </p>
-                  )}
-                  <p className="text-xs text-slate-500 mt-1">{project.techType} • {project.region}</p>
+                  <p className="text-base font-semibold text-slate-900">{project.projectReference || `PRJ-${project.id}`}</p>
+                  <p className="text-xs text-slate-500 mt-1">{project.techType || "N/A"} • {project.district || project.region || "Unassigned district"}</p>
                   <div className="flex flex-wrap gap-2 mt-3 text-[11px]">
-                    <span className="badge bg-slate-100 text-slate-700">Progress {project.progress}%</span>
+                    <span className="badge bg-slate-100 text-slate-700">Target {formatMetricValue(project.targetInstallations)}</span>
+                    <span className="badge bg-slate-100 text-slate-700">Duration {project.projectDurationMonths ? `${project.projectDurationMonths} months` : "N/A"}</span>
                     {project.status && <span className="badge bg-emerald-50 text-emerald-700">{project.status}</span>}
                     {project.contractStatus && <span className="badge bg-blue-50 text-blue-700">{project.contractStatus}</span>}
                   </div>
@@ -10548,66 +12471,60 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
                   <button
                     onClick={() => {
                       setSelectedProject(prev => (prev?.id === project.id ? null : project));
-                      setProjectTab("overview");
+                      setProjectTab(project.status === ProjectStatus.SETUP_PENDING ? "planning" : "overview");
                     }}
                     className="btn-primary text-xs"
                   >
                     {selectedProject?.id === project.id ? "Close Project" : "Open Project"}
                   </button>
+                  <button
+                    onClick={() => {
+                      setSelectedProject(project);
+                      setProjectTab("fieldwork");
+                    }}
+                    disabled={!isProjectSetupComplete(project)}
+                    className={`text-xs px-4 py-2 rounded-xl font-semibold ${
+                      isProjectSetupComplete(project)
+                        ? "bg-blue-600 text-white"
+                        : "bg-slate-100 text-slate-400 cursor-not-allowed"
+                    }`}
+                  >
+                    Submit Installation
+                  </button>
                 </div>
               </div>
-              <div className="grid grid-cols-2 gap-3 text-[11px] text-slate-500 sm:grid-cols-6">
-                {isRbfPortal && (
-                  <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
-                    <p className="uppercase tracking-wider text-slate-400">Vendor</p>
-                    <p className="font-semibold text-slate-700">{project.vendorName || "N/A"}</p>
-                  </div>
-                )}
+              <div className="grid grid-cols-2 gap-3 text-[11px] text-slate-500 sm:grid-cols-5">
                 <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
-                  <p className="uppercase tracking-wider text-slate-400">Start</p>
-                  <p className="font-semibold text-slate-700">{formatDate(startDateForProject(project))}</p>
+                  <p className="uppercase tracking-wider text-slate-400">Project ID</p>
+                  <p className="font-semibold text-slate-700">{project.projectReference || `PRJ-${project.id}`}</p>
                 </div>
                 <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
-                  <p className="uppercase tracking-wider text-slate-400">End</p>
-                  <p className="font-semibold text-slate-700">{formatDate(endDateForProject(project))}</p>
+                  <p className="uppercase tracking-wider text-slate-400">Technology</p>
+                  <p className="font-semibold text-slate-700">{project.techType || "N/A"}</p>
                 </div>
                 <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
                   <p className="uppercase tracking-wider text-slate-400">District</p>
                   <p className="font-semibold text-slate-700">{project.district || project.region || "N/A"}</p>
                 </div>
                 <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
-                  <p className="uppercase tracking-wider text-slate-400">Budget</p>
-                  <p className="font-semibold text-slate-700">
-                    {budgetForProject(project) != null ? `M ${Number(budgetForProject(project)).toLocaleString()}` : "N/A"}
-                  </p>
+                  <p className="uppercase tracking-wider text-slate-400">Installation Target</p>
+                  <p className="font-semibold text-slate-700">{formatMetricValue(project.targetInstallations)}</p>
                 </div>
                 <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
-                  <p className="uppercase tracking-wider text-slate-400">Tender</p>
-                  <p className="font-semibold text-slate-700">{project.tenderReferenceNumber || "N/A"}</p>
+                  <p className="uppercase tracking-wider text-slate-400">Project Duration</p>
+                  <p className="font-semibold text-slate-700">{project.projectDurationMonths ? `${project.projectDurationMonths} months` : "N/A"}</p>
                 </div>
-                <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
-                  <p className="uppercase tracking-wider text-slate-400">Value</p>
-                  <p className="font-semibold text-slate-700">
-                    M {Number(project.milestoneTotalAmount ?? contractValueByProject.get(project.id) ?? 0).toLocaleString()}
-                  </p>
-                </div>
-                {isRbfPortal && (
-                  <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
-                    <p className="uppercase tracking-wider text-slate-400">Beneficiaries</p>
-                    <p className="font-semibold text-slate-700">{formatMetricValue(project.targetBeneficiaries)}</p>
-                  </div>
-                )}
               </div>
-              <div className="flex flex-wrap gap-3 text-[11px] text-slate-500">
-                <span className="rounded-full bg-slate-100 px-3 py-1">
-                  Milestones: {project.milestoneCount ?? milestonesForProject(project.id).length}
-                </span>
-                <span className="rounded-full bg-slate-100 px-3 py-1">
-                  Overall Progress: {project.progress}%
-                </span>
-                <span className="rounded-full bg-slate-100 px-3 py-1">
-                  Claims: {claimsForProject(project.id).length}
-                </span>
+              <div className="grid gap-3 md:grid-cols-3">
+                {milestonesForProject(project.id).slice().sort((a, b) => (a.milestoneNumber || 0) - (b.milestoneNumber || 0)).map((milestone, index) => (
+                  <div key={milestone.id} className="rounded-2xl border border-slate-100 bg-slate-50 px-4 py-3">
+                    <p className="text-[11px] uppercase tracking-wider text-slate-400">Milestone {milestone.milestoneNumber || index + 1}</p>
+                    <p className="mt-1 text-sm font-semibold text-slate-900">{milestone.disbursementPct || milestone.percentage}%</p>
+                    <p className={`mt-1 text-xs font-semibold ${getMilestoneStateTone(getMilestoneStateLabel(milestone, project.id))}`}>
+                      {getMilestoneStateLabel(milestone, project.id)}
+                    </p>
+                  </div>
+                ))}
               </div>
               <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
                 <div className="bg-gradient-to-r from-emerald-500 via-teal-400 to-sky-500 h-full" style={{ width: `${project.progress}%` }} />
@@ -10626,8 +12543,10 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
   );
 };
 
-const TACView = () => {
+const TACView = ({ mode }: { mode: "technical" | "financial" }) => {
+  const isFinancialEvaluationMode = mode === "financial";
   const [view, setView] = useState<"list" | "evaluate">("list");
+  const [submittedBidOpen, setSubmittedBidOpen] = useState(false);
   const [selectedEval, setSelectedEval] = useState<{
     bid: TenderBid;
     evaluationId?: string;
@@ -10645,22 +12564,47 @@ const TACView = () => {
   } | null>(null);
   const [bidQueue, setBidQueue] = useState<TenderBid[]>([]);
   const [evaluations, setEvaluations] = useState<TenderBidEvaluation[]>([]);
+  const [tenderThresholds, setTenderThresholds] = useState<Record<string, number>>({});
   const [isLoading, setIsLoading] = useState(false);
   const [notification, setNotification] = useState<string | null>(null);
+  const [isStageOneDecisionSubmitting, setIsStageOneDecisionSubmitting] = useState(false);
 
   const showNotification = (msg: string) => {
     setNotification(msg);
     setTimeout(() => setNotification(null), 3000);
   };
+  const stageTwoTechnicalCriteria = [
+    { key: "technical", label: "Technical design quality", max: 20 },
+    { key: "feasibility", label: "Technology tier", max: 15 },
+    { key: "om", label: "O&M strategy", max: 10 },
+    { key: "kpi", label: "Implementation plan", max: 10 },
+    { key: "gender", label: "Gender/inclusion approach", max: 10 },
+    { key: "environmental", label: "Local capacity", max: 5 },
+  ] as const;
+  const stageTwoFinancialCriteria = [
+    { key: "technical", label: "Value for money", max: 10 },
+    { key: "feasibility", label: "Subsidy reasonableness", max: 10 },
+    { key: "kpi", label: "BOQ accuracy", max: 5 },
+    { key: "gender", label: "Co-financing contribution", max: 5 },
+  ] as const;
+  const queueStatusTone = (bid: TenderBid) =>
+    bid.status === BidStatus.SUBMITTED ? "bg-blue-100 text-blue-700" :
+    bid.status === BidStatus.UNDER_REVIEW ? "bg-amber-100 text-amber-700" :
+    bid.status === BidStatus.REVISION_REQUIRED ? "bg-orange-100 text-orange-700" :
+    bid.status === BidStatus.ACCEPTED ? "bg-emerald-100 text-emerald-700" :
+    bid.status === BidStatus.REJECTED ? "bg-rose-100 text-rose-700" :
+    "bg-slate-100 text-slate-700";
 
   const loadEvaluations = React.useCallback(async () => {
     setIsLoading(true);
     try {
-      const [bids, evals] = await Promise.all([
+      const [bids, evals, tenderRows] = await Promise.all([
         fetchTenderBids(),
         fetchBidEvaluations(),
+        fetchTenders(),
       ]);
-      setBidQueue(bids.filter(b => [BidStatus.SUBMITTED, BidStatus.UNDER_REVIEW].includes(b.status)));
+      setTenderThresholds(Object.fromEntries(tenderRows.map((item) => [item.id, item.technicalThreshold ?? 70])));
+      setBidQueue(bids.filter(b => b.status !== BidStatus.DRAFT));
       setEvaluations(evals);
     } finally {
       setIsLoading(false);
@@ -10671,30 +12615,125 @@ const TACView = () => {
     void loadEvaluations();
   }, [loadEvaluations]);
 
-  const evaluationsByBid = useMemo(() => {
+  React.useEffect(() => {
+    const handler = () => void loadEvaluations();
+    window.addEventListener("rbf-bid-updated", handler);
+    return () => window.removeEventListener("rbf-bid-updated", handler);
+  }, [loadEvaluations]);
+
+  const technicalEvaluationsByBid = useMemo(() => {
     const map = new Map<string, TenderBidEvaluation>();
-    evaluations.forEach(ev => map.set(ev.bid, ev));
+    evaluations
+      .filter(ev => ev.evaluatorRole === UserRole.TAC || ev.evaluatorRole === UserRole.ADMIN)
+      .forEach(ev => map.set(ev.bid, ev));
     return map;
   }, [evaluations]);
 
+  const financialEvaluationsByBid = useMemo(() => {
+    const map = new Map<string, TenderBidEvaluation>();
+    evaluations
+      .filter(ev => ev.evaluatorRole === UserRole.RBF_OFFICIAL || ev.evaluatorRole === UserRole.ADMIN)
+      .forEach(ev => map.set(ev.bid, ev));
+    return map;
+  }, [evaluations]);
+
+  const roleScopedEvaluationsByBid = isFinancialEvaluationMode ? financialEvaluationsByBid : technicalEvaluationsByBid;
+
+  const getTechnicalComposite = (evaluation?: TenderBidEvaluation) =>
+    evaluation
+      ? [
+          evaluation.technicalScore,
+          evaluation.feasibilityScore,
+          evaluation.omScore,
+          evaluation.kpiScore,
+          evaluation.genderScore,
+          evaluation.environmentalScore,
+        ].reduce((sum, value) => sum + Number(value || 0), 0)
+      : 0;
+  const getFinancialTotal = (evaluation?: TenderBidEvaluation) =>
+    evaluation
+      ? [
+          evaluation.technicalScore,
+          evaluation.feasibilityScore,
+          evaluation.kpiScore,
+          evaluation.genderScore,
+        ].reduce((sum, value) => sum + Number(value || 0), 0)
+      : 0;
+
+  const bidsById = useMemo(() => {
+    const map = new Map<string, TenderBid>();
+    bidQueue.forEach((bid) => map.set(bid.id, bid));
+    return map;
+  }, [bidQueue]);
+
+  const hasPassedTechnicalThreshold = (bid: TenderBid) => {
+    const threshold = tenderThresholds[bid.tender] ?? 70;
+    const technicalBid = bidsById.get(bid.id) || bid;
+    const technicalScore = technicalBid.technical_score_total ?? getTechnicalComposite(technicalEvaluationsByBid.get(technicalBid.id));
+    return technicalScore >= Math.round((threshold / 100) * 70);
+  };
+
+  const filteredBidQueue = useMemo(() => {
+    if (isFinancialEvaluationMode) {
+      return bidQueue.filter((bid) => bid.stage_key === "site_specific" && hasPassedTechnicalThreshold(bid));
+    }
+    return bidQueue.filter((bid) => bid.stage_key === "site_specific");
+  }, [bidQueue, isFinancialEvaluationMode, technicalEvaluationsByBid, tenderThresholds, bidsById]);
+
+  const stageOneReviewQueue = useMemo(
+    () => bidQueue.filter((bid) => bid.stage_key !== "site_specific"),
+    [bidQueue]
+  );
+
   const handleStartEvaluation = (bid: TenderBid) => {
-    const existing = evaluationsByBid.get(bid.id);
+    const existing = roleScopedEvaluationsByBid.get(bid.id);
     setSelectedEval({
       bid,
       evaluationId: existing?.id,
       comments: existing?.comments ?? "",
       criteria: {
         technical: existing?.technicalScore ?? 0,
-        financial: existing?.financialScore ?? 0,
+        financial: isFinancialEvaluationMode ? existing?.financialScore ?? 0 : 0,
         feasibility: existing?.feasibilityScore ?? 0,
         kpi: existing?.kpiScore ?? 0,
         gender: existing?.genderScore ?? 0,
-        environmental: existing?.environmentalScore ?? 0,
-        om: existing?.omScore ?? 0,
-        inclusivity: existing?.inclusivityScore ?? 0,
+        environmental: isFinancialEvaluationMode ? 0 : existing?.environmentalScore ?? 0,
+        om: isFinancialEvaluationMode ? 0 : existing?.omScore ?? 0,
+        inclusivity: 0,
       },
     });
     setView("evaluate");
+  };
+
+  const handleStageOneDecision = async (decision: "shortlist" | "partial" | "reject") => {
+    if (!selectedEval || isStageOneDecisionSubmitting) return;
+    const reason = selectedEval.comments.trim();
+    if ((decision === "partial" || decision === "reject") && !reason) {
+      showNotification("Feedback is required for partial conformity or rejection.");
+      return;
+    }
+    setIsStageOneDecisionSubmitting(true);
+    try {
+      if (decision === "shortlist") {
+        await acceptTenderBid(selectedEval.bid.id);
+        showNotification(`Shortlisted ${selectedEval.bid.vendor_name} for Stage 2.`);
+      } else if (decision === "partial") {
+        await markTenderBidPartialConformity(selectedEval.bid.id, reason);
+        showNotification(`Marked ${selectedEval.bid.vendor_name} as revision required.`);
+      } else {
+        await rejectTenderBid(selectedEval.bid.id, reason);
+        showNotification(`Rejected ${selectedEval.bid.vendor_name} for this tender.`);
+      }
+      setView("list");
+      setSelectedEval(null);
+      await loadEvaluations();
+      window.dispatchEvent(new Event("rbf-bid-updated"));
+    } catch (err: any) {
+      const raw = String(err?.message || "");
+      showNotification(toFriendlyApiMessage(raw) || "Failed to update Stage 1 decision.");
+    } finally {
+      setIsStageOneDecisionSubmitting(false);
+    }
   };
 
   const handleSaveScore = async () => {
@@ -10702,17 +12741,19 @@ const TACView = () => {
     const payload = {
       bid: selectedEval.bid.id,
       technicalScore: selectedEval.criteria.technical,
-      financialScore: selectedEval.criteria.financial,
+      financialScore: isFinancialEvaluationMode ? selectedEval.criteria.financial : 0,
       feasibilityScore: selectedEval.criteria.feasibility,
       kpiScore: selectedEval.criteria.kpi,
       genderScore: selectedEval.criteria.gender,
-      environmentalScore: selectedEval.criteria.environmental,
-      omScore: selectedEval.criteria.om,
-      inclusivityScore: selectedEval.criteria.inclusivity,
+      environmentalScore: isFinancialEvaluationMode ? 0 : selectedEval.criteria.environmental,
+      omScore: isFinancialEvaluationMode ? 0 : selectedEval.criteria.om,
+      inclusivityScore: 0,
       comments: selectedEval.comments,
     };
+    let reviewedBid: TenderBid | null = null;
     try {
-      await reviewTenderBid(selectedEval.bid.id);
+      reviewedBid = await reviewTenderBid(selectedEval.bid.id);
+      setBidQueue(prev => prev.map(item => item.id === reviewedBid?.id ? reviewedBid! : item));
     } catch {
       // ignore review update errors
     }
@@ -10725,8 +12766,10 @@ const TACView = () => {
         next.push(saved);
         return next;
       });
+      await loadEvaluations();
+      window.dispatchEvent(new Event("rbf-bid-updated"));
       setView("list");
-      showNotification(`Evaluation saved for ${selectedEval.bid.vendor_name}.`);
+      showNotification(`${isFinancialEvaluationMode ? "Financial" : "Technical"} evaluation saved for ${selectedEval.bid.vendor_name}.`);
     } catch (err: any) {
       const raw = String(err?.message || "");
       showNotification(toFriendlyApiMessage(raw) || "Failed to save evaluation.");
@@ -10734,174 +12777,620 @@ const TACView = () => {
   };
 
   if (view === "evaluate" && selectedEval) {
-    const totalScore = Math.round((
-      selectedEval.criteria.technical +
-      selectedEval.criteria.financial +
-      selectedEval.criteria.feasibility +
-      selectedEval.criteria.kpi +
-      selectedEval.criteria.gender +
-      selectedEval.criteria.environmental +
-      selectedEval.criteria.om +
-      selectedEval.criteria.inclusivity
-    ) / 8);
+    const isStageOneBid = selectedEval.bid.stage_key !== "site_specific" && !String(selectedEval.bid.stage || "").includes("Stage 2");
+    const canDecideStageOne = [BidStatus.SUBMITTED, BidStatus.UNDER_REVIEW].includes(selectedEval.bid.status);
+    const technicalTotal = selectedEval.criteria.technical + selectedEval.criteria.feasibility + selectedEval.criteria.om + selectedEval.criteria.kpi + selectedEval.criteria.gender + selectedEval.criteria.environmental;
+    const financialTotal = selectedEval.criteria.technical + selectedEval.criteria.feasibility + selectedEval.criteria.kpi + selectedEval.criteria.gender;
+    const technicalThreshold = tenderThresholds[selectedEval.bid.tender] ?? 70;
+    const technicalThresholdScore = Math.round((technicalThreshold / 100) * 70);
+    const totalScore = isFinancialEvaluationMode ? financialTotal : technicalTotal;
+    const totalProjectCost = Number(selectedEval.bid.bid_amount || 0);
+    const subsidyRequested = Number(selectedEval.bid.subsidy_requested || 0);
+    const coFinancingAmount = Math.max(
+      0,
+      Number(selectedEval.bid.system_configuration?.co_financing_amount_lsl ?? (totalProjectCost - subsidyRequested))
+    );
+    const coFinancingRatio = totalProjectCost > 0 ? (coFinancingAmount / totalProjectCost) * 100 : 0;
+    const totalHouseholds = (selectedEval.bid.sites || []).reduce(
+      (sum, site) => sum + Number(site.estimatedHouseholds || site.numberOfHouseholds || 0),
+      0
+    );
+    const costPerConnection = subsidyRequested > 0 && totalHouseholds > 0 ? subsidyRequested / totalHouseholds : null;
+    const systemCapacityValue = selectedEval.bid.system_configuration?.system_capacity;
+    const systemCapacityUnit = selectedEval.bid.system_configuration?.system_capacity_unit;
+    const gpsValidatedSiteCount = (selectedEval.bid.sites || []).filter(site => site.latitude != null && site.longitude != null).length;
+    const allSitesHaveGps = (selectedEval.bid.sites || []).length > 0 && gpsValidatedSiteCount === (selectedEval.bid.sites || []).length;
+    const isStageTwoBid = selectedEval.bid.stage_key === "site_specific" || String(selectedEval.bid.stage || "").includes("Stage 2");
+    const technicalReferenceBidId = selectedEval.bid.stage_two_source_bid || selectedEval.bid.id;
+    const technicalReferenceEvaluation = technicalEvaluationsByBid.get(technicalReferenceBidId);
+    const technicalDocumentLinks = [
+      { label: "Technical Proposal", url: selectedEval.bid.technical_proposal_file },
+      { label: "Financial Proposal", url: selectedEval.bid.financial_proposal_file },
+      { label: "Bill of Quantities", url: selectedEval.bid.boq_file },
+      { label: "Gender Action Plan", url: selectedEval.bid.gender_action_plan_file },
+      { label: "Implementation Plan", url: selectedEval.bid.implementation_plan_file },
+      { label: "O&M Plan", url: selectedEval.bid.om_plan_file },
+    ].filter(doc => Boolean(doc.url));
+    const financialDocumentLinks = technicalDocumentLinks;
 
-    return (
-      <div className="space-y-6 max-w-4xl mx-auto">
-        <div className="flex items-center gap-4 mb-8">
-          <button onClick={() => setView("list")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
-            <X size={20} />
-          </button>
-          <div>
-            <h1 className="text-2xl font-bold text-slate-900">Technical Evaluation</h1>
-            <p className="text-slate-500">{selectedEval.bid.vendor_name} • {selectedEval.bid.tender}</p>
-          </div>
-        </div>
+    if (isFinancialEvaluationMode && isStageOneBid) {
+      const proposedBudget = Number(selectedEval.bid.bid_amount || 0);
+      const tenderBudget = 0;
+      const inclusionChecks = [
+        { label: "Female target", met: Number(selectedEval.bid.female_target_pct || 0) >= 50, value: `${selectedEval.bid.female_target_pct || 0}%` },
+        { label: "Vulnerable target", met: Number(selectedEval.bid.vulnerable_target_pct || 0) >= 30, value: `${selectedEval.bid.vulnerable_target_pct || 0}%` },
+        { label: "Low-income target", met: Number(selectedEval.bid.low_income_target_pct || 0) >= 60, value: `${selectedEval.bid.low_income_target_pct || 0}%` },
+      ];
+      return (
+        <>
+          <AnimatePresence>
+            {notification && (
+              <motion.div
+                initial={{ opacity: 0, y: -20 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -20 }}
+                className="fixed top-24 right-8 z-[200] bg-emerald-600 text-white px-6 py-3 rounded-xl shadow-xl flex items-center gap-3"
+              >
+                <CheckCircle2 size={20} />
+                <span className="font-medium">{notification}</span>
+              </motion.div>
+            )}
+          </AnimatePresence>
+          <div className="space-y-6 max-w-5xl mx-auto">
+            <div className="flex items-center gap-4 mb-8">
+              <button onClick={() => setView("list")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
+                <X size={20} />
+              </button>
+              <div>
+                <h1 className="text-2xl font-bold text-slate-900">Stage 1 Evaluation</h1>
+                <p className="text-slate-500">{selectedEval.bid.tender_name || selectedEval.bid.tender} • {selectedEval.bid.vendor_name}</p>
+              </div>
+            </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <div className="lg:col-span-2 space-y-6">
-            <div className="card p-8 space-y-8">
+            <div className="grid gap-6 lg:grid-cols-[1.2fr,0.8fr]">
               <div className="space-y-6">
-                <h3 className="font-bold text-slate-900 border-b border-slate-100 pb-2">Scoring Matrix</h3>
-                
-                <div className="space-y-4">
-                  <div className="space-y-2">
-                    <div className="flex justify-between items-center">
-                      <label className="text-sm font-bold text-slate-700">Technical Capacity (0-100)</label>
-                      <span className="text-sm font-bold text-emerald-600">{selectedEval.criteria.technical}</span>
-                    </div>
-                    <input 
-                      type="range" min="0" max="100" 
-                      value={selectedEval.criteria.technical}
-                      onChange={(e) => setSelectedEval({...selectedEval, criteria: {...selectedEval.criteria, technical: parseInt(e.target.value)}})}
-                      className="w-full h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-emerald-600" 
-                    />
-                  </div>
+                <div className="card p-6">
+                  <h3 className="text-lg font-bold text-slate-900">Concept Note</h3>
+                  <p className="mt-4 whitespace-pre-wrap text-sm text-slate-700">{selectedEval.bid.concept_note || "No concept note submitted."}</p>
+                </div>
 
-                  <div className="space-y-2">
-                    <div className="flex justify-between items-center">
-                      <label className="text-sm font-bold text-slate-700">Financial Stability (0-100)</label>
-                      <span className="text-sm font-bold text-emerald-600">{selectedEval.criteria.financial}</span>
-                    </div>
-                    <input 
-                      type="range" min="0" max="100" 
-                      value={selectedEval.criteria.financial}
-                      onChange={(e) => setSelectedEval({...selectedEval, criteria: {...selectedEval.criteria, financial: parseInt(e.target.value)}})}
-                      className="w-full h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-emerald-600" 
-                    />
-                  </div>
-
-                  <div className="space-y-2">
-                    <div className="flex justify-between items-center">
-                      <label className="text-sm font-bold text-slate-700">Technical Feasibility (0-100)</label>
-                      <span className="text-sm font-bold text-emerald-600">{selectedEval.criteria.feasibility}</span>
-                    </div>
-                    <input 
-                      type="range" min="0" max="100" 
-                      value={selectedEval.criteria.feasibility}
-                      onChange={(e) => setSelectedEval({...selectedEval, criteria: {...selectedEval.criteria, feasibility: parseInt(e.target.value)}})}
-                      className="w-full h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-emerald-600" 
-                    />
-                  </div>
-
-                  <div className="space-y-2">
-                    <div className="flex justify-between items-center">
-                      <label className="text-sm font-bold text-slate-700">Technology KPIs (0-100)</label>
-                      <span className="text-sm font-bold text-emerald-600">{selectedEval.criteria.kpi}</span>
-                    </div>
-                    <input
-                      type="range" min="0" max="100"
-                      value={selectedEval.criteria.kpi}
-                      onChange={(e) => setSelectedEval({...selectedEval, criteria: {...selectedEval.criteria, kpi: parseInt(e.target.value)}})}
-                      className="w-full h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-emerald-600"
-                    />
-                  </div>
-
-                  <div className="space-y-2">
-                    <div className="flex justify-between items-center">
-                      <label className="text-sm font-bold text-slate-700">Gender Action Plan (0-100)</label>
-                      <span className="text-sm font-bold text-emerald-600">{selectedEval.criteria.gender}</span>
-                    </div>
-                    <input
-                      type="range" min="0" max="100"
-                      value={selectedEval.criteria.gender}
-                      onChange={(e) => setSelectedEval({...selectedEval, criteria: {...selectedEval.criteria, gender: parseInt(e.target.value)}})}
-                      className="w-full h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-emerald-600"
-                    />
-                  </div>
-
-                  <div className="space-y-2">
-                    <div className="flex justify-between items-center">
-                      <label className="text-sm font-bold text-slate-700">Environmental Compliance (0-100)</label>
-                      <span className="text-sm font-bold text-emerald-600">{selectedEval.criteria.environmental}</span>
-                    </div>
-                    <input
-                      type="range" min="0" max="100"
-                      value={selectedEval.criteria.environmental}
-                      onChange={(e) => setSelectedEval({...selectedEval, criteria: {...selectedEval.criteria, environmental: parseInt(e.target.value)}})}
-                      className="w-full h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-emerald-600"
-                    />
-                  </div>
-
-                  <div className="space-y-2">
-                    <div className="flex justify-between items-center">
-                      <label className="text-sm font-bold text-slate-700">O&M Strategy (0-100)</label>
-                      <span className="text-sm font-bold text-emerald-600">{selectedEval.criteria.om}</span>
-                    </div>
-                    <input
-                      type="range" min="0" max="100"
-                      value={selectedEval.criteria.om}
-                      onChange={(e) => setSelectedEval({...selectedEval, criteria: {...selectedEval.criteria, om: parseInt(e.target.value)}})}
-                      className="w-full h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-emerald-600"
-                    />
-                  </div>
-
-                  <div className="space-y-2">
-                    <div className="flex justify-between items-center">
-                      <label className="text-sm font-bold text-slate-700">Inclusivity Targets (0-100)</label>
-                      <span className="text-sm font-bold text-emerald-600">{selectedEval.criteria.inclusivity}</span>
-                    </div>
-                    <input
-                      type="range" min="0" max="100"
-                      value={selectedEval.criteria.inclusivity}
-                      onChange={(e) => setSelectedEval({...selectedEval, criteria: {...selectedEval.criteria, inclusivity: parseInt(e.target.value)}})}
-                      className="w-full h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-emerald-600"
-                    />
+                <div className="card p-6">
+                  <h3 className="text-lg font-bold text-slate-900">Proposed Sites</h3>
+                  <div className="mt-4 space-y-3">
+                    {(selectedEval.bid.sites || []).map((site, index) => (
+                      <div key={`${site.siteName}-${index}`} className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                        <p className="font-semibold text-slate-900">{site.siteName || `Site ${index + 1}`}</p>
+                        <p className="mt-1 text-sm text-slate-600">{site.district || "No district"}{site.villageSubDistrict ? ` • ${site.villageSubDistrict}` : ""}</p>
+                        <p className="mt-2 text-xs text-slate-500">GPS: {site.latitude != null && site.longitude != null ? `${site.latitude}, ${site.longitude}` : "Not provided at Stage 1"}</p>
+                      </div>
+                    ))}
+                    {(selectedEval.bid.sites || []).length === 0 && (
+                      <p className="text-sm text-slate-500">No sites submitted.</p>
+                    )}
                   </div>
                 </div>
               </div>
 
-              <div className="space-y-4">
-                <h3 className="font-bold text-slate-900 border-b border-slate-100 pb-2">Justification & Comments</h3>
-                <textarea 
-                  rows={4} 
-                  placeholder="Provide detailed reasoning for the assigned scores..." 
-                  className="input-field"
-                  value={selectedEval.comments}
-                  onChange={(e) => setSelectedEval({ ...selectedEval, comments: e.target.value })}
-                />
-              </div>
+              <div className="space-y-6">
+                <div className="card p-6">
+                  <h3 className="text-lg font-bold text-slate-900">Tender Fit Checks</h3>
+                  <div className="mt-4 space-y-3 text-sm">
+                    <div className="flex items-center justify-between rounded-xl border border-slate-200 px-4 py-3">
+                      <span className="text-slate-600">Bid Amount</span>
+                      <span className="font-semibold text-slate-900">LSL {proposedBudget.toLocaleString()}</span>
+                    </div>
+                    <div className="flex items-center justify-between rounded-xl border border-slate-200 px-4 py-3">
+                      <span className="text-slate-600">Stage</span>
+                      <span className="font-semibold text-slate-900">Stage 1 Submitted - Awaiting Review</span>
+                    </div>
+                    {inclusionChecks.map((item) => (
+                      <div key={item.label} className="flex items-center justify-between rounded-xl border border-slate-200 px-4 py-3">
+                        <span className="text-slate-600">{item.label}</span>
+                        <span className={`font-semibold ${item.met ? "text-emerald-700" : "text-rose-700"}`}>{item.met ? `Met (${item.value})` : `Not met (${item.value})`}</span>
+                      </div>
+                    ))}
+                    <div className="rounded-xl border border-slate-200 px-4 py-3">
+                      <p className="text-slate-600">Bid amount vs budget</p>
+                      <p className="mt-1 font-semibold text-slate-900">{tenderBudget > 0 ? `LSL ${proposedBudget.toLocaleString()} against budget LSL ${tenderBudget.toLocaleString()}` : "Tender budget not displayed in this review panel."}</p>
+                    </div>
+                  </div>
+                </div>
 
-              <div className="flex justify-end gap-3 pt-6 border-t border-slate-100">
-                <button onClick={() => setView("list")} className="btn-secondary">Cancel</button>
-                <button onClick={handleSaveScore} className="btn-primary">Submit Final Score</button>
+                <div className="card p-6">
+                  <h3 className="text-lg font-bold text-slate-900">Review Outcome</h3>
+                  <textarea
+                    className="input-field mt-4 min-h-[140px]"
+                    placeholder="Add required feedback for partial conformity or rejection."
+                    value={selectedEval.comments}
+                    onChange={(e) => setSelectedEval({ ...selectedEval, comments: e.target.value })}
+                  />
+                  {canDecideStageOne ? (
+                    <div className="mt-4 grid gap-3">
+                      <button
+                        type="button"
+                        onClick={() => void handleStageOneDecision("shortlist")}
+                        disabled={isStageOneDecisionSubmitting}
+                        className="btn-primary disabled:opacity-60"
+                      >
+                        {isStageOneDecisionSubmitting ? "Saving..." : "Shortlist"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleStageOneDecision("partial")}
+                        disabled={isStageOneDecisionSubmitting}
+                        className="btn-secondary border-orange-200 text-orange-700 disabled:opacity-60"
+                      >
+                        Partial Conformity
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleStageOneDecision("reject")}
+                        disabled={isStageOneDecisionSubmitting}
+                        className="btn-secondary border-rose-200 text-rose-700 disabled:opacity-60"
+                      >
+                        Reject
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+                      This submission has already been marked as <span className="font-semibold text-slate-900">{selectedEval.bid.status === BidStatus.ACCEPTED ? "Shortlisted" : selectedEval.bid.status}</span>.
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           </div>
+          {renderSubmittedBidModal()}
+        </>
+      );
+    }
 
-          <div className="space-y-6">
-            <div className="card p-6">
-              <h3 className="text-sm font-bold text-slate-400 uppercase mb-4">Proposal Documents</h3>
-              <div className="space-y-3">
-                {[
-                  { label: "Technical Proposal", url: selectedEval.bid.technical_proposal_file },
-                  { label: "Financial Proposal", url: selectedEval.bid.financial_proposal_file },
-                  { label: "BOQ", url: selectedEval.bid.boq_file },
-                  { label: "Gender Action Plan", url: selectedEval.bid.gender_action_plan_file },
-                  { label: "Implementation Plan", url: selectedEval.bid.implementation_plan_file },
-                  { label: "Reporting Templates", url: selectedEval.bid.reporting_templates_file },
-                ]
-                  .filter(doc => Boolean(doc.url))
-                  .map(doc => (
+    return (
+      <>
+        <div className="space-y-6 max-w-4xl mx-auto">
+          <div className="flex items-center gap-4 mb-8">
+            <button onClick={() => setView("list")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
+              <X size={20} />
+            </button>
+            <div>
+              <h1 className="text-2xl font-bold text-slate-900">{isFinancialEvaluationMode ? "Financial Evaluation" : "Technical Evaluation"}</h1>
+              <p className="text-slate-500">{selectedEval.bid.vendor_name} • {selectedEval.bid.tender}</p>
+            </div>
+            <div className="ml-auto">
+              <button onClick={() => setSubmittedBidOpen(true)} className="btn-secondary text-sm">
+                View Submitted Bid
+              </button>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <div className="lg:col-span-2 space-y-6">
+              <div className="card p-8 space-y-8">
+                <div className="space-y-6">
+                  <h3 className="font-bold text-slate-900 border-b border-slate-100 pb-2">{isFinancialEvaluationMode ? "RMT Financial Scoring" : "Technical Scoring Matrix"}</h3>
+                  
+                  <div className="space-y-4">
+                    {isFinancialEvaluationMode ? (
+                      <div className="space-y-4">
+                        <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
+                          Technical threshold passed at <span className="font-bold">{getTechnicalComposite(technicalReferenceEvaluation)}/70</span>.
+                          RMT financial scoring is now unlocked for this bid.
+                        </div>
+                        <div className="overflow-hidden rounded-2xl border border-slate-200">
+                          <table className="min-w-full text-sm">
+                            <thead className="bg-slate-50 text-slate-500">
+                              <tr>
+                                <th className="px-4 py-3 text-left font-semibold">Criteria</th>
+                                <th className="px-4 py-3 text-left font-semibold">Max</th>
+                                <th className="px-4 py-3 text-left font-semibold">Score</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {stageTwoFinancialCriteria.map((criterion) => (
+                                <tr key={criterion.key} className="border-t border-slate-100">
+                                  <td className="px-4 py-3 text-slate-700">{criterion.label}</td>
+                                  <td className="px-4 py-3 font-semibold text-slate-900">{criterion.max}</td>
+                                <td className="px-4 py-3">
+                                    <div className="flex items-center gap-3">
+                                      <input
+                                        type="range"
+                                        min={0}
+                                        max={criterion.max}
+                                        step={1}
+                                        value={selectedEval.criteria[criterion.key]}
+                                        onChange={(e) => {
+                                          const nextValue = Math.max(0, Math.min(criterion.max, Number(e.target.value || 0)));
+                                          setSelectedEval({ ...selectedEval, criteria: { ...selectedEval.criteria, [criterion.key]: nextValue, financial: 0 } });
+                                        }}
+                                        className="h-2 flex-1 cursor-pointer accent-emerald-600"
+                                      />
+                                      <input
+                                        type="number"
+                                        min={0}
+                                        max={criterion.max}
+                                        value={selectedEval.criteria[criterion.key]}
+                                        onChange={(e) => {
+                                          const nextValue = Math.max(0, Math.min(criterion.max, Number(e.target.value || 0)));
+                                          setSelectedEval({ ...selectedEval, criteria: { ...selectedEval.criteria, [criterion.key]: nextValue, financial: 0 } });
+                                        }}
+                                        className="input-field h-10 w-24"
+                                      />
+                                    </div>
+                                  </td>
+                                </tr>
+                              ))}
+                              <tr className="border-t border-slate-200 bg-slate-50">
+                                <td className="px-4 py-3 font-bold text-slate-900">Financial Total</td>
+                                <td className="px-4 py-3 font-bold text-slate-900">30</td>
+                                <td className="px-4 py-3 font-bold text-emerald-700">{financialTotal}</td>
+                              </tr>
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="overflow-hidden rounded-2xl border border-slate-200">
+                        <table className="min-w-full text-sm">
+                          <thead className="bg-slate-50 text-slate-500">
+                            <tr>
+                              <th className="px-4 py-3 text-left font-semibold">Criteria</th>
+                              <th className="px-4 py-3 text-left font-semibold">Max</th>
+                              <th className="px-4 py-3 text-left font-semibold">Score</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {stageTwoTechnicalCriteria.map((criterion) => (
+                              <tr key={criterion.key} className="border-t border-slate-100">
+                                <td className="px-4 py-3 text-slate-700">{criterion.label}</td>
+                                <td className="px-4 py-3 font-semibold text-slate-900">{criterion.max}</td>
+                                <td className="px-4 py-3">
+                                  <div className="flex items-center gap-3">
+                                    <input
+                                      type="range"
+                                      min={0}
+                                      max={criterion.max}
+                                      step={1}
+                                      value={selectedEval.criteria[criterion.key]}
+                                      onChange={(e) => {
+                                        const nextValue = Math.max(0, Math.min(criterion.max, Number(e.target.value || 0)));
+                                        setSelectedEval({ ...selectedEval, criteria: { ...selectedEval.criteria, [criterion.key]: nextValue } });
+                                      }}
+                                      className="h-2 flex-1 cursor-pointer accent-emerald-600"
+                                    />
+                                    <input
+                                      type="number"
+                                      min={0}
+                                      max={criterion.max}
+                                      value={selectedEval.criteria[criterion.key]}
+                                      onChange={(e) => {
+                                        const nextValue = Math.max(0, Math.min(criterion.max, Number(e.target.value || 0)));
+                                        setSelectedEval({ ...selectedEval, criteria: { ...selectedEval.criteria, [criterion.key]: nextValue } });
+                                      }}
+                                      className="input-field h-10 w-24"
+                                    />
+                                  </div>
+                                </td>
+                              </tr>
+                            ))}
+                            <tr className="border-t border-slate-200 bg-slate-50">
+                              <td className="px-4 py-3 font-bold text-slate-900">Technical Total</td>
+                              <td className="px-4 py-3 font-bold text-slate-900">70</td>
+                              <td className="px-4 py-3 font-bold text-emerald-700">{technicalTotal}</td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+              <div className="space-y-4">
+                <h3 className="font-bold text-slate-900 border-b border-slate-100 pb-2">Justification & Comments</h3>
+                {!isFinancialEvaluationMode && (
+                  <div className="rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900">
+                    TAC can only submit technical scoring in this workflow. Financial scoring is reserved for the RMT after technical clearance.
+                  </div>
+                )}
+                <textarea 
+                  rows={4} 
+                  placeholder={isFinancialEvaluationMode ? "Evaluation notes..." : "Evaluation notes..."} 
+                  className="input-field"
+                    value={selectedEval.comments}
+                    onChange={(e) => setSelectedEval({ ...selectedEval, comments: e.target.value })}
+                  />
+                </div>
+
+                <div className="flex justify-end gap-3 pt-6 border-t border-slate-100">
+                  <button onClick={() => setView("list")} className="btn-secondary">Cancel</button>
+                  <button onClick={handleSaveScore} className="btn-primary">Save Score</button>
+                  {isFinancialEvaluationMode && (
+                    <button
+                      onClick={() => {
+                        void handleSaveScore();
+                        showNotification("Score saved. Use the award ranking panel to confirm the recommended winner.");
+                      }}
+                      className="btn-secondary"
+                    >
+                      Recommend for Award
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-6">
+              <div className="card p-6">
+                <h3 className="text-sm font-bold text-slate-400 uppercase mb-4">Submitted Form Review</h3>
+                <div className="space-y-3">
+                  <button onClick={() => setSubmittedBidOpen(true)} className="btn-secondary w-full text-sm">
+                    {isFinancialEvaluationMode ? "View Submitted Stage 2 Form" : "View Submitted Stage 1 Form"}
+                  </button>
+                  <p className="text-xs text-slate-500">
+                    {isFinancialEvaluationMode
+                      ? "Open the vendor's detailed Stage 2 submission to review all completed fields, sites, and uploads while assigning the financial score."
+                      : "Open the vendor's detailed Stage 2 submission to review all completed fields, sites, and uploads while assigning the technical score."}
+                  </p>
+                </div>
+              </div>
+
+              <div className="card p-6">
+                <h3 className="text-sm font-bold text-slate-400 uppercase mb-4">
+                  {isFinancialEvaluationMode ? "Financial & Compliance Documents" : "Technical Documents"}
+                </h3>
+                <div className="space-y-3">
+                  {(isFinancialEvaluationMode ? financialDocumentLinks : technicalDocumentLinks)
+                    .filter(doc => Boolean(doc.url))
+                    .map(doc => (
+                      <a
+                        key={doc.label}
+                        href={String(doc.url)}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-slate-50 border border-transparent hover:border-slate-100 transition-all text-left group"
+                      >
+                        <div className="p-2 rounded-lg bg-slate-100 text-slate-400 group-hover:bg-emerald-50 group-hover:text-emerald-600">
+                          <FileText size={18} />
+                        </div>
+                        <span className="text-xs font-medium text-slate-600 truncate">{doc.label}</span>
+                      </a>
+                    ))}
+                  {(isFinancialEvaluationMode ? financialDocumentLinks : technicalDocumentLinks).length === 0 && (
+                    <p className="text-xs text-slate-500">No documents uploaded for this bid.</p>
+                  )}
+                </div>
+              </div>
+
+              <div className="card p-6 bg-slate-900 text-white">
+                <h3 className="text-sm font-bold text-slate-400 uppercase mb-4">Aggregate Score</h3>
+                <div className="text-center py-4">
+                  <p className="text-5xl font-bold text-emerald-400">
+                    {totalScore}
+                  </p>
+                  <p className="text-xs text-slate-400 mt-2 uppercase tracking-widest">{isFinancialEvaluationMode ? "Financial Score / 30" : `Technical Score / 70 • Threshold ${technicalThresholdScore}`}</p>
+                  {isFinancialEvaluationMode && technicalReferenceEvaluation && (
+                    <p className="mt-3 text-xs text-slate-400">Total Score: {getTechnicalComposite(technicalReferenceEvaluation) + financialTotal} / 100</p>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        {renderSubmittedBidModal()}
+      </>
+    );
+  }
+
+  function renderSubmittedBidModal() {
+    if (!submittedBidOpen || !selectedEval) return null;
+    const bid = selectedEval.bid;
+    const totalProjectCost = Number(bid.bid_amount || 0);
+    const subsidyRequested = Number(bid.subsidy_requested || 0);
+    const coFinancingAmount = Math.max(
+      0,
+      Number(bid.system_configuration?.co_financing_amount_lsl ?? (totalProjectCost - subsidyRequested))
+    );
+    const totalHouseholds = (bid.sites || []).reduce(
+      (sum, site) => sum + Number(site.estimatedHouseholds || site.numberOfHouseholds || 0),
+      0
+    );
+    const costPerConnection = subsidyRequested > 0 && totalHouseholds > 0 ? subsidyRequested / totalHouseholds : null;
+    const isStageTwoBid = bid.stage_key === "site_specific" || String(bid.stage || "").includes("Stage 2");
+    const allDocuments = [
+      { label: "Technical Proposal", url: bid.technical_proposal_file },
+      { label: "Financial Proposal", url: bid.financial_proposal_file },
+      { label: "Itemized BoQ", url: bid.boq_file },
+      { label: "Gender Action Plan", url: bid.gender_action_plan_file },
+      { label: "O&M Plan", url: bid.implementation_plan_file },
+      { label: "Reporting Templates", url: bid.reporting_templates_file },
+      { label: "Distribution Map", url: bid.distribution_map_file },
+    ].filter(doc => Boolean(doc.url));
+
+    return (
+      <AnimatePresence>
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          className="fixed inset-0 z-[220] bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4"
+          onClick={() => setSubmittedBidOpen(false)}
+        >
+          <motion.div
+            initial={{ scale: 0.96, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            exit={{ scale: 0.96, opacity: 0 }}
+            className="bg-white rounded-3xl shadow-2xl w-full max-w-6xl max-h-[88vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="sticky top-0 z-10 border-b border-slate-200 bg-white/95 backdrop-blur px-6 py-4 flex items-start justify-between gap-4">
+              <div>
+                <h2 className="text-xl font-bold text-slate-900">Submitted Bid Review</h2>
+                <p className="text-sm text-slate-500">
+                  {bid.vendor_name} • {bid.tender_name || bid.tender_reference || bid.tender} • {bid.stage_badge || bid.stage || "Bid"}
+                </p>
+              </div>
+              <button onClick={() => setSubmittedBidOpen(false)} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-6">
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Vendor</p>
+                  <p className="mt-2 text-sm font-semibold text-slate-900">{bid.vendor_name}</p>
+                </div>
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Status</p>
+                  <p className="mt-2 text-sm font-semibold text-slate-900">{bid.status}</p>
+                </div>
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Version</p>
+                  <p className="mt-2 text-sm font-semibold text-slate-900">{bid.version_number}</p>
+                </div>
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Submitted</p>
+                  <p className="mt-2 text-sm font-semibold text-slate-900">{bid.submitted_at ? new Date(bid.submitted_at).toLocaleString() : "Draft"}</p>
+                </div>
+              </div>
+
+              <div className="rounded-3xl border border-slate-200 overflow-hidden">
+                <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
+                  <h3 className="text-lg font-bold text-slate-900">Section A: Financial Proposal</h3>
+                </div>
+                <div className="p-6 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+                  <div className="rounded-2xl border border-slate-100 bg-white px-4 py-4">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Total Project Cost</p>
+                    <p className="mt-2 text-sm font-semibold text-slate-900">LSL {totalProjectCost.toLocaleString()}</p>
+                  </div>
+                  <div className="rounded-2xl border border-slate-100 bg-white px-4 py-4">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Subsidy Requested</p>
+                    <p className="mt-2 text-sm font-semibold text-slate-900">LSL {subsidyRequested.toLocaleString()}</p>
+                  </div>
+                  <div className="rounded-2xl border border-slate-100 bg-white px-4 py-4">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Co-financing</p>
+                    <p className="mt-2 text-sm font-semibold text-slate-900">LSL {coFinancingAmount.toLocaleString()}</p>
+                  </div>
+                  <div className="rounded-2xl border border-slate-100 bg-white px-4 py-4">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Cost Per Connection</p>
+                    <p className="mt-2 text-sm font-semibold text-slate-900">{costPerConnection != null ? `LSL ${costPerConnection.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : "Not enough data"}</p>
+                  </div>
+                </div>
+              </div>
+
+              {isStageTwoBid && (
+                <div className="rounded-3xl border border-slate-200 overflow-hidden">
+                  <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
+                    <h3 className="text-lg font-bold text-slate-900">Section B: Technical Specification</h3>
+                  </div>
+                  <div className="p-6 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
+                    <div className="rounded-2xl border border-slate-100 bg-white px-4 py-4">
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Technology Type</p>
+                      <p className="mt-2 text-sm font-semibold text-slate-900">{bid.system_configuration?.technology_type || bid.technology_type || "Not provided"}</p>
+                    </div>
+                    <div className="rounded-2xl border border-slate-100 bg-white px-4 py-4">
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Brand & Model</p>
+                      <p className="mt-2 text-sm font-semibold text-slate-900">{bid.device_brand_model || "Not provided"}</p>
+                    </div>
+                    <div className="rounded-2xl border border-slate-100 bg-white px-4 py-4">
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Technology Tier</p>
+                      <p className="mt-2 text-sm font-semibold text-slate-900">{bid.tech_tier || "Not provided"}</p>
+                    </div>
+                    <div className="rounded-2xl border border-slate-100 bg-white px-4 py-4">
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Energy Target</p>
+                      <p className="mt-2 text-sm font-semibold text-slate-900">{bid.energy_target || bid.energy_target_kwh_month ? `${bid.energy_target || bid.energy_target_kwh_month} kWh/month` : "Not provided"}</p>
+                    </div>
+                    <div className="rounded-2xl border border-slate-100 bg-white px-4 py-4">
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Warranty Period</p>
+                      <p className="mt-2 text-sm font-semibold text-slate-900">{bid.warranty_period || bid.warranty_period_months ? `${bid.warranty_period || bid.warranty_period_months} months` : "Not provided"}</p>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <div className="rounded-3xl border border-slate-200 overflow-hidden">
+                <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
+                  <h3 className="text-lg font-bold text-slate-900">Section C: Project Sites & Scope</h3>
+                </div>
+                <div className="p-6 space-y-4">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="rounded-2xl border border-slate-100 bg-white px-4 py-4">
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Primary District</p>
+                      <p className="mt-2 text-sm font-semibold text-slate-900">{bid.sites?.find(site => site.district)?.district || "Not provided"}</p>
+                    </div>
+                    <div className="rounded-2xl border border-slate-100 bg-white px-4 py-4">
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Installation Target</p>
+                      <p className="mt-2 text-sm font-semibold text-slate-900">{totalHouseholds.toLocaleString()} households</p>
+                    </div>
+                  </div>
+                  <div className="overflow-x-auto rounded-2xl border border-slate-100">
+                    <table className="min-w-full text-sm">
+                      <thead className="bg-slate-50 text-slate-500">
+                        <tr>
+                          {["Village", "District", "Latitude", "Longitude", "Households", "Target Technology"].map(label => (
+                            <th key={label} className="px-4 py-3 text-left font-semibold">{label}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(bid.sites || []).map((site, index) => (
+                          <tr key={`${site.siteName}-${index}`} className="border-t border-slate-100">
+                            <td className="px-4 py-3 text-slate-700">{site.siteName || "N/A"}</td>
+                            <td className="px-4 py-3 text-slate-700">{site.district || "N/A"}</td>
+                            <td className="px-4 py-3 text-slate-700">{site.latitude != null ? site.latitude : "N/A"}</td>
+                            <td className="px-4 py-3 text-slate-700">{site.longitude != null ? site.longitude : "N/A"}</td>
+                            <td className="px-4 py-3 text-slate-700">{site.estimatedHouseholds || site.numberOfHouseholds || "N/A"}</td>
+                            <td className="px-4 py-3 text-slate-700">{site.targetTechnology || "N/A"}</td>
+                          </tr>
+                        ))}
+                        {(bid.sites || []).length === 0 && (
+                          <tr>
+                            <td colSpan={6} className="px-4 py-6 text-center text-slate-500">No site rows submitted.</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+
+              <div className="rounded-3xl border border-slate-200 overflow-hidden">
+                <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
+                  <h3 className="text-lg font-bold text-slate-900">Section D: Social Inclusion Commitments</h3>
+                </div>
+                <div className="p-6 grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="rounded-2xl border border-slate-100 bg-white px-4 py-4">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Female-Headed Target</p>
+                    <p className="mt-2 text-sm font-semibold text-slate-900">{bid.female_target_pct ?? 0}%</p>
+                  </div>
+                  <div className="rounded-2xl border border-slate-100 bg-white px-4 py-4">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Vulnerable Group Target</p>
+                    <p className="mt-2 text-sm font-semibold text-slate-900">{bid.vulnerable_target_pct ?? 0}%</p>
+                  </div>
+                  <div className="rounded-2xl border border-slate-100 bg-white px-4 py-4">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Low-Income Target</p>
+                    <p className="mt-2 text-sm font-semibold text-slate-900">{bid.low_income_target_pct ?? 0}%</p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="rounded-3xl border border-slate-200 overflow-hidden">
+                <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
+                  <h3 className="text-lg font-bold text-slate-900">Section E: Project Narrative</h3>
+                </div>
+                <div className="p-6">
+                  <div className="rounded-2xl border border-slate-100 bg-white px-4 py-4">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Implementation Strategy</p>
+                    <p className="mt-3 text-sm text-slate-700 whitespace-pre-wrap">{bid.concept_note || "Not provided"}</p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="rounded-3xl border border-slate-200 overflow-hidden">
+                <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
+                  <h3 className="text-lg font-bold text-slate-900">Uploaded Documents</h3>
+                </div>
+                <div className="p-6 space-y-3">
+                  {allDocuments.map(doc => (
                     <a
                       key={doc.label}
                       href={String(doc.url)}
@@ -10912,34 +13401,18 @@ const TACView = () => {
                       <div className="p-2 rounded-lg bg-slate-100 text-slate-400 group-hover:bg-emerald-50 group-hover:text-emerald-600">
                         <FileText size={18} />
                       </div>
-                      <span className="text-xs font-medium text-slate-600 truncate">{doc.label}</span>
+                      <span className="text-sm font-medium text-slate-700 truncate">{doc.label}</span>
                     </a>
                   ))}
-                {[
-                  selectedEval.bid.technical_proposal_file,
-                  selectedEval.bid.financial_proposal_file,
-                  selectedEval.bid.boq_file,
-                  selectedEval.bid.gender_action_plan_file,
-                  selectedEval.bid.implementation_plan_file,
-                  selectedEval.bid.reporting_templates_file,
-                ].every(item => !item) && (
-                  <p className="text-xs text-slate-500">No documents uploaded for this bid.</p>
-                )}
+                  {allDocuments.length === 0 && (
+                    <p className="text-sm text-slate-500">No documents uploaded for this bid.</p>
+                  )}
+                </div>
               </div>
             </div>
-
-            <div className="card p-6 bg-slate-900 text-white">
-              <h3 className="text-sm font-bold text-slate-400 uppercase mb-4">Aggregate Score</h3>
-              <div className="text-center py-4">
-                <p className="text-5xl font-bold text-emerald-400">
-                  {totalScore}
-                </p>
-                <p className="text-xs text-slate-400 mt-2 uppercase tracking-widest">Weighted Average</p>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
+          </motion.div>
+        </motion.div>
+      </AnimatePresence>
     );
   }
 
@@ -10961,24 +13434,65 @@ const TACView = () => {
 
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">Technical Advisory Committee</h1>
-          <p className="text-slate-500">Review and evaluate technical proposals</p>
+          <h1 className="text-2xl font-bold text-slate-900">{isFinancialEvaluationMode ? "RMT Evaluation Screens" : "TAC Stage 2 Technical Evaluation"}</h1>
+          <p className="text-slate-500">{isFinancialEvaluationMode ? "Review Stage 1 submissions, then score Stage 2 financial proposals after technical clearance." : "Assess Stage 2 technical submissions and score the detailed proposal."}</p>
         </div>
       </div>
 
+      {isFinancialEvaluationMode && (
+        <div className="card">
+          <div className="p-6 border-b border-slate-100 flex items-center justify-between">
+            <div>
+              <h3 className="text-lg font-bold">Bid List - Stage 1 Submissions</h3>
+              <p className="text-sm text-slate-500 mt-1">RMT reviews concept notes, proposed sites, inclusion commitments, and tender fit before shortlisting vendors to Stage 2.</p>
+            </div>
+            <span className="badge bg-amber-100 text-amber-700">
+              {stageOneReviewQueue.filter(item => [BidStatus.SUBMITTED, BidStatus.UNDER_REVIEW].includes(item.status)).length} Awaiting Review
+            </span>
+          </div>
+          <div className="divide-y divide-slate-100">
+            {stageOneReviewQueue.map((item) => (
+              <div key={item.id} className="p-6 flex items-center justify-between hover:bg-slate-50 transition-colors">
+                <div>
+                  <p className="font-bold text-slate-900">{item.vendor_name}</p>
+                  <p className="text-xs text-slate-500">Submitted {item.submitted_at ? new Date(item.submitted_at).toLocaleDateString() : "N/A"} • {item.tender_reference || item.tender}</p>
+                </div>
+                <div className="flex items-center gap-4">
+                  <span className={`inline-flex rounded-full px-3 py-1 text-xs font-bold ${queueStatusTone(item)}`}>{item.status === BidStatus.ACCEPTED ? "Shortlisted" : item.status}</span>
+                  <button onClick={() => handleStartEvaluation(item)} className="btn-primary py-1.5 px-4 text-sm">{item.status === BidStatus.ACCEPTED ? "View" : "Review"}</button>
+                </div>
+              </div>
+            ))}
+            {!stageOneReviewQueue.length && (
+              <div className="p-6 text-sm text-slate-500">No Stage 1 submissions found.</div>
+            )}
+          </div>
+        </div>
+      )}
+
       <div className="card">
         <div className="p-6 border-b border-slate-100 flex items-center justify-between">
-          <h3 className="text-lg font-bold">Evaluation Queue</h3>
+          <h3 className="text-lg font-bold">{isFinancialEvaluationMode ? "Bid List - Stage 2 Submissions" : "Bid List - Stage 2 Technical Review"}</h3>
           <span className="badge bg-rose-100 text-rose-700">
-            {bidQueue.filter(item => !evaluationsByBid.get(item.id)).length} Pending Reviews
+            {filteredBidQueue.filter(item => !roleScopedEvaluationsByBid.get(item.id)).length} Pending Reviews
           </span>
         </div>
         <div className="divide-y divide-slate-100">
           {isLoading && (
             <div className="p-6 text-sm text-slate-500">Loading evaluations...</div>
           )}
-          {!isLoading && bidQueue.map((item) => {
-            const existing = evaluationsByBid.get(item.id);
+          {!isLoading && filteredBidQueue.map((item) => {
+            const existing = roleScopedEvaluationsByBid.get(item.id);
+            const technicalExisting = technicalEvaluationsByBid.get(item.id);
+            const financialExisting = financialEvaluationsByBid.get(item.id);
+            const technicalScore = item.technical_score_total ?? getTechnicalComposite(technicalExisting);
+            const financialScore = item.financial_score_total ?? getFinancialTotal(financialExisting);
+            const combinedScore = technicalScore + financialScore;
+            const threshold = tenderThresholds[item.tender] ?? 70;
+            const rowStatus =
+              item.evaluation_status === "evaluated" ? "Evaluated" :
+              item.evaluation_status === "technical_scored" ? (isFinancialEvaluationMode ? "Pending Financial" : "Evaluated") :
+              "Pending";
             return (
             <div key={item.id} className="p-6 flex items-center justify-between hover:bg-slate-50 transition-colors">
               <div className="flex gap-4 items-center">
@@ -10987,30 +13501,46 @@ const TACView = () => {
                 </div>
                 <div>
                   <p className="font-bold text-slate-900">{item.vendor_name}</p>
-                  <p className="text-xs text-slate-500">Tender: {item.tender}</p>
+                  <p className="text-xs text-slate-500">Tender: {item.tender_reference || item.tender}</p>
+                  {isFinancialEvaluationMode && (
+                    <p className="text-xs text-emerald-700">Technical gate: {technicalScore}/{Math.round((threshold / 100) * 70)}</p>
+                  )}
                 </div>
               </div>
               <div className="flex items-center gap-6">
-                {existing && existing.totalScore > 0 && (
-                  <div className="text-right">
+                <div className="hidden md:grid grid-cols-4 gap-6 text-right">
+                  <div>
                     <p className="text-xs font-bold text-slate-400 uppercase">Score</p>
-                    <p className="text-lg font-bold text-emerald-600">{existing.totalScore}/100</p>
+                    <p className="text-lg font-bold text-emerald-600">{combinedScore > 0 ? `${combinedScore}/100` : "—"}</p>
                   </div>
-                )}
+                  <div>
+                    <p className="text-xs font-bold text-slate-400 uppercase">Technical</p>
+                    <p className="text-sm font-semibold text-slate-900">{technicalScore > 0 ? `${technicalScore}/70` : "—"}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs font-bold text-slate-400 uppercase">Financial</p>
+                    <p className="text-sm font-semibold text-slate-900">{financialScore > 0 ? `${financialScore}/30` : "—"}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs font-bold text-slate-400 uppercase">Status</p>
+                    <p className="text-sm font-semibold text-slate-900">{rowStatus}</p>
+                  </div>
+                </div>
                 <button 
                   onClick={() => handleStartEvaluation(item)}
                   className="btn-primary py-1.5 px-4 text-sm"
                 >
-                  {existing ? 'Edit Score' : 'Start Evaluation'}
+                  {existing ? "Review" : `Start ${isFinancialEvaluationMode ? "Financial" : "Technical"} Score`}
                 </button>
               </div>
             </div>
           )})}
-          {!isLoading && bidQueue.length === 0 && (
-            <div className="p-6 text-sm text-slate-500">No submitted bids awaiting evaluation.</div>
+          {!isLoading && filteredBidQueue.length === 0 && (
+            <div className="p-6 text-sm text-slate-500">{isFinancialEvaluationMode ? "No bids have passed the technical threshold for RMT financial evaluation yet." : "No submitted bids awaiting evaluation."}</div>
           )}
         </div>
       </div>
+      {renderSubmittedBidModal()}
     </div>
   );
 };
@@ -11330,6 +13860,14 @@ const FieldVerifierView = () => {
         </div>
       </div>
 
+      <div className="card p-6">
+        <div className="mb-4">
+          <h3 className="text-lg font-bold text-slate-900">District GIS Map</h3>
+          <p className="text-sm text-slate-500">Installations in your assigned district appear here for verification planning.</p>
+        </div>
+        <GisInstallationsMap showFilters={false} height="450px" />
+      </div>
+
       <div className="card">
         <div className="p-6 border-b border-slate-100">
           <h3 className="text-lg font-bold">Verification Queue</h3>
@@ -11363,256 +13901,334 @@ const FieldVerifierView = () => {
 };
 
 const AdminView = () => {
-  const [view, setView] = useState<"dashboard" | "create">("dashboard");
-  const [users, setUsers] = useState([
-    { id: "USR-001", fullName: "Admin User", email: "admin@rbf.ls", role: UserRole.ADMIN, status: "Active", region: "All" },
-    { id: "USR-002", fullName: "M. Paiira", email: "m.paiira@rbf.ls", role: UserRole.RBF_OFFICIAL, status: "Active", region: "Maseru" },
-    { id: "USR-003", fullName: "T. Molapo", email: "t.molapo@doe.ls", role: UserRole.DOE_OFFICER, status: "Active", region: "Leribe" },
-  ]);
-  const [createError, setCreateError] = useState("");
-  const [createInfo, setCreateInfo] = useState("");
+  const districts = ["Maseru", "Leribe", "Berea", "Mafeteng", "Mohale's Hoek", "Quthing", "Qacha's Nek", "Mokhotlong", "Thaba-Tseka", "Butha-Buthe"];
+  const [view, setView] = useState<"dashboard" | "create" | "edit" | "detail">("dashboard");
+  const [users, setUsers] = useState<User[]>([]);
+  const [selectedUser, setSelectedUser] = useState<User | null>(null);
+  const [roleOptions, setRoleOptions] = useState<Array<{ label: string; value: string }>>([]);
+  const [filters, setFilters] = useState({ role: "", district: "", status: "" });
+  const [search, setSearch] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [formError, setFormError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
-
-  const [newUser, setNewUser] = useState({
+  const [prospectLogs, setProspectLogs] = useState<ProspectSyncLog[]>([]);
+  const [prospectLogsLoading, setProspectLogsLoading] = useState(false);
+  const [prospectRefreshLoading, setProspectRefreshLoading] = useState(false);
+  const [prospectOperationFilter, setProspectOperationFilter] = useState<"all" | "post" | "get">("all");
+  const [prospectStatusFilter, setProspectStatusFilter] = useState<"all" | "pending" | "success" | "failed">("all");
+  const [form, setForm] = useState({
     fullName: "",
-    username: "",
     email: "",
-    role: UserRole.RBF_OFFICIAL,
-    region: "Maseru",
-    gender: "Male",
-    mobileNumber: "",
-    tierAssignment: "",
-    verificationZone: "",
+    role: "",
+    gender: "Male" as "Male" | "Female" | "Other",
+    district: "",
+    isActive: true,
   });
-  const districts = ["All", "Maseru", "Leribe", "Berea", "Mafeteng", "Mohale's Hoek", "Quthing", "Qacha's Nek", "Mokhotlong", "Thaba-Tseka", "Butha-Buthe"];
 
-  const handleCreateUser = async (e: React.FormEvent) => {
+  const loadUsers = React.useCallback(async () => {
+    setLoading(true);
+    try {
+      const [list, meta] = await Promise.all([
+        fetchAdminManagedUsers({
+          role: filters.role || undefined,
+          district: filters.district || undefined,
+          status: filters.status ? (filters.status.toLowerCase() as "active" | "inactive") : undefined,
+        }),
+        fetchUserManagementMeta(),
+      ]);
+      setUsers(list);
+      setRoleOptions(meta.roles || []);
+      if (!form.role && meta.roles?.[0]?.value) {
+        setForm(prev => ({ ...prev, role: meta.roles[0].value }));
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, [filters.role, filters.district, filters.status, form.role]);
+
+  React.useEffect(() => {
+    void loadUsers();
+  }, [loadUsers]);
+
+  const loadProspectLogs = React.useCallback(async () => {
+    setProspectLogsLoading(true);
+    try {
+      const logs = await fetchProspectSyncLogs({
+        status: prospectStatusFilter === "all" ? undefined : prospectStatusFilter,
+        pageSize: 50,
+      });
+      setProspectLogs(logs);
+    } catch (err: any) {
+      setMessage(toFriendlyApiMessage(String(err?.message || "")) || "Unable to load Prospect sync status.");
+    } finally {
+      setProspectLogsLoading(false);
+    }
+  }, [prospectStatusFilter]);
+
+  React.useEffect(() => {
+    void loadProspectLogs();
+  }, [loadProspectLogs]);
+
+  const resetForm = () => {
+    setForm({
+      fullName: "",
+      email: "",
+      role: roleOptions[0]?.value || "",
+      gender: "Male",
+      district: "",
+      isActive: true,
+    });
+    setFormError("");
+  };
+
+  const openCreate = () => {
+    resetForm();
+    setSelectedUser(null);
+    setView("create");
+  };
+
+  const openDetail = async (userId: string, nextView: "detail" | "edit") => {
+    setLoading(true);
+    setFormError("");
+    try {
+      const detail = await fetchAdminUserDetail(userId);
+      setSelectedUser(detail);
+      setForm({
+        fullName: detail.fullName || "",
+        email: detail.email || "",
+        role: detail.role || roleOptions[0]?.value || "",
+        gender: detail.gender || "Male",
+        district: detail.district || detail.region || detail.verificationZone || "",
+        isActive: detail.isActive ?? detail.status === "Active",
+      });
+      setView(nextView);
+    } catch (err: any) {
+      setMessage(toFriendlyApiMessage(String(err?.message || "")) || "Unable to load user details.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCreateOrUpdate = async (e: React.FormEvent) => {
     e.preventDefault();
-    setCreateError("");
-    setCreateInfo("");
-    if (!newUser.fullName.trim()) {
-      setCreateError("full_name: This field is required.");
+    setFormError("");
+    setMessage(null);
+    if (!form.fullName.trim() || !form.email.trim() || !form.role || !form.gender) {
+      setFormError("Full name, email, role, and gender are required.");
       return;
     }
-    if (!newUser.username.trim()) {
-      setCreateError("username: This field is required.");
-      return;
-    }
-    if (!newUser.email.trim()) {
-      setCreateError("email: This field is required.");
-      return;
-    }
-    if (!newUser.mobileNumber.trim()) {
-      setCreateError("mobile_number: This field is required.");
-      return;
-    }
-    if (!/^\d{10,15}$/.test(newUser.mobileNumber.trim())) {
-      setCreateError("mobile_number: Must be 10-15 digits.");
-      return;
-    }
-    if (!newUser.region) {
-      setCreateError("region: This field is required.");
-      return;
-    }
-    if (!newUser.gender) {
-      setCreateError("gender: This field is required.");
-      return;
-    }
-    if (newUser.role === UserRole.FIELD_VERIFIER && !newUser.verificationZone.trim()) {
-      setCreateError("verification_zone: This field is required for Field Verifiers.");
+    const districtRequired = [UserRole.FIELD_VERIFIER, UserRole.DOE_OFFICER].includes(form.role as UserRole);
+    if (districtRequired && !form.district.trim()) {
+      setFormError("Assigned district is required for Field Officer and DoE roles.");
       return;
     }
     try {
       setIsSubmitting(true);
-      const result = await createOfficialAccount({
-        username: newUser.username.trim(),
-        fullName: newUser.fullName.trim(),
-        email: newUser.email.trim(),
-        gender: newUser.gender as any,
-        role: newUser.role,
-        region: newUser.region,
-        mobileNumber: newUser.mobileNumber.trim(),
-        tierAssignment: newUser.tierAssignment.trim() || undefined,
-        verificationZone: newUser.verificationZone.trim() || undefined,
-      });
-      const user = result.user;
-      setUsers([
-        {
-          id: user.id,
-          fullName: user.fullName,
-          email: user.email,
-          role: user.role,
-          status: user.status,
-          region: user.region || "N/A",
-        },
-        ...users,
-      ]);
-      if (result.initialPassword) {
-        setCreateInfo(`Temporary password generated: ${result.initialPassword}`);
-      } else if (result.emailError) {
-        setCreateInfo(`Account created, but email delivery failed: ${result.emailError}`);
-      } else {
-        setCreateInfo("Account created and credentials sent to email.");
+      if (view === "create") {
+        const result = await createAdminManagedUser({
+          fullName: form.fullName.trim(),
+          email: form.email.trim(),
+          role: form.role,
+          gender: form.gender,
+          district: form.district.trim() || undefined,
+        });
+        setMessage(result.initialPassword
+          ? `User created. Username: ${result.user.username || result.user.email}. Temporary password: ${result.initialPassword}`
+          : result.emailError
+            ? `User created, but email delivery failed: ${result.emailError}`
+            : `User created. Username: ${result.user.username || result.user.email}. Credentials email sent.`);
+      } else if (selectedUser) {
+        const updated = await updateAdminManagedUser(selectedUser.id, {
+          fullName: form.fullName.trim(),
+          email: form.email.trim(),
+          role: form.role,
+          gender: form.gender,
+          district: form.district.trim() || undefined,
+          isActive: form.isActive,
+        });
+        setSelectedUser(updated);
+        setMessage("User updated successfully.");
       }
+      await loadUsers();
       setView("dashboard");
     } catch (err: any) {
-      const friendly = toFriendlyApiMessage(String(err?.message || ""));
-      setCreateError(friendly || "Unable to create account. Please verify the details.");
+      setFormError(toFriendlyApiMessage(String(err?.message || "")) || "Unable to save user.");
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  if (view === "create") {
+  const handleDeactivate = async (userId: string) => {
+    if (!window.confirm("Deactivate this user? They will lose access immediately.")) return;
+    try {
+      setIsSubmitting(true);
+      await deactivateAdminManagedUser(userId);
+      setMessage("User deactivated.");
+      await loadUsers();
+      if (selectedUser?.id === userId) {
+        const detail = await fetchAdminUserDetail(userId);
+        setSelectedUser(detail);
+      }
+    } catch (err: any) {
+      setMessage(toFriendlyApiMessage(String(err?.message || "")) || "Unable to deactivate user.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const filteredUsers = users.filter(user => {
+    if (!search.trim()) return true;
+    const haystack = `${user.fullName} ${user.email} ${user.roleLabel || user.role} ${user.district || user.region || ""}`.toLowerCase();
+    return haystack.includes(search.toLowerCase());
+  });
+
+  const handleRefreshProspectPanel = async () => {
+    try {
+      setProspectRefreshLoading(true);
+      await refreshProspectSyncPanel({ size: 100, page: 1 });
+      setMessage("Prospect GET sync refresh queued.");
+      await loadProspectLogs();
+    } catch (err: any) {
+      setMessage(toFriendlyApiMessage(String(err?.message || "")) || "Unable to refresh Prospect sync status.");
+    } finally {
+      setProspectRefreshLoading(false);
+    }
+  };
+
+  if (view === "create" || view === "edit") {
+    const isEdit = view === "edit";
+    const districtRequired = [UserRole.FIELD_VERIFIER, UserRole.DOE_OFFICER].includes(form.role as UserRole);
     return (
-      <div className="space-y-6 max-w-2xl mx-auto">
-        <div className="flex items-center gap-4 mb-8">
-          <button onClick={() => setView("dashboard")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
+      <div className="mx-auto max-w-3xl space-y-6">
+        <div className="mb-8 flex items-center gap-4">
+          <button onClick={() => setView("dashboard")} className="rounded-lg p-2 text-slate-500 hover:bg-slate-100">
             <ChevronRight className="rotate-180" size={20} />
           </button>
           <div>
-            <h1 className="text-2xl font-bold text-slate-900">Create Official Account</h1>
-            <p className="text-slate-500">Register a new official, evaluator, or verifier</p>
+            <h1 className="text-2xl font-bold text-slate-900">{isEdit ? "Edit User" : "Create User"}</h1>
+            <p className="text-slate-500">{isEdit ? "Update role, district, and active status." : "Create a new admin-managed non-vendor user."}</p>
           </div>
         </div>
 
         <div className="card p-8">
-          <form onSubmit={handleCreateUser} className="space-y-6">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <form onSubmit={handleCreateOrUpdate} className="space-y-6">
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
               <div className="space-y-1">
-                <label className="text-sm font-bold text-slate-700 ml-1">Full Name *</label>
-                <input 
-                  required
-                  type="text" 
-                  value={newUser.fullName}
-                  onChange={(e) => setNewUser({...newUser, fullName: e.target.value})}
-                  className="input-field" 
-                  placeholder="Official Name" 
-                />
+                <label className="ml-1 text-sm font-bold text-slate-700">Full Name *</label>
+                <input className="input-field" value={form.fullName} onChange={(e) => setForm(prev => ({ ...prev, fullName: e.target.value }))} />
               </div>
               <div className="space-y-1">
-                <label className="text-sm font-bold text-slate-700 ml-1">Username *</label>
-                <input 
-                  required
-                  type="text" 
-                  value={newUser.username}
-                  onChange={(e) => setNewUser({...newUser, username: e.target.value.replace(/\\s/g, "")})}
-                  className="input-field" 
-                  placeholder="official_username" 
-                />
+                <label className="ml-1 text-sm font-bold text-slate-700">Email *</label>
+                <input className="input-field" type="email" value={form.email} onChange={(e) => setForm(prev => ({ ...prev, email: e.target.value }))} />
               </div>
               <div className="space-y-1">
-                <label className="text-sm font-bold text-slate-700 ml-1">Email Address *</label>
-                <input 
-                  required
-                  type="email" 
-                  value={newUser.email}
-                  onChange={(e) => setNewUser({...newUser, email: e.target.value})}
-                  className="input-field" 
-                  placeholder="official@rbf.ls" 
-                />
-              </div>
-              <div className="space-y-1">
-                <label className="text-sm font-bold text-slate-700 ml-1">Mobile Number *</label>
-                <input 
-                  required
-                  type="tel" 
-                  value={newUser.mobileNumber}
-                  onChange={(e) => setNewUser({...newUser, mobileNumber: e.target.value.replace(/\\D/g, "")})}
-                  className="input-field" 
-                  inputMode="numeric"
-                  placeholder="Digits only"
-                  pattern="[0-9]{10,15}"
-                />
-              </div>
-              <div className="space-y-1">
-                <label className="text-sm font-bold text-slate-700 ml-1">System Role *</label>
-                <select 
-                  value={newUser.role}
-                  onChange={(e) => setNewUser({...newUser, role: e.target.value as UserRole})}
-                  className="input-field"
-                  required
-                >
-                  <option value={UserRole.RBF_OFFICIAL}>RBF Management Team</option>
-                  <option value={UserRole.DOE_OFFICER}>DoE Officer</option>
-                  <option value={UserRole.TAC}>TAC Member</option>
-                  <option value={UserRole.FIELD_VERIFIER}>Field Verifier</option>
-                  <option value={UserRole.UNDP_DONOR}>Project Steering Committee</option>
-                  <option value={UserRole.AUDITOR}>Auditor</option>
+                <label className="ml-1 text-sm font-bold text-slate-700">Role *</label>
+                <select className="input-field" value={form.role} onChange={(e) => setForm(prev => ({ ...prev, role: e.target.value }))}>
+                  {roleOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
                 </select>
               </div>
               <div className="space-y-1">
-                <label className="text-sm font-bold text-slate-700 ml-1">Assigned Region *</label>
-                <select 
-                  value={newUser.region}
-                  onChange={(e) => setNewUser({...newUser, region: e.target.value})}
-                  className="input-field"
-                  required
-                >
-                  {districts.map((district) => (
-                    <option key={district} value={district}>
-                      {district === "All" ? "All Regions" : district}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="space-y-1">
-                <label className="text-sm font-bold text-slate-700 ml-1">Gender *</label>
-                <select 
-                  value={newUser.gender}
-                  onChange={(e) => setNewUser({...newUser, gender: e.target.value as any})}
-                  className="input-field"
-                  required
-                >
+                <label className="ml-1 text-sm font-bold text-slate-700">Gender *</label>
+                <select className="input-field" value={form.gender} onChange={(e) => setForm(prev => ({ ...prev, gender: e.target.value as "Male" | "Female" | "Other" }))}>
                   <option value="Male">Male</option>
                   <option value="Female">Female</option>
                   <option value="Other">Other</option>
                 </select>
               </div>
               <div className="space-y-1">
-                <label className="text-sm font-bold text-slate-700 ml-1">Tier Assignment (Optional)</label>
-                <input 
-                  type="text" 
-                  value={newUser.tierAssignment}
-                  onChange={(e) => setNewUser({...newUser, tierAssignment: e.target.value})}
-                  className="input-field" 
-                  placeholder="e.g., evaluator, verifier"
-                />
+                <label className="ml-1 text-sm font-bold text-slate-700">Assigned District/Region {districtRequired ? "*" : "(Optional)"}</label>
+                <select className="input-field" value={form.district} onChange={(e) => setForm(prev => ({ ...prev, district: e.target.value }))}>
+                  <option value="">Select district</option>
+                  {districts.map(district => <option key={district} value={district}>{district}</option>)}
+                </select>
               </div>
-              <div className="space-y-1">
-                <label className="text-sm font-bold text-slate-700 ml-1">
-                  Verification Zone {newUser.role === UserRole.FIELD_VERIFIER ? "*" : "(Optional)"}
-                </label>
-                <input 
-                  required={newUser.role === UserRole.FIELD_VERIFIER}
-                  type="text" 
-                  value={newUser.verificationZone}
-                  onChange={(e) => setNewUser({...newUser, verificationZone: e.target.value})}
-                  className="input-field" 
-                  placeholder="Assigned zone"
-                />
-              </div>
+              {isEdit && (
+                <div className="space-y-1">
+                  <label className="ml-1 text-sm font-bold text-slate-700">Status</label>
+                  <select className="input-field" value={form.isActive ? "active" : "inactive"} onChange={(e) => setForm(prev => ({ ...prev, isActive: e.target.value === "active" }))}>
+                    <option value="active">Active</option>
+                    <option value="inactive">Inactive</option>
+                  </select>
+                </div>
+              )}
             </div>
 
-            {createError && (
-              <p className="text-rose-600 text-xs font-medium">{createError}</p>
-            )}
+            {formError && <p className="text-xs font-medium text-rose-600">{formError}</p>}
 
-            <div className="bg-blue-50 p-4 rounded-xl border border-blue-100 flex gap-3">
-              <AlertCircle className="text-blue-600 shrink-0" size={20} />
-              <p className="text-xs text-blue-800 leading-relaxed">
-                A temporary password will be auto-generated and sent to the official's email. 
-                They will be required to change it upon their first login.
-              </p>
-            </div>
-
-            <div className="flex justify-end gap-3 pt-4 border-t border-slate-100">
+            <div className="flex gap-3 border-t border-slate-100 pt-4">
               <button type="button" onClick={() => setView("dashboard")} className="btn-secondary">Cancel</button>
               <button type="submit" disabled={isSubmitting} className="btn-primary px-8">
-                {isSubmitting ? "Creating..." : "Create Account"}
+                {isSubmitting ? "Saving..." : isEdit ? "Save Changes" : "Create User"}
               </button>
             </div>
           </form>
+        </div>
+      </div>
+    );
+  }
+
+  if (view === "detail" && selectedUser) {
+    return (
+      <div className="space-y-6">
+        <div className="mb-8 flex items-center gap-4">
+          <button onClick={() => setView("dashboard")} className="rounded-lg p-2 text-slate-500 hover:bg-slate-100">
+            <ChevronRight className="rotate-180" size={20} />
+          </button>
+          <div>
+            <h1 className="text-2xl font-bold text-slate-900">{selectedUser.fullName}</h1>
+            <p className="text-slate-500">Profile, role scope, audit trail, and Prospect sync status</p>
+          </div>
+        </div>
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+          <div className="card p-6 space-y-4">
+            <div>
+              <p className="text-xs font-bold uppercase tracking-widest text-slate-400">Profile</p>
+              <p className="mt-2 text-lg font-semibold text-slate-900">{selectedUser.fullName}</p>
+              <p className="text-sm text-slate-500">{selectedUser.email}</p>
+            </div>
+            <div className="space-y-2 text-sm text-slate-600">
+              <p><span className="font-semibold text-slate-800">Role:</span> {selectedUser.roleLabel || selectedUser.role}</p>
+              <p><span className="font-semibold text-slate-800">District:</span> {selectedUser.district || "—"}</p>
+              <p><span className="font-semibold text-slate-800">Status:</span> {selectedUser.status}</p>
+              <p><span className="font-semibold text-slate-800">Last Login:</span> {selectedUser.lastLogin ? new Date(selectedUser.lastLogin).toLocaleString() : "Never"}</p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button onClick={() => setView("edit")} className="btn-primary text-xs">Edit User</button>
+              {selectedUser.isActive !== false && selectedUser.status !== "Inactive" && (
+                <button onClick={() => handleDeactivate(selectedUser.id)} className="btn-secondary text-xs" disabled={isSubmitting}>Deactivate</button>
+              )}
+            </div>
+          </div>
+          <div className="card p-6 lg:col-span-2">
+            <h3 className="text-lg font-bold text-slate-900">Recent Audit Log</h3>
+            <div className="mt-4 space-y-3">
+              {(selectedUser.recentAuditLogs || []).length === 0 && <p className="text-sm text-slate-500">No audit entries yet.</p>}
+              {(selectedUser.recentAuditLogs || []).map(log => (
+                <div key={String(log.id)} className="rounded-xl border border-slate-100 p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="font-semibold text-slate-900">{log.action}</p>
+                    <span className="text-xs text-slate-400">{log.createdAt ? new Date(log.createdAt).toLocaleString() : "N/A"}</span>
+                  </div>
+                  <p className="mt-1 text-xs text-slate-500">{log.module || "users"} • {log.recordType || "user"} #{log.recordId ?? "—"}</p>
+                </div>
+              ))}
+            </div>
+            <h3 className="mt-6 text-lg font-bold text-slate-900">Prospect Sync Status</h3>
+            <div className="mt-4 space-y-3">
+              {(selectedUser.prospectSyncStatus || []).length === 0 && <p className="text-sm text-slate-500">No Prospect sync logs yet.</p>}
+              {(selectedUser.prospectSyncStatus || []).map(log => (
+                <div key={String(log.id)} className="rounded-xl border border-slate-100 p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="font-semibold text-slate-900">{log.methodName}</p>
+                    <span className="text-xs text-slate-400">{log.createdAt ? new Date(log.createdAt).toLocaleString() : "N/A"}</span>
+                  </div>
+                  <p className="mt-1 text-xs text-slate-500">Status: {log.status} • Attempts: {log.attempts}</p>
+                  {log.errorMessage && <p className="mt-1 text-xs text-rose-600">{log.errorMessage}</p>}
+                </div>
+              ))}
+            </div>
+          </div>
         </div>
       </div>
     );
@@ -11623,111 +14239,110 @@ const AdminView = () => {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-slate-900">System Administration</h1>
-          <p className="text-slate-500">Manage users, roles, and system integrity</p>
+          <p className="text-slate-500">Manage admin-created users and their access lifecycle.</p>
         </div>
-        <div className="flex gap-3">
-          <button className="btn-secondary flex items-center gap-2">
-            <Download size={18} /> Audit Logs
-          </button>
-          <button onClick={() => setView("create")} className="btn-primary flex items-center gap-2">
-            <Plus size={18} /> Create User
-          </button>
-        </div>
+        <button onClick={openCreate} className="btn-primary flex items-center gap-2">
+          <Plus size={18} /> Create User
+        </button>
       </div>
 
-      {createInfo && (
+      {message && (
         <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs font-medium text-emerald-700">
-          {createInfo}
+          {message}
         </div>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
         <div className="card p-6">
-          <h4 className="text-xs font-bold text-slate-400 uppercase mb-4">User Status</h4>
-          <div className="flex items-end justify-between">
-            <div>
-              <p className="text-3xl font-bold">{users.length + 139}</p>
-              <p className="text-xs text-emerald-600 font-medium">+12 this week</p>
-            </div>
-            <Users size={32} className="text-slate-200" />
-          </div>
+          <h4 className="mb-4 text-xs font-bold uppercase text-slate-400">Total Non-Vendor Users</h4>
+          <p className="text-3xl font-bold text-slate-900">{users.length}</p>
         </div>
         <div className="card p-6">
-          <h4 className="text-xs font-bold text-slate-400 uppercase mb-4">API Health</h4>
-          <div className="flex items-end justify-between">
-            <div>
-              <p className="text-3xl font-bold">99.9%</p>
-              <p className="text-xs text-emerald-600 font-medium">All systems green</p>
-            </div>
-            <Activity size={32} className="text-slate-200" />
-          </div>
+          <h4 className="mb-4 text-xs font-bold uppercase text-slate-400">Active</h4>
+          <p className="text-3xl font-bold text-slate-900">{users.filter(user => user.isActive !== false && user.status !== "Inactive").length}</p>
         </div>
         <div className="card p-6">
-          <h4 className="text-xs font-bold text-slate-400 uppercase mb-4">System Alerts</h4>
-          <div className="flex items-end justify-between">
-            <div>
-              <p className="text-3xl font-bold">2</p>
-              <p className="text-xs text-rose-600 font-medium">Requires attention</p>
-            </div>
-            <AlertCircle size={32} className="text-slate-200" />
-          </div>
+          <h4 className="mb-4 text-xs font-bold uppercase text-slate-400">Inactive</h4>
+          <p className="text-3xl font-bold text-slate-900">{users.filter(user => user.isActive === false || user.status === "Inactive").length}</p>
         </div>
       </div>
 
+      <ProspectSyncStatusPanel
+        logs={prospectLogs}
+        loading={prospectLogsLoading}
+        refreshing={prospectRefreshLoading}
+        operationFilter={prospectOperationFilter}
+        statusFilter={prospectStatusFilter}
+        onOperationFilterChange={setProspectOperationFilter}
+        onStatusFilterChange={setProspectStatusFilter}
+        onRefresh={() => void handleRefreshProspectPanel()}
+      />
+
       <div className="card">
-        <div className="p-6 border-b border-slate-100 flex items-center justify-between">
-          <h3 className="text-lg font-bold">User Management</h3>
-          <div className="flex gap-2">
+        <div className="flex flex-col gap-4 border-b border-slate-100 p-6 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <h3 className="text-lg font-bold">User Management</h3>
+            <p className="text-sm text-slate-500">All non-vendor users in the platform.</p>
+          </div>
+          <div className="flex flex-wrap gap-2">
             <div className="relative">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-              <input type="text" placeholder="Search users..." className="pl-9 pr-4 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:ring-emerald-500 focus:border-emerald-500 outline-none" />
+              <input value={search} onChange={(e) => setSearch(e.target.value)} type="text" placeholder="Search users..." className="rounded-lg border border-slate-200 bg-slate-50 py-1.5 pl-9 pr-4 text-sm outline-none focus:border-emerald-500 focus:ring-emerald-500" />
             </div>
+            <select className="input-field py-1.5 text-sm" value={filters.role} onChange={(e) => setFilters(prev => ({ ...prev, role: e.target.value }))}>
+              <option value="">All Roles</option>
+              {roleOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+            </select>
+            <select className="input-field py-1.5 text-sm" value={filters.district} onChange={(e) => setFilters(prev => ({ ...prev, district: e.target.value }))}>
+              <option value="">All Districts</option>
+              {districts.map(district => <option key={district} value={district}>{district}</option>)}
+            </select>
+            <select className="input-field py-1.5 text-sm" value={filters.status} onChange={(e) => setFilters(prev => ({ ...prev, status: e.target.value }))}>
+              <option value="">All Statuses</option>
+              <option value="active">Active</option>
+              <option value="inactive">Inactive</option>
+            </select>
           </div>
         </div>
         <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse">
+          <table className="w-full border-collapse text-left">
             <thead>
-              <tr className="bg-slate-50 border-b border-slate-100">
-                <th className="p-4 text-xs font-bold text-slate-500 uppercase">ID</th>
-                <th className="p-4 text-xs font-bold text-slate-500 uppercase">User</th>
-                <th className="p-4 text-xs font-bold text-slate-500 uppercase">Role</th>
-                <th className="p-4 text-xs font-bold text-slate-500 uppercase">Region</th>
-                <th className="p-4 text-xs font-bold text-slate-500 uppercase">Status</th>
-                <th className="p-4 text-xs font-bold text-slate-500 uppercase text-right">Actions</th>
+              <tr className="border-b border-slate-100 bg-slate-50">
+                <th className="p-4 text-xs font-bold uppercase text-slate-500">Name</th>
+                <th className="p-4 text-xs font-bold uppercase text-slate-500">Email</th>
+                <th className="p-4 text-xs font-bold uppercase text-slate-500">Role</th>
+                <th className="p-4 text-xs font-bold uppercase text-slate-500">District</th>
+                <th className="p-4 text-xs font-bold uppercase text-slate-500">Status</th>
+                <th className="p-4 text-right text-xs font-bold uppercase text-slate-500">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {users.map((user) => (
-                <tr key={user.id} className="hover:bg-slate-50 transition-colors">
-                  <td className="p-4 font-mono text-xs text-slate-500">{user.id}</td>
+              {!loading && filteredUsers.length === 0 && (
+                <tr>
+                  <td colSpan={6} className="p-6 text-center text-sm text-slate-500">No users found for the selected filters.</td>
+                </tr>
+              )}
+              {filteredUsers.map((user) => (
+                <tr key={user.id} className="transition-colors hover:bg-slate-50">
                   <td className="p-4">
-                    <div className="flex items-center gap-3">
-                      <div className="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-slate-500 text-xs font-bold">
-                        {user.fullName.split(' ').map(n => n[0]).join('')}
-                      </div>
-                      <div>
-                        <p className="text-sm font-bold text-slate-900">{user.fullName}</p>
-                        <p className="text-xs text-slate-500">{user.email}</p>
-                      </div>
-                    </div>
+                    <p className="text-sm font-bold text-slate-900">{user.fullName}</p>
                   </td>
+                  <td className="p-4 text-sm text-slate-600">{user.email}</td>
+                  <td className="p-4"><span className="rounded bg-slate-100 px-2 py-1 text-xs font-medium text-slate-600">{user.roleLabel || user.role}</span></td>
+                  <td className="p-4 text-sm text-slate-600">{user.district || user.region || "—"}</td>
                   <td className="p-4">
-                    <span className="text-xs font-medium text-slate-600 bg-slate-100 px-2 py-1 rounded">{user.role}</span>
-                  </td>
-                  <td className="p-4">
-                    <span className="text-xs text-slate-600">{user.region}</span>
-                  </td>
-                  <td className="p-4">
-                    <span className={`text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full ${
-                      user.status === 'Active' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'
-                    }`}>
-                      {user.status}
+                    <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-widest ${(user.isActive !== false && user.status !== "Inactive") ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>
+                      {(user.isActive !== false && user.status !== "Inactive") ? "Active" : "Inactive"}
                     </span>
                   </td>
                   <td className="p-4 text-right">
-                    <button onClick={() => setView("create")} className="text-slate-400 hover:text-emerald-600 p-1">
-                      <Settings size={16} />
-                    </button>
+                    <div className="flex justify-end gap-2">
+                      <button onClick={() => void openDetail(user.id, "detail")} className="text-xs font-semibold text-emerald-700 hover:underline">View</button>
+                      <button onClick={() => void openDetail(user.id, "edit")} className="text-xs font-semibold text-slate-700 hover:underline">Edit</button>
+                      {(user.isActive !== false && user.status !== "Inactive") && (
+                        <button onClick={() => void handleDeactivate(user.id)} className="text-xs font-semibold text-rose-700 hover:underline">Deactivate</button>
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -11997,6 +14612,14 @@ const DoEOfficerView = () => {
             ))}
           </div>
         </div>
+      </div>
+
+      <div className="card p-6">
+        <div className="mb-4">
+          <h3 className="text-lg font-bold text-slate-900">Regional GIS Map</h3>
+          <p className="text-sm text-slate-500">Filtered to the installations visible under your regional scope.</p>
+        </div>
+        <GisInstallationsMap showFilters height="500px" />
       </div>
     </div>
   );
@@ -12649,6 +15272,35 @@ export default function App() {
   const [showNotifications, setShowNotifications] = useState(false);
   const [notifications, setNotifications] = useState<Notification[]>(MOCK_NOTIFICATIONS);
   const [authMessage, setAuthMessage] = useState<string | null>(null);
+  const isApplyingBrowserStateRef = React.useRef(false);
+  const lastBrowserStateKeyRef = React.useRef("");
+
+  const buildBrowserRouteState = React.useCallback(() => ({
+    __app: "rbf-spa",
+    hasUser: Boolean(currentUser),
+    showPublicPortal,
+    authView,
+    activeTab,
+    tenderView,
+    pendingTenderId,
+    pendingBidTenderId,
+    pendingBidId,
+  }), [currentUser, showPublicPortal, authView, activeTab, tenderView, pendingTenderId, pendingBidTenderId, pendingBidId]);
+
+  const applyBrowserRouteState = React.useCallback((state: any) => {
+    if (!state || state.__app !== "rbf-spa") return;
+    isApplyingBrowserStateRef.current = true;
+    setShowPublicPortal(Boolean(state.showPublicPortal));
+    setAuthView(state.authView === "register" ? "register" : "login");
+    setActiveTab(typeof state.activeTab === "string" && state.activeTab.trim() ? state.activeTab : "dashboard");
+    setTenderView(state.tenderView === "create" || state.tenderView === "details" ? state.tenderView : "list");
+    setPendingTenderId(typeof state.pendingTenderId === "string" ? state.pendingTenderId : null);
+    setPendingBidTenderId(typeof state.pendingBidTenderId === "string" ? state.pendingBidTenderId : null);
+    setPendingBidId(typeof state.pendingBidId === "string" ? state.pendingBidId : null);
+    window.setTimeout(() => {
+      isApplyingBrowserStateRef.current = false;
+    }, 0);
+  }, []);
 
   const loadNotifications = React.useCallback(async () => {
     if (!getStoredUser()) {
@@ -12692,6 +15344,32 @@ export default function App() {
         setCurrentUser(null);
       });
   }, []);
+
+  React.useEffect(() => {
+    if (typeof window === "undefined") return;
+    const initialState = buildBrowserRouteState();
+    const initialKey = JSON.stringify(initialState);
+    lastBrowserStateKeyRef.current = initialKey;
+    window.history.replaceState(initialState, "");
+
+    const handlePopState = (event: PopStateEvent) => {
+      if (event.state?.__app === "rbf-spa") {
+        applyBrowserRouteState(event.state);
+      }
+    };
+
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, [applyBrowserRouteState, buildBrowserRouteState]);
+
+  React.useEffect(() => {
+    if (typeof window === "undefined" || isApplyingBrowserStateRef.current) return;
+    const nextState = buildBrowserRouteState();
+    const nextKey = JSON.stringify(nextState);
+    if (nextKey === lastBrowserStateKeyRef.current) return;
+    lastBrowserStateKeyRef.current = nextKey;
+    window.history.pushState(nextState, "");
+  }, [buildBrowserRouteState]);
 
   const role = currentUser?.role;
 
@@ -12741,7 +15419,7 @@ export default function App() {
         return { tab: "my_bids" };
       }
       if (isProject) {
-        return { tab: "projects" };
+        return { tab: "projects_hub" };
       }
       return { tab: "dashboard" };
     }
@@ -12899,9 +15577,9 @@ export default function App() {
         case "evaluations":
         case "scoring":
         case "blacklisting":
-          return activeTab === "blacklisting" ? <Blacklisting currentUser={currentUser} /> : <TACView />;
+          return activeTab === "blacklisting" ? <Blacklisting currentUser={currentUser} /> : <TACView mode="technical" />;
         default:
-          return <TACView />;
+          return <TACView mode="technical" />;
       }
     }
     if (role === UserRole.FIELD_VERIFIER) {
@@ -12977,6 +15655,7 @@ export default function App() {
     // Default RBF Official view
     switch (activeTab) {
       case "dashboard": return <Dashboard role={role} onNewTender={handleNewTender} />;
+      case "evaluations": return <TACView mode="financial" />;
       case "tenders": return (
         <Tenders
           initialView={tenderView}
@@ -13078,6 +15757,7 @@ export default function App() {
     return [
       ...common,
       { id: "tenders", icon: FileText, label: "Tender Management" },
+      { id: "evaluations", icon: ClipboardCheck, label: "Financial Evaluation" },
       { id: "prequal", icon: ClipboardCheck, label: "Pre-Qualification" },
       { id: "rbf_projects", icon: BarChart3, label: "RBF Project" },
       { id: "blacklisting", icon: FileWarning, label: "Blacklisting" },

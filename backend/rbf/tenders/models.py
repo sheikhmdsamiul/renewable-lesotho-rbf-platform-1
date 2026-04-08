@@ -15,6 +15,7 @@ class BidStatus(models.TextChoices):
     DRAFT = 'Draft'
     SUBMITTED = 'Submitted'
     UNDER_REVIEW = 'Under Review'
+    REVISION_REQUIRED = 'Revision Required'
     AWARDED = 'Awarded'
     ACCEPTED = 'Accepted'
     REJECTED = 'Rejected'
@@ -108,17 +109,37 @@ class TenderBid(models.Model):
     
     # Bid content
     bid_amount = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    subsidy_requested = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
     proposal_file = models.FileField(upload_to='tender_bids/', null=True, blank=True)
     stage = models.CharField(max_length=64, blank=True)  # e.g., "Pre-Qualification", "Site-Specific"
     concept_note = models.TextField(blank=True)  # For Stage 1
     technical_proposal = models.TextField(blank=True)  # For Stage 2
     financial_proposal = models.TextField(blank=True)  # For Stage 2
+    system_configuration = models.JSONField(default=dict, blank=True)
+    boq_items = models.JSONField(default=list, blank=True)
+    boq_details = models.JSONField(default=list, blank=True)
+    device_brand_model = models.CharField(max_length=255, blank=True)
+    tech_tier = models.CharField(max_length=16, blank=True)
+    energy_target_kwh_month = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     technical_proposal_file = models.FileField(upload_to='tender_bids/', null=True, blank=True)
     financial_proposal_file = models.FileField(upload_to='tender_bids/', null=True, blank=True)
     boq_file = models.FileField(upload_to='tender_bids/', null=True, blank=True)
     gender_action_plan_file = models.FileField(upload_to='tender_bids/', null=True, blank=True)
     implementation_plan_file = models.FileField(upload_to='tender_bids/', null=True, blank=True)
+    om_plan_file = models.FileField(upload_to='tender_bids/', null=True, blank=True)
     reporting_templates_file = models.FileField(upload_to='tender_bids/', null=True, blank=True)
+    distribution_map_file = models.FileField(upload_to='tender_bids/', null=True, blank=True)
+    female_target_pct = models.PositiveIntegerField(default=50)
+    vulnerable_target_pct = models.PositiveIntegerField(default=30)
+    low_income_target_pct = models.PositiveIntegerField(default=60)
+    inclusion_commitment_confirmed = models.BooleanField(default=False)
+    om_strategy_summary = models.TextField(blank=True)
+    local_technicians_to_be_trained = models.PositiveIntegerField(null=True, blank=True)
+    warranty_period_months = models.PositiveIntegerField(null=True, blank=True)
+    offer_paygo = models.BooleanField(default=False)
+    paygo_platform = models.CharField(max_length=255, blank=True)
+    daily_payment_amount_lsl = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    collection_method = models.CharField(max_length=64, blank=True)
     
     # Metadata
     version_number = models.PositiveIntegerField(default=1)
@@ -127,6 +148,15 @@ class TenderBid(models.Model):
     reviewed_at = models.DateTimeField(null=True, blank=True)
     reviewed_by = models.CharField(max_length=255, blank=True)
     rejection_reason = models.TextField(blank=True)
+    stage_two_unlocked = models.BooleanField(default=False)
+    stage_two_unlocked_at = models.DateTimeField(null=True, blank=True)
+    stage_two_source_bid = models.ForeignKey(
+        'self',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='stage_two_drafts',
+    )
     
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -134,6 +164,13 @@ class TenderBid(models.Model):
     class Meta:
         ordering = ['-submitted_at']
         unique_together = ('tender', 'vendor_id', 'version_number')
+        constraints = [
+            models.UniqueConstraint(
+                fields=['tender', 'vendor_id'],
+                condition=~models.Q(status__in=[BidStatus.DRAFT, BidStatus.REVISION_REQUIRED, BidStatus.WITHDRAWN, BidStatus.ACCEPTED]),
+                name='uniq_tender_vendor_final_bid',
+            ),
+        ]
         indexes = [
             models.Index(fields=['tender', 'status']),
             models.Index(fields=['vendor_id']),
@@ -186,6 +223,12 @@ class ContractStatus(models.TextChoices):
     REJECTED = 'Rejected'
 
 
+class ContractSignatureStatus(models.TextChoices):
+    AWAITING = 'awaiting'
+    UPLOADED = 'uploaded'
+    APPROVED = 'approved'
+
+
 class TenderContract(models.Model):
     tender = models.ForeignKey(Tender, on_delete=models.CASCADE, related_name='contracts')
     bid = models.ForeignKey(TenderBid, null=True, blank=True, on_delete=models.SET_NULL, related_name='contracts')
@@ -195,6 +238,11 @@ class TenderContract(models.Model):
     reference_number = models.CharField(max_length=64, unique=True)
     template_name = models.CharField(max_length=255, blank=True)
     status = models.CharField(max_length=16, choices=ContractStatus.choices, default=ContractStatus.GENERATED)
+    signature_status = models.CharField(
+        max_length=16,
+        choices=ContractSignatureStatus.choices,
+        default=ContractSignatureStatus.AWAITING,
+    )
     generated_file = models.FileField(upload_to='tender_contracts/generated/', null=True, blank=True)
     generated_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -226,10 +274,15 @@ class TenderBidSite(models.Model):
     bid = models.ForeignKey(TenderBid, on_delete=models.CASCADE, related_name='sites')
     site_name = models.CharField(max_length=255)
     district = models.CharField(max_length=128, blank=True)
+    village_sub_district = models.CharField(max_length=255, blank=True)
     latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
     longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
     system_configuration = models.JSONField(default=dict, blank=True)
     boq_items = models.JSONField(default=list, blank=True)
+    number_of_households = models.PositiveIntegerField(default=0)
+    target_beneficiary_type = models.CharField(max_length=32, blank=True)
+    estimated_energy_demand_kwh_month = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    road_access_available = models.BooleanField(default=False)
     notes = models.TextField(blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)

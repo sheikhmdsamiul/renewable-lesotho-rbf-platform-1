@@ -5,6 +5,19 @@ from rbf.users.models import User, UserRole
 
 DEMO_USERS = [
     {
+        'username': 'vendor_approved',
+        'password': 'Vendor@1234',
+        'email': 'vendor@rbf.ls',
+        'full_name': 'Approved Vendor User',
+        'role': UserRole.VENDOR,
+        'status': 'Active',
+        'gender': 'Female',
+        'region': 'Maseru',
+        'mobile_number': '26655555555',
+        'organization_name': 'Approved Vendor Ltd',
+        'organization_type': 'Private Company',
+    },
+    {
         'username': 'admin_user',
         'password': 'Admin@1234',
         'email': 'admin@rbf.ls',
@@ -125,9 +138,6 @@ class Command(BaseCommand):
                 created += 1
             else:
                 updated += 1
-
-        # Explicitly remove the vendor demo user if it exists.
-        User.objects.filter(username='vendor_approved').delete()
 
         self.stdout.write(
             self.style.SUCCESS(

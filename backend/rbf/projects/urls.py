@@ -10,9 +10,13 @@ from .views import (
     PaymentClaimViewSet,
     DisbursementViewSet,
     AuditLogViewSet,
+    ProspectSyncLogViewSet,
+    AnomalyFlagViewSet,
 )
 
 router = DefaultRouter()
+router.register(r'prospect-sync-logs', ProspectSyncLogViewSet, basename='prospect-sync-log')
+router.register(r'anomaly-flags', AnomalyFlagViewSet, basename='anomaly-flag')
 router.register(r'audit-logs', AuditLogViewSet, basename='audit-log')
 router.register(r'disbursements', DisbursementViewSet, basename='disbursement')
 router.register(r'claims', PaymentClaimViewSet, basename='payment-claim')

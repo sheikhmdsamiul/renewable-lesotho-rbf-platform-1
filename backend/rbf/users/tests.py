@@ -1,5 +1,6 @@
 import re
 from datetime import timedelta
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
@@ -11,6 +12,7 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from rbf.projects.models import (
+    AuditLog,
     Disbursement,
     DisbursementStatus,
     InstallationReport,
@@ -26,6 +28,137 @@ from rbf.users.models import BlacklistedIdentifier, BlacklistCaseStatus, VendorB
 
 
 class UserApiTests(APITestCase):
+    @patch("rbf.users.views.SyncToProspectJob.dispatch_async")
+    def test_super_admin_can_create_non_vendor_user_and_queue_prospect_agent(self, dispatch_async):
+        User = get_user_model()
+        admin = User.objects.create_user(
+            username="super_admin_create",
+            password="securePass123",
+            role="Platform Administrator (Super Admin)",
+            status="Active",
+            email="super-admin@example.com",
+        )
+        self.client.force_authenticate(admin)
+
+        response = self.client.post(
+            "/api/users/",
+            {
+                "email": "field.officer@example.com",
+                "full_name": "Field Officer One",
+                "gender": "Female",
+                "role": "Field Officer",
+                "region": "Maseru",
+                "verification_zone": "Maseru Urban",
+                "status": "Active",
+                "is_active": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        created_user = User.objects.get(email="field.officer@example.com")
+        self.assertTrue(created_user.must_change_password)
+        self.assertEqual(created_user.role, "Field Verifier")
+        self.assertTrue(AuditLog.objects.filter(action="user_created", record_id=created_user.id, record_type="user").exists())
+        dispatch_async.assert_called_once()
+        self.assertEqual(dispatch_async.call_args.args[0], "pushAgent")
+        self.assertEqual(dispatch_async.call_args.args[1][0]["gender"], "F")
+        self.assertEqual(dispatch_async.call_args.kwargs["record_id"], created_user.id)
+        self.assertEqual(dispatch_async.call_args.kwargs["record_type"], "user")
+
+    def test_super_admin_user_list_excludes_vendors_and_supports_filters(self):
+        User = get_user_model()
+        admin = User.objects.create_user(
+            username="super_admin_list",
+            password="securePass123",
+            role="Platform Administrator (Super Admin)",
+            status="Active",
+        )
+        User.objects.create_user(
+            username="vendor_hidden",
+            password="securePass123",
+            role="Vendor",
+            status="Active",
+            region="Maseru",
+            email="vendor-hidden@example.com",
+            gender="Male",
+            mobile_number="26655555555",
+        )
+        User.objects.create_user(
+            username="doe_visible",
+            password="securePass123",
+            role="DoE Officer",
+            status="Active",
+            region="Maseru",
+            email="doe-visible@example.com",
+            gender="Female",
+            mobile_number="26655555556",
+        )
+        self.client.force_authenticate(admin)
+
+        response = self.client.get("/api/users/?role=DoE Officer&district=Maseru&status=active")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["results"][0]["role"], "DoE Officer")
+
+    def test_super_admin_can_deactivate_user(self):
+        User = get_user_model()
+        admin = User.objects.create_user(
+            username="super_admin_deactivate",
+            password="securePass123",
+            role="Platform Administrator (Super Admin)",
+            status="Active",
+        )
+        managed = User.objects.create_user(
+            username="auditor_user",
+            password="securePass123",
+            role="Auditor",
+            status="Active",
+            is_active=True,
+            email="auditor@example.com",
+            gender="Male",
+            region="Maseru",
+            mobile_number="26655555557",
+        )
+        self.client.force_authenticate(admin)
+
+        response = self.client.post(f"/api/users/{managed.id}/deactivate/", {}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        managed.refresh_from_db()
+        self.assertFalse(managed.is_active)
+        self.assertEqual(managed.status, "Inactive")
+        self.assertTrue(AuditLog.objects.filter(action="user_deactivated", record_id=managed.id).exists())
+
+    def test_change_password_clears_must_change_password(self):
+        User = get_user_model()
+        user = User.objects.create_user(
+            username="must_change_user",
+            password="TempPass123!",
+            email="must-change@example.com",
+            role="Auditor",
+            status="Active",
+            must_change_password=True,
+            gender="Female",
+            region="Maseru",
+            mobile_number="26655555558",
+        )
+        self.client.force_authenticate(user)
+
+        response = self.client.post(
+            "/api/users/auth/change-password/",
+            {"new_password": "ChangedPass123!"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["role"], "Auditor")
+        self.assertFalse(response.data["must_change_password"])
+        user.refresh_from_db()
+        self.assertFalse(user.must_change_password)
+        self.assertTrue(user.check_password("ChangedPass123!"))
+
     def test_create_and_list_user(self):
         User = get_user_model()
         admin = User.objects.create_user(
@@ -118,6 +251,44 @@ class UserApiTests(APITestCase):
         )
         self.assertEqual(login_response.status_code, status.HTTP_200_OK)
         self.assertIn("access", login_response.data)
+
+    @override_settings(DEBUG=True)
+    def test_user_created_via_api_can_login_with_email_and_temp_password(self):
+        User = get_user_model()
+        admin = User.objects.create_user(
+            username="creator_admin_email_login",
+            password="securePass123",
+            role="Platform Administrator (Super Admin)",
+            status="Active",
+        )
+        self.client.force_authenticate(admin)
+
+        create_response = self.client.post(
+            "/api/users/",
+            {
+                "email": "temp.login@example.com",
+                "full_name": "Temp Login User",
+                "role": "Field Officer",
+                "status": "Active",
+                "gender": "Female",
+                "region": "Maseru",
+            },
+            format="json",
+        )
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        self.assertIn("initial_password", create_response.data)
+        self.assertEqual(create_response.data["username"], "temp_login")
+
+        self.client.force_authenticate(user=None)
+        login_response = self.client.post(
+            "/api/users/auth/token/",
+            {"username": "temp.login@example.com", "password": create_response.data["initial_password"]},
+            format="json",
+        )
+
+        self.assertEqual(login_response.status_code, status.HTTP_200_OK)
+        self.assertIn("access", login_response.data)
+        self.assertEqual(login_response.data["user"]["username"], "temp_login")
 
     def test_pending_vendor_can_login(self):
         cache.set("registration_otp_verified:pending@example.com", True, timeout=300)

@@ -192,12 +192,20 @@ def _resolve_target_installations(bid) -> int:
     except Exception:
         bid_sites = []
 
-    if not bid_sites:
-        return 0
-
     units_total = 0
+    bid_config = getattr(bid, "system_configuration", {}) or {}
+    if isinstance(bid_config, dict):
+        for key in ("units", "unit_count", "systems", "total_units", "installation_target"):
+            if key in bid_config and isinstance(bid_config[key], (int, float)):
+                units_total += int(bid_config[key])
+                break
+
     for site in bid_sites:
-        config = site.system_configuration or {}
+        households = getattr(site, "number_of_households", 0) or 0
+        if households:
+            units_total += int(households)
+            continue
+        config = getattr(site, "system_configuration", {}) or {}
         if not isinstance(config, dict):
             continue
         for key in ("units", "unit_count", "systems", "total_units"):
@@ -205,7 +213,9 @@ def _resolve_target_installations(bid) -> int:
                 units_total += int(config[key])
                 break
 
-    return units_total if units_total > 0 else len(bid_sites)
+    if units_total > 0:
+        return units_total
+    return len(bid_sites)
 
 
 def _header_template(contract_reference: str) -> str:

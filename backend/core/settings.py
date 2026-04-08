@@ -48,6 +48,7 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'rbf.projects.middleware.RequestContextMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
@@ -210,3 +211,26 @@ OTP_EXPIRY_SECONDS = env.int('OTP_EXPIRY_SECONDS', default=600)
 # Celery
 CELERY_BROKER_URL = env('REDIS_URL', default='redis://localhost:6379/0')
 CELERY_RESULT_BACKEND = env('REDIS_URL', default='redis://localhost:6379/0')
+
+# Prospect integration
+PROSPECT_BASE_URL = env('PROSPECT_BASE_URL', default='')
+PROSPECT_WRITE_TOKEN = env('PROSPECT_WRITE_TOKEN', default='')
+PROSPECT_READ_TOKEN = env('PROSPECT_READ_TOKEN', default='')
+PROSPECT_TOKEN_IN_AGENTS = env('PROSPECT_TOKEN_IN_AGENTS', default='')
+PROSPECT_TOKEN_IN_TARGETS = env('PROSPECT_TOKEN_IN_TARGETS', default='')
+PROSPECT_TOKEN_IN_CUSTOMERS = env('PROSPECT_TOKEN_IN_CUSTOMERS', default='')
+PROSPECT_TOKEN_IN_INSTALLATIONS = env('PROSPECT_TOKEN_IN_INSTALLATIONS', default='')
+PROSPECT_TOKEN_IN_INSTALLATIONS_TS = env('PROSPECT_TOKEN_IN_INSTALLATIONS_TS', default='')
+PROSPECT_TOKEN_IN_REPORTS = env('PROSPECT_TOKEN_IN_REPORTS', default='')
+PROSPECT_TIMEOUT_SECONDS = env.int('PROSPECT_TIMEOUT_SECONDS', default=30)
+PROSPECT_BATCH_SIZE = env.int('PROSPECT_BATCH_SIZE', default=10000)
+
+# GIS and project thresholds
+LESOTHO_BOUNDARY_PATH = env('LESOTHO_BOUNDARY_PATH', default='/public/geojson/lesotho.geojson')
+GPS_DUPLICATE_RADIUS_METERS = env.int('GPS_DUPLICATE_RADIUS_METERS', default=10)
+GPS_VERIFICATION_MAX_DISTANCE_METERS = env.int('GPS_VERIFICATION_MAX_DISTANCE_METERS', default=50)
+KPI_CACHE_MINUTES = env.int('KPI_CACHE_MINUTES', default=15)
+MILESTONE2_VERIFICATION_THRESHOLD = env.float('MILESTONE2_VERIFICATION_THRESHOLD', default=0.80)
+ANOMALY_DEVIATION_THRESHOLD = env.float('ANOMALY_DEVIATION_THRESHOLD', default=0.05)
+MAX_MAP_RECORDS = env.int('MAX_MAP_RECORDS', default=1000)
+MAX_FILE_SIZE_MB = env.int('MAX_FILE_SIZE_MB', default=10)

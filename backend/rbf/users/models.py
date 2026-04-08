@@ -3,14 +3,14 @@ from django.db import models
 
 
 class UserRole(models.TextChoices):
-    RBF_OFFICIAL = 'RBF Management Team'
-    TAC = 'TAC Member'
-    DOE_OFFICER = 'DoE Officer'
-    FIELD_VERIFIER = 'Field Verifier'
-    VENDOR = 'Vendor'
-    ADMIN = 'Platform Administrator (Super Admin)'
-    UNDP_DONOR = 'Project Steering Committee'
-    AUDITOR = 'Auditor'
+    RBF_OFFICIAL = 'RBF Management Team', 'RBF Management Team'
+    TAC = 'TAC Member', 'TAC Member'
+    DOE_OFFICER = 'DoE Officer', 'DoE Officer'
+    FIELD_VERIFIER = 'Field Verifier', 'Field Verifier'
+    VENDOR = 'Vendor', 'Vendor'
+    ADMIN = 'Platform Administrator (Super Admin)', 'Platform Administrator (Super Admin)'
+    UNDP_DONOR = 'Project Steering Committee', 'Project Steering Committee'
+    AUDITOR = 'Auditor', 'Auditor'
 
 
 class UserStatus(models.TextChoices):
@@ -47,11 +47,11 @@ class User(AbstractUser):
 
 
 class PrequalificationStatus(models.TextChoices):
-    PENDING = 'Pending'
-    UNDER_REVIEW = 'Under Review'
-    APPROVED = 'Approved'
-    CLARIFICATION_REQUESTED = 'Partial (Resubmit)'
-    REJECTED = 'Rejected'
+    PENDING = 'Pending', 'Pending'
+    UNDER_REVIEW = 'Under Review', 'Under Review'
+    APPROVED = 'Approved', 'Approved'
+    CLARIFICATION_REQUESTED = 'Partial (Resubmit)', 'Partial (Resubmit)'
+    REJECTED = 'Rejected', 'Rejected'
 
 
 class VendorPrequalification(models.Model):
@@ -125,10 +125,10 @@ class VendorPrequalification(models.Model):
 
 
 class BlacklistReason(models.TextChoices):
-    FRAUDULENT_REPORTING = 'Fraudulent Reporting'
-    INTEGRITY_BREACH = 'Integrity Breach'
-    PERSISTENT_NON_PERFORMANCE = 'Persistent Non-Performance'
-    EXTERNAL_LEGAL_ACTION = 'External Legal Action'
+    FRAUDULENT_REPORTING = 'Fraudulent Reporting', 'Fraudulent Reporting'
+    INTEGRITY_BREACH = 'Integrity Breach', 'Integrity Breach'
+    PERSISTENT_NON_PERFORMANCE = 'Persistent Non-Performance', 'Persistent Non-Performance'
+    EXTERNAL_LEGAL_ACTION = 'External Legal Action', 'External Legal Action'
 
 
 class BlacklistCaseStatus(models.TextChoices):

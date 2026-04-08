@@ -1,3 +1,11 @@
+import json
+import os
+from decimal import Decimal
+from functools import lru_cache
+from pathlib import Path
+
+from django.conf import settings
+from django.utils import timezone
 from rest_framework import serializers
 from .models import (
     Tender,
@@ -9,24 +17,235 @@ from .models import (
     TenderContract,
     ContractStatus,
 )
-from rbf.users.models import UserRole
+from rbf.users.models import UserRole, VendorPrequalification, PrequalificationStatus
+from rbf.projects.models import TechnologyType, VerificationMethod
+from rbf.users.models import User
+
+
+PRE_QUALIFICATION_STAGE_KEYS = {
+    'pre_qualification',
+    'prequalification',
+    'pre-qualification',
+    'concept',
+    'stage_1',
+    'stage1',
+    'stage_1:_concept',
+}
+SITE_SPECIFIC_STAGE_KEYS = {
+    'site_specific',
+    'site-specific',
+    'sitespecific',
+    'detailed',
+    'stage_2',
+    'stage2',
+    'stage_2:_detailed',
+}
+SITE_TARGET_BENEFICIARY_CHOICES = (
+    ('female_headed', 'female_headed'),
+    ('vulnerable', 'vulnerable'),
+    ('low_income', 'low_income'),
+    ('standard', 'standard'),
+)
+TECH_TIER_CHOICES = {f"Tier {idx}" for idx in range(1, 6)}
+
+
+def normalize_tech_tier(value) -> str:
+    raw = str(value or '').strip()
+    if not raw:
+        return ''
+    normalized = raw.lower().replace('level', 'tier')
+    match = normalized.replace('-', ' ').split()
+    if len(match) == 2 and match[0] == 'tier' and match[1].isdigit():
+        tier_number = int(match[1])
+        if 1 <= tier_number <= 5:
+            return f'Tier {tier_number}'
+    digits = ''.join(ch for ch in raw if ch.isdigit())
+    if digits:
+        tier_number = int(digits)
+        if 1 <= tier_number <= 5:
+            return f'Tier {tier_number}'
+    return raw
+
+
+def normalize_tender_stage(stage_value) -> str:
+    raw = str(stage_value or '').strip()
+    normalized = raw.lower().replace(' ', '_')
+    if normalized in PRE_QUALIFICATION_STAGE_KEYS:
+        return 'pre_qualification'
+    if normalized in SITE_SPECIFIC_STAGE_KEYS:
+        return 'site_specific'
+    return 'pre_qualification'
+
+
+def tender_stage_label(stage_value) -> str:
+    return 'Stage 1: Concept' if normalize_tender_stage(stage_value) == 'pre_qualification' else 'Stage 2: Detailed'
+
+
+def is_site_specific_stage(stage_value) -> bool:
+    return normalize_tender_stage(stage_value) == 'site_specific'
+
+
+def normalize_technology_type(value) -> str:
+    raw = str(value or '').strip().upper()
+    mapping = {
+        'SOLAR HOME SYSTEM': TechnologyType.SHS,
+        'IMPROVED COOKSTOVE': TechnologyType.ICS,
+        'MINI-GRID': TechnologyType.GMG,
+        'SOLAR WATER PUMP': TechnologyType.SWP,
+        'PRODUCTIVE USE': TechnologyType.PUE,
+    }
+    return mapping.get(raw, raw if raw in {choice for choice, _ in TechnologyType.choices} else '')
+
+
+@lru_cache(maxsize=1)
+def _load_lesotho_boundary_coordinates():
+    geojson_path = Path(__file__).resolve().parents[2] / 'public' / 'geojson' / 'lesotho.geojson'
+    if not geojson_path.exists():
+        geojson_path = Path(__file__).resolve().parents[3] / 'public' / 'geojson' / 'lesotho.geojson'
+    with geojson_path.open('r', encoding='utf-8') as geojson_file:
+        payload = json.load(geojson_file)
+
+    geometry = payload
+    if payload.get('type') == 'FeatureCollection':
+        features = payload.get('features') or []
+        geometry = features[0].get('geometry') if features else {}
+    elif payload.get('type') == 'Feature':
+        geometry = payload.get('geometry') or {}
+
+    geo_type = geometry.get('type')
+    coordinates = geometry.get('coordinates') or []
+    if geo_type == 'Polygon':
+        return [coordinates]
+    if geo_type == 'MultiPolygon':
+        return coordinates
+    return []
+
+
+def _point_in_ring(longitude: Decimal, latitude: Decimal, ring) -> bool:
+    inside = False
+    x = float(longitude)
+    y = float(latitude)
+    ring_len = len(ring)
+    if ring_len < 3:
+        return False
+    j = ring_len - 1
+    for i in range(ring_len):
+        xi, yi = ring[i][0], ring[i][1]
+        xj, yj = ring[j][0], ring[j][1]
+        intersects = ((yi > y) != (yj > y)) and (
+            x < (xj - xi) * (y - yi) / ((yj - yi) or 1e-12) + xi
+        )
+        if intersects:
+            inside = not inside
+        j = i
+    return inside
+
+
+def point_in_lesotho(longitude: Decimal, latitude: Decimal) -> bool:
+    for polygon in _load_lesotho_boundary_coordinates():
+        if not polygon:
+            continue
+        outer_ring = polygon[0]
+        if not _point_in_ring(longitude, latitude, outer_ring):
+            continue
+        holes = polygon[1:] if len(polygon) > 1 else []
+        if any(_point_in_ring(longitude, latitude, hole) for hole in holes):
+            continue
+        return True
+    return False
+
+
+def has_stage_two_shortlist_access(bid) -> bool:
+    if bid is None or not getattr(bid, 'stage_two_unlocked', False):
+        return False
+    source_bid = getattr(bid, 'stage_two_source_bid', None)
+    return bool(source_bid and source_bid.status == BidStatus.ACCEPTED)
 
 
 class TenderBidSiteSerializer(serializers.ModelSerializer):
+    target_beneficiary_type = serializers.ChoiceField(
+        choices=SITE_TARGET_BENEFICIARY_CHOICES,
+        required=False,
+        allow_blank=True,
+    )
+    system_configuration = serializers.JSONField(required=False, write_only=True)
+
     class Meta:
         model = TenderBidSite
         fields = [
             'id',
             'site_name',
             'district',
+            'village_sub_district',
             'latitude',
             'longitude',
             'system_configuration',
-            'boq_items',
+            'number_of_households',
+            'target_beneficiary_type',
+            'estimated_energy_demand_kwh_month',
+            'road_access_available',
             'notes',
             'created_at',
         ]
         read_only_fields = ['id', 'created_at']
+
+    def to_internal_value(self, data):
+        payload = data.copy() if hasattr(data, 'copy') else dict(data)
+        if 'estimated_households' in payload and 'number_of_households' not in payload:
+            payload['number_of_households'] = payload.get('estimated_households')
+        if 'village' in payload and 'village_sub_district' not in payload:
+            payload['village_sub_district'] = payload.get('village')
+        if 'primary_beneficiary_type' in payload and 'target_beneficiary_type' not in payload:
+            payload['target_beneficiary_type'] = payload.get('primary_beneficiary_type')
+        if 'road_access' in payload and 'road_access_available' not in payload:
+            payload['road_access_available'] = payload.get('road_access')
+        if 'target_technology' in payload:
+            current_config = payload.get('system_configuration')
+            if isinstance(current_config, str):
+                try:
+                    current_config = json.loads(current_config)
+                except Exception:
+                    current_config = {}
+            if not isinstance(current_config, dict):
+                current_config = {}
+            current_config['target_technology'] = payload.get('target_technology')
+            payload['system_configuration'] = current_config
+        return super().to_internal_value(payload)
+
+    def validate(self, attrs):
+        errors = {}
+        for field_name in ('site_name', 'district'):
+            value = attrs.get(field_name)
+            if value is not None and not str(value).strip():
+                errors[field_name] = 'This field is required.'
+        for field_name in ('latitude', 'longitude'):
+            value = attrs.get(field_name)
+            if value is None:
+                continue
+            numeric_value = Decimal(str(value))
+            if field_name == 'latitude' and not Decimal('-90') <= numeric_value <= Decimal('90'):
+                errors[field_name] = 'Latitude must be between -90 and 90.'
+            if field_name == 'longitude' and not Decimal('-180') <= numeric_value <= Decimal('180'):
+                errors[field_name] = 'Longitude must be between -180 and 180.'
+        households = attrs.get('number_of_households')
+        if households is not None and households < 1:
+            errors['number_of_households'] = 'Number of households must be at least 1.'
+        demand = attrs.get('estimated_energy_demand_kwh_month')
+        if demand is not None and Decimal(str(demand)) <= Decimal('0'):
+            errors['estimated_energy_demand_kwh_month'] = 'Estimated energy demand must be greater than 0.'
+        if errors:
+            raise serializers.ValidationError(errors)
+        return attrs
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        data.pop('system_configuration', None)
+        data['estimated_households'] = data.get('number_of_households')
+        data['village'] = data.get('village_sub_district')
+        data['primary_beneficiary_type'] = data.get('target_beneficiary_type')
+        data['road_access'] = data.get('road_access_available')
+        data['target_technology'] = (instance.system_configuration or {}).get('target_technology', '')
+        return data
 
 
 class TenderBidSerializer(serializers.ModelSerializer):
@@ -34,47 +253,169 @@ class TenderBidSerializer(serializers.ModelSerializer):
     sites = TenderBidSiteSerializer(many=True, required=False)
     tender_reference = serializers.CharField(source='tender.reference_number', read_only=True)
     tender_name = serializers.CharField(source='tender.name', read_only=True)
+    tender_status = serializers.CharField(source='tender.status', read_only=True)
+    tender_intent_to_award_at = serializers.DateTimeField(source='tender.intent_to_award_at', read_only=True)
+    tender_intent_to_award_bid_id = serializers.SerializerMethodField()
+    tender_awarded_at = serializers.DateTimeField(source='tender.awarded_at', read_only=True)
+    tender_awarded_vendor_id = serializers.CharField(source='tender.awarded_vendor_id', read_only=True)
+    tender_awarded_vendor_name = serializers.CharField(source='tender.awarded_vendor_name', read_only=True)
+    stage = serializers.CharField(read_only=True)
+    stage_key = serializers.SerializerMethodField()
+    stage_badge = serializers.SerializerMethodField()
+    technology_type = serializers.SerializerMethodField()
+    document_requirements = serializers.SerializerMethodField()
+    document_counts = serializers.SerializerMethodField()
+    stage_two_ready = serializers.SerializerMethodField()
+    deadline = serializers.SerializerMethodField()
+    deadline_passed = serializers.SerializerMethodField()
+    deadline_countdown_seconds = serializers.SerializerMethodField()
+    is_locked = serializers.SerializerMethodField()
+    version_history = serializers.SerializerMethodField()
+    evaluation_status = serializers.SerializerMethodField()
+    technical_score_total = serializers.SerializerMethodField()
+    financial_score_total = serializers.SerializerMethodField()
     
     class Meta:
         model = TenderBid
         fields = [
             'id', 'tender', 'vendor_id', 'vendor_name', 'vendor_email',
-            'tender_reference', 'tender_name',
-            'bid_amount', 'proposal_file', 'stage', 'concept_note',
+            'tender_reference', 'tender_name', 'tender_status',
+            'tender_intent_to_award_at', 'tender_intent_to_award_bid_id',
+            'tender_awarded_at', 'tender_awarded_vendor_id', 'tender_awarded_vendor_name',
+            'bid_amount', 'subsidy_requested', 'proposal_file', 'stage', 'stage_key', 'stage_badge', 'technology_type', 'concept_note',
             'technical_proposal', 'financial_proposal',
+            'system_configuration', 'boq_items', 'boq_details', 'device_brand_model', 'tech_tier', 'energy_target_kwh_month',
             'technical_proposal_file', 'financial_proposal_file', 'boq_file',
-            'gender_action_plan_file', 'implementation_plan_file', 'reporting_templates_file',
+            'gender_action_plan_file', 'implementation_plan_file', 'om_plan_file', 'reporting_templates_file', 'distribution_map_file',
+            'female_target_pct', 'vulnerable_target_pct', 'low_income_target_pct',
+            'inclusion_commitment_confirmed',
+            'om_strategy_summary', 'local_technicians_to_be_trained', 'warranty_period_months',
+            'offer_paygo', 'paygo_platform', 'daily_payment_amount_lsl', 'collection_method',
+            'stage_two_unlocked', 'stage_two_unlocked_at', 'stage_two_source_bid', 'stage_two_ready',
+            'document_requirements', 'document_counts',
+            'deadline', 'deadline_passed', 'deadline_countdown_seconds', 'is_locked', 'version_history',
+            'evaluation_status', 'technical_score_total', 'financial_score_total',
             'status', 'version_number',
             'submitted_at', 'reviewed_at', 'reviewed_by', 'rejection_reason',
             'created_at', 'updated_at', 'sites'
         ]
-        read_only_fields = ['id', 'submitted_at', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'submitted_at', 'created_at', 'updated_at', 'stage', 'stage_key', 'stage_badge', 'technology_type', 'stage_two_unlocked', 'stage_two_unlocked_at', 'stage_two_source_bid', 'stage_two_ready']
+
+    def get_tender_intent_to_award_bid_id(self, obj):
+        bid_id = getattr(obj.tender, 'intent_to_award_bid_id', None)
+        return str(bid_id) if bid_id is not None else None
 
     def to_internal_value(self, data):
-        payload = data.copy() if hasattr(data, 'copy') else dict(data)
-        sites = payload.get('sites')
-        if isinstance(sites, str):
-            try:
-                import json
-                payload['sites'] = json.loads(sites)
-            except Exception:
-                pass
+        if hasattr(data, 'lists'):
+            payload = {}
+            for key, values in data.lists():
+                payload[key] = values[-1] if len(values) == 1 else values
+        else:
+            payload = data.copy() if hasattr(data, 'copy') else dict(data)
+        alias_map = {
+            'om_plan_document': 'om_plan_file',
+            'warranty_period': 'warranty_period_months',
+            'warranty_months': 'warranty_period_months',
+            'gender_inclusion_target': 'female_target_pct',
+            'vulnerable_group_target': 'vulnerable_target_pct',
+            'low_income_target': 'low_income_target_pct',
+            'energy_target': 'energy_target_kwh_month',
+            'boq_details': 'boq_items',
+            'technical_summary': 'technical_proposal',
+            'financial_summary': 'financial_proposal',
+            'service_tier': 'tech_tier',
+            'paygo_offered': 'offer_paygo',
+            'min_daily_payment_lsl': 'daily_payment_amount_lsl',
+            'local_technicians_count': 'local_technicians_to_be_trained',
+        }
+        for alias, canonical in alias_map.items():
+            if alias in payload and canonical not in payload:
+                payload[canonical] = payload.get(alias)
+        for alias in (
+            'om_plan_document',
+            'warranty_period',
+            'warranty_months',
+            'gender_inclusion_target',
+            'vulnerable_group_target',
+            'low_income_target',
+            'energy_target',
+            'paygo_offered',
+            'min_daily_payment_lsl',
+            'local_technicians_count',
+        ):
+            payload.pop(alias, None)
+        for field_name in ('sites', 'system_configuration', 'boq_items', 'boq_details'):
+            value = payload.get(field_name)
+            if isinstance(value, str):
+                try:
+                    payload[field_name] = json.loads(value)
+                except Exception:
+                    pass
+        if 'co_financing_amount' in payload and 'system_configuration' not in payload:
+            payload['system_configuration'] = {}
+        if 'system_configuration' in payload and not isinstance(payload.get('system_configuration'), dict):
+            payload['system_configuration'] = {}
+        system_configuration = payload.get('system_configuration')
+        if isinstance(system_configuration, dict):
+            for input_key, target_key in (
+                ('device_brand', 'device_brand'),
+                ('device_model', 'device_model'),
+                ('rated_power_w', 'rated_power_w'),
+                ('battery_capacity_wh', 'battery_capacity_wh'),
+                ('pv_panel_size_w', 'pv_panel_size_w'),
+                ('inverter_type', 'inverter_type'),
+                ('co_financing_amount', 'co_financing_amount_lsl'),
+            ):
+                if input_key in payload and target_key not in system_configuration:
+                    system_configuration[target_key] = payload.get(input_key)
+        if 'aftersales_description' in payload and isinstance(system_configuration, dict):
+            system_configuration['aftersales_description'] = payload.get('aftersales_description')
         return super().to_internal_value(payload)
+
+    def _required_document_fields(self):
+        return [
+            'technical_proposal_file',
+            'financial_proposal_file',
+            'boq_file',
+            'gender_action_plan_file',
+            'implementation_plan_file',
+            'om_plan_file',
+        ]
+
+    def _effective_stage_key(self, attrs):
+        instance = getattr(self, 'instance', None)
+        if instance is not None and has_stage_two_shortlist_access(instance):
+            return 'site_specific'
+        tender = attrs.get('tender') or getattr(getattr(self, 'instance', None), 'tender', None)
+        if tender is not None:
+            return normalize_tender_stage(tender.stage_type)
+        return 'pre_qualification'
+
+    def _effective_stage_label(self, attrs):
+        tender = attrs.get('tender') or getattr(getattr(self, 'instance', None), 'tender', None)
+        if tender is not None:
+            return tender_stage_label(tender.stage_type)
+        return 'Stage 1: Concept'
 
     def validate(self, attrs):
         errors = {}
-        def validate_file(field_name, max_size_mb=15, allowed_ext=None):
-            file_obj = attrs.get(field_name)
+        request = self.context.get('request')
+        instance = getattr(self, 'instance', None)
+        tender = attrs.get('tender') or getattr(instance, 'tender', None)
+        stage_key = self._effective_stage_key(attrs)
+        attrs['stage'] = self._effective_stage_label(attrs)
+
+        def validate_file(field_name, allowed_ext=None):
+            file_obj = attrs.get(field_name, getattr(instance, field_name, None) if instance else None)
             if not file_obj:
                 return
-            if file_obj.size > max_size_mb * 1024 * 1024:
-                errors[field_name] = f'File too large (max {max_size_mb}MB).'
+            if getattr(file_obj, 'size', 0) > settings.MAX_FILE_SIZE_MB * 1024 * 1024:
+                errors[field_name] = f'File too large (max {settings.MAX_FILE_SIZE_MB}MB).'
                 return
-            valid_ext = allowed_ext or {'.pdf', '.doc', '.docx', '.xls', '.xlsx'}
-            import os
+            valid_ext = allowed_ext or {'.pdf', '.docx', '.xlsx'}
             ext = os.path.splitext(file_obj.name)[1].lower()
             if ext not in valid_ext:
-                errors[field_name] = 'Invalid file type. Allowed: PDF, DOC, DOCX, XLS, XLSX.'
+                errors[field_name] = 'Invalid file type. Allowed: PDF, DOCX, XLSX.'
 
         validate_file('proposal_file')
         validate_file('technical_proposal_file')
@@ -82,7 +423,243 @@ class TenderBidSerializer(serializers.ModelSerializer):
         validate_file('boq_file')
         validate_file('gender_action_plan_file')
         validate_file('implementation_plan_file')
+        validate_file('om_plan_file')
         validate_file('reporting_templates_file')
+
+        bid_amount = attrs.get('bid_amount', instance.bid_amount if instance else None)
+        subsidy_requested = attrs.get('subsidy_requested', instance.subsidy_requested if instance else None)
+        system_configuration = attrs.get('system_configuration', instance.system_configuration if instance else {})
+        if system_configuration and not isinstance(system_configuration, dict):
+            errors['system_configuration'] = 'System configuration must be an object.'
+        elif isinstance(system_configuration, dict):
+            numeric_fields = ('rated_power_w', 'battery_capacity_wh', 'pv_panel_size_w')
+            for field_name in numeric_fields:
+                value = system_configuration.get(field_name)
+                if value not in (None, '') and Decimal(str(value)) <= Decimal('0'):
+                    errors.setdefault('system_configuration', {})[field_name] = 'Value must be greater than 0.'
+
+        boq_items = attrs.get('boq_items', instance.boq_items if instance else [])
+        if boq_items and not isinstance(boq_items, list):
+            errors['boq_items'] = 'BOQ items must be an array.'
+        elif isinstance(boq_items, list):
+            for idx, item in enumerate(boq_items):
+                if not isinstance(item, dict):
+                    errors.setdefault('boq_items', {})[idx] = 'Each BOQ item must be an object.'
+                    continue
+                qty = item.get('qty')
+                unit_price = item.get('unit_price')
+                if not str(item.get('description', '')).strip():
+                    errors.setdefault('boq_items', {})[idx] = 'Description is required.'
+                if qty in (None, '') or Decimal(str(qty)) <= Decimal('0'):
+                    errors.setdefault('boq_items', {})[f'{idx}_qty'] = 'Quantity must be greater than 0.'
+                if unit_price in (None, '') or Decimal(str(unit_price)) < Decimal('0'):
+                    errors.setdefault('boq_items', {})[f'{idx}_unit_price'] = 'Unit price must be zero or greater.'
+
+        status_value = attrs.get('status', instance.status if instance else BidStatus.DRAFT)
+        sites = attrs.get('sites') if 'sites' in attrs else (list(instance.sites.all()) if instance else [])
+
+        if status_value == BidStatus.SUBMITTED:
+            if stage_key == 'site_specific' and instance is not None and not has_stage_two_shortlist_access(instance):
+                errors['detail'] = 'Only shortlisted vendors can submit Stage 2 proposals.'
+            if tender is not None and request and getattr(request, 'user', None):
+                duplicate_bid_qs = TenderBid.objects.filter(
+                    tender=tender,
+                    vendor_id=str(request.user.id),
+                ).exclude(status__in={BidStatus.DRAFT, BidStatus.REVISION_REQUIRED, BidStatus.WITHDRAWN})
+                if instance is not None:
+                    duplicate_bid_qs = duplicate_bid_qs.exclude(id=instance.id)
+                    if getattr(instance, 'stage_two_source_bid_id', None):
+                        duplicate_bid_qs = duplicate_bid_qs.exclude(id=instance.stage_two_source_bid_id)
+                if duplicate_bid_qs.exists():
+                    errors['tender'] = 'You have already submitted a bid for this tender.'
+            if bid_amount in (None, ''):
+                errors['bid_amount'] = 'This field is required before submitting.'
+            elif Decimal(str(bid_amount)) <= Decimal('0'):
+                errors['bid_amount'] = 'Bid amount must be greater than 0.'
+
+            if subsidy_requested in (None, ''):
+                errors['subsidy_requested'] = 'This field is required before submitting.'
+            else:
+                subsidy_decimal = Decimal(str(subsidy_requested))
+                if subsidy_decimal <= Decimal('0'):
+                    errors['subsidy_requested'] = 'Subsidy requested must be greater than 0.'
+                elif bid_amount not in (None, '') and subsidy_decimal > Decimal(str(bid_amount)):
+                    errors['subsidy_requested'] = 'Subsidy requested must be less than or equal to the bid amount.'
+
+            inclusion_targets = {
+                'female_target_pct': (50, attrs.get('female_target_pct', instance.female_target_pct if instance else 50)),
+                'vulnerable_target_pct': (30, attrs.get('vulnerable_target_pct', instance.vulnerable_target_pct if instance else 30)),
+                'low_income_target_pct': (60, attrs.get('low_income_target_pct', instance.low_income_target_pct if instance else 60)),
+            }
+            for field_name, (minimum, value) in inclusion_targets.items():
+                if value is None or int(value) < minimum:
+                    errors[field_name] = f'Value must be at least {minimum}.'
+
+            if tender is not None:
+                deadline = tender.last_date_submission or tender.deadline
+                if deadline and timezone.now() > deadline:
+                    errors['tender'] = 'Bidding deadline has passed.'
+
+            required_submit_fields = {
+                'bid_amount': bid_amount,
+                'subsidy_requested': subsidy_requested,
+            }
+            for field_name, value in required_submit_fields.items():
+                if value in (None, ''):
+                    errors[field_name] = 'This field is required before submitting.'
+            if stage_key == 'pre_qualification':
+                concept_note = attrs.get('concept_note', instance.concept_note if instance else '')
+                concept_note_text = str(concept_note or '').strip()
+                if not concept_note_text:
+                    errors['concept_note'] = 'Concept note is required for Stage 1 submissions.'
+                elif len(concept_note_text) < 200:
+                    errors['concept_note'] = 'Concept note must contain at least 200 characters.'
+                if not sites:
+                    errors['sites'] = 'At least 1 project site is required.'
+                else:
+                    site_errors = {}
+                    for idx, site in enumerate(sites):
+                        site_name = getattr(site, 'site_name', None) if not isinstance(site, dict) else site.get('site_name')
+                        district = getattr(site, 'district', None) if not isinstance(site, dict) else site.get('district')
+                        beneficiary_type = getattr(site, 'target_beneficiary_type', None) if not isinstance(site, dict) else site.get('target_beneficiary_type')
+                        households = getattr(site, 'number_of_households', None) if not isinstance(site, dict) else site.get('number_of_households')
+                        if (
+                            not str(site_name or '').strip()
+                            or not str(district or '').strip()
+                            or not str(beneficiary_type or '').strip()
+                            or households in (None, '', 0)
+                        ):
+                            site_errors[idx] = 'Site name, district, primary beneficiary type, and estimated households are required for Stage 1.'
+                            continue
+                        latitude = getattr(site, 'latitude', None) if not isinstance(site, dict) else site.get('latitude')
+                        longitude = getattr(site, 'longitude', None) if not isinstance(site, dict) else site.get('longitude')
+                        if latitude not in (None, '') and longitude not in (None, ''):
+                            if not point_in_lesotho(Decimal(str(longitude)), Decimal(str(latitude))):
+                                site_errors[idx] = 'Site coordinates must fall within Lesotho.'
+                    if site_errors:
+                        errors['sites'] = site_errors
+            else:
+                technology_type = ''
+                if tender is not None and isinstance(tender.technology_types, list) and tender.technology_types:
+                    technology_type = normalize_technology_type(tender.technology_types[0]) or str(tender.technology_types[0])
+                if isinstance(system_configuration, dict):
+                    system_configuration['technology_type'] = technology_type or system_configuration.get('technology_type', '')
+
+                device_brand = (system_configuration or {}).get('device_brand') if isinstance(system_configuration, dict) else ''
+                device_model = (system_configuration or {}).get('device_model') if isinstance(system_configuration, dict) else ''
+                for field_name, value in {
+                    'device_brand': device_brand,
+                    'device_model': device_model,
+                    'tech_tier': attrs.get('tech_tier', instance.tech_tier if instance else ''),
+                }.items():
+                    if value in (None, ''):
+                        errors[field_name] = 'This field is required before submitting.'
+
+                tech_tier = normalize_tech_tier(attrs.get('tech_tier', instance.tech_tier if instance else ''))
+                if tech_tier and tech_tier not in TECH_TIER_CHOICES:
+                    errors['tech_tier'] = 'Service tier must be one of Tier 1, Tier 2, Tier 3, Tier 4, or Tier 5.'
+                else:
+                    attrs['tech_tier'] = tech_tier
+                    vendor = None
+                    if request and getattr(request, 'user', None) and getattr(request.user, 'is_authenticated', False):
+                        vendor = request.user
+                    approved_preq = (
+                        VendorPrequalification.objects
+                        .filter(vendor=vendor, status=PrequalificationStatus.APPROVED)
+                        .order_by('-reviewed_at', '-submitted_at', '-id')
+                        .first()
+                        if vendor is not None else None
+                    )
+                    approved_tier = normalize_tech_tier(approved_preq.tech_tier if approved_preq else '')
+                    if approved_tier and tech_tier:
+                        approved_tier_value = int(approved_tier.split()[-1])
+                        requested_tier_value = int(tech_tier.split()[-1])
+                        if requested_tier_value > approved_tier_value:
+                            errors['tech_tier'] = f'Service tier cannot exceed your approved pre-qualification tier ({approved_tier}).'
+                for field_name in self._required_document_fields():
+                    if not attrs.get(field_name, getattr(instance, field_name, None) if instance else None):
+                        errors[field_name] = 'This document is required for site-specific submissions.'
+
+                if isinstance(system_configuration, dict):
+                    co_financing_amount = system_configuration.get('co_financing_amount_lsl')
+                    if co_financing_amount not in (None, '') and Decimal(str(co_financing_amount)) < Decimal('0'):
+                        errors.setdefault('system_configuration', {})['co_financing_amount_lsl'] = 'Co-financing must be zero or greater.'
+
+                boq_total = Decimal('0')
+                if not boq_items:
+                    errors['boq_items'] = 'Bill of Quantities is required for site-specific submissions.'
+                elif isinstance(boq_items, list):
+                    for item in boq_items:
+                        qty = item.get('qty') if isinstance(item, dict) else None
+                        unit_price = item.get('unit_price') if isinstance(item, dict) else None
+                        if qty not in (None, '') and unit_price not in (None, ''):
+                            boq_total += Decimal(str(qty)) * Decimal(str(unit_price))
+                    if bid_amount not in (None, '') and boq_total != Decimal(str(bid_amount)):
+                        errors['boq_items'] = f'BOQ grand total must equal the bid amount. Current total: {boq_total}.'
+
+                om_strategy_summary = attrs.get('om_strategy_summary', instance.om_strategy_summary if instance else '')
+                if not str(om_strategy_summary or '').strip():
+                    errors['om_strategy_summary'] = 'O&M strategy summary is required for site-specific submissions.'
+
+                offer_paygo = attrs.get('offer_paygo', instance.offer_paygo if instance else False)
+                normalized_tender_tech = normalize_technology_type(technology_type)
+                if normalized_tender_tech == TechnologyType.SHS or str(technology_type).upper() == 'SHS':
+                    paygo_platform = attrs.get('paygo_platform', instance.paygo_platform if instance else '')
+                    daily_payment_amount_lsl = attrs.get('daily_payment_amount_lsl', instance.daily_payment_amount_lsl if instance else None)
+                    collection_method = attrs.get('collection_method', instance.collection_method if instance else '')
+                    if offer_paygo:
+                        if not str(paygo_platform or '').strip():
+                            errors['paygo_platform'] = 'PAYGO platform is required when PAYGO is offered.'
+                        if daily_payment_amount_lsl in (None, '') or Decimal(str(daily_payment_amount_lsl)) <= Decimal('0'):
+                            errors['daily_payment_amount_lsl'] = 'Minimum daily payment is required when PAYGO is offered.'
+                        if not str(collection_method or '').strip():
+                            errors['collection_method'] = 'Collection method is required when PAYGO is offered.'
+
+            if not attrs.get('inclusion_commitment_confirmed', instance.inclusion_commitment_confirmed if instance else False):
+                errors['inclusion_commitment_confirmed'] = 'You must confirm the inclusion commitment before submitting.'
+            if stage_key == 'site_specific':
+                if not sites:
+                    errors['sites'] = 'At least 1 project site is required.'
+                else:
+                    site_errors = {}
+                    for idx, site in enumerate(sites):
+                        site_name = getattr(site, 'site_name', None) if not isinstance(site, dict) else site.get('site_name')
+                        district = getattr(site, 'district', None) if not isinstance(site, dict) else site.get('district')
+                        beneficiary_type = getattr(site, 'target_beneficiary_type', None) if not isinstance(site, dict) else site.get('target_beneficiary_type')
+                        households = getattr(site, 'number_of_households', None) if not isinstance(site, dict) else site.get('number_of_households')
+                        latitude = getattr(site, 'latitude', None) if not isinstance(site, dict) else site.get('latitude')
+                        longitude = getattr(site, 'longitude', None) if not isinstance(site, dict) else site.get('longitude')
+                        if (
+                            not str(site_name or '').strip()
+                            or not str(district or '').strip()
+                            or not str(beneficiary_type or '').strip()
+                            or households in (None, '', 0)
+                        ):
+                            site_errors[idx] = 'Site name, district, primary beneficiary type, and number of households are required before submitting.'
+                            continue
+                        if latitude in (None, '') or longitude in (None, ''):
+                            site_errors[idx] = 'Latitude and longitude are required before submitting.'
+                            continue
+                        if not point_in_lesotho(Decimal(str(longitude)), Decimal(str(latitude))):
+                            site_errors[idx] = 'Site coordinates must fall within Lesotho.'
+                    if site_errors:
+                        errors['sites'] = site_errors
+            elif sites:
+                site_errors = {}
+                for idx, site in enumerate(sites):
+                    latitude = getattr(site, 'latitude', None) if not isinstance(site, dict) else site.get('latitude')
+                    longitude = getattr(site, 'longitude', None) if not isinstance(site, dict) else site.get('longitude')
+                    if latitude in (None, '') or longitude in (None, ''):
+                        continue
+                    if not point_in_lesotho(Decimal(str(longitude)), Decimal(str(latitude))):
+                        site_errors[idx] = 'Site coordinates must fall within Lesotho.'
+                if site_errors:
+                    errors['sites'] = site_errors
+        if stage_key == 'pre_qualification':
+            attrs['technical_proposal'] = ''
+            attrs['financial_proposal'] = ''
+        if not attrs.get('boq_details') and attrs.get('boq_items'):
+            attrs['boq_details'] = attrs['boq_items']
 
         if errors:
             raise serializers.ValidationError(errors)
@@ -110,6 +687,30 @@ class TenderBidSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
+        system_configuration = instance.system_configuration or {}
+        data['boq_details'] = data.get('boq_details') or data.get('boq_items') or []
+        data['energy_target'] = data.get('energy_target_kwh_month')
+        data['warranty_period'] = data.get('warranty_period_months')
+        data['om_plan_document'] = data.get('om_plan_file')
+        data['technical_summary'] = data.get('technical_proposal')
+        data['financial_summary'] = data.get('financial_proposal')
+        data['service_tier'] = data.get('tech_tier')
+        data['paygo_offered'] = data.get('offer_paygo')
+        data['min_daily_payment_lsl'] = data.get('daily_payment_amount_lsl')
+        data['local_technicians_count'] = data.get('local_technicians_to_be_trained')
+        data['warranty_months'] = data.get('warranty_period_months')
+        data['gender_inclusion_target'] = data.get('female_target_pct')
+        data['vulnerable_group_target'] = data.get('vulnerable_target_pct')
+        data['low_income_target'] = data.get('low_income_target_pct')
+        data['aftersales_description'] = system_configuration.get('aftersales_description', '')
+        data['stage'] = tender_stage_label('site_specific' if instance.stage_two_unlocked else (instance.tender.stage_type if instance.tender_id else instance.stage))
+        data['device_brand'] = system_configuration.get('device_brand', '')
+        data['device_model'] = system_configuration.get('device_model', '')
+        data['rated_power_w'] = system_configuration.get('rated_power_w')
+        data['battery_capacity_wh'] = system_configuration.get('battery_capacity_wh')
+        data['pv_panel_size_w'] = system_configuration.get('pv_panel_size_w')
+        data['inverter_type'] = system_configuration.get('inverter_type', '')
+        data['co_financing_amount'] = system_configuration.get('co_financing_amount_lsl')
         request = self.context.get('request')
         if request:
             file_fields = [
@@ -119,16 +720,181 @@ class TenderBidSerializer(serializers.ModelSerializer):
                 'boq_file',
                 'gender_action_plan_file',
                 'implementation_plan_file',
+                'om_plan_file',
                 'reporting_templates_file',
+                'distribution_map_file',
             ]
             for field in file_fields:
                 if data.get(field):
                     data[field] = request.build_absolute_uri(data[field])
+            if data.get('om_plan_document'):
+                data['om_plan_document'] = request.build_absolute_uri(data['om_plan_document'])
         return data
+
+    def get_stage_key(self, obj):
+        if has_stage_two_shortlist_access(obj):
+            return 'site_specific'
+        return normalize_tender_stage(obj.tender.stage_type if obj.tender_id else obj.stage)
+
+    def get_stage_badge(self, obj):
+        return tender_stage_label('site_specific' if has_stage_two_shortlist_access(obj) else (obj.tender.stage_type if obj.tender_id else obj.stage))
+
+    def get_stage_two_ready(self, obj):
+        if has_stage_two_shortlist_access(obj):
+            return True
+        return bool(
+            TenderBid.objects.filter(
+                tender=obj.tender,
+                vendor_id=obj.vendor_id,
+                stage_two_unlocked=True,
+                status=BidStatus.DRAFT,
+                stage_two_source_bid__status=BidStatus.ACCEPTED,
+            ).exclude(id=obj.id).exists()
+        )
+
+    def get_technology_type(self, obj):
+        technology_types = obj.tender.technology_types if obj.tender_id else []
+        if not technology_types:
+            return None
+        return normalize_technology_type(technology_types[0]) or technology_types[0]
+
+    def get_document_requirements(self, obj):
+        required = self._required_document_fields()
+        return [
+            {
+                'field': field_name,
+                'required': is_site_specific_stage(obj.tender.stage_type if obj.tender_id else obj.stage),
+                'uploaded': bool(getattr(obj, field_name)),
+            }
+            for field_name in required
+        ]
+
+    def get_document_counts(self, obj):
+        required = self._required_document_fields()
+        uploaded = sum(1 for field_name in required if getattr(obj, field_name))
+        return {'uploaded': uploaded, 'required': len(required)}
+
+    def get_deadline(self, obj):
+        return obj.tender.last_date_submission or obj.tender.deadline
+
+    def get_deadline_passed(self, obj):
+        deadline = obj.tender.last_date_submission or obj.tender.deadline
+        return bool(deadline and timezone.now() > deadline)
+
+    def get_deadline_countdown_seconds(self, obj):
+        deadline = obj.tender.last_date_submission or obj.tender.deadline
+        if not deadline:
+            return None
+        remaining = int((deadline - timezone.now()).total_seconds())
+        return max(0, remaining)
+
+    def get_is_locked(self, obj):
+        return obj.status != BidStatus.DRAFT
+
+    def get_version_history(self, obj):
+        history_qs = (
+            TenderBid.objects.filter(tender=obj.tender, vendor_id=obj.vendor_id)
+            .order_by('-version_number', '-updated_at')
+            .only('id', 'version_number', 'status', 'updated_at', 'submitted_at')
+        )
+        return [
+            {
+                'id': str(item.id),
+                'version_number': item.version_number,
+                'status': item.status,
+                'updated_at': item.updated_at,
+                'submitted_at': item.submitted_at,
+            }
+            for item in history_qs
+        ]
+
+    def _stage_two_scored_evaluations(self, obj):
+        if self.get_stage_key(obj) != 'site_specific':
+            return []
+        evaluations = getattr(obj, '_prefetched_objects_cache', {}).get('evaluations')
+        if evaluations is None:
+            evaluations = obj.evaluations.select_related('evaluator').all()
+        return [ev for ev in evaluations if ev.status == EvaluationStatus.SCORED]
+
+    def get_evaluation_status(self, obj):
+        scored_evaluations = self._stage_two_scored_evaluations(obj)
+        if not scored_evaluations:
+            return 'pending'
+        has_financial = any(getattr(getattr(ev, 'evaluator', None), 'role', None) in {UserRole.RBF_OFFICIAL, UserRole.ADMIN} for ev in scored_evaluations)
+        has_technical = any(getattr(getattr(ev, 'evaluator', None), 'role', None) in {UserRole.TAC, UserRole.ADMIN} for ev in scored_evaluations)
+        if has_financial:
+            return 'evaluated'
+        if has_technical:
+            return 'technical_scored'
+        return 'pending'
+
+    def get_technical_score_total(self, obj):
+        scored_evaluations = [
+            ev for ev in self._stage_two_scored_evaluations(obj)
+            if getattr(getattr(ev, 'evaluator', None), 'role', None) in {UserRole.TAC, UserRole.ADMIN}
+        ]
+        if not scored_evaluations:
+            return None
+        totals = [
+            (ev.technical_score or 0)
+            + (ev.feasibility_score or 0)
+            + (ev.om_score or 0)
+            + (ev.kpi_score or 0)
+            + (ev.gender_score or 0)
+            + (ev.environmental_score or 0)
+            for ev in scored_evaluations
+        ]
+        return round(sum(totals) / len(totals))
+
+    def get_financial_score_total(self, obj):
+        scored_evaluations = [
+            ev for ev in self._stage_two_scored_evaluations(obj)
+            if getattr(getattr(ev, 'evaluator', None), 'role', None) in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}
+        ]
+        if not scored_evaluations:
+            return None
+        totals = [
+            (ev.technical_score or 0)
+            + (ev.feasibility_score or 0)
+            + (ev.kpi_score or 0)
+            + (ev.gender_score or 0)
+            for ev in scored_evaluations
+        ]
+        return round(sum(totals) / len(totals))
 
 
 class TenderBidEvaluationSerializer(serializers.ModelSerializer):
     evaluator_username = serializers.CharField(source='evaluator.username', read_only=True)
+    evaluator_role = serializers.CharField(source='evaluator.role', read_only=True)
+    TECHNICAL_ROLE_KEYS = {UserRole.TAC, UserRole.ADMIN}
+    FINANCIAL_ROLE_KEYS = {UserRole.RBF_OFFICIAL, UserRole.ADMIN}
+    TECHNICAL_SCORE_FIELDS = (
+        'technical_score',
+        'feasibility_score',
+        'om_score',
+        'kpi_score',
+        'gender_score',
+        'environmental_score',
+    )
+    TECHNICAL_SCORE_LIMITS = {
+        'technical_score': 20,
+        'feasibility_score': 15,
+        'om_score': 10,
+        'kpi_score': 10,
+        'gender_score': 10,
+        'environmental_score': 5,
+        'inclusivity_score': 0,
+    }
+    FINANCIAL_SCORE_COMPONENT_LIMITS = {
+        'technical_score': 10,
+        'feasibility_score': 10,
+        'kpi_score': 5,
+        'gender_score': 5,
+        'financial_score': 30,
+        'environmental_score': 0,
+        'om_score': 0,
+        'inclusivity_score': 0,
+    }
 
     class Meta:
         model = TenderBidEvaluation
@@ -137,6 +903,7 @@ class TenderBidEvaluationSerializer(serializers.ModelSerializer):
             'bid',
             'evaluator',
             'evaluator_username',
+            'evaluator_role',
             'status',
             'technical_score',
             'financial_score',
@@ -151,39 +918,88 @@ class TenderBidEvaluationSerializer(serializers.ModelSerializer):
             'created_at',
             'updated_at',
         ]
-        read_only_fields = ['id', 'total_score', 'created_at', 'updated_at', 'evaluator_username']
+        read_only_fields = ['id', 'total_score', 'created_at', 'updated_at', 'evaluator_username', 'evaluator_role']
+
+    def _role(self):
+        request = self.context.get('request')
+        return getattr(getattr(request, 'user', None), 'role', None)
+
+    def _technical_total(self, instance, attrs):
+        return sum(
+            int(attrs.get(field_name, getattr(instance, field_name, 0) if instance else 0) or 0)
+            for field_name in self.TECHNICAL_SCORE_FIELDS
+        )
+
+    def _financial_total(self, instance, attrs):
+        fields = ('technical_score', 'feasibility_score', 'kpi_score', 'gender_score')
+        return sum(
+            int(attrs.get(field_name, getattr(instance, field_name, 0) if instance else 0) or 0)
+            for field_name in fields
+        )
+
+    def _bid(self, attrs):
+        return attrs.get('bid') or getattr(getattr(self, 'instance', None), 'bid', None)
+
+    def _technical_clearance_bid(self, bid):
+        return bid
 
     def validate(self, attrs):
-        scores = [
-            attrs.get('technical_score', 0),
-            attrs.get('financial_score', 0),
-            attrs.get('feasibility_score', 0),
-            attrs.get('kpi_score', 0),
-            attrs.get('gender_score', 0),
-            attrs.get('environmental_score', 0),
-            attrs.get('om_score', 0),
-            attrs.get('inclusivity_score', 0),
-        ]
-        for score in scores:
+        role = self._role()
+        instance = getattr(self, 'instance', None)
+        bid = self._bid(attrs)
+        score_limits = self.FINANCIAL_SCORE_COMPONENT_LIMITS if role == UserRole.RBF_OFFICIAL else self.TECHNICAL_SCORE_LIMITS
+
+        field_errors = {}
+        for field_name, limit in score_limits.items():
+            score = attrs.get(field_name, getattr(instance, field_name, 0) if instance else 0)
             if score is None:
-                continue
-            if score < 0 or score > 100:
-                raise serializers.ValidationError('Scores must be between 0 and 100.')
+                score = 0
+            if score < 0 or score > limit:
+                field_errors[field_name] = f'Score must be between 0 and {limit}.'
+        if field_errors:
+            raise serializers.ValidationError(field_errors)
+
+        if role == UserRole.TAC:
+            financial_score = attrs.get('financial_score', instance.financial_score if instance else 0)
+            if financial_score not in (None, 0):
+                raise serializers.ValidationError({'financial_score': 'Financial evaluation is reserved for the RBF Management Team after technical clearance.'})
+            if attrs.get('inclusivity_score', getattr(instance, 'inclusivity_score', 0) if instance else 0) not in (None, 0):
+                raise serializers.ValidationError({'inclusivity_score': 'This score is no longer used in the Stage 2 technical matrix.'})
+        if role == UserRole.RBF_OFFICIAL:
+            technical_total = None
+            if bid is not None:
+                technical_bid = self._technical_clearance_bid(bid)
+                technical_evaluations = TenderBidEvaluation.objects.filter(
+                    bid=technical_bid,
+                    status=EvaluationStatus.SCORED,
+                    evaluator__role__in=self.TECHNICAL_ROLE_KEYS,
+                )
+                technical_total = None
+                if technical_evaluations.exists():
+                    technical_values = [
+                        sum(getattr(ev, field_name, 0) for field_name in self.TECHNICAL_SCORE_FIELDS)
+                        for ev in technical_evaluations
+                    ]
+                    technical_total = round(sum(technical_values) / len(technical_values))
+            threshold = getattr(getattr(bid, 'tender', None), 'technical_threshold', 70) or 70
+            minimum_technical_total = round((Decimal(str(threshold)) / Decimal('100')) * Decimal('70'))
+            if technical_total is None or technical_total < minimum_technical_total:
+                raise serializers.ValidationError({'financial_score': f'Financial evaluation can only start after the technical score passes the threshold ({threshold}% of 70).'})
+            if attrs.get('environmental_score', getattr(instance, 'environmental_score', 0) if instance else 0) not in (None, 0):
+                raise serializers.ValidationError({'environmental_score': 'RMT can only submit the 30-point financial matrix in this workflow.'})
+            if attrs.get('om_score', getattr(instance, 'om_score', 0) if instance else 0) not in (None, 0):
+                raise serializers.ValidationError({'om_score': 'RMT can only submit the 30-point financial matrix in this workflow.'})
+            if attrs.get('inclusivity_score', getattr(instance, 'inclusivity_score', 0) if instance else 0) not in (None, 0):
+                raise serializers.ValidationError({'inclusivity_score': 'RMT can only submit the 30-point financial matrix in this workflow.'})
         return attrs
 
     def _compute_total(self, instance, attrs):
-        values = [
-            attrs.get('technical_score', instance.technical_score if instance else 0),
-            attrs.get('financial_score', instance.financial_score if instance else 0),
-            attrs.get('feasibility_score', instance.feasibility_score if instance else 0),
-            attrs.get('kpi_score', instance.kpi_score if instance else 0),
-            attrs.get('gender_score', instance.gender_score if instance else 0),
-            attrs.get('environmental_score', instance.environmental_score if instance else 0),
-            attrs.get('om_score', instance.om_score if instance else 0),
-            attrs.get('inclusivity_score', instance.inclusivity_score if instance else 0),
-        ]
-        total = round(sum(values) / max(1, len(values)))
-        return total
+        role = self._role()
+        if role == UserRole.RBF_OFFICIAL:
+            financial_total = self._financial_total(instance, attrs)
+            attrs['financial_score'] = financial_total
+            return financial_total
+        return self._technical_total(instance, attrs)
 
     def create(self, validated_data):
         validated_data['total_score'] = self._compute_total(None, validated_data)
@@ -254,6 +1070,35 @@ class TenderContractSerializer(serializers.ModelSerializer):
             else:
                 data[annex_field] = resolved_value
         return data
+
+
+class ProjectAssignmentSerializer(serializers.Serializer):
+    PROJECT_DURATION_CHOICES = ((6, 6), (12, 12), (18, 18))
+
+    project_duration_months = serializers.ChoiceField(choices=PROJECT_DURATION_CHOICES)
+    installation_target = serializers.IntegerField(min_value=1)
+    technology_type = serializers.ChoiceField(choices=TechnologyType.choices)
+    energy_output_target_kwh = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal('0.01'))
+    district_zone = serializers.CharField(allow_blank=False)
+    verification_method = serializers.ChoiceField(choices=VerificationMethod.choices)
+    female_target_pct = serializers.IntegerField(min_value=50, max_value=100, required=False, default=50)
+    vulnerable_target_pct = serializers.IntegerField(min_value=30, max_value=100, required=False, default=30)
+    low_income_target_pct = serializers.IntegerField(min_value=60, max_value=100, required=False, default=60)
+    start_date = serializers.DateField(required=False, allow_null=True, input_formats=['%Y-%m-%d'])
+
+    def validate(self, attrs):
+        contract = self.context.get('contract')
+        if contract is None:
+            return attrs
+        if contract.status != ContractStatus.APPROVED:
+            raise serializers.ValidationError('Contract must have status = approved before assigning milestones.')
+        if contract.project_id or getattr(contract, 'projects', None) and contract.projects.exists():
+            raise serializers.ValidationError('This contract has already been assigned to a project.')
+        vendor = User.objects.filter(id=contract.vendor_id).first()
+        if vendor is None:
+            raise serializers.ValidationError({'vendor_id': 'Awarded vendor could not be found.'})
+        attrs['vendor'] = vendor
+        return attrs
 
 
 class TenderListSerializer(serializers.ModelSerializer):

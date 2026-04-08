@@ -7,6 +7,7 @@ from django.conf import settings
 from django.core.cache import cache
 from django.core.mail import send_mail
 from django.core.management import call_command
+from django.contrib.sessions.models import Session
 from rest_framework import viewsets
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
@@ -16,6 +17,7 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.parsers import MultiPartParser, FormParser
 from django.utils import timezone
+from django.db.models import Q
 from drf_spectacular.utils import extend_schema
 from rest_framework.exceptions import APIException
 from rest_framework_simplejwt.views import TokenObtainPairView
@@ -41,13 +43,17 @@ from .models import (
 # Key: cache key, Value: (otp, expires_at_epoch)
 _OTP_FALLBACK = {}
 from .serializers import (
+    AdminManagedUserDetailSerializer,
+    AdminManagedUserSerializer,
     BlacklistAppealSerializer,
+    ChangePasswordSerializer,
     CustomTokenObtainPairSerializer,
     UserSerializer,
     VendorBlacklistCaseSerializer,
     VendorPrequalificationSerializer,
 )
-from rbf.projects.audit import log_audit
+from rbf.projects.audit import log_audit, AuditLogger
+from rbf.projects.integrations import SyncToProspectJob, normalize_prospect_gender
 
 
 class IsAdminOrRbfOfficial:
@@ -104,12 +110,41 @@ class UserViewSet(viewsets.ModelViewSet):
     queryset = User.objects.all().order_by('-id')
     serializer_class = UserSerializer
 
+    ADMIN_MANAGED_ROLES = {
+        UserRole.RBF_OFFICIAL,
+        UserRole.TAC,
+        UserRole.DOE_OFFICER,
+        UserRole.FIELD_VERIFIER,
+        UserRole.UNDP_DONOR,
+        UserRole.AUDITOR,
+    }
+
     def get_serializer_context(self):
         context = super().get_serializer_context()
         context['cache'] = cache
         return context
 
+    def get_serializer_class(self):
+        user = getattr(self.request, 'user', None)
+        if self.action == 'retrieve' and IsAdminOrRbfOfficial.check(user) and getattr(user, 'role', None) == UserRole.ADMIN:
+            return AdminManagedUserDetailSerializer
+        if self.action in {'create', 'update', 'partial_update'} and IsAdminOrRbfOfficial.check(user) and getattr(user, 'role', None) == UserRole.ADMIN:
+            return AdminManagedUserSerializer
+        return UserSerializer
+
+    def _assert_super_admin(self, user):
+        if not (user and user.is_authenticated and user.role == UserRole.ADMIN):
+            raise PermissionDenied('Only Platform Administrator (Super Admin) can manage admin-created users.')
+
+    def _invalidate_user_sessions(self, user: User):
+        for session in Session.objects.all().iterator():
+            data = session.get_decoded()
+            if str(data.get('_auth_user_id') or '') == str(user.id):
+                session.delete()
+
     def create(self, request, *args, **kwargs):
+        if request.user.is_authenticated:
+            self._assert_super_admin(request.user)
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         self.perform_create(serializer)
@@ -118,16 +153,15 @@ class UserViewSet(viewsets.ModelViewSet):
 
         data = dict(serializer.data)
         generated_password = getattr(serializer, 'generated_password', None)
-        email_configured = bool(settings.EMAIL_HOST_USER and settings.EMAIL_HOST_PASSWORD)
+        email_configured = bool(settings.EMAIL_HOST_USER and settings.EMAIL_HOST_PASSWORD) or settings.DEBUG
         email_error = None
         if generated_password and user.email:
-            subject = 'Your RBF Digital Platform account'
+            subject = 'Your account has been created'
             message = (
-                f'Hello {user.full_name or user.username},\n\n'
-                f'Your account has been created for the Renewable Lesotho RBF platform.\n'
+                'Your account has been created.\n'
                 f'Username: {user.username}\n'
-                f'Temporary password: {generated_password}\n\n'
-                'Please log in and change your password immediately.'
+                f'Temporary password: {generated_password}\n'
+                'Please log in and change your password.'
             )
             if email_configured:
                 try:
@@ -148,17 +182,20 @@ class UserViewSet(viewsets.ModelViewSet):
             if email_error:
                 data['email_error'] = email_error
 
-        log_audit(
-            request.user if getattr(request.user, 'is_authenticated', False) else None,
-            'user_account_created',
-            user,
-            {
-                'role': user.role,
-                'region': user.region,
-                'tier_assignment': user.tier_assignment,
-                'verification_zone': user.verification_zone,
-            },
+        location_area_1 = user.verification_zone or user.region or ''
+        SyncToProspectJob.dispatch_async(
+            'pushAgent',
+            [{
+                'external_id': str(user.id),
+                'agent_type': 'installer' if user.role == UserRole.FIELD_VERIFIER else 'sales_agent',
+                'gender': normalize_prospect_gender(user.gender),
+                'country': 'LS',
+                'location_area_1': location_area_1,
+            }],
+            record_id=int(user.id),
+            record_type='user',
         )
+        AuditLogger.log('user_created', 'users', user.id, 'user', new_status=user.status, notes=f'Created {user.role} user.')
 
         return Response(data, status=status.HTTP_201_CREATED, headers=headers)
 
@@ -175,21 +212,94 @@ class UserViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        if IsAdminOrRbfOfficial.check(user):
+        elevated_actions = {
+            'approve',
+            'initiate_blacklisting',
+            'review_blacklisting',
+            'confirm_blacklisting',
+            'reinstate_vendor',
+            'appeal_review',
+        }
+        if self.action in elevated_actions and IsAdminOrRbfOfficial.check(user):
             return User.objects.all().order_by('-id')
+        if user and user.is_authenticated and user.role == UserRole.ADMIN:
+            queryset = User.objects.exclude(role=UserRole.VENDOR).order_by('-id')
+            role = str(self.request.query_params.get('role') or '').strip()
+            district = str(self.request.query_params.get('district') or '').strip()
+            status_value = str(self.request.query_params.get('status') or '').strip()
+            if role:
+                queryset = queryset.filter(role=role)
+            if district:
+                queryset = queryset.filter(Q(region__iexact=district) | Q(verification_zone__iexact=district))
+            if status_value:
+                normalized = status_value.lower()
+                if normalized in {'active', 'inactive'}:
+                    queryset = queryset.filter(is_active=(normalized == 'active'))
+            return queryset
         return User.objects.filter(id=getattr(user, 'id', None)).order_by('-id')
 
     def update(self, request, *args, **kwargs):
         target_user = self.get_object()
+        if request.user.role == UserRole.ADMIN and target_user.role != UserRole.VENDOR:
+            partial = False
+            serializer = self.get_serializer(target_user, data=request.data, partial=partial)
+            serializer.is_valid(raise_exception=True)
+            self.perform_update(serializer)
+            updated_user = serializer.instance
+            if getattr(serializer, 'was_deactivated', False):
+                self._invalidate_user_sessions(updated_user)
+                AuditLogger.log('user_deactivated', 'users', updated_user.id, 'user', old_status='Active', new_status='Inactive', notes='User deactivated by Super Admin.')
+            else:
+                AuditLogger.log('user_updated', 'users', updated_user.id, 'user', new_status=updated_user.status, notes='User profile updated by Super Admin.')
+            return Response(self.get_serializer(updated_user).data)
         if target_user.id != request.user.id and not IsAdminOrRbfOfficial.check(request.user):
             raise PermissionDenied('You do not have permission to update this user.')
         return super().update(request, *args, **kwargs)
 
     def partial_update(self, request, *args, **kwargs):
         target_user = self.get_object()
+        if request.user.role == UserRole.ADMIN and target_user.role != UserRole.VENDOR:
+            serializer = self.get_serializer(target_user, data=request.data, partial=True)
+            serializer.is_valid(raise_exception=True)
+            self.perform_update(serializer)
+            updated_user = serializer.instance
+            if getattr(serializer, 'was_deactivated', False):
+                self._invalidate_user_sessions(updated_user)
+                AuditLogger.log('user_deactivated', 'users', updated_user.id, 'user', old_status='Active', new_status='Inactive', notes='User deactivated by Super Admin.')
+            else:
+                AuditLogger.log('user_updated', 'users', updated_user.id, 'user', new_status=updated_user.status, notes='User profile updated by Super Admin.')
+            return Response(self.get_serializer(updated_user).data)
         if target_user.id != request.user.id and not IsAdminOrRbfOfficial.check(request.user):
             raise PermissionDenied('You do not have permission to update this user.')
         return super().partial_update(request, *args, **kwargs)
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated], url_path='deactivate')
+    def deactivate(self, request, pk=None):
+        self._assert_super_admin(request.user)
+        user = self.get_object()
+        if user.role in {UserRole.VENDOR, UserRole.ADMIN}:
+            return Response({'detail': 'This action is only for admin-created non-vendor users.'}, status=status.HTTP_400_BAD_REQUEST)
+        user.status = UserStatus.INACTIVE
+        user.is_active = False
+        user.save(update_fields=['status', 'is_active'])
+        self._invalidate_user_sessions(user)
+        AuditLogger.log('user_deactivated', 'users', user.id, 'user', old_status='Active', new_status='Inactive', notes='User deactivated by Super Admin.')
+        return Response(AdminManagedUserDetailSerializer(user).data, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated], url_path='management/meta')
+    def management_meta(self, request):
+        self._assert_super_admin(request.user)
+        return Response({
+            'roles': [
+                {'label': 'RMT', 'value': UserRole.RBF_OFFICIAL},
+                {'label': 'TAC', 'value': UserRole.TAC},
+                {'label': 'DoE', 'value': UserRole.DOE_OFFICER},
+                {'label': 'Field Officer', 'value': UserRole.FIELD_VERIFIER},
+                {'label': 'PSC', 'value': UserRole.UNDP_DONOR},
+                {'label': 'UNDP', 'value': UserRole.UNDP_DONOR},
+                {'label': 'Auditor', 'value': UserRole.AUDITOR},
+            ],
+        })
 
     @action(detail=True, methods=['patch', 'post'], permission_classes=[IsAuthenticated])
     def approve(self, request, pk=None):
@@ -590,3 +700,20 @@ class CurrentUserView(APIView):
     @extend_schema(responses=UserSerializer)
     def get(self, request):
         return Response(UserSerializer(request.user).data)
+
+
+class ChangePasswordView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = ChangePasswordSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = request.user
+        current_password = serializer.validated_data.get('current_password') or ''
+        if not user.must_change_password and not user.check_password(current_password):
+            return Response({'detail': 'Current password is incorrect.'}, status=status.HTTP_400_BAD_REQUEST)
+        user.set_password(serializer.validated_data['new_password'])
+        user.must_change_password = False
+        user.save(update_fields=['password', 'must_change_password'])
+        AuditLogger.log('password_changed', 'users', user.id, 'user', notes='Password changed and first-login requirement cleared.')
+        return Response(UserSerializer(user).data, status=status.HTTP_200_OK)

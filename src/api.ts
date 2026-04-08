@@ -1,6 +1,7 @@
 import {
   Tender,
   Project,
+  ProjectSetup,
   Notification,
   User,
   UserRole,
@@ -8,6 +9,7 @@ import {
   ProjectUpdate,
   ProjectDocument,
   InstallationReport,
+  SmartMeterReading,
   VerificationTask,
   VendorPrequalification,
   VendorPrequalificationSubmission,
@@ -15,6 +17,9 @@ import {
   PaymentClaimSubmission,
   Disbursement,
   AuditLog,
+  AnomalyFlag,
+  MapInstallationsResponse,
+  MapInstallationRecord,
   TenderBid,
   TenderBidSite,
   BidStatus,
@@ -23,6 +28,9 @@ import {
   TenderAwardRankingRow,
   VendorBlacklistCase,
   BlacklistAppeal,
+  ProjectKpiSummary,
+  PortfolioKpiSummary,
+  ProspectSyncLog,
 } from "./types";
 
 const env = (import.meta as any)?.env ?? {};
@@ -246,11 +254,13 @@ function mapTenderFromApi(api: any): Tender {
 function mapUserFromApi(api: any): User {
   return {
     id: String(api.id ?? ""),
+    username: api.username ?? undefined,
     fullName: api.full_name ?? api.fullName ?? api.username ?? "",
     email: api.email ?? "",
     role: (api.role as UserRole) ?? UserRole.VENDOR,
     gender: api.gender === "Male" || api.gender === "Female" || api.gender === "Other" ? api.gender : "Other",
     region: api.region ?? undefined,
+    district: api.district ?? api.verification_zone ?? api.region ?? undefined,
     mobileNumber: api.mobile_number ?? undefined,
     nationalId: api.national_id ?? undefined,
     address: api.address ?? undefined,
@@ -264,7 +274,23 @@ function mapUserFromApi(api: any): User {
     tierAssignment: api.tier_assignment ?? undefined,
     verificationZone: api.verification_zone ?? undefined,
     status: api.status ?? "Active",
+    isActive: api.is_active ?? undefined,
     mustChangePassword: api.must_change_password ?? false,
+    roleLabel: api.role_label ?? undefined,
+    lastLogin: api.last_login ?? undefined,
+    recentAuditLogs: Array.isArray(api.recent_audit_logs)
+      ? api.recent_audit_logs.map((log: any) => ({
+          id: String(log.id ?? ""),
+          action: log.action ?? "",
+          module: log.module ?? undefined,
+          recordId: log.record_id ?? undefined,
+          recordType: log.record_type ?? undefined,
+          createdAt: log.created_at ?? undefined,
+        }))
+      : undefined,
+    prospectSyncStatus: Array.isArray(api.prospect_sync_status)
+      ? api.prospect_sync_status.map(mapProspectSyncLogFromApi)
+      : undefined,
     vendorTag: api.vendor_tag ?? undefined,
     blacklistSummary: api.blacklist_summary ?? undefined,
   };
@@ -375,13 +401,62 @@ function mapProjectFromApi(api: any): Project {
     targetInstallations: api.target_installations != null ? Number(api.target_installations) : undefined,
     targetFemalePct: api.target_female_pct != null ? Number(api.target_female_pct) : undefined,
     targetVulnerablePct: api.target_vulnerable_pct != null ? Number(api.target_vulnerable_pct) : undefined,
+    targetLowIncomePct: api.target_low_income_pct != null ? Number(api.target_low_income_pct) : undefined,
     targetBeneficiaries: api.target_beneficiaries != null ? Number(api.target_beneficiaries) : undefined,
+    projectDurationMonths: api.project_duration_months != null ? Number(api.project_duration_months) : undefined,
+    verificationMethod: api.verification_method ?? undefined,
     deploymentTeamRoster: api.deployment_team_roster ?? "",
     deploymentEquipmentPlan: api.deployment_equipment_plan ?? "",
+    deploymentSiteStatus: api.deployment_site_status ?? "",
     deploymentWorkSchedule: api.deployment_work_schedule ?? "",
+    deploymentPermitsStatus: api.deployment_permits_status ?? "",
+    deviceBrand: api.device_brand ?? "",
+    deviceModel: api.device_model ?? "",
+    deviceTechTier: api.device_tech_tier ?? "",
+    verificationMethodConfirmed: Boolean(api.verification_method_confirmed),
+    setupCompletedAt: api.setup_completed_at ?? undefined,
+    projectSetup: mapProjectSetupFromApi(api.project_setup),
+    claimCount: api.claim_count != null ? Number(api.claim_count) : undefined,
+    unresolvedFlagCount: api.unresolved_flag_count != null ? Number(api.unresolved_flag_count) : undefined,
+    latestAuditEntry: api.latest_audit_entry ? mapAuditLogFromApi(api.latest_audit_entry) : undefined,
+    contractValue: api.contract_value != null ? Number(api.contract_value) : undefined,
     energyOutput: Number(api.energy_output ?? 0),
     uptime: Number(api.uptime ?? 0),
     genderImpact: Number(api.gender_impact ?? 0),
+  };
+}
+
+function mapProjectSetupFromApi(api: any): ProjectSetup | undefined {
+  if (!api || typeof api !== "object") return undefined;
+  return {
+    id: api.id != null ? String(api.id) : undefined,
+    projectId: api.project != null ? String(api.project) : undefined,
+    vendorId: api.vendor != null ? String(api.vendor) : undefined,
+    teamRosterFile: normalizeFileUrl(api.team_roster_file ?? undefined),
+    teamRosterFileUrl: normalizeFileUrl(api.team_roster_file_url ?? undefined),
+    equipmentPlanFile: normalizeFileUrl(api.equipment_plan_file ?? undefined),
+    equipmentPlanFileUrl: normalizeFileUrl(api.equipment_plan_file_url ?? undefined),
+    siteStatus: api.site_status ?? undefined,
+    workScheduleStart: api.work_schedule_start ?? undefined,
+    workScheduleEnd: api.work_schedule_end ?? undefined,
+    complianceDocsFile: normalizeFileUrl(api.compliance_docs_file ?? undefined),
+    complianceDocsFileUrl: normalizeFileUrl(api.compliance_docs_file_url ?? undefined),
+    insuranceCertificateFile: normalizeFileUrl(api.insurance_certificate_file ?? undefined),
+    insuranceCertificateFileUrl: normalizeFileUrl(api.insurance_certificate_file_url ?? undefined),
+    deviceModel: api.device_model ?? undefined,
+    deviceBrand: api.device_brand ?? undefined,
+    techTier: api.tech_tier != null ? Number(api.tech_tier) : undefined,
+    meterApiEndpoint: api.meter_api_endpoint ?? undefined,
+    hasMeterApiToken: Boolean(api.has_meter_api_token),
+    manualVerificationConfirmed: Boolean(api.manual_verification_confirmed),
+    checklistTeamReady: Boolean(api.checklist_team_ready),
+    checklistEquipmentReady: Boolean(api.checklist_equipment_ready),
+    checklistSiteReady: Boolean(api.checklist_site_ready),
+    checklistSafetyReady: Boolean(api.checklist_safety_ready),
+    checklistLogisticsReady: Boolean(api.checklist_logistics_ready),
+    setupCompletedAt: api.setup_completed_at ?? undefined,
+    createdAt: api.created_at ?? undefined,
+    updatedAt: api.updated_at ?? undefined,
   };
 }
 
@@ -389,14 +464,18 @@ function mapMilestoneFromApi(api: any): Milestone {
   return {
     id: String(api.id ?? ""),
     projectId: String(api.project ?? ""),
+    milestoneNumber: api.milestone_number != null ? Number(api.milestone_number) : undefined,
+    disbursementPct: api.disbursement_pct != null ? Number(api.disbursement_pct) : undefined,
     name: api.name ?? "",
     description: api.description ?? undefined,
     percentage: Number(api.percentage ?? 0),
     status: api.status ?? "Pending",
     amount: Number(api.amount ?? 0),
+    amountLsl: api.amount_lsl != null ? Number(api.amount_lsl) : undefined,
     progressPercentage: Number(api.progress_percentage ?? 0),
     targetDate: api.target_date ?? undefined,
     completedDate: api.completed_date ?? undefined,
+    unlockedAt: api.unlocked_at ?? undefined,
   };
 }
 
@@ -442,6 +521,30 @@ function mapInstallationReportFromApi(api: any): InstallationReport {
     kwhReading: api.kwh_reading != null ? Number(api.kwh_reading) : undefined,
     status: api.status ?? "Submitted",
     submittedAt: api.submitted_at ?? "",
+    beneficiaryName: api.beneficiary_name ?? undefined,
+    householdType: api.household_type ?? undefined,
+    verificationStatus: api.verification_status ?? undefined,
+    verifiedBy: api.verified_by ?? undefined,
+    gisStatus: api.gis_status ?? undefined,
+  };
+}
+
+function mapMapInstallationFromApi(api: any): MapInstallationRecord {
+  return {
+    id: String(api.id ?? ""),
+    projectId: String(api.project_id ?? ""),
+    latitude: Number(api.latitude ?? 0),
+    longitude: Number(api.longitude ?? 0),
+    gisStatus: api.gis_status ?? "yellow",
+    verificationStatus: api.verification_status ?? "Pending",
+    technologyType: api.technology_type ?? "",
+    householdType: api.household_type ?? undefined,
+    vendorName: api.vendor_name ?? "",
+    beneficiaryName: api.beneficiary_name ?? "",
+    serialNumber: api.serial_number ?? undefined,
+    district: api.district ?? "",
+    installationDate: api.installation_date ?? undefined,
+    uptimePct: api.uptime_pct != null ? Number(api.uptime_pct) : undefined,
   };
 }
 
@@ -469,6 +572,7 @@ function mapBidEvaluationFromApi(api: any): TenderBidEvaluation {
     bid: String(api.bid ?? ""),
     evaluator: api.evaluator != null ? String(api.evaluator) : undefined,
     evaluatorUsername: api.evaluator_username ?? undefined,
+    evaluatorRole: api.evaluator_role ?? undefined,
     status: api.status ?? "Pending",
     technicalScore: Number(api.technical_score ?? 0),
     financialScore: Number(api.financial_score ?? 0),
@@ -496,6 +600,7 @@ function mapTenderContractFromApi(api: any): TenderContract {
     referenceNumber: api.reference_number ?? "",
     templateName: api.template_name ?? undefined,
     status: api.status ?? "Generated",
+    signatureStatus: api.signature_status ?? undefined,
     generatedFile: normalizeFileUrl(api.generated_file ?? undefined),
     signedFile: normalizeFileUrl(api.signed_file ?? undefined),
     annexAFile: normalizeFileUrl(api.annex_a_file ?? undefined),
@@ -581,11 +686,36 @@ function mapTenderBidSiteFromApi(api: any): TenderBidSite {
     id: api.id != null ? String(api.id) : undefined,
     siteName: api.site_name ?? "",
     district: api.district ?? undefined,
+    villageSubDistrict: api.village_sub_district ?? undefined,
     latitude: api.latitude != null ? Number(api.latitude) : undefined,
     longitude: api.longitude != null ? Number(api.longitude) : undefined,
-    systemConfiguration: api.system_configuration ?? undefined,
-    boqItems: Array.isArray(api.boq_items) ? api.boq_items : [],
+    estimatedHouseholds: api.estimated_households != null ? Number(api.estimated_households) : (api.number_of_households != null ? Number(api.number_of_households) : undefined),
+    numberOfHouseholds: api.number_of_households != null ? Number(api.number_of_households) : undefined,
+    targetTechnology: api.target_technology ?? undefined,
+    targetBeneficiaryType: api.target_beneficiary_type ?? undefined,
+    estimatedEnergyDemandKwhMonth: api.estimated_energy_demand_kwh_month != null ? Number(api.estimated_energy_demand_kwh_month) : undefined,
+    roadAccessAvailable: api.road_access_available != null ? Boolean(api.road_access_available) : undefined,
     notes: api.notes ?? undefined,
+  };
+}
+
+function mapTenderBidSiteToApi(site: Partial<TenderBidSite> | Record<string, any>): Record<string, any> {
+  const rawSite = site as any;
+  const estimatedHouseholds = rawSite.estimatedHouseholds ?? rawSite.estimated_households ?? rawSite.numberOfHouseholds ?? rawSite.number_of_households;
+  return {
+    site_name: rawSite.siteName ?? rawSite.site_name ?? "",
+    district: rawSite.district ?? "",
+    village_sub_district: rawSite.villageSubDistrict ?? rawSite.village_sub_district ?? "",
+    latitude: rawSite.latitude ?? undefined,
+    longitude: rawSite.longitude ?? undefined,
+    estimated_households: estimatedHouseholds ?? undefined,
+    number_of_households: estimatedHouseholds ?? undefined,
+    target_technology: rawSite.targetTechnology ?? rawSite.target_technology ?? undefined,
+    target_beneficiary_type: rawSite.targetBeneficiaryType ?? rawSite.target_beneficiary_type ?? undefined,
+    estimated_energy_demand_kwh_month:
+      rawSite.estimatedEnergyDemandKwhMonth ?? rawSite.estimated_energy_demand_kwh_month ?? undefined,
+    road_access_available: rawSite.roadAccessAvailable ?? rawSite.road_access_available ?? false,
+    notes: rawSite.notes ?? "",
   };
 }
 
@@ -595,26 +725,90 @@ function mapTenderBidFromApi(api: any): TenderBid {
     tender: String(api.tender ?? ""),
     tender_reference: api.tender_reference ?? undefined,
     tender_name: api.tender_name ?? undefined,
+    tender_status: api.tender_status ?? undefined,
+    tender_intent_to_award_at: api.tender_intent_to_award_at ?? undefined,
+    tender_intent_to_award_bid_id: api.tender_intent_to_award_bid_id != null ? String(api.tender_intent_to_award_bid_id) : undefined,
+    tender_awarded_at: api.tender_awarded_at ?? undefined,
+    tender_awarded_vendor_id: api.tender_awarded_vendor_id != null ? String(api.tender_awarded_vendor_id) : undefined,
+    tender_awarded_vendor_name: api.tender_awarded_vendor_name ?? undefined,
     vendor_id: api.vendor_id ?? "",
     vendor_name: api.vendor_name ?? "",
     vendor_email: api.vendor_email ?? undefined,
     bid_amount: api.bid_amount != null ? Number(api.bid_amount) : undefined,
+    subsidy_requested: api.subsidy_requested != null ? Number(api.subsidy_requested) : undefined,
     stage: api.stage ?? undefined,
+    stage_key: api.stage_key ?? undefined,
+    stage_badge: api.stage_badge ?? undefined,
+    technology_type: api.technology_type ?? undefined,
+    device_brand: api.device_brand ?? undefined,
+    device_model: api.device_model ?? undefined,
+    co_financing_amount: api.co_financing_amount != null ? Number(api.co_financing_amount) : undefined,
     concept_note: api.concept_note ?? undefined,
     technical_proposal: api.technical_proposal ?? undefined,
     financial_proposal: api.financial_proposal ?? undefined,
+    device_brand_model: api.device_brand_model ?? undefined,
+    tech_tier: api.tech_tier ?? undefined,
+    energy_target_kwh_month: api.energy_target_kwh_month != null ? Number(api.energy_target_kwh_month) : undefined,
+    energy_target: api.energy_target != null ? Number(api.energy_target) : undefined,
+    system_configuration: api.system_configuration ?? undefined,
+    boq_details: Array.isArray(api.boq_details) ? api.boq_details : [],
+    boq_items: Array.isArray(api.boq_items) ? api.boq_items : [],
     technical_proposal_file: normalizeFileUrl(api.technical_proposal_file ?? undefined),
     financial_proposal_file: normalizeFileUrl(api.financial_proposal_file ?? undefined),
     boq_file: normalizeFileUrl(api.boq_file ?? undefined),
     gender_action_plan_file: normalizeFileUrl(api.gender_action_plan_file ?? undefined),
     implementation_plan_file: normalizeFileUrl(api.implementation_plan_file ?? undefined),
+    om_plan_file: normalizeFileUrl(api.om_plan_file ?? undefined),
+    om_plan_document: normalizeFileUrl(api.om_plan_document ?? api.om_plan_file ?? undefined),
     reporting_templates_file: normalizeFileUrl(api.reporting_templates_file ?? undefined),
+    distribution_map_file: normalizeFileUrl(api.distribution_map_file ?? undefined),
+    female_target_pct: api.female_target_pct != null ? Number(api.female_target_pct) : undefined,
+    gender_inclusion_target: api.gender_inclusion_target != null ? Number(api.gender_inclusion_target) : undefined,
+    vulnerable_target_pct: api.vulnerable_target_pct != null ? Number(api.vulnerable_target_pct) : undefined,
+    vulnerable_group_target: api.vulnerable_group_target != null ? Number(api.vulnerable_group_target) : undefined,
+    low_income_target_pct: api.low_income_target_pct != null ? Number(api.low_income_target_pct) : undefined,
+    low_income_target: api.low_income_target != null ? Number(api.low_income_target) : undefined,
+    inclusion_commitment_confirmed: api.inclusion_commitment_confirmed != null ? Boolean(api.inclusion_commitment_confirmed) : undefined,
+    om_strategy_summary: api.om_strategy_summary ?? undefined,
+    local_technicians_to_be_trained: api.local_technicians_to_be_trained != null ? Number(api.local_technicians_to_be_trained) : undefined,
+    warranty_period_months: api.warranty_period_months != null ? Number(api.warranty_period_months) : undefined,
+    warranty_period: api.warranty_period != null ? Number(api.warranty_period) : undefined,
+    offer_paygo: api.offer_paygo != null ? Boolean(api.offer_paygo) : undefined,
+    paygo_platform: api.paygo_platform ?? undefined,
+    daily_payment_amount_lsl: api.daily_payment_amount_lsl != null ? Number(api.daily_payment_amount_lsl) : undefined,
+    collection_method: api.collection_method ?? undefined,
+    technical_summary: api.technical_summary ?? api.technical_proposal ?? undefined,
+    financial_summary: api.financial_summary ?? api.financial_proposal ?? undefined,
+    aftersales_description: api.aftersales_description ?? undefined,
+    service_tier: api.service_tier ?? api.tech_tier ?? undefined,
+    stage_two_unlocked: Boolean(api.stage_two_unlocked),
+    stage_two_unlocked_at: api.stage_two_unlocked_at ?? undefined,
+    stage_two_source_bid: api.stage_two_source_bid != null ? String(api.stage_two_source_bid) : undefined,
+    stage_two_ready: api.stage_two_ready != null ? Boolean(api.stage_two_ready) : undefined,
+    document_requirements: Array.isArray(api.document_requirements) ? api.document_requirements : [],
+    document_counts: api.document_counts ?? undefined,
+    deadline: api.deadline ?? undefined,
+    deadline_passed: api.deadline_passed != null ? Boolean(api.deadline_passed) : undefined,
+    deadline_countdown_seconds: api.deadline_countdown_seconds != null ? Number(api.deadline_countdown_seconds) : undefined,
+    is_locked: api.is_locked != null ? Boolean(api.is_locked) : undefined,
+    evaluation_status: api.evaluation_status ?? undefined,
+    technical_score_total: api.technical_score_total != null ? Number(api.technical_score_total) : undefined,
+    financial_score_total: api.financial_score_total != null ? Number(api.financial_score_total) : undefined,
+    version_history: Array.isArray(api.version_history) ? api.version_history.map((item: any) => ({
+      id: String(item.id ?? ""),
+      version_number: Number(item.version_number ?? 0),
+      status: (item.status as BidStatus) ?? BidStatus.DRAFT,
+      updated_at: item.updated_at ?? undefined,
+      submitted_at: item.submitted_at ?? undefined,
+    })) : [],
     status: (api.status as BidStatus) ?? BidStatus.DRAFT,
     version_number: Number(api.version_number ?? 0),
     submitted_at: api.submitted_at ?? undefined,
     reviewed_at: api.reviewed_at ?? undefined,
     reviewed_by: api.reviewed_by ?? undefined,
     rejection_reason: api.rejection_reason ?? undefined,
+    created_at: api.created_at ?? undefined,
+    updated_at: api.updated_at ?? undefined,
     sites: Array.isArray(api.sites) ? api.sites.map(mapTenderBidSiteFromApi) : [],
   };
 }
@@ -710,6 +904,51 @@ function mapAuditLogFromApi(api: any): AuditLog {
     actor: api.actor != null ? String(api.actor) : undefined,
     actorUsername: api.actor_username ?? undefined,
     createdAt: api.created_at ?? "",
+    notes: api.notes ?? undefined,
+    recordId: api.record_id != null ? String(api.record_id) : undefined,
+    recordType: api.record_type ?? undefined,
+    actorRole: api.actor_role ?? undefined,
+    module: api.module ?? undefined,
+  };
+}
+
+function mapSmartMeterReadingFromApi(api: any): SmartMeterReading {
+  return {
+    id: String(api.id ?? ""),
+    projectId: String(api.project ?? ""),
+    installationId: api.installation != null ? String(api.installation) : undefined,
+    meterId: api.meter_id ?? "",
+    kwh: Number(api.kwh ?? 0),
+    uptimePct: api.uptime_pct != null ? Number(api.uptime_pct) : undefined,
+    recordedAt: api.recorded_at ?? "",
+    createdAt: api.created_at ?? "",
+  };
+}
+
+function mapAnomalyFlagFromApi(api: any): AnomalyFlag {
+  return {
+    id: String(api.id ?? ""),
+    installation: String(api.installation ?? ""),
+    project: String(api.project ?? ""),
+    flagType: api.flag_type ?? "",
+    description: api.description ?? undefined,
+    isResolved: Boolean(api.is_resolved),
+    createdAt: api.created_at ?? "",
+    resolvedAt: api.resolved_at ?? undefined,
+  };
+}
+
+function mapProspectSyncLogFromApi(api: any): ProspectSyncLog {
+  return {
+    id: String(api.id ?? ""),
+    methodName: api.method_name ?? "",
+    status: api.status ?? "",
+    attempts: Number(api.attempts ?? 0),
+    errorMessage: api.error_message ?? undefined,
+    createdAt: api.created_at ?? undefined,
+    updatedAt: api.updated_at ?? undefined,
+    recordId: api.record_id != null ? String(api.record_id) : undefined,
+    recordType: api.record_type ?? undefined,
   };
 }
 
@@ -995,22 +1234,35 @@ export async function submitTenderBid(payload: Partial<TenderBid>): Promise<Tend
   const form = new FormData();
   form.append('tender', String(payload.tender ?? ""));
   if (payload.bid_amount != null) form.append('bid_amount', String(payload.bid_amount));
-  form.append('stage', payload.stage ?? "");
+  if (payload.subsidy_requested != null) form.append('subsidy_requested', String(payload.subsidy_requested));
+  if (payload.stage != null) form.append('stage', payload.stage);
   form.append('concept_note', payload.concept_note ?? "");
   form.append('technical_proposal', payload.technical_proposal ?? "");
   form.append('financial_proposal', payload.financial_proposal ?? "");
+  form.append('device_brand_model', payload.device_brand_model ?? "");
+  if (payload.tech_tier != null) form.append('tech_tier', payload.tech_tier);
+  if (payload.energy_target != null) form.append('energy_target', String(payload.energy_target));
+  if (payload.system_configuration) form.append('system_configuration', JSON.stringify(payload.system_configuration));
+  if (payload.boq_details) form.append('boq_details', JSON.stringify(payload.boq_details));
+  else if (payload.boq_items) form.append('boq_items', JSON.stringify(payload.boq_items));
+  if (payload.gender_inclusion_target != null) form.append('gender_inclusion_target', String(payload.gender_inclusion_target));
+  else if (payload.female_target_pct != null) form.append('female_target_pct', String(payload.female_target_pct));
+  if (payload.vulnerable_group_target != null) form.append('vulnerable_group_target', String(payload.vulnerable_group_target));
+  else if (payload.vulnerable_target_pct != null) form.append('vulnerable_target_pct', String(payload.vulnerable_target_pct));
+  if (payload.low_income_target != null) form.append('low_income_target', String(payload.low_income_target));
+  else if (payload.low_income_target_pct != null) form.append('low_income_target_pct', String(payload.low_income_target_pct));
+  if (payload.inclusion_commitment_confirmed != null) form.append('inclusion_commitment_confirmed', String(payload.inclusion_commitment_confirmed));
+  form.append('om_strategy_summary', payload.om_strategy_summary ?? "");
+  form.append('aftersales_description', payload.aftersales_description ?? "");
+  if (payload.local_technicians_to_be_trained != null) form.append('local_technicians_to_be_trained', String(payload.local_technicians_to_be_trained));
+  if (payload.warranty_period != null) form.append('warranty_period', String(payload.warranty_period));
+  else if (payload.warranty_period_months != null) form.append('warranty_period_months', String(payload.warranty_period_months));
+  if (payload.offer_paygo != null) form.append('offer_paygo', String(payload.offer_paygo));
+  form.append('paygo_platform', payload.paygo_platform ?? "");
+  if (payload.daily_payment_amount_lsl != null) form.append('daily_payment_amount_lsl', String(payload.daily_payment_amount_lsl));
+  form.append('collection_method', payload.collection_method ?? "");
+  if (payload.sites) form.append('sites', JSON.stringify(payload.sites.map(mapTenderBidSiteToApi)));
   form.append('status', payload.status ?? BidStatus.DRAFT);
-
-  const sitesPayload = (payload.sites ?? []).map((site) => ({
-    site_name: site.siteName,
-    district: site.district ?? "",
-    latitude: site.latitude ?? null,
-    longitude: site.longitude ?? null,
-    system_configuration: site.systemConfiguration ?? {},
-    boq_items: site.boqItems ?? [],
-    notes: site.notes ?? "",
-  }));
-  form.append('sites', JSON.stringify(sitesPayload));
 
   const technicalProposalFile = (payload as any).technical_proposal_file;
   if (technicalProposalFile instanceof File) {
@@ -1032,9 +1284,21 @@ export async function submitTenderBid(payload: Partial<TenderBid>): Promise<Tend
   if (implementationPlanFile instanceof File) {
     form.append('implementation_plan_file', implementationPlanFile);
   }
+  const omPlanDocument = (payload as any).om_plan_document;
+  if (omPlanDocument instanceof File) {
+    form.append('om_plan_document', omPlanDocument);
+  }
+  const omPlanFile = (payload as any).om_plan_file;
+  if (omPlanFile instanceof File) {
+    form.append('om_plan_file', omPlanFile);
+  }
   const reportingTemplatesFile = (payload as any).reporting_templates_file;
   if (reportingTemplatesFile instanceof File) {
     form.append('reporting_templates_file', reportingTemplatesFile);
+  }
+  const distributionMapFile = (payload as any).distribution_map_file;
+  if (distributionMapFile instanceof File) {
+    form.append('distribution_map_file', distributionMapFile);
   }
 
   const data = await http<any>(`/api/tender-bids/`, {
@@ -1047,24 +1311,35 @@ export async function submitTenderBid(payload: Partial<TenderBid>): Promise<Tend
 export async function updateTenderBid(bidId: string, payload: Partial<TenderBid>): Promise<TenderBid> {
   const form = new FormData();
   if (payload.bid_amount != null) form.append('bid_amount', String(payload.bid_amount));
+  if (payload.subsidy_requested != null) form.append('subsidy_requested', String(payload.subsidy_requested));
   if (payload.stage != null) form.append('stage', payload.stage);
   if (payload.concept_note != null) form.append('concept_note', payload.concept_note);
   if (payload.technical_proposal != null) form.append('technical_proposal', payload.technical_proposal);
   if (payload.financial_proposal != null) form.append('financial_proposal', payload.financial_proposal);
+  if (payload.device_brand_model != null) form.append('device_brand_model', payload.device_brand_model);
+  if (payload.tech_tier != null) form.append('tech_tier', payload.tech_tier);
+  if (payload.energy_target != null) form.append('energy_target', String(payload.energy_target));
+  if (payload.system_configuration != null) form.append('system_configuration', JSON.stringify(payload.system_configuration));
+  if (payload.boq_details != null) form.append('boq_details', JSON.stringify(payload.boq_details));
+  else if (payload.boq_items != null) form.append('boq_items', JSON.stringify(payload.boq_items));
+  if (payload.gender_inclusion_target != null) form.append('gender_inclusion_target', String(payload.gender_inclusion_target));
+  else if (payload.female_target_pct != null) form.append('female_target_pct', String(payload.female_target_pct));
+  if (payload.vulnerable_group_target != null) form.append('vulnerable_group_target', String(payload.vulnerable_group_target));
+  else if (payload.vulnerable_target_pct != null) form.append('vulnerable_target_pct', String(payload.vulnerable_target_pct));
+  if (payload.low_income_target != null) form.append('low_income_target', String(payload.low_income_target));
+  else if (payload.low_income_target_pct != null) form.append('low_income_target_pct', String(payload.low_income_target_pct));
+  if (payload.inclusion_commitment_confirmed != null) form.append('inclusion_commitment_confirmed', String(payload.inclusion_commitment_confirmed));
+  if (payload.om_strategy_summary != null) form.append('om_strategy_summary', payload.om_strategy_summary);
+  if (payload.aftersales_description != null) form.append('aftersales_description', payload.aftersales_description);
+  if (payload.local_technicians_to_be_trained != null) form.append('local_technicians_to_be_trained', String(payload.local_technicians_to_be_trained));
+  if (payload.warranty_period != null) form.append('warranty_period', String(payload.warranty_period));
+  else if (payload.warranty_period_months != null) form.append('warranty_period_months', String(payload.warranty_period_months));
+  if (payload.offer_paygo != null) form.append('offer_paygo', String(payload.offer_paygo));
+  if (payload.paygo_platform != null) form.append('paygo_platform', payload.paygo_platform);
+  if (payload.daily_payment_amount_lsl != null) form.append('daily_payment_amount_lsl', String(payload.daily_payment_amount_lsl));
+  if (payload.collection_method != null) form.append('collection_method', payload.collection_method);
+  if (payload.sites != null) form.append('sites', JSON.stringify(payload.sites.map(mapTenderBidSiteToApi)));
   if (payload.status != null) form.append('status', payload.status);
-
-  if (payload.sites) {
-    const sitesPayload = (payload.sites ?? []).map((site) => ({
-      site_name: site.siteName,
-      district: site.district ?? "",
-      latitude: site.latitude ?? null,
-      longitude: site.longitude ?? null,
-      system_configuration: site.systemConfiguration ?? {},
-      boq_items: site.boqItems ?? [],
-      notes: site.notes ?? "",
-    }));
-    form.append('sites', JSON.stringify(sitesPayload));
-  }
 
   const technicalProposalFile = (payload as any).technical_proposal_file;
   if (technicalProposalFile instanceof File) {
@@ -1086,9 +1361,21 @@ export async function updateTenderBid(bidId: string, payload: Partial<TenderBid>
   if (implementationPlanFile instanceof File) {
     form.append('implementation_plan_file', implementationPlanFile);
   }
+  const omPlanDocument = (payload as any).om_plan_document;
+  if (omPlanDocument instanceof File) {
+    form.append('om_plan_document', omPlanDocument);
+  }
+  const omPlanFile = (payload as any).om_plan_file;
+  if (omPlanFile instanceof File) {
+    form.append('om_plan_file', omPlanFile);
+  }
   const reportingTemplatesFile = (payload as any).reporting_templates_file;
   if (reportingTemplatesFile instanceof File) {
     form.append('reporting_templates_file', reportingTemplatesFile);
+  }
+  const distributionMapFile = (payload as any).distribution_map_file;
+  if (distributionMapFile instanceof File) {
+    form.append('distribution_map_file', distributionMapFile);
   }
 
   const data = await http<any>(`/api/tender-bids/${bidId}/`, {
@@ -1135,6 +1422,19 @@ export async function rejectTenderBid(
   rejectionReason: string
 ): Promise<TenderBid> {
   const data = await http<any>(`/api/tender-bids/${bidId}/reject/`, {
+    method: "POST",
+    body: JSON.stringify({
+      rejection_reason: rejectionReason,
+    }),
+  });
+  return mapTenderBidFromApi(data);
+}
+
+export async function markTenderBidPartialConformity(
+  bidId: string,
+  rejectionReason: string
+): Promise<TenderBid> {
+  const data = await http<any>(`/api/tender-bids/${bidId}/partial_conformity/`, {
     method: "POST",
     body: JSON.stringify({
       rejection_reason: rejectionReason,
@@ -1222,14 +1522,48 @@ export async function signTenderContract(contractId: string, payload: {
   return mapTenderContractFromApi(data);
 }
 
-export async function approveTenderContract(contractId: string, milestones?: Array<{ name: string; percentage: number; amount: number }>): Promise<TenderContract> {
-  const body: any = {};
-  if (milestones) body.milestones = milestones;
+export async function approveTenderContract(contractId: string, payload?: {
+  sendEmail?: boolean;
+}): Promise<TenderContract> {
   const data = await http<any>(`/api/tender-contracts/${contractId}/approve/`, {
+    method: "POST",
+    body: JSON.stringify({
+      send_email: payload?.sendEmail ?? true,
+    }),
+  });
+  return mapTenderContractFromApi(data);
+}
+
+export async function assignTenderContract(contractId: string, payload?: {
+  projectDurationMonths?: number;
+  targetInstallations?: number;
+  techType?: string;
+  energyOutput?: number;
+  district?: string;
+  verificationMethod?: string;
+  targetFemalePct?: number;
+  targetVulnerablePct?: number;
+  targetLowIncomePct?: number;
+}): Promise<TenderContract> {
+  const body: any = {};
+  if (payload?.projectDurationMonths != null) body.project_duration_months = payload.projectDurationMonths;
+  if (payload?.targetInstallations != null) body.installation_target = payload.targetInstallations;
+  if (payload?.techType) body.technology_type = payload.techType;
+  if (payload?.energyOutput != null) body.energy_output_target_kwh = payload.energyOutput;
+  if (payload?.district) body.district_zone = payload.district;
+  if (payload?.verificationMethod) body.verification_method = payload.verificationMethod;
+  if (payload?.targetFemalePct != null) body.female_target_pct = payload.targetFemalePct;
+  if (payload?.targetVulnerablePct != null) body.vulnerable_target_pct = payload.targetVulnerablePct;
+  if (payload?.targetLowIncomePct != null) body.low_income_target_pct = payload.targetLowIncomePct;
+  const data = await http<any>(`/api/tender-contracts/${contractId}/assign/`, {
     method: "POST",
     body: JSON.stringify(body),
   });
-  return mapTenderContractFromApi(data);
+  return data;
+}
+
+export async function fetchTenderContractAssignment(contractId: string): Promise<any> {
+  return await http<any>(`/api/tender-contracts/${contractId}/assign/`);
 }
 
 export async function rejectTenderContract(contractId: string, reason: string): Promise<TenderContract> {
@@ -1245,17 +1579,137 @@ export async function fetchProjects(): Promise<Project[]> {
   return unwrapListResponse<any>(data).map(mapProjectFromApi);
 }
 
+export async function fetchProjectKpiSummary(projectId: string): Promise<ProjectKpiSummary> {
+  return await http<ProjectKpiSummary>(`/api/kpi/project/${projectId}`);
+}
+
+export async function fetchPortfolioKpiSummary(): Promise<PortfolioKpiSummary> {
+  return await http<PortfolioKpiSummary>(`/api/kpi/portfolio`);
+}
+
+export async function downloadProjectKpiPdf(projectId: string): Promise<void> {
+  const token = typeof window !== "undefined" ? localStorage.getItem(ACCESS_TOKEN_KEY) : null;
+  const requestUrls = API_BASE_CANDIDATES.map((base) => joinApiUrl(base, `/api/kpi/project/${projectId}/export-pdf`));
+  let lastError: Error | null = null;
+  for (const requestUrl of requestUrls) {
+    try {
+      const res = await fetch(requestUrl, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status} ${res.statusText}`);
+      }
+      const blob = await res.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = `KPI_Report_${projectId}_${new Date().toISOString().slice(0, 10)}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(objectUrl);
+      return;
+    } catch (error: any) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+    }
+  }
+  throw lastError || new Error("Unable to download KPI report.");
+}
+
 export async function updateProject(id: string, payload: Partial<Project>): Promise<Project> {
   const body: Record<string, any> = {
     deployment_team_roster: payload.deploymentTeamRoster ?? "",
     deployment_equipment_plan: payload.deploymentEquipmentPlan ?? "",
+    deployment_site_status: payload.deploymentSiteStatus ?? "",
     deployment_work_schedule: payload.deploymentWorkSchedule ?? "",
+    deployment_permits_status: payload.deploymentPermitsStatus ?? "",
+    device_brand: payload.deviceBrand ?? "",
+    device_model: payload.deviceModel ?? "",
+    device_tech_tier: payload.deviceTechTier ?? "",
+    verification_method_confirmed: Boolean(payload.verificationMethodConfirmed),
   };
   const data = await http<any>(`/api/projects/${id}/`, {
     method: "PATCH",
     body: JSON.stringify(body),
   });
   return mapProjectFromApi(data);
+}
+
+function buildProjectSetupForm(payload: {
+  siteStatus?: string;
+  workScheduleStart?: string;
+  workScheduleEnd?: string;
+  deviceModel?: string;
+  deviceBrand?: string;
+  techTier?: number | string;
+  meterApiEndpoint?: string;
+  meterApiToken?: string;
+  manualVerificationConfirmed?: boolean;
+  checklistTeamReady?: boolean;
+  checklistEquipmentReady?: boolean;
+  checklistSiteReady?: boolean;
+  checklistSafetyReady?: boolean;
+  checklistLogisticsReady?: boolean;
+  teamRosterFile?: File | null;
+  equipmentPlanFile?: File | null;
+  complianceDocsFile?: File | null;
+  insuranceCertificateFile?: File | null;
+}): FormData {
+  const form = new FormData();
+  if (payload.siteStatus) form.append("site_status", payload.siteStatus);
+  if (payload.workScheduleStart) form.append("work_schedule_start", payload.workScheduleStart);
+  if (payload.workScheduleEnd) form.append("work_schedule_end", payload.workScheduleEnd);
+  if (payload.deviceModel) form.append("device_model", payload.deviceModel);
+  if (payload.deviceBrand) form.append("device_brand", payload.deviceBrand);
+  if (payload.techTier != null && payload.techTier !== "") form.append("tech_tier", String(payload.techTier));
+  if (payload.meterApiEndpoint) form.append("meter_api_endpoint", payload.meterApiEndpoint);
+  if (payload.meterApiToken) form.append("meter_api_token", payload.meterApiToken);
+  form.append("manual_verification_confirmed", String(Boolean(payload.manualVerificationConfirmed)));
+  form.append("checklist_team_ready", String(Boolean(payload.checklistTeamReady)));
+  form.append("checklist_equipment_ready", String(Boolean(payload.checklistEquipmentReady)));
+  form.append("checklist_site_ready", String(Boolean(payload.checklistSiteReady)));
+  form.append("checklist_safety_ready", String(Boolean(payload.checklistSafetyReady)));
+  form.append("checklist_logistics_ready", String(Boolean(payload.checklistLogisticsReady)));
+  if (payload.teamRosterFile instanceof File) form.append("team_roster_file", payload.teamRosterFile);
+  if (payload.equipmentPlanFile instanceof File) form.append("equipment_plan_file", payload.equipmentPlanFile);
+  if (payload.complianceDocsFile instanceof File) form.append("compliance_docs_file", payload.complianceDocsFile);
+  if (payload.insuranceCertificateFile instanceof File) form.append("insurance_certificate_file", payload.insuranceCertificateFile);
+  return form;
+}
+
+export async function saveProjectSetupDraft(
+  projectId: string,
+  payload: Parameters<typeof buildProjectSetupForm>[0],
+): Promise<Project> {
+  const data = await http<any>(`/api/projects/${projectId}/setup/`, {
+    method: "POST",
+    body: buildProjectSetupForm(payload),
+  });
+  return mapProjectFromApi(data);
+}
+
+export async function submitProjectSetup(
+  projectId: string,
+  payload: Parameters<typeof buildProjectSetupForm>[0],
+): Promise<Project> {
+  const data = await http<any>(`/api/projects/${projectId}/setup/submit/`, {
+    method: "POST",
+    body: buildProjectSetupForm(payload),
+  });
+  return mapProjectFromApi(data);
+}
+
+export async function testProjectSetupConnection(
+  projectId: string,
+  payload: { meterApiEndpoint: string; meterApiToken: string },
+): Promise<{ status: string; message: string }> {
+  return await http<{ status: string; message: string }>(`/api/projects/${projectId}/setup/test-connection/`, {
+    method: "POST",
+    body: JSON.stringify({
+      meter_api_endpoint: payload.meterApiEndpoint,
+      meter_api_token: payload.meterApiToken,
+    }),
+  });
 }
 
 export async function fetchMilestones(projectId?: string): Promise<Milestone[]> {
@@ -1385,7 +1839,7 @@ export async function createInstallationReport(payload: {
   photoFiles?: File[];
   meterId?: string;
   kwhReading?: number;
-}): Promise<InstallationReport> {
+}): Promise<{ report: InstallationReport; warning?: string }> {
   const form = new FormData();
   form.append("project", payload.projectId);
   if (payload.milestoneId) form.append("milestone", payload.milestoneId);
@@ -1405,7 +1859,35 @@ export async function createInstallationReport(payload: {
     method: "POST",
     body: form,
   });
-  return mapInstallationReportFromApi(data);
+  if (data?.success && data?.data) {
+    return {
+      report: mapInstallationReportFromApi(data.data),
+      warning: typeof data.warning === "string" ? data.warning : undefined,
+    };
+  }
+  return {
+    report: mapInstallationReportFromApi(data),
+  };
+}
+
+export async function fetchMapInstallations(filters: Record<string, string | undefined> = {}): Promise<MapInstallationsResponse> {
+  const search = new URLSearchParams();
+  Object.entries(filters).forEach(([key, value]) => {
+    if (value != null && value !== "") search.set(key, value);
+  });
+  const query = search.toString();
+  const data = await http<any>(`/api/installations/map-data${query ? `?${query}` : ""}`);
+  const payload = data?.data ?? {};
+  return {
+    installations: Array.isArray(payload.installations) ? payload.installations.map(mapMapInstallationFromApi) : [],
+    summary: {
+      total: Number(payload.summary?.total ?? 0),
+      verified: Number(payload.summary?.verified ?? 0),
+      pending: Number(payload.summary?.pending ?? 0),
+      flagged: Number(payload.summary?.flagged ?? 0),
+    },
+    truncated: Boolean(data?.truncated),
+  };
 }
 
 export async function fetchVerificationTasks(projectId?: string): Promise<VerificationTask[]> {
@@ -1675,9 +2157,73 @@ export async function fetchDisbursements(): Promise<Disbursement[]> {
   return unwrapListResponse<any>(data).map(mapDisbursementFromApi);
 }
 
-export async function fetchAuditLogs(): Promise<AuditLog[]> {
-  const data = await http<any>(`/api/projects/audit-logs/`);
+export async function fetchAuditLogs(projectId?: string): Promise<AuditLog[]> {
+  const query = projectId
+    ? `?record_type=project&record_id=${encodeURIComponent(projectId)}`
+    : "";
+  const data = await http<any>(`/api/projects/audit-logs/${query}`);
   return unwrapListResponse<any>(data).map(mapAuditLogFromApi);
+}
+
+export async function fetchSmartMeterReadings(projectId?: string): Promise<SmartMeterReading[]> {
+  const query = projectId ? `?project=${encodeURIComponent(projectId)}` : "";
+  const data = await http<any>(`/api/projects/smart-meter-readings/${query}`);
+  return unwrapListResponse<any>(data).map(mapSmartMeterReadingFromApi);
+}
+
+export async function fetchAnomalyFlags(projectId?: string): Promise<AnomalyFlag[]> {
+  const query = projectId ? `?project=${encodeURIComponent(projectId)}` : "";
+  const data = await http<any>(`/api/projects/anomaly-flags/${query}`);
+  return unwrapListResponse<any>(data).map(mapAnomalyFlagFromApi);
+}
+
+export async function fetchProspectSyncLogs(params?: {
+  status?: string;
+  pageSize?: number;
+}): Promise<ProspectSyncLog[]> {
+  const query = new URLSearchParams();
+  if (params?.status) query.set("status", params.status);
+  if (params?.pageSize) query.set("page_size", String(params.pageSize));
+  const url = query.toString() ? `/api/projects/prospect-sync-logs/?${query.toString()}` : `/api/projects/prospect-sync-logs/`;
+  const data = await http<any>(url);
+  return unwrapListResponse<any>(data).map(mapProspectSyncLogFromApi);
+}
+
+export async function refreshProspectSyncPanel(payload?: {
+  projectId?: string;
+  size?: number;
+  page?: number;
+  country?: string;
+  program?: string;
+  externalId?: string;
+}): Promise<{ status: string; queued_methods: string[]; filters: Record<string, string | number> }> {
+  const body: Record<string, string | number> = {};
+  if (payload?.projectId) body.project_id = payload.projectId;
+  if (payload?.size != null) body.size = payload.size;
+  if (payload?.page != null) body.page = payload.page;
+  if (payload?.country) body.country = payload.country;
+  if (payload?.program) body.program = payload.program;
+  if (payload?.externalId) body.external_id = payload.externalId;
+  return await http<{ status: string; queued_methods: string[]; filters: Record<string, string | number> }>(`/api/projects/prospect-sync-logs/refresh-panel/`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function requestProjectSetupChange(projectId: string, message: string): Promise<{ status: string; message: string }> {
+  return await http<{ status: string; message: string }>(`/api/projects/${projectId}/setup/request-change/`, {
+    method: "POST",
+    body: JSON.stringify({ message }),
+  });
+}
+
+export async function uploadProjectMeterCsv(projectId: string, file: File): Promise<{ status: string; rows_ingested: number; uploaded_at: string }> {
+  const form = new FormData();
+  form.append("file", file);
+  return await http<{ status: string; rows_ingested: number; uploaded_at: string }>(`/api/projects/${projectId}/meter-csv-upload/`, {
+    method: "POST",
+    body: form,
+  });
 }
 
 export async function flagProjectIssue(
@@ -1738,10 +2284,19 @@ export async function loginUser(username: string, password: string): Promise<{ u
     }
   }
 
-  const user = mapUserFromApi(data.user);
   if (typeof window !== "undefined") {
     localStorage.setItem(ACCESS_TOKEN_KEY, data.access);
     localStorage.setItem(REFRESH_TOKEN_KEY, data.refresh);
+  }
+
+  let user: User;
+  if (data?.user) {
+    user = mapUserFromApi(data.user);
+  } else {
+    user = await fetchCurrentUser();
+  }
+
+  if (typeof window !== "undefined") {
     localStorage.setItem(USER_KEY, JSON.stringify(user));
   }
 
@@ -1776,10 +2331,10 @@ export async function fetchCurrentUser(): Promise<User> {
   return user;
 }
 
-export async function updateUserPassword(userId: string, newPassword: string): Promise<User> {
-  const data = await http<any>(`/api/users/${userId}/`, {
-    method: "PATCH",
-    body: JSON.stringify({ password: newPassword }),
+export async function changeOwnPassword(newPassword: string, currentPassword = ""): Promise<User> {
+  const data = await http<any>(`/api/users/auth/change-password/`, {
+    method: "POST",
+    body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
   });
   const user = mapUserFromApi(data);
   if (typeof window !== "undefined") {
@@ -1788,29 +2343,45 @@ export async function updateUserPassword(userId: string, newPassword: string): P
   return user;
 }
 
-export async function createOfficialAccount(payload: {
-  username: string;
+export async function fetchAdminManagedUsers(params?: {
+  role?: string;
+  district?: string;
+  status?: "active" | "inactive";
+}): Promise<User[]> {
+  const query = new URLSearchParams();
+  if (params?.role) query.set("role", params.role);
+  if (params?.district) query.set("district", params.district);
+  if (params?.status) query.set("status", params.status);
+  const url = query.toString() ? `/api/users/?${query.toString()}` : `/api/users/`;
+  const data = await http<any>(url);
+  return unwrapListResponse<any>(data).map(mapUserFromApi);
+}
+
+export async function fetchAdminUserDetail(userId: string): Promise<User> {
+  const data = await http<any>(`/api/users/${userId}/`);
+  return mapUserFromApi(data);
+}
+
+export async function fetchUserManagementMeta(): Promise<{ roles: Array<{ label: string; value: string }> }> {
+  return await http<{ roles: Array<{ label: string; value: string }> }>(`/api/users/management/meta/`);
+}
+
+export async function createAdminManagedUser(payload: {
   fullName: string;
   email: string;
   gender: "Male" | "Female" | "Other";
-  role: UserRole;
-  region: string;
-  mobileNumber: string;
-  tierAssignment?: string;
-  verificationZone?: string;
+  role: string;
+  district?: string;
 }): Promise<{ user: User; initialPassword?: string; emailError?: string }> {
   const data = await http<any>(`/api/users/`, {
     method: "POST",
     body: JSON.stringify({
-      username: payload.username,
       full_name: payload.fullName,
       email: payload.email,
       gender: payload.gender,
       role: payload.role,
-      region: payload.region,
-      mobile_number: payload.mobileNumber,
-      tier_assignment: payload.tierAssignment ?? "",
-      verification_zone: payload.verificationZone ?? "",
+      region: payload.district ?? "",
+      verification_zone: payload.district ?? "",
     }),
   });
   return {
@@ -1818,6 +2389,37 @@ export async function createOfficialAccount(payload: {
     initialPassword: data?.initial_password ?? undefined,
     emailError: data?.email_error ?? undefined,
   };
+}
+
+export async function updateAdminManagedUser(userId: string, payload: {
+  fullName?: string;
+  email?: string;
+  gender?: "Male" | "Female" | "Other";
+  role?: string;
+  district?: string;
+  isActive?: boolean;
+}): Promise<User> {
+  const data = await http<any>(`/api/users/${userId}/`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      full_name: payload.fullName,
+      email: payload.email,
+      gender: payload.gender,
+      role: payload.role,
+      region: payload.district,
+      verification_zone: payload.district,
+      is_active: payload.isActive,
+    }),
+  });
+  return mapUserFromApi(data);
+}
+
+export async function deactivateAdminManagedUser(userId: string): Promise<User> {
+  const data = await http<any>(`/api/users/${userId}/deactivate/`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  return mapUserFromApi(data);
 }
 
 export async function registerVendor(payload: {

@@ -24,6 +24,26 @@ Apps and endpoints:
 - Notifications: /api/notifications/
 - Health: /api/health/
 
+Prospect integration:
+- Configure `PROSPECT_BASE_URL`, `PROSPECT_WRITE_TOKEN`, and `PROSPECT_READ_TOKEN` in `backend/.env`
+- Prospect write endpoints are limited to: `/v1/in/agents`, `/v1/in/customers`, `/v1/in/installations`, `/v1/in/installations_ts`, `/v1/in/targets`, `/v1/in/reports`
+- Prospect read endpoints are limited to: `/v1/out/installations`, `/v1/out/targets`
+- Project targets are queued to Prospect after local project creation
+- Project target updates are re-queued after local project target changes
+- Vendor setup completion queues the Prospect agent sync
+- Installation submissions are queued to Prospect after local save
+- Field verification re-queues the Prospect installation sync as an update
+- On-demand sync panel refreshes can be queued via `POST /api/projects/prospect-sync-logs/refresh-panel/`
+- Sync logs are available at `/api/projects/prospect-sync-logs/`
+- Retry failed or pending syncs with `python manage.py retry_prospect_syncs`
+
+GIS map setup:
+- Install backend dependencies including `shapely` from `requirements.txt`
+- Run once on first deploy: `python manage.py setup_lesotho_boundary`
+- The command stores the filtered boundary at `backend/public/geojson/lesotho.geojson`
+- The frontend map loads the boundary from `GET /api/map/boundary`
+- Map data is served from `GET /api/map/installations`
+
 Production hardening notes:
 - Set `DJANGO_DEBUG=0`
 - Set a strong `SECRET_KEY`

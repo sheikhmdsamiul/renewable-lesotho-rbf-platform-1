@@ -1,0 +1,8 @@
+{
+              "type": "Feature",
+              "properties": {"ISO_A2": "LS"},
+              "geometry": {
+                "type": "Polygon",
+                "coordinates": [[[27.0, -30.5], [29.5, -30.5], [29.5, -28.0], [27.0, -28.0], [27.0, -30.5]]]
+              }
+            }
