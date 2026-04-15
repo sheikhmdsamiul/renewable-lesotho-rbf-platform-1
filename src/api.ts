@@ -1896,6 +1896,26 @@ export async function fetchVerificationTasks(projectId?: string): Promise<Verifi
   return unwrapListResponse<any>(data).map(mapVerificationTaskFromApi);
 }
 
+export async function verifyVerificationTask(
+  taskId: string,
+  payload:
+    | { verifierLat: number; verifierLng: number; verificationStatus?: "verified" | "flagged" | "partial" }
+    | FormData
+): Promise<VerificationTask> {
+  const body = payload instanceof FormData
+    ? payload
+    : JSON.stringify({
+        verifier_lat: payload.verifierLat,
+        verifier_lng: payload.verifierLng,
+        verification_status: payload.verificationStatus,
+      });
+  const data = await http<any>(`/api/projects/verification-tasks/${taskId}/verify/`, {
+    method: "POST",
+    body,
+  });
+  return mapVerificationTaskFromApi(data);
+}
+
 export async function fetchNotifications(): Promise<Notification[]> {
   const data = await http<any>(`/api/notifications/`);
   return unwrapListResponse<any>(data).map(mapNotificationFromApi);

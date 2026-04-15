@@ -1127,6 +1127,75 @@ class ProjectApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         queue_installation.assert_called_once_with(str(report.id), include_customer=False, include_installation=True)
 
+    def test_field_verifier_can_access_and_verify_any_task_in_assigned_district(self):
+        User = get_user_model()
+        vendor = User.objects.create_user(
+            username="district_vendor",
+            password="securePass123",
+            role="Vendor",
+            status="Active",
+        )
+        verifier = User.objects.create_user(
+            username="district_verifier",
+            password="securePass123",
+            role="Field Verifier",
+            status="Active",
+            verification_zone="Maseru",
+        )
+        other_verifier = User.objects.create_user(
+            username="district_verifier_other",
+            password="securePass123",
+            role="Field Verifier",
+            status="Active",
+            verification_zone="Maseru",
+        )
+        project = Project.objects.create(
+            vendor_id=str(vendor.id),
+            vendor_name=vendor.username,
+            tech_type="SHS",
+            region="Maseru",
+            district="Maseru",
+            status=ProjectStatus.VERIFICATION,
+            progress=20,
+            energy_output=10,
+            uptime=96,
+            gender_impact=50,
+        )
+        report = InstallationReport.objects.create(
+            project=project,
+            vendor=vendor,
+            gps_lat=-29.31,
+            gps_lng=27.48,
+            serial_number="SERIAL-DISTRICT-1",
+            beneficiary_id="BEN-DISTRICT-1",
+            status=InstallationStatus.SUBMITTED,
+        )
+        task = VerificationTask.objects.create(
+            report=report,
+            assigned_verifier=other_verifier,
+            vendor_lat=report.gps_lat,
+            vendor_lng=report.gps_lng,
+            status=VerificationStatus.PENDING,
+        )
+
+        self.client.force_authenticate(verifier)
+        list_response = self.client.get("/api/projects/verification-tasks/")
+        self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(list_response.data["count"], 1)
+
+        verify_response = self.client.post(
+            f"/api/projects/verification-tasks/{task.id}/verify/",
+            {
+                "verifier_lat": -29.31,
+                "verifier_lng": 27.48,
+                "verification_status": "verified",
+            },
+            format="json",
+        )
+        self.assertEqual(verify_response.status_code, status.HTTP_200_OK)
+        task.refresh_from_db()
+        self.assertEqual(task.status, VerificationStatus.VERIFIED)
+
     @patch("rbf.projects.views.SyncToProspectJob.dispatch_async")
     def test_prospect_sync_panel_refresh_queues_read_endpoints_on_demand(self, dispatch_async):
         self.client.force_authenticate(self.admin_user)

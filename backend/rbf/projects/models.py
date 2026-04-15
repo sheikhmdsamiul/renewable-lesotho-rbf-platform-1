@@ -1,6 +1,7 @@
 from django.conf import settings
 from django.core import signing
 from django.db import models
+from django.utils import timezone
 
 
 class ProspectSyncStatus(models.TextChoices):
@@ -452,6 +453,59 @@ class VerificationTask(models.Model):
 
     def __str__(self):
         return f"Verification {self.id} - Report {self.report_id}"
+
+
+class FieldVerificationStatus(models.TextChoices):
+    VERIFIED = 'verified', 'Verified'
+    FLAGGED = 'flagged', 'Flagged'
+    PARTIAL = 'partial', 'Partial'
+
+
+class BeneficiaryGender(models.TextChoices):
+    MALE = 'male', 'Male'
+    FEMALE = 'female', 'Female'
+    OTHER = 'other', 'Other'
+    UNKNOWN = 'unknown', 'Unknown'
+
+
+class FieldVerification(models.Model):
+    installation = models.ForeignKey(InstallationReport, related_name='field_verifications', on_delete=models.CASCADE)
+    field_officer = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        related_name='field_verifications',
+        on_delete=models.CASCADE,
+    )
+    beneficiary_present = models.BooleanField(default=False)
+    beneficiary_gender = models.CharField(
+        max_length=16,
+        choices=BeneficiaryGender.choices,
+        default=BeneficiaryGender.UNKNOWN,
+    )
+    system_working = models.BooleanField(default=False)
+    officer_latitude = models.DecimalField(max_digits=9, decimal_places=6)
+    officer_longitude = models.DecimalField(max_digits=9, decimal_places=6)
+    location_match = models.BooleanField(default=False)
+    location_distance_meters = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    site_photos = models.JSONField(default=list, blank=True)
+    serial_visible = models.BooleanField(default=False)
+    observation_notes = models.CharField(max_length=500, blank=True)
+    verification_status = models.CharField(
+        max_length=16,
+        choices=FieldVerificationStatus.choices,
+        default=FieldVerificationStatus.VERIFIED,
+    )
+    flag_reason = models.TextField(blank=True, null=True)
+    verified_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ['-verified_at', '-id']
+        indexes = [
+            models.Index(fields=['installation', 'verification_status']),
+            models.Index(fields=['field_officer', 'verified_at']),
+        ]
+
+    def __str__(self):
+        return f"Field verification {self.id} - installation {self.installation_id}"
 
 
 class SmartMeterReading(models.Model):

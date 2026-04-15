@@ -93,6 +93,7 @@ import {
   SmartMeterReading,
   AnomalyFlag,
   ProspectSyncLog,
+  VerificationTask,
 } from "./types";
 import { MOCK_TENDERS, MOCK_NOTIFICATIONS } from "./constants";
 import {
@@ -146,6 +147,8 @@ import {
   fetchProjectDocuments,
   uploadProjectDocument,
   fetchInstallationReports,
+  fetchVerificationTasks,
+  verifyVerificationTask,
   createInstallationReport,
   fetchTenderBids,
   submitTenderBid,
@@ -13545,256 +13548,648 @@ const TACView = ({ mode }: { mode: "technical" | "financial" }) => {
   );
 };
 
-const FieldVerifierView = () => {
-  const [view, setView] = useState<"dashboard" | "inspect" | "new">("dashboard");
-  const [selectedInspection, setSelectedInspection] = useState<any>(null);
+const FieldVerifierView = ({ mode = "dashboard" }: { mode?: "dashboard" | "inspections" | "gis" | "reports" }) => {
+  const [view, setView] = useState<"dashboard" | "inspect">("dashboard");
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [inspectionStep, setInspectionStep] = useState(1);
+  const [tasks, setTasks] = useState<VerificationTask[]>([]);
+  const [reports, setReports] = useState<InstallationReport[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
+  const [locating, setLocating] = useState(false);
   const [inspectionData, setInspectionData] = useState({
     gpsLat: "",
     gpsLong: "",
     serialNumber: "",
-    isOperational: true,
     beneficiaryConfirmed: false,
-    photos: [] as string[],
-    notes: ""
+    beneficiaryGender: "unknown",
+    systemWorking: true,
+    serialVisible: true,
+    verificationStatus: "verified" as "verified" | "flagged" | "partial",
+    notes: "",
+    flagReason: "",
+    sitePhotos: [] as File[],
   });
 
-  const [inspections, setInspections] = useState([
-    { id: "INS-901", site: "Ha-Ramabanta", tech: "SHS", date: "2025-05-12", status: "Pending", district: "Maseru", vendor: "SolarLease" },
-    { id: "INS-902", site: "Mokhotlong Central", tech: "Mini-Grid", date: "2025-05-14", status: "Scheduled", district: "Mokhotlong", vendor: "Mountain Power" },
-    { id: "INS-903", site: "Semonkong Village", tech: "ICS", date: "2025-05-15", status: "Scheduled", district: "Maseru", vendor: "CleanCook" },
-  ]);
+  const currentUser = getStoredUser();
+  const assignedDistrict = currentUser?.district || currentUser?.verificationZone || currentUser?.region || "District not assigned";
 
-  const allProjects = [
-    { id: "INS-904", site: "Quthing Outpost", tech: "SHS", date: "2025-06-01", status: "Pending", district: "Quthing", vendor: "SolarLease" },
-    { id: "INS-905", site: "Butha-Buthe Clinic", tech: "Mini-Grid", date: "2025-06-05", status: "Pending", district: "Butha-Buthe", vendor: "EcoEnergy" },
-    { id: "INS-906", site: "Mohale's Hoek School", tech: "ICS", date: "2025-06-10", status: "Pending", district: "Mohale's Hoek", vendor: "CleanCook" },
-  ];
-
-  const filteredProjects = allProjects.filter(p => 
-    p.id.toLowerCase().includes(searchQuery.toLowerCase()) || 
-    p.site.toLowerCase().includes(searchQuery.toLowerCase())
-  );
-
-  const handleStartInspection = (ins: any) => {
-    setSelectedInspection(ins);
-    setView("inspect");
-    setInspectionStep(1);
-    setInspectionData({
-      gpsLat: "",
-      gpsLong: "",
-      serialNumber: "",
-      isOperational: true,
-      beneficiaryConfirmed: false,
-      photos: [],
-      notes: ""
+  const formatDateTime = (value?: string | null) => {
+    if (!value) return "N/A";
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return "N/A";
+    return parsed.toLocaleString("en-US", {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
     });
   };
 
-  const handleNextStep = () => {
-    if (inspectionStep < 3) {
-      setInspectionStep(inspectionStep + 1);
+  const loadVerifierData = React.useCallback(async (silent = false) => {
+    if (silent) {
+      setRefreshing(true);
     } else {
-      const updatedInspections = inspections.some(i => i.id === selectedInspection.id)
-        ? inspections.map(i => i.id === selectedInspection.id ? { ...i, status: "Verified" } : i)
-        : [...inspections, { ...selectedInspection, status: "Verified" }];
-      
-      setInspections(updatedInspections);
-      alert(`Inspection for ${selectedInspection.site} completed and queued for sync.`);
+      setLoading(true);
+    }
+    setError(null);
+    try {
+      const [taskData, reportData, projectData] = await Promise.all([
+        fetchVerificationTasks(),
+        fetchInstallationReports(),
+        fetchProjects(),
+      ]);
+      setTasks(taskData);
+      setReports(reportData);
+      setProjects(projectData);
+      setLastSyncedAt(new Date().toISOString());
+    } catch (err: any) {
+      const raw = String(err?.message || "");
+      setError(toFriendlyApiMessage(raw) || "Unable to load the field verification queue.");
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    void loadVerifierData();
+  }, [loadVerifierData]);
+
+  const reportsById = useMemo(() => Object.fromEntries(reports.map(report => [report.id, report])), [reports]);
+  const projectsById = useMemo(() => Object.fromEntries(projects.map(project => [project.id, project])), [projects]);
+
+  const queue = useMemo(() => (
+    tasks
+      .map((task) => {
+        const report = reportsById[task.report];
+        const project = report ? projectsById[report.projectId] : undefined;
+        const siteName = project?.projectTitle || project?.projectReference || `Project ${report?.projectId || "Unknown"}`;
+        return {
+          task,
+          report,
+          project,
+          siteName,
+          vendorName: project?.vendorName || report?.vendorUsername || "Assigned vendor",
+          district: project?.district || project?.region || assignedDistrict,
+          submittedAt: report?.submittedAt || task.createdAt,
+          technology: project?.techType || "Installation",
+          beneficiaryName: report?.beneficiaryName || report?.beneficiaryId || "Beneficiary not named",
+        };
+      })
+      .filter((item) => item.report)
+      .sort((a, b) => (a.submittedAt || "").localeCompare(b.submittedAt || ""))
+  ), [assignedDistrict, projectsById, reportsById, tasks]);
+
+  const filteredQueue = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return queue;
+    return queue.filter((item) => {
+      const haystack = [
+        item.task.id,
+        item.siteName,
+        item.vendorName,
+        item.district,
+        item.technology,
+        item.beneficiaryName,
+        item.report?.serialNumber,
+        item.project?.projectReference,
+      ].join(" ").toLowerCase();
+      return haystack.includes(q);
+    });
+  }, [queue, searchQuery]);
+
+  const pendingCount = queue.filter(({ task }) => task.status === "Pending").length;
+  const completedCount = queue.filter(({ task }) => task.status === "Verified").length;
+  const flaggedCount = queue.filter(({ task }) => task.status === "Flagged" || task.status === "Partial").length;
+  const todayDate = new Date();
+  const todayKey = todayDate.toISOString().slice(0, 10);
+  const isSameDay = (value?: string) => Boolean(value && value.slice(0, 10) === todayKey);
+  const startOfWeek = new Date(todayDate);
+  startOfWeek.setDate(todayDate.getDate() - todayDate.getDay());
+  startOfWeek.setHours(0, 0, 0, 0);
+  const verifiedToday = queue.filter(({ task }) => task.status === "Verified" && isSameDay(task.updatedAt)).length;
+  const flaggedToday = queue.filter(({ task }) => (task.status === "Flagged" || task.status === "Partial") && isSameDay(task.updatedAt)).length;
+  const completedThisWeek = queue.filter(({ task }) => {
+    if (!(task.status === "Verified" || task.status === "Flagged" || task.status === "Partial")) return false;
+    const updated = new Date(task.updatedAt || task.createdAt);
+    return !Number.isNaN(updated.getTime()) && updated >= startOfWeek;
+  }).length;
+  const recentlyVerified = queue
+    .filter(({ task }) => task.status === "Verified" || task.status === "Flagged" || task.status === "Partial")
+    .slice()
+    .sort((a, b) => (b.task.updatedAt || "").localeCompare(a.task.updatedAt || ""))
+    .slice(0, 5);
+
+  const selectedQueueItem = selectedTaskId ? queue.find((item) => item.task.id === selectedTaskId) : undefined;
+  const selectedTask = selectedQueueItem?.task;
+  const selectedReport = selectedQueueItem?.report;
+  const selectedProject = selectedQueueItem?.project;
+
+  const openInspection = (taskId: string) => {
+    const item = queue.find((entry) => entry.task.id === taskId);
+    setSelectedTaskId(taskId);
+    setInspectionStep(1);
+    setInspectionData({
+      gpsLat: item?.task.verifierLat != null ? String(item.task.verifierLat) : "",
+      gpsLong: item?.task.verifierLng != null ? String(item.task.verifierLng) : "",
+      serialNumber: item?.report?.serialNumber || "",
+      beneficiaryConfirmed: false,
+      beneficiaryGender: item?.report?.householdType === "female_headed" ? "female" : "unknown",
+      systemWorking: true,
+      serialVisible: true,
+      verificationStatus: item?.task.status === "Flagged" ? "flagged" : item?.task.status === "Partial" ? "partial" : "verified",
+      notes: "",
+      flagReason: "",
+      sitePhotos: [],
+    });
+    setMessage(null);
+    setError(null);
+    setView("inspect");
+  };
+
+  const handleUseCurrentLocation = () => {
+    if (typeof navigator === "undefined" || !navigator.geolocation) {
+      setError("This browser cannot capture GPS coordinates automatically.");
+      return;
+    }
+    setLocating(true);
+    setError(null);
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        setInspectionData((prev) => ({
+          ...prev,
+          gpsLat: position.coords.latitude.toFixed(6),
+          gpsLong: position.coords.longitude.toFixed(6),
+        }));
+        setLocating(false);
+      },
+      () => {
+        setError("Unable to capture your current GPS location. Enter coordinates manually and try again.");
+        setLocating(false);
+      },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+    );
+  };
+
+  const handleNextStep = async () => {
+    if (!selectedTask) return;
+
+    if (inspectionStep === 1) {
+      const lat = Number(inspectionData.gpsLat);
+      const lng = Number(inspectionData.gpsLong);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+        setError("Valid verifier GPS coordinates are required before continuing.");
+        return;
+      }
+      if (!inspectionData.serialNumber.trim()) {
+        setError("Confirm the observed serial number before continuing.");
+        return;
+      }
+      setError(null);
+      setInspectionStep(2);
+      return;
+    }
+
+    if (inspectionStep === 2) {
+      if ((inspectionData.verificationStatus === "verified" || inspectionData.verificationStatus === "partial") && !inspectionData.beneficiaryConfirmed) {
+        setError("Confirm the beneficiary check or mark the task as flagged.");
+        return;
+      }
+      if ((inspectionData.verificationStatus === "flagged" || inspectionData.verificationStatus === "partial") && !inspectionData.flagReason.trim()) {
+        setError("A reason is required for flagged or partial verification decisions.");
+        return;
+      }
+      setError(null);
+      setInspectionStep(3);
+      return;
+    }
+
+    if (inspectionData.sitePhotos.length < 1) {
+      setError("Upload at least one site photo before submitting.");
+      return;
+    }
+
+    try {
+      setSubmitting(true);
+      setError(null);
+      const form = new FormData();
+      form.append("verifier_lat", String(Number(inspectionData.gpsLat)));
+      form.append("verifier_lng", String(Number(inspectionData.gpsLong)));
+      form.append("verification_status", inspectionData.verificationStatus);
+      form.append("beneficiary_present", inspectionData.beneficiaryConfirmed ? "true" : "false");
+      form.append("beneficiary_gender", inspectionData.beneficiaryGender);
+      form.append("system_working", inspectionData.systemWorking ? "true" : "false");
+      form.append("serial_visible", inspectionData.serialVisible ? "true" : "false");
+      form.append("observation_notes", inspectionData.notes);
+      form.append("flag_reason", inspectionData.flagReason);
+      inspectionData.sitePhotos.forEach((file) => form.append("site_photos", file));
+      const updatedTask = await verifyVerificationTask(selectedTask.id, form);
+      setMessage(`Verification submitted for ${selectedQueueItem?.siteName || "the assigned site"} with status ${updatedTask.status}.`);
+      await loadVerifierData(true);
+      setSelectedTaskId(updatedTask.id);
       setView("dashboard");
+    } catch (err: any) {
+      const raw = String(err?.message || "");
+      setError(toFriendlyApiMessage(raw) || "Unable to submit this verification.");
+    } finally {
+      setSubmitting(false);
     }
   };
 
-  if (view === "new") {
+  const statusTone = (status: string) => {
+    if (status === "Verified") return "bg-emerald-100 text-emerald-700";
+    if (status === "Flagged") return "bg-rose-100 text-rose-700";
+    if (status === "Partial") return "bg-amber-100 text-amber-700";
+    if (status === "Paused" || status === "Terminated") return "bg-slate-200 text-slate-700";
+    return "bg-blue-100 text-blue-700";
+  };
+
+  if (view === "dashboard" && mode === "gis") {
     return (
-      <div className="space-y-6 max-w-4xl mx-auto">
-        <div className="flex items-center gap-4 mb-8">
-          <button onClick={() => setView("dashboard")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
-            <ChevronRight className="rotate-180" size={20} />
-          </button>
+      <div className="space-y-8">
+        <div className="flex items-center justify-between gap-4">
           <div>
-            <h1 className="text-2xl font-bold text-slate-900">New Inspection</h1>
-            <p className="text-slate-500">Search for a project to begin field verification</p>
+            <h1 className="text-2xl font-bold text-slate-900">Map View</h1>
+            <p className="text-slate-500">Installation pins in {assignedDistrict}. Yellow is pending, green is verified, red is flagged.</p>
+          </div>
+          <div className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-600">
+            <span className="font-semibold text-emerald-700">Verified {completedCount}</span>
+            <span className="mx-2 text-slate-300">|</span>
+            <span className="font-semibold text-amber-700">Pending {pendingCount}</span>
+            <span className="mx-2 text-slate-300">|</span>
+            <span className="font-semibold text-rose-700">Flagged {flaggedCount}</span>
           </div>
         </div>
-
         <div className="card p-6">
-          <div className="relative mb-6">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={20} />
-            <input 
-              type="text" 
-              className="input-field pl-10" 
-              placeholder="Search by Project ID or Site Name..." 
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-            />
-          </div>
+          <GisInstallationsMap showFilters={false} height="620px" />
+        </div>
+      </div>
+    );
+  }
 
-          <div className="space-y-4">
-            <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">Available for Inspection</p>
-            <div className="divide-y divide-slate-100 border border-slate-100 rounded-xl overflow-hidden">
-              {filteredProjects.length > 0 ? filteredProjects.map((p) => (
-                <div key={p.id} className="p-4 flex items-center justify-between hover:bg-slate-50 transition-colors">
-                  <div>
-                    <p className="font-bold text-slate-900">{p.site}</p>
-                    <p className="text-xs text-slate-500">{p.tech} • ID: {p.id} • {p.vendor}</p>
-                  </div>
-                  <button 
-                    onClick={() => handleStartInspection(p)}
-                    className="btn-primary py-1.5 px-4 text-xs"
-                  >
-                    Start Inspection
-                  </button>
-                </div>
-              )) : (
-                <div className="p-8 text-center text-slate-500">
-                  No projects found matching your search.
-                </div>
-              )}
-            </div>
+  if (view === "dashboard" && mode === "reports") {
+    const history = queue
+      .filter(({ task }) => task.status !== "Pending")
+      .slice()
+      .sort((a, b) => (b.task.updatedAt || "").localeCompare(a.task.updatedAt || ""))
+      .slice(0, 20);
+    return (
+      <div className="space-y-8">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-900">My Reports</h1>
+          <p className="text-slate-500">Your verification performance summary and recent submission history.</p>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+          <StatCard label="This Week" value={String(completedThisWeek)} icon={ClipboardCheck} color="bg-blue-600" />
+          <StatCard label="Verified Today" value={String(verifiedToday)} icon={CheckCircle2} color="bg-emerald-600" />
+          <StatCard label="Flagged Today" value={String(flaggedToday)} icon={AlertTriangle} color="bg-rose-500" />
+          <StatCard label="Pending Queue" value={String(pendingCount)} icon={Clock} color="bg-amber-500" />
+        </div>
+        <div className="card">
+          <div className="p-6 border-b border-slate-100">
+            <h3 className="text-lg font-bold text-slate-900">My Verification History</h3>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-sm">
+              <thead className="bg-slate-50 text-slate-500">
+                <tr>
+                  <th className="px-4 py-3 text-left font-semibold">INS ID</th>
+                  <th className="px-4 py-3 text-left font-semibold">Beneficiary</th>
+                  <th className="px-4 py-3 text-left font-semibold">Date</th>
+                  <th className="px-4 py-3 text-left font-semibold">Outcome</th>
+                  <th className="px-4 py-3 text-left font-semibold">GPS Match</th>
+                </tr>
+              </thead>
+              <tbody>
+                {history.map((item) => (
+                  <tr key={item.task.id} className="border-t border-slate-100">
+                    <td className="px-4 py-3 font-medium text-slate-900">{item.task.id}</td>
+                    <td className="px-4 py-3 text-slate-700">{item.beneficiaryName}</td>
+                    <td className="px-4 py-3 text-slate-700">{formatDateTime(item.task.updatedAt)}</td>
+                    <td className="px-4 py-3"><span className={`rounded-full px-2.5 py-1 text-[11px] font-bold ${statusTone(item.task.status)}`}>{item.task.status}</span></td>
+                    <td className="px-4 py-3 text-slate-700">
+                      {item.task.distanceMeters != null ? `${item.task.distanceMeters.toFixed(1)}m ${item.task.distanceMeters <= 50 ? "OK" : "Mismatch"}` : "N/A"}
+                    </td>
+                  </tr>
+                ))}
+                {history.length === 0 && (
+                  <tr>
+                    <td colSpan={5} className="px-4 py-8 text-center text-slate-500">No submitted verification history yet.</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
           </div>
         </div>
       </div>
     );
   }
 
-  if (view === "inspect" && selectedInspection) {
+  if (view === "inspect" && selectedTask && selectedReport) {
+    const lockedStatus = selectedTask.status === "Paused" || selectedTask.status === "Terminated";
+
     return (
-      <div className="space-y-6 max-w-4xl mx-auto pb-20">
+      <div className="space-y-6 max-w-5xl mx-auto pb-20">
         <div className="flex items-center gap-4 mb-8">
-          <button onClick={() => setView(inspections.some(i => i.id === selectedInspection.id) ? "dashboard" : "new")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
+          <button onClick={() => setView("dashboard")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
             <ChevronRight className="rotate-180" size={20} />
           </button>
           <div>
-            <h1 className="text-2xl font-bold text-slate-900">Site Inspection</h1>
-            <p className="text-slate-500">Verifying {selectedInspection.site} ({selectedInspection.id})</p>
+            <h1 className="text-2xl font-bold text-slate-900">Inspection Workspace</h1>
+            <p className="text-slate-500">
+              {selectedQueueItem?.siteName} • Task {selectedTask.id} • {selectedProject?.district || selectedProject?.region || assignedDistrict}
+            </p>
           </div>
         </div>
 
+        {(message || error || lockedStatus) && (
+          <div className={`rounded-2xl border px-4 py-3 text-sm ${error || lockedStatus ? "border-amber-200 bg-amber-50 text-amber-800" : "border-emerald-200 bg-emerald-50 text-emerald-700"}`}>
+            {lockedStatus
+              ? (selectedTask.status === "Paused"
+                  ? "This task is paused. Submission is blocked until the vendor restriction is cleared."
+                  : "This task was terminated and can no longer be submitted from the verifier portal.")
+              : (error || message)}
+          </div>
+        )}
+
         <div className="flex items-center justify-between mb-8 px-4">
           {[
-            { step: 1, label: "Technical Check" },
-            { step: 2, label: "Beneficiary Verification" },
-            { step: 3, label: "Evidence & Submit" },
-          ].map((s, i) => (
-            <React.Fragment key={s.step}>
+            { step: 1, label: "Location & Device" },
+            { step: 2, label: "Beneficiary Check" },
+            { step: 3, label: "Submit Verification" },
+          ].map((item, index) => (
+            <React.Fragment key={item.step}>
               <div className="flex flex-col items-center gap-2">
                 <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold text-sm transition-all ${
-                  inspectionStep >= s.step ? "bg-blue-600 text-white shadow-lg shadow-blue-600/20" : "bg-slate-200 text-slate-500"
+                  inspectionStep >= item.step ? "bg-blue-600 text-white shadow-lg shadow-blue-600/20" : "bg-slate-200 text-slate-500"
                 }`}>
-                  {s.step}
+                  {item.step}
                 </div>
-                <span className={`text-xs font-bold ${inspectionStep >= s.step ? "text-slate-900" : "text-slate-400"}`}>{s.label}</span>
+                <span className={`text-xs font-bold ${inspectionStep >= item.step ? "text-slate-900" : "text-slate-400"}`}>{item.label}</span>
               </div>
-              {i < 2 && <div className={`flex-1 h-0.5 mx-4 ${inspectionStep > s.step ? "bg-blue-600" : "bg-slate-200"}`} />}
+              {index < 2 && <div className={`flex-1 h-0.5 mx-4 ${inspectionStep > item.step ? "bg-blue-600" : "bg-slate-200"}`} />}
             </React.Fragment>
           ))}
         </div>
 
-        <div className="card p-8">
-          <div className="space-y-8">
-            {inspectionStep === 1 && (
-              <div className="space-y-6">
-                <h3 className="text-lg font-bold text-slate-900 border-b border-slate-100 pb-2">Technical Verification</h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                  <div className="space-y-1">
-                    <label className="text-sm font-bold text-slate-700 ml-1">System Serial Number *</label>
-                    <input 
-                      required type="text" className="input-field" placeholder="Scan or enter SN"
-                      value={inspectionData.serialNumber} onChange={(e) => setInspectionData({...inspectionData, serialNumber: e.target.value})}
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-sm font-bold text-slate-700 ml-1">System Operational? *</label>
-                    <div className="flex gap-4 p-2">
-                      <label className="flex items-center gap-2 cursor-pointer">
-                        <input type="radio" checked={inspectionData.isOperational} onChange={() => setInspectionData({...inspectionData, isOperational: true})} />
-                        <span className="text-sm">Yes</span>
-                      </label>
-                      <label className="flex items-center gap-2 cursor-pointer">
-                        <input type="radio" checked={!inspectionData.isOperational} onChange={() => setInspectionData({...inspectionData, isOperational: false})} />
-                        <span className="text-sm">No</span>
-                      </label>
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div className="lg:col-span-2 card p-8">
+            <div className="space-y-8">
+              {inspectionStep === 1 && (
+                <div className="space-y-6">
+                  <h3 className="text-lg font-bold text-slate-900 border-b border-slate-100 pb-2">Verifier Coordinates and Device Check</h3>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Reported Serial</p>
+                      <p className="mt-2 text-sm font-semibold text-slate-900">{selectedReport.serialNumber || "Not provided"}</p>
+                    </div>
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Reported GPS</p>
+                      <p className="mt-2 text-sm font-semibold text-slate-900">
+                        {selectedReport.gpsLat.toFixed(6)}, {selectedReport.gpsLng.toFixed(6)}
+                      </p>
                     </div>
                   </div>
-                  <div className="space-y-1">
-                    <label className="text-sm font-bold text-slate-700 ml-1">GPS Latitude *</label>
-                    <input 
-                      required type="text" className="input-field" placeholder="-29.XXXX"
-                      value={inspectionData.gpsLat} onChange={(e) => setInspectionData({...inspectionData, gpsLat: e.target.value})}
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-sm font-bold text-slate-700 ml-1">GPS Longitude *</label>
-                    <input 
-                      required type="text" className="input-field" placeholder="28.XXXX"
-                      value={inspectionData.gpsLong} onChange={(e) => setInspectionData({...inspectionData, gpsLong: e.target.value})}
-                    />
-                  </div>
-                </div>
-              </div>
-            )}
 
-            {inspectionStep === 2 && (
-              <div className="space-y-6">
-                <h3 className="text-lg font-bold text-slate-900 border-b border-slate-100 pb-2">Beneficiary Verification</h3>
-                <div className="p-4 bg-blue-50 border border-blue-100 rounded-xl space-y-4">
-                  <p className="text-sm text-blue-800">Please confirm with the household head that the system was installed on the reported date and they received training.</p>
-                  <label className="flex items-center gap-3 cursor-pointer p-3 bg-white rounded-lg border border-blue-200">
-                    <input 
-                      type="checkbox" 
-                      checked={inspectionData.beneficiaryConfirmed} 
-                      onChange={(e) => setInspectionData({...inspectionData, beneficiaryConfirmed: e.target.checked})}
-                      className="rounded text-blue-600 focus:ring-blue-500"
-                    />
-                    <span className="text-sm font-bold text-slate-700">Beneficiary confirms installation and training</span>
-                  </label>
-                </div>
-                <div className="space-y-1">
-                  <label className="text-sm font-bold text-slate-700 ml-1">Verification Notes</label>
-                  <textarea 
-                    className="input-field min-h-[120px]" placeholder="Any discrepancies or beneficiary feedback..."
-                    value={inspectionData.notes} onChange={(e) => setInspectionData({...inspectionData, notes: e.target.value})}
-                  />
-                </div>
-              </div>
-            )}
-
-            {inspectionStep === 3 && (
-              <div className="space-y-6">
-                <h3 className="text-lg font-bold text-slate-900 border-b border-slate-100 pb-2">Evidence & Submission</h3>
-                <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-                  {[
-                    "System Label Photo",
-                    "Installation Context",
-                    "Beneficiary with System",
-                    "Verifier at Site"
-                  ].map(label => (
-                    <div key={label} className="aspect-square border-2 border-dashed border-slate-200 rounded-xl flex flex-col items-center justify-center gap-2 hover:border-blue-400 hover:bg-blue-50 transition-all cursor-pointer group">
-                      <Plus className="text-slate-300 group-hover:text-blue-500" size={24} />
-                      <span className="text-[10px] font-bold text-slate-400 group-hover:text-blue-600 uppercase text-center px-2">{label}</span>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div className="space-y-1">
+                      <label className="text-sm font-bold text-slate-700 ml-1">Observed Serial Number *</label>
+                      <input
+                        type="text"
+                        className="input-field"
+                        value={inspectionData.serialNumber}
+                        onChange={(e) => setInspectionData((prev) => ({ ...prev, serialNumber: e.target.value }))}
+                      />
                     </div>
-                  ))}
-                </div>
-                <div className="p-4 bg-amber-50 border border-amber-100 rounded-xl flex gap-3">
-                  <AlertCircle className="text-amber-600 shrink-0" size={20} />
-                  <p className="text-xs text-amber-800">By submitting, you certify that you have physically visited the site and verified the installation according to RBF standards.</p>
-                </div>
-              </div>
-            )}
+                    <div className="space-y-1">
+                      <label className="text-sm font-bold text-slate-700 ml-1">Verification Outcome *</label>
+                      <select
+                        className="input-field"
+                        value={inspectionData.verificationStatus}
+                        onChange={(e) => setInspectionData((prev) => ({ ...prev, verificationStatus: e.target.value as "verified" | "flagged" | "partial" }))}
+                      >
+                        <option value="verified">Verified</option>
+                        <option value="partial">Partial</option>
+                        <option value="flagged">Flagged</option>
+                      </select>
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-sm font-bold text-slate-700 ml-1">Verifier GPS Latitude *</label>
+                      <input
+                        type="text"
+                        className="input-field"
+                        placeholder="-29.XXXXXX"
+                        value={inspectionData.gpsLat}
+                        onChange={(e) => setInspectionData((prev) => ({ ...prev, gpsLat: e.target.value }))}
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-sm font-bold text-slate-700 ml-1">Verifier GPS Longitude *</label>
+                      <input
+                        type="text"
+                        className="input-field"
+                        placeholder="27.XXXXXX"
+                        value={inspectionData.gpsLong}
+                        onChange={(e) => setInspectionData((prev) => ({ ...prev, gpsLong: e.target.value }))}
+                      />
+                    </div>
+                  </div>
 
-            <div className="flex justify-between pt-8 border-t border-slate-100">
-              <button 
-                type="button" 
-                onClick={() => inspectionStep > 1 ? setInspectionStep(inspectionStep - 1) : setView(inspections.some(i => i.id === selectedInspection.id) ? "dashboard" : "new")}
-                className="btn-secondary px-8"
+                  <button type="button" onClick={handleUseCurrentLocation} className="btn-secondary" disabled={locating}>
+                    {locating ? "Capturing GPS..." : "Use Current Location"}
+                  </button>
+                </div>
+              )}
+
+              {inspectionStep === 2 && (
+                <div className="space-y-6">
+                  <h3 className="text-lg font-bold text-slate-900 border-b border-slate-100 pb-2">Beneficiary Confirmation</h3>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div className="space-y-1">
+                      <label className="text-sm font-bold text-slate-700 ml-1">Beneficiary Present on Site? *</label>
+                      <div className="flex gap-4 p-2">
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input type="radio" checked={inspectionData.beneficiaryConfirmed} onChange={() => setInspectionData((prev) => ({ ...prev, beneficiaryConfirmed: true }))} />
+                          <span className="text-sm">Yes</span>
+                        </label>
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input type="radio" checked={!inspectionData.beneficiaryConfirmed} onChange={() => setInspectionData((prev) => ({ ...prev, beneficiaryConfirmed: false }))} />
+                          <span className="text-sm">No</span>
+                        </label>
+                      </div>
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-sm font-bold text-slate-700 ml-1">Gender of Beneficiary Seen</label>
+                      <select
+                        className="input-field"
+                        value={inspectionData.beneficiaryGender}
+                        onChange={(e) => setInspectionData((prev) => ({ ...prev, beneficiaryGender: e.target.value }))}
+                      >
+                        <option value="unknown">Unknown</option>
+                        <option value="female">Female</option>
+                        <option value="male">Male</option>
+                        <option value="other">Other</option>
+                      </select>
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-sm font-bold text-slate-700 ml-1">System Observed Working? *</label>
+                      <div className="flex gap-4 p-2">
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input type="radio" checked={inspectionData.systemWorking} onChange={() => setInspectionData((prev) => ({ ...prev, systemWorking: true }))} />
+                          <span className="text-sm">Yes</span>
+                        </label>
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input type="radio" checked={!inspectionData.systemWorking} onChange={() => setInspectionData((prev) => ({ ...prev, systemWorking: false }))} />
+                          <span className="text-sm">No</span>
+                        </label>
+                      </div>
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-sm font-bold text-slate-700 ml-1">Serial Number Visible and Matches? *</label>
+                      <div className="flex gap-4 p-2">
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input type="radio" checked={inspectionData.serialVisible} onChange={() => setInspectionData((prev) => ({ ...prev, serialVisible: true }))} />
+                          <span className="text-sm">Yes</span>
+                        </label>
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input type="radio" checked={!inspectionData.serialVisible} onChange={() => setInspectionData((prev) => ({ ...prev, serialVisible: false }))} />
+                          <span className="text-sm">No</span>
+                        </label>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="p-4 bg-blue-50 border border-blue-100 rounded-xl space-y-4">
+                    <p className="text-sm text-blue-800">
+                      Confirm the beneficiary identity and whether the installation is present and explained at the site.
+                    </p>
+                    <p className="text-sm font-bold text-slate-700">
+                      Beneficiary record: {selectedReport.beneficiaryName || selectedReport.beneficiaryId || "Not captured"}
+                    </p>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-sm font-bold text-slate-700 ml-1">Verifier Notes</label>
+                    <textarea
+                      className="input-field min-h-[120px]"
+                      placeholder="Capture any mismatch, training gap, or context for follow-up."
+                      value={inspectionData.notes}
+                      onChange={(e) => setInspectionData((prev) => ({ ...prev, notes: e.target.value }))}
+                    />
+                  </div>
+                  {(inspectionData.verificationStatus === "flagged" || inspectionData.verificationStatus === "partial") && (
+                    <div className="space-y-1">
+                      <label className="text-sm font-bold text-slate-700 ml-1">Reason for Flagged/Partial Outcome *</label>
+                      <textarea
+                        className="input-field min-h-[90px]"
+                        placeholder="Explain the mismatch, issue, or partial compliance."
+                        value={inspectionData.flagReason}
+                        onChange={(e) => setInspectionData((prev) => ({ ...prev, flagReason: e.target.value }))}
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {inspectionStep === 3 && (
+                <div className="space-y-6">
+                  <h3 className="text-lg font-bold text-slate-900 border-b border-slate-100 pb-2">Submission Summary</h3>
+                  <div className="space-y-1">
+                    <label className="text-sm font-bold text-slate-700 ml-1">Site Photos (minimum 1, maximum 5)</label>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      multiple
+                      className="input-field"
+                      onChange={(e) => {
+                        const files = Array.from(e.target.files || []).slice(0, 5);
+                        setInspectionData((prev) => ({ ...prev, sitePhotos: files }));
+                      }}
+                    />
+                    <p className="text-xs text-slate-500">{inspectionData.sitePhotos.length} photo{inspectionData.sitePhotos.length === 1 ? "" : "s"} selected</p>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Task Status to Submit</p>
+                      <p className="mt-2 text-sm font-semibold text-slate-900 capitalize">{inspectionData.verificationStatus}</p>
+                    </div>
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Verifier Coordinates</p>
+                      <p className="mt-2 text-sm font-semibold text-slate-900">{inspectionData.gpsLat}, {inspectionData.gpsLong}</p>
+                    </div>
+                  </div>
+                  {(inspectionData.verificationStatus === "flagged" || inspectionData.verificationStatus === "partial") && (
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Flag Reason</p>
+                      <p className="mt-2 text-sm font-semibold text-slate-900">{inspectionData.flagReason || "Not provided"}</p>
+                    </div>
+                  )}
+                  <div className="p-4 bg-amber-50 border border-amber-100 rounded-xl flex gap-3">
+                    <AlertCircle className="text-amber-600 shrink-0" size={20} />
+                    <p className="text-xs text-amber-800">
+                      This portal submits the live verification task with verifier GPS, site evidence, and the field officer outcome.
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              <div className="flex justify-between pt-8 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => inspectionStep > 1 ? setInspectionStep(inspectionStep - 1) : setView("dashboard")}
+                  className="btn-secondary px-8"
+                >
+                  {inspectionStep === 1 ? "Back to Queue" : "Previous"}
+                </button>
+                <button onClick={() => void handleNextStep()} className="btn-primary px-12 disabled:opacity-60" disabled={submitting || lockedStatus}>
+                  {inspectionStep === 3 ? (submitting ? "Submitting..." : "Submit Verification") : "Next Step"}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-4">
+            <div className="card p-5">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Project</p>
+              <p className="mt-2 text-lg font-bold text-slate-900">{selectedQueueItem?.siteName}</p>
+              <p className="mt-1 text-sm text-slate-500">{selectedProject?.projectReference || `Project ${selectedReport.projectId}`}</p>
+            </div>
+            <div className="card p-5">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Vendor-Submitted GPS</p>
+              <p className="mt-2 text-sm font-semibold text-slate-900">{selectedReport.gpsLat.toFixed(6)}, {selectedReport.gpsLng.toFixed(6)}</p>
+              <a
+                href={`https://www.google.com/maps?q=${selectedReport.gpsLat},${selectedReport.gpsLng}`}
+                target="_blank"
+                rel="noreferrer"
+                className="mt-3 inline-flex text-xs font-semibold text-blue-600 hover:text-blue-700"
               >
-                {inspectionStep === 1 ? "Cancel" : "Previous"}
-              </button>
-              <button onClick={handleNextStep} className="btn-primary px-12">
-                {inspectionStep === 3 ? "Complete Inspection" : "Next Step"}
-              </button>
+                Open map pin
+              </a>
+            </div>
+            <div className="card p-5">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Beneficiary</p>
+              <p className="mt-2 text-sm font-semibold text-slate-900">{selectedReport.beneficiaryName || selectedReport.beneficiaryId || "Not captured"}</p>
+            </div>
+            <div className="card p-5">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Vendor</p>
+              <p className="mt-2 text-sm font-semibold text-slate-900">{selectedProject?.vendorName || selectedReport.vendorUsername || "N/A"}</p>
+            </div>
+            <div className="card p-5">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Current Task Status</p>
+              <span className={`mt-3 inline-flex rounded-full px-3 py-1 text-xs font-bold ${statusTone(selectedTask.status)}`}>
+                {selectedTask.status}
+              </span>
+              {selectedTask.distanceMeters != null && (
+                <p className="mt-3 text-sm text-slate-500">
+                  Previous distance check: {selectedTask.distanceMeters.toFixed(1)} m
+                </p>
+              )}
             </div>
           </div>
         </div>
@@ -13804,97 +14199,236 @@ const FieldVerifierView = () => {
 
   return (
     <div className="space-y-8">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">Field Verification</h1>
-          <p className="text-slate-500">Site inspections and ODK/KoboToolbox sync</p>
+          <h1 className="text-2xl font-bold text-slate-900">{mode === "inspections" ? "Verification Queue" : "Field Verification Dashboard"}</h1>
+          <p className="text-slate-500">
+            {mode === "inspections"
+              ? `Pending verifications for ${assignedDistrict}, sorted oldest first.`
+              : "Assigned installation tasks, verifier GPS capture, and live submission status."}
+          </p>
         </div>
-        <button onClick={() => setView("new")} className="btn-primary flex items-center gap-2">
-          <Plus size={18} /> New Inspection
+        <button onClick={() => void loadVerifierData(true)} className="btn-primary flex items-center gap-2 disabled:opacity-60" disabled={refreshing}>
+          <Activity size={18} />
+          {refreshing ? "Refreshing..." : "Refresh Queue"}
         </button>
       </div>
 
+      {(message || error) && (
+        <div className={`rounded-2xl border px-4 py-3 text-sm ${error ? "border-rose-200 bg-rose-50 text-rose-700" : "border-emerald-200 bg-emerald-50 text-emerald-700"}`}>
+          {error || message}
+        </div>
+      )}
+
+      {mode === "dashboard" && (
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6">
+        <div className="card p-6">
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Pending Verifications</p>
+          <p className="mt-2 text-3xl font-bold text-slate-900">{pendingCount}</p>
+          <p className="mt-2 text-xs text-amber-700">Action required</p>
+        </div>
+        <div className="card p-6">
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Verified Today</p>
+          <p className="mt-2 text-3xl font-bold text-slate-900">{verifiedToday}</p>
+          <p className="mt-2 text-xs text-emerald-700">Completed on site</p>
+        </div>
+        <div className="card p-6">
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Flagged Today</p>
+          <p className="mt-2 text-3xl font-bold text-slate-900">{flaggedToday}</p>
+          <p className="mt-2 text-xs text-rose-700">Needs review</p>
+        </div>
+        <div className="card p-6">
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">This Week Completed</p>
+          <p className="mt-2 text-3xl font-bold text-slate-900">{completedThisWeek}</p>
+          <p className="mt-2 text-xs text-slate-500">Verified, flagged, and partial</p>
+        </div>
+      </div>
+      )}
+
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div className="card p-6 bg-slate-900 text-white">
-          <h3 className="text-lg font-bold mb-4">Offline Sync Status</h3>
+          <h3 className="text-lg font-bold mb-4">Verification Queue Sync</h3>
           <div className="flex items-center justify-between mb-6">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-full bg-emerald-500/20 flex items-center justify-center text-emerald-400">
                 <CheckCircle2 size={24} />
               </div>
               <div>
-                <p className="font-bold">All Data Synced</p>
-                <p className="text-xs text-slate-400">Last sync: 12 mins ago</p>
+                <p className="font-bold">{loading ? "Loading queue..." : `${queue.length} assigned task${queue.length === 1 ? "" : "s"}`}</p>
+                <p className="text-xs text-slate-400">Last sync: {formatDateTime(lastSyncedAt)}</p>
               </div>
             </div>
-            <button
-              onClick={() => alert("Offline data is already fully synced.")}
-              className="btn-secondary bg-white/10 border-white/20 text-white hover:bg-white/20"
-            >
-              Sync Now
-            </button>
-          </div>
-          <div className="space-y-3">
-            <div className="flex justify-between text-xs font-bold uppercase text-slate-400">
-              <span>Syncing Progress</span>
-              <span>100%</span>
+            <div className="text-right">
+              <p className="text-2xl font-bold">{pendingCount}</p>
+              <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Pending</p>
             </div>
-            <div className="w-full bg-white/10 h-1.5 rounded-full overflow-hidden">
-              <div className="bg-emerald-500 h-full w-full" />
+          </div>
+          <div className="grid grid-cols-3 gap-3 text-center">
+            <div className="rounded-xl bg-white/10 px-3 py-3">
+              <p className="text-lg font-bold">{pendingCount}</p>
+              <p className="text-[10px] uppercase tracking-widest text-slate-400">Pending</p>
+            </div>
+            <div className="rounded-xl bg-white/10 px-3 py-3">
+              <p className="text-lg font-bold">{flaggedCount}</p>
+              <p className="text-[10px] uppercase tracking-widest text-slate-400">Review</p>
+            </div>
+            <div className="rounded-xl bg-white/10 px-3 py-3">
+              <p className="text-lg font-bold">{completedCount}</p>
+              <p className="text-[10px] uppercase tracking-widest text-slate-400">Verified</p>
             </div>
           </div>
         </div>
 
         <div className="card p-6">
-          <h3 className="text-lg font-bold mb-4">Assigned Region</h3>
+          <h3 className="text-lg font-bold mb-4">Assigned District</h3>
           <div className="flex items-center gap-4">
             <div className="w-12 h-12 rounded-xl bg-blue-50 flex items-center justify-center text-blue-600">
               <MapIcon size={24} />
             </div>
             <div>
-              <p className="font-bold text-slate-900">Thaba-Tseka District</p>
-              <p className="text-xs text-slate-500">12 Pending Installations • 4 Verified</p>
+              <p className="font-bold text-slate-900">{assignedDistrict}</p>
+              <p className="text-xs text-slate-500">{queue.length} queue items mapped to your current verifier workspace</p>
             </div>
           </div>
-          <button onClick={() => setView("new")} className="w-full mt-6 btn-secondary text-sm">View Region Map</button>
+          <div className="mt-6 grid grid-cols-2 gap-3">
+            <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Projects</p>
+              <p className="mt-2 text-lg font-bold text-slate-900">{new Set(queue.map(item => item.project?.id).filter(Boolean)).size}</p>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Beneficiaries</p>
+              <p className="mt-2 text-lg font-bold text-slate-900">{new Set(queue.map(item => item.report?.beneficiaryId).filter(Boolean)).size}</p>
+            </div>
+          </div>
         </div>
       </div>
 
       <div className="card p-6">
         <div className="mb-4">
           <h3 className="text-lg font-bold text-slate-900">District GIS Map</h3>
-          <p className="text-sm text-slate-500">Installations in your assigned district appear here for verification planning.</p>
+          <p className="text-sm text-slate-500">Installations in the current verifier scope appear here for route planning and anomaly review.</p>
         </div>
         <GisInstallationsMap showFilters={false} height="450px" />
       </div>
 
-      <div className="card">
-        <div className="p-6 border-b border-slate-100">
-          <h3 className="text-lg font-bold">Verification Queue</h3>
-        </div>
-        <div className="divide-y divide-slate-100">
-          {inspections.map((ins, i) => (
-            <div key={i} className="p-6 flex items-center justify-between">
-              <div className="flex gap-4 items-center">
-                <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${ins.status === 'Verified' ? 'bg-emerald-100 text-emerald-600' : 'bg-slate-100 text-slate-400'}`}>
-                  {ins.status === 'Verified' ? <CheckCircle2 size={20} /> : <Clock size={20} />}
-                </div>
-                <div>
-                  <p className="font-bold text-slate-900">{ins.site}</p>
-                  <p className="text-xs text-slate-500">{ins.tech} • ID: {ins.id} • {ins.vendor}</p>
-                </div>
-              </div>
-              <div className="flex items-center gap-4">
-                <span className="text-sm text-slate-500">{ins.date}</span>
-                {ins.status !== 'Verified' ? (
-                  <button onClick={() => handleStartInspection(ins)} className="btn-primary py-1 px-3 text-xs">Verify</button>
-                ) : (
-                  <span className="text-xs font-bold text-emerald-600 uppercase tracking-widest">Verified</span>
+      {mode === "dashboard" && (
+        <div className="card">
+          <div className="p-6 border-b border-slate-100">
+            <h3 className="text-lg font-bold text-slate-900">Recently Verified</h3>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-sm">
+              <thead className="bg-slate-50 text-slate-500">
+                <tr>
+                  <th className="px-4 py-3 text-left font-semibold">INS ID</th>
+                  <th className="px-4 py-3 text-left font-semibold">Beneficiary</th>
+                  <th className="px-4 py-3 text-left font-semibold">Technology</th>
+                  <th className="px-4 py-3 text-left font-semibold">Outcome</th>
+                  <th className="px-4 py-3 text-left font-semibold">Time</th>
+                </tr>
+              </thead>
+              <tbody>
+                {recentlyVerified.map((item) => (
+                  <tr key={item.task.id} className="border-t border-slate-100">
+                    <td className="px-4 py-3 font-medium text-slate-900">{item.task.id}</td>
+                    <td className="px-4 py-3 text-slate-700">{item.beneficiaryName}</td>
+                    <td className="px-4 py-3 text-slate-700">{item.technology}</td>
+                    <td className="px-4 py-3"><span className={`rounded-full px-2.5 py-1 text-[11px] font-bold ${statusTone(item.task.status)}`}>{item.task.status}</span></td>
+                    <td className="px-4 py-3 text-slate-700">{formatDateTime(item.task.updatedAt)}</td>
+                  </tr>
+                ))}
+                {recentlyVerified.length === 0 && (
+                  <tr>
+                    <td colSpan={5} className="px-4 py-8 text-center text-slate-500">No recent verification activity yet.</td>
+                  </tr>
                 )}
-              </div>
-            </div>
-          ))}
+              </tbody>
+            </table>
+          </div>
         </div>
+      )}
+
+      <div className="card">
+        <div className="p-6 border-b border-slate-100 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+          <div>
+            <h3 className="text-lg font-bold">Verification Queue</h3>
+            <p className="text-sm text-slate-500">Assigned tasks are loaded from the backend verification task endpoint.</p>
+          </div>
+          <div className="relative w-full md:w-80">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+            <input
+              type="text"
+              className="input-field pl-10"
+              placeholder="Search project, serial, beneficiary, vendor..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+            />
+          </div>
+        </div>
+
+        {loading ? (
+          <div className="p-8 text-center text-slate-500">Loading assigned verification tasks...</div>
+        ) : filteredQueue.length === 0 ? (
+          <div className="p-8 text-center text-slate-500">No verification tasks matched your search.</div>
+        ) : (
+          <div className="divide-y divide-slate-100">
+            {filteredQueue.map((item) => {
+              const isLocked = item.task.status === "Paused" || item.task.status === "Terminated";
+              const actionLabel =
+                item.task.status === "Verified" ? "View" :
+                item.task.status === "Flagged" || item.task.status === "Partial" ? "Resume" :
+                isLocked ? "View" : "Verify";
+              return (
+                <div key={item.task.id} className="p-6 flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+                  <div className="flex gap-4 items-start">
+                    <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${
+                      item.task.status === "Verified" ? "bg-emerald-100 text-emerald-600" :
+                      item.task.status === "Flagged" ? "bg-rose-100 text-rose-600" :
+                      item.task.status === "Partial" ? "bg-amber-100 text-amber-600" :
+                      "bg-slate-100 text-slate-400"
+                    }`}>
+                      {item.task.status === "Verified" ? <CheckCircle2 size={20} /> : item.task.status === "Flagged" ? <AlertTriangle size={20} /> : <Clock size={20} />}
+                    </div>
+                    <div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="font-bold text-slate-900">{item.siteName}</p>
+                        <span className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-bold ${statusTone(item.task.status)}`}>
+                          {item.task.status}
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-500 mt-1">
+                        {item.technology} • {item.vendorName} • {item.district}
+                      </p>
+                      <p className="text-xs text-slate-500">
+                        Task {item.task.id} • Beneficiary: {item.beneficiaryName} • Serial: {item.report?.serialNumber || "N/A"}
+                      </p>
+                      <a
+                        href={`https://www.google.com/maps?q=${item.report?.gpsLat},${item.report?.gpsLng}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="mt-2 inline-flex text-xs font-semibold text-blue-600 hover:text-blue-700"
+                      >
+                        Map pin
+                      </a>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-4">
+                    <div className="text-right">
+                      <p className="text-sm text-slate-500">{formatDateTime(item.submittedAt)}</p>
+                      {item.task.distanceMeters != null && (
+                        <p className="text-xs text-slate-400">{item.task.distanceMeters.toFixed(1)} m from vendor pin</p>
+                      )}
+                    </div>
+                    <button onClick={() => openInspection(item.task.id)} className="btn-primary py-1.5 px-4 text-xs">
+                      {actionLabel}
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -15272,6 +15806,7 @@ export default function App() {
   const [showNotifications, setShowNotifications] = useState(false);
   const [notifications, setNotifications] = useState<Notification[]>(MOCK_NOTIFICATIONS);
   const [authMessage, setAuthMessage] = useState<string | null>(null);
+  const [fieldVerifierInspectionBadge, setFieldVerifierInspectionBadge] = useState<string | undefined>(undefined);
   const isApplyingBrowserStateRef = React.useRef(false);
   const lastBrowserStateKeyRef = React.useRef("");
 
@@ -15344,6 +15879,32 @@ export default function App() {
         setCurrentUser(null);
       });
   }, []);
+
+  React.useEffect(() => {
+    if (currentUser?.role !== UserRole.FIELD_VERIFIER) {
+      setFieldVerifierInspectionBadge(undefined);
+      return;
+    }
+
+    let cancelled = false;
+    const loadVerifierBadge = async () => {
+      try {
+        const tasks = await fetchVerificationTasks();
+        if (cancelled) return;
+        const openCount = tasks.filter((task) => task.status === "Pending" || task.status === "Partial" || task.status === "Flagged").length;
+        setFieldVerifierInspectionBadge(openCount > 99 ? "99+" : openCount > 0 ? String(openCount) : undefined);
+      } catch {
+        if (!cancelled) setFieldVerifierInspectionBadge(undefined);
+      }
+    };
+
+    void loadVerifierBadge();
+    const id = window.setInterval(() => void loadVerifierBadge(), 30000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [currentUser]);
 
   React.useEffect(() => {
     if (typeof window === "undefined") return;
@@ -15585,11 +16146,18 @@ export default function App() {
     if (role === UserRole.FIELD_VERIFIER) {
       switch (activeTab) {
         case "dashboard":
+          return <FieldVerifierView mode="dashboard" />;
         case "inspections":
         case "sync":
-          return <FieldVerifierView />;
+          return <FieldVerifierView mode="inspections" />;
+        case "gis":
+          return <FieldVerifierView mode="gis" />;
+        case "reports":
+          return <FieldVerifierView mode="reports" />;
+        case "notifications":
+          return <NotificationLogs logs={notifications} onSelect={handleNotificationSelect} />;
         default:
-          return <FieldVerifierView />;
+          return <FieldVerifierView mode="dashboard" />;
       }
     }
     if (role === UserRole.ADMIN) {
@@ -15702,10 +16270,10 @@ export default function App() {
     if (role === UserRole.FIELD_VERIFIER) {
       return [
         ...common,
-        { id: "inspections", icon: ClipboardCheck, label: "Inspections", badge: "12" },
-        { id: "monitoring", icon: Activity, label: "Monitoring" },
-        { id: "gis", icon: MapIcon, label: "Region Map" },
-        { id: "sync", icon: Activity, label: "Offline Sync" },
+        { id: "inspections", icon: ClipboardCheck, label: "Verifications", badge: fieldVerifierInspectionBadge },
+        { id: "gis", icon: MapIcon, label: "Map View" },
+        { id: "reports", icon: FileText, label: "My Reports" },
+        { id: "notifications", icon: Bell, label: "Notifications" },
       ];
     }
 

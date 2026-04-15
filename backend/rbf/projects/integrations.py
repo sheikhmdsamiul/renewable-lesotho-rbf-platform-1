@@ -454,6 +454,9 @@ def _build_installation_sync_payload(report: InstallationReport) -> tuple[dict[s
             'usage_category': 'household',
             'usage_sub_category': report.household_type or '',
             'location_area_1': district,
+            'status': str(report.status or '').lower(),
+            'verification_status': str(getattr(getattr(report, 'verification_task', None), 'status', '') or '').lower(),
+            'gis_status': str(report.gis_status or '').lower(),
             'is_test': False,
         }]
     }

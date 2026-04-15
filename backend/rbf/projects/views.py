@@ -25,6 +25,9 @@ from .models import (
     ProjectDocument,
     InstallationReport,
     InstallationStatus,
+    BeneficiaryGender,
+    FieldVerification,
+    FieldVerificationStatus,
     VerificationTask,
     VerificationStatus,
     SmartMeterReading,
@@ -44,6 +47,7 @@ from .serializers import (
     ProjectUpdateSerializer,
     ProjectDocumentSerializer,
     InstallationReportSerializer,
+    FieldVerificationSerializer,
     VerificationTaskSerializer,
     SmartMeterReadingSerializer,
     PaymentClaimSerializer,
@@ -70,6 +74,25 @@ def vendor_query_filter(user, prefix: str = ''):
     vendor_names = {user.full_name, user.organization_name, user.username}
     vendor_names = {name for name in vendor_names if name}
     return Q(**{f'{prefix}vendor_id__in': vendor_ids}) | Q(**{f'{prefix}vendor_name__in': vendor_names})
+
+
+def field_verifier_district_filter(user, project_prefix: str = 'project__'):
+    district = (
+        getattr(user, 'verification_zone', '')
+        or getattr(user, 'district', '')
+        or getattr(user, 'region', '')
+        or ''
+    ).strip()
+    if not district:
+        return Q(pk__in=[])
+    return Q(**{f'{project_prefix}district__iexact': district}) | Q(**{f'{project_prefix}region__iexact': district})
+
+
+def field_verifier_task_scope_filter(user, task_prefix: str = ''):
+    return Q(**{f'{task_prefix}assigned_verifier': user}) | field_verifier_district_filter(
+        user,
+        project_prefix=f'{task_prefix}report__project__',
+    )
 
 
 def create_project_activity_update(project: Project, author, title: str, body: str):
@@ -138,7 +161,7 @@ def build_installation_map_queryset(user: User):
     if user.role == UserRole.VENDOR:
         queryset = queryset.filter(vendor=user)
     elif user.role == UserRole.FIELD_VERIFIER:
-        queryset = queryset.filter(project__district__iexact=user.verification_zone)
+        queryset = queryset.filter(field_verifier_district_filter(user))
 
     return queryset
 
@@ -1160,7 +1183,9 @@ class InstallationReportViewSet(viewsets.ModelViewSet):
         if user.role == UserRole.VENDOR:
             return qs.filter(vendor=user)
         if user.role == UserRole.FIELD_VERIFIER:
-            return qs.filter(verification_task__assigned_verifier=user)
+            return qs.filter(
+                Q(verification_task__assigned_verifier=user) | field_verifier_district_filter(user)
+            ).distinct()
         return qs
 
     def _assert_write_permission(self):
@@ -1331,6 +1356,7 @@ class VerificationTaskViewSet(viewsets.ModelViewSet):
     queryset = VerificationTask.objects.select_related('report', 'assigned_verifier').all()
     serializer_class = VerificationTaskSerializer
     permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['status', 'assigned_verifier', 'report__project']
     search_fields = ['report__serial_number', 'report__beneficiary_id']
@@ -1342,7 +1368,7 @@ class VerificationTaskViewSet(viewsets.ModelViewSet):
         qs = self.queryset.order_by('-created_at')
         user = self.request.user
         if user.role == UserRole.FIELD_VERIFIER:
-            return qs.filter(assigned_verifier=user)
+            return qs.filter(field_verifier_task_scope_filter(user)).distinct().order_by('created_at')
         if user.role == UserRole.VENDOR:
             return qs.filter(report__vendor=user)
         return qs
@@ -1352,6 +1378,16 @@ class VerificationTaskViewSet(viewsets.ModelViewSet):
         if request.user.role not in self.VERIFY_ROLES:
             raise PermissionDenied('You do not have permission to verify installations.')
         task = self.get_object()
+        if request.user.role == UserRole.FIELD_VERIFIER:
+            assigned_district = (
+                getattr(request.user, 'verification_zone', '')
+                or getattr(request.user, 'district', '')
+                or getattr(request.user, 'region', '')
+                or ''
+            ).strip().lower()
+            task_district = (task.report.project.district or task.report.project.region or '').strip().lower()
+            if assigned_district and task_district and assigned_district != task_district:
+                raise PermissionDenied('You can only verify installations in your assigned district.')
         if task.status == VerificationStatus.PAUSED:
             return Response({'detail': 'Field verification is paused while the vendor is under suspension.'}, status=status.HTTP_400_BAD_REQUEST)
         if task.status == VerificationStatus.TERMINATED:
@@ -1381,17 +1417,69 @@ class VerificationTaskViewSet(viewsets.ModelViewSet):
             a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
             return 2 * r * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
+        beneficiary_present = str(request.data.get('beneficiary_present') or '').strip().lower() in {'1', 'true', 'yes', 'on'}
+        system_working = str(request.data.get('system_working') or '').strip().lower() in {'1', 'true', 'yes', 'on'}
+        serial_visible = str(request.data.get('serial_visible') or '').strip().lower() in {'1', 'true', 'yes', 'on'}
+        beneficiary_gender = str(request.data.get('beneficiary_gender') or 'unknown').strip().lower() or 'unknown'
+        if beneficiary_gender not in {choice for choice, _label in BeneficiaryGender.choices}:
+            beneficiary_gender = BeneficiaryGender.UNKNOWN
+        observation_notes = str(request.data.get('observation_notes') or '').strip()
+        flag_reason = str(request.data.get('flag_reason') or '').strip()
+        if len(observation_notes) > 500:
+            return Response({'detail': 'observation_notes must be 500 characters or fewer.'}, status=status.HTTP_400_BAD_REQUEST)
+
         distance = haversine(float(task.vendor_lat), float(task.vendor_lng), verifier_lat, verifier_lng)
+        location_match = distance <= 50
         requested_status = str(request.data.get('verification_status') or '').strip().lower()
         if requested_status == 'partial':
             next_status = VerificationStatus.PARTIAL
+            verification_record_status = FieldVerificationStatus.PARTIAL
         elif requested_status == 'flagged':
             next_status = VerificationStatus.FLAGGED
+            verification_record_status = FieldVerificationStatus.FLAGGED
         elif requested_status == 'verified':
             next_status = VerificationStatus.VERIFIED
+            verification_record_status = FieldVerificationStatus.VERIFIED
         else:
-            next_status = VerificationStatus.FLAGGED if distance > 100 else VerificationStatus.VERIFIED
-        anomaly = next_status == VerificationStatus.FLAGGED
+            next_status = VerificationStatus.FLAGGED if distance > 50 else VerificationStatus.VERIFIED
+            verification_record_status = FieldVerificationStatus.FLAGGED if distance > 50 else FieldVerificationStatus.VERIFIED
+
+        if not location_match and next_status == VerificationStatus.VERIFIED:
+            next_status = VerificationStatus.FLAGGED
+            verification_record_status = FieldVerificationStatus.FLAGGED
+            flag_reason = f'Location mismatch: {distance:.2f}m'
+        if next_status in {VerificationStatus.FLAGGED, VerificationStatus.PARTIAL} and not flag_reason:
+            return Response({'detail': 'flag_reason is required when verification is flagged or partial.'}, status=status.HTTP_400_BAD_REQUEST)
+        anomaly = next_status in {VerificationStatus.FLAGGED, VerificationStatus.PARTIAL}
+
+        photo_paths: list[str] = []
+        files = request.FILES.getlist('site_photos')
+        if len(files) > 5:
+            return Response({'detail': 'You can upload at most 5 site photos.'}, status=status.HTTP_400_BAD_REQUEST)
+        for file in files:
+            if file.size > 5 * 1024 * 1024:
+                return Response({'detail': f'{file.name} exceeds the 5MB upload limit.'}, status=status.HTTP_400_BAD_REQUEST)
+            extension = file.name.rsplit('.', 1)[-1] if '.' in file.name else 'jpg'
+            saved = default_storage.save(f'field_verifications/{uuid.uuid4().hex}.{extension}', file)
+            photo_paths.append(saved)
+
+        field_verification = FieldVerification.objects.create(
+            installation=task.report,
+            field_officer=request.user,
+            beneficiary_present=beneficiary_present,
+            beneficiary_gender=beneficiary_gender,
+            system_working=system_working,
+            officer_latitude=verifier_lat,
+            officer_longitude=verifier_lng,
+            location_match=location_match,
+            location_distance_meters=distance,
+            site_photos=photo_paths,
+            serial_visible=serial_visible,
+            observation_notes=observation_notes,
+            verification_status=verification_record_status,
+            flag_reason=flag_reason or None,
+            verified_at=timezone.now(),
+        )
 
         task.verifier_lat = verifier_lat
         task.verifier_lng = verifier_lng
@@ -1404,7 +1492,7 @@ class VerificationTaskViewSet(viewsets.ModelViewSet):
         if next_status == VerificationStatus.VERIFIED:
             report.status = InstallationStatus.VERIFIED
             report.gis_status = GisStatus.GREEN
-            report.anomaly_flags.filter(flag_type='verification_distance', is_resolved=False).update(
+            report.anomaly_flags.filter(flag_type__in=['verification_distance', 'location_mismatch'], is_resolved=False).update(
                 is_resolved=True,
                 resolved_at=timezone.now(),
             )
@@ -1414,23 +1502,67 @@ class VerificationTaskViewSet(viewsets.ModelViewSet):
             AnomalyFlag.objects.create(
                 installation=report,
                 project=report.project,
-                flag_type='verification_distance',
-                description=f'Field verification detected a {distance:.2f}m GPS mismatch.',
+                flag_type='location_mismatch' if not location_match else 'verification_distance',
+                description=flag_reason or f'Field verification detected a {distance:.2f}m GPS mismatch.',
             )
         else:
             report.status = InstallationStatus.SUBMITTED
             report.gis_status = GisStatus.YELLOW
         report.save(update_fields=['status', 'gis_status'])
         queue_installation_sync(str(report.id), include_customer=False, include_installation=True)
-        log_audit(request.user, 'installation_verified', report, {'distance_meters': distance, 'anomaly': anomaly})
+        log_audit(
+            request.user,
+            'installation_verified',
+            report,
+            {
+                'distance_meters': distance,
+                'anomaly': anomaly,
+                'installation_id': str(report.id),
+                'outcome': verification_record_status,
+                'actor_id': str(request.user.id),
+                'module': 'field_verification',
+            },
+        )
         create_project_activity_update(
             report.project,
             request.user,
             'Installation Verification Completed',
             f"Installation report {report.id} was {str(next_status).lower()} after field verification.",
         )
+        Notification.objects.create(
+            recipient_id=str(report.vendor_id),
+            recipient_name=report.vendor.full_name or report.vendor.username,
+            type=NotificationChannel.IN_APP,
+            event='installation_verification_vendor',
+            title=f'Installation #{report.id} {verification_record_status}',
+            body=f'Installation #{report.id} was {verification_record_status} by the field officer.',
+            status=NotificationStatus.SENT,
+            linked_entity_id=str(report.id),
+        )
+        district_name = report.project.district or report.project.region or ''
+        oversight_users = User.objects.filter(role__in={UserRole.RBF_OFFICIAL, UserRole.ADMIN}).only('id', 'full_name', 'username')
+        Notification.objects.bulk_create(
+            [
+                Notification(
+                    recipient_id=str(user.id),
+                    recipient_name=user.full_name or user.username,
+                    type=NotificationChannel.IN_APP,
+                    event='installation_verification_rmt',
+                    title=f'Installation #{report.id} verified by field officer',
+                    body=(
+                        f'Installation #{report.id} was {verification_record_status} by '
+                        f'{request.user.full_name or request.user.username} in {district_name}.'
+                    ),
+                    status=NotificationStatus.SENT,
+                    linked_entity_id=str(report.id),
+                )
+                for user in oversight_users
+            ]
+        )
         refresh_project_kpis(str(report.project_id))
-        return Response(self.get_serializer(task).data, status=status.HTTP_200_OK)
+        payload = self.get_serializer(task).data
+        payload['field_verification'] = FieldVerificationSerializer(field_verification, context={'request': request}).data
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 class MapInstallationView(APIView):
@@ -1650,7 +1782,9 @@ class AnomalyFlagViewSet(viewsets.ReadOnlyModelViewSet):
         if user.role == UserRole.DOE_OFFICER and user.region:
             return qs.filter(project__region__iexact=user.region)
         if user.role == UserRole.FIELD_VERIFIER:
-            return qs.filter(installation__verification_task__assigned_verifier=user)
+            return qs.filter(
+                Q(installation__verification_task__assigned_verifier=user) | field_verifier_district_filter(user)
+            ).distinct()
         return qs
 
     @action(detail=True, methods=['post'])

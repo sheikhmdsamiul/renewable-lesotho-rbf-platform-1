@@ -81,6 +81,12 @@ class MilestoneEligibilityResult:
 
 
 class KpiService:
+    GENDER_TARGETS = {
+        "female_headed": 50,
+        "vulnerable": 30,
+        "low_income": 60,
+    }
+
     def __init__(self, project_id: str):
         self.project = Project.objects.get(id=project_id)
 
@@ -96,7 +102,7 @@ class KpiService:
         return InstallationReport.objects.filter(
             project=self.project,
             status=InstallationStatus.VERIFIED,
-        )
+        ).distinct()
 
     def _readings_queryset(self):
         verified_installations = self._verified_installations()
@@ -113,7 +119,7 @@ class KpiService:
             total_pending=Count("id", filter=Q(status=InstallationStatus.SUBMITTED)),
             total_flagged=Count("id", filter=Q(status=InstallationStatus.FLAGGED)),
         )
-        target = int(self.project.target_installations or 0)
+        target = int(self.project.target_installations or self.project.installation_target or 0)
         verified = int(aggregates["total_verified"] or 0)
         progress_pct = (verified / target * 100.0) if target > 0 else 0.0
         expected_pct = _expected_progress_pct(self.project)
@@ -160,9 +166,9 @@ class KpiService:
                 "met": percentage >= float(target),
             }
 
-        female = build(int(grouped["female_count"] or 0), int(self.project.target_female_pct or 0))
-        vulnerable = build(int(grouped["vulnerable_count"] or 0), int(self.project.target_vulnerable_pct or 0))
-        low_income = build(int(grouped["low_income_count"] or 0), int(self.project.target_low_income_pct or 0))
+        female = build(int(grouped["female_count"] or 0), self.GENDER_TARGETS["female_headed"])
+        vulnerable = build(int(grouped["vulnerable_count"] or 0), self.GENDER_TARGETS["vulnerable"])
+        low_income = build(int(grouped["low_income_count"] or 0), self.GENDER_TARGETS["low_income"])
 
         return {
             "total_verified": total,
@@ -176,6 +182,7 @@ class KpiService:
             "female_trend_pct_vs_last_week": _round(recent_pct - prior_pct, 1),
             "female_trending_up": recent_pct >= prior_pct,
             "all_gender_kpis_met": female["met"] and vulnerable["met"] and low_income["met"],
+            "all_kpis_met": female["met"] and vulnerable["met"] and low_income["met"],
         }
 
     def getEnergyKpi(self, months_back: int = 3) -> dict[str, Any]:
@@ -192,7 +199,7 @@ class KpiService:
             .order_by("month")
         )
 
-        target_kwh = float(self.project.energy_output or 0)
+        target_kwh = float(self.project.energy_output_target_kwh or self.project.energy_output or 0)
         monthly_data = []
         for row in monthly_rows:
             total_kwh = float(row["total_kwh"] or 0)
@@ -232,7 +239,7 @@ class KpiService:
                 reading_count=Count("id"),
             )
         )
-        target = float(self.project.uptime or 99.0 or 99.0)
+        target = 99.0
         average = sum(float(row["avg_uptime"] or 0) for row in per_device) / len(per_device) if per_device else 0.0
         devices_above = sum(1 for row in per_device if float(row["avg_uptime"] or 0) >= target)
         devices_below = sum(1 for row in per_device if 0 < float(row["avg_uptime"] or 0) < target)
@@ -270,30 +277,34 @@ class KpiService:
         }
 
     def getInstallationTrend(self) -> dict[str, Any]:
-        verified = (
+        verified = list(
             self._verified_installations()
             .annotate(week=TruncWeek("submitted_at"))
             .values("week")
             .annotate(weekly_verified=Count("id"))
             .order_by("week")
         )
-        target = int(self.project.target_installations or 0)
+        target = int(self.project.target_installations or self.project.installation_target or 0)
         duration_weeks = max(1.0, (_project_duration_days(self.project) / 7.0))
         target_per_week = target / duration_weeks if duration_weeks > 0 else 0.0
         cumulative = 0
         weeks = []
+        target_line = []
         for index, row in enumerate(verified, start=1):
             cumulative += int(row["weekly_verified"] or 0)
+            target_value = _round(target_per_week * index, 1)
             weeks.append(
                 {
                     "week_start": row["week"].date().isoformat() if row["week"] else "",
                     "cumulative_verified": cumulative,
                     "weekly_new": int(row["weekly_verified"] or 0),
-                    "target_at_this_week": _round(target_per_week * index, 1),
+                    "target_at_this_week": target_value,
                 }
             )
+            target_line.append(target_value)
         return {
             "weeks": weeks,
+            "target_line": target_line,
             "total_verified": cumulative,
             "target": target,
         }
@@ -306,6 +317,7 @@ class KpiService:
         installation = self.getInstallationProgress()
         gender = self.getGenderKpi()
         readings_cutoff = timezone.now() - timedelta(days=30)
+        blocking_flags = AnomalyFlag.objects.filter(project=self.project, is_resolved=False).exclude(flag_type='duplicate_gps').count()
         all_flags = AnomalyFlag.objects.filter(project=self.project, is_resolved=False).count()
         meter_present = self._readings_queryset().filter(recorded_at__gte=readings_cutoff).exists()
 
@@ -329,9 +341,18 @@ class KpiService:
             )
         )
 
+        milestone_one = _milestone_by_number(self.project, 1)
+        milestone_one_paid = bool(
+            milestone_one
+            and (
+                milestone_one.status in {"paid", "Paid"}
+                or PaymentClaim.objects.filter(project=self.project, milestone=milestone_one, status=PaymentClaimStatus.PAID).exists()
+            )
+        )
         summary = {
             "milestone_1": {
                 "eligible": contract_approved and setup_complete,
+                "status": "PAID" if milestone_one_paid else "CLAIMABLE" if contract_approved and setup_complete else "Pending",
                 "conditions": {
                     "contract_approved": contract_approved,
                     "setup_complete": setup_complete,
@@ -341,11 +362,19 @@ class KpiService:
                 "eligible": (
                     verified_ratio >= 0.8
                     and gender["female_headed"]["met"]
+                    and blocking_flags == 0
                     and meter_present
                 ),
+                "status": "PAID" if milestone_two_paid else "CLAIMABLE" if (
+                    verified_ratio >= 0.8
+                    and gender["female_headed"]["met"]
+                    and blocking_flags == 0
+                    and meter_present
+                ) else "Pending",
                 "conditions": {
                     "installations_80_pct": verified_ratio >= 0.8,
-                    "gender_kpi_met": gender["female_headed"]["met"],
+                    "female_pct_50": gender["female_headed"]["met"],
+                    "no_blocking_anomaly_flags": blocking_flags == 0,
                     "meter_data_present": meter_present,
                 },
             },
@@ -356,10 +385,16 @@ class KpiService:
                     and all_flags == 0
                     and milestone_two_paid
                 ),
+                "status": "CLAIMABLE" if (
+                    verified_ratio >= 1.0
+                    and gender["all_gender_kpis_met"]
+                    and all_flags == 0
+                    and milestone_two_paid
+                ) else "Pending",
                 "conditions": {
                     "installations_100_pct": verified_ratio >= 1.0,
-                    "all_kpis_met": gender["all_gender_kpis_met"],
-                    "no_flags": all_flags == 0,
+                    "all_gender_kpis_met": gender["all_gender_kpis_met"],
+                    "all_anomaly_flags_resolved": all_flags == 0,
                     "milestone_2_paid": milestone_two_paid,
                 },
             },

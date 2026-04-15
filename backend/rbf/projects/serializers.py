@@ -7,6 +7,7 @@ from .models import (
     ProjectUpdate,
     ProjectDocument,
     InstallationReport,
+    FieldVerification,
     VerificationTask,
     SmartMeterReading,
     PaymentClaim,
@@ -473,6 +474,15 @@ class VerificationTaskSerializer(serializers.ModelSerializer):
             'created_at',
             'updated_at',
         ]
+
+
+class FieldVerificationSerializer(serializers.ModelSerializer):
+    field_officer_username = serializers.CharField(source='field_officer.username', read_only=True)
+
+    class Meta:
+        model = FieldVerification
+        fields = '__all__'
+        read_only_fields = ['id', 'field_officer_username', 'verified_at']
 
 
 class SmartMeterReadingSerializer(serializers.ModelSerializer):

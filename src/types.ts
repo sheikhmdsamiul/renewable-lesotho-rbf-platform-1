@@ -413,6 +413,7 @@ export interface ProjectKpiSummary {
     female_trend_pct_vs_last_week: number;
     female_trending_up: boolean;
     all_gender_kpis_met: boolean;
+    all_kpis_met?: boolean;
   };
   energy_kpi: {
     monthly_data: Array<{
@@ -444,10 +445,11 @@ export interface ProjectKpiSummary {
       weekly_new: number;
       target_at_this_week: number;
     }>;
+    target_line?: number[];
     total_verified: number;
     target: number;
   };
-  milestone_eligibility: Record<string, { eligible: boolean; conditions: Record<string, boolean> }>;
+  milestone_eligibility: Record<string, { eligible: boolean; status?: string; conditions: Record<string, boolean> }>;
   generated_at: string;
 }
 
@@ -630,7 +632,7 @@ export interface ProjectDocument {
 }
 
 export type InstallationStatus = "Submitted" | "Verified" | "Flagged";
-export type VerificationStatus = "Pending" | "Verified" | "Flagged";
+export type VerificationStatus = "Pending" | "Paused" | "Partial" | "Verified" | "Flagged" | "Terminated";
 
 export interface InstallationReport {
   id: string;

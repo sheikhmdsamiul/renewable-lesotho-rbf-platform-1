@@ -44,6 +44,12 @@ function statusTone(met: boolean) {
   return met ? "text-emerald-700 bg-emerald-50 border-emerald-200" : "text-rose-700 bg-rose-50 border-rose-200";
 }
 
+function milestoneStatusTone(status?: string) {
+  if (status === "PAID") return "bg-emerald-100 text-emerald-700";
+  if (status === "CLAIMABLE") return "bg-lime-100 text-lime-700";
+  return "bg-slate-200 text-slate-700";
+}
+
 export default function KpiDashboard({ projectId }: { projectId: string }) {
   const [chartReady, setChartReady] = useState(false);
   const [summary, setSummary] = useState<ProjectKpiSummary | null>(null);
@@ -98,42 +104,42 @@ export default function KpiDashboard({ projectId }: { projectId: string }) {
         target: `>=${summary.gender_kpi.female_headed.target}%`,
         current: `${summary.gender_kpi.female_headed.percentage}%`,
         ok: summary.gender_kpi.female_headed.met,
-        status: summary.gender_kpi.female_headed.met ? "Met" : "Below",
+        status: summary.gender_kpi.female_headed.met ? "✅ Met" : "❌ Not Met",
       },
       {
         label: "Vulnerable groups",
         target: `>=${summary.gender_kpi.vulnerable.target}%`,
         current: `${summary.gender_kpi.vulnerable.percentage}%`,
         ok: summary.gender_kpi.vulnerable.met,
-        status: summary.gender_kpi.vulnerable.met ? "Met" : "Below",
+        status: summary.gender_kpi.vulnerable.met ? "✅ Met" : "⚠ Below",
       },
       {
         label: "Low-income HH",
         target: `>=${summary.gender_kpi.low_income.target}%`,
         current: `${summary.gender_kpi.low_income.percentage}%`,
         ok: summary.gender_kpi.low_income.met,
-        status: summary.gender_kpi.low_income.met ? "Met" : "Below",
+        status: summary.gender_kpi.low_income.met ? "✅ Met" : "⚠ Below",
       },
       {
         label: "System uptime",
         target: `>=${summary.uptime_kpi.target_uptime_pct}%`,
         current: `${summary.uptime_kpi.average_uptime_pct}%`,
         ok: summary.uptime_kpi.met,
-        status: summary.uptime_kpi.met ? "Met" : "Below",
+        status: summary.uptime_kpi.met ? "✅ Met" : "⚠ Below",
       },
       {
         label: "Installation progress",
         target: String(summary.installation_progress.target),
         current: String(summary.installation_progress.verified),
         ok: summary.installation_progress.on_track,
-        status: `${summary.installation_progress.progress_pct}%`,
+        status: summary.installation_progress.on_track ? "✅ Met" : "⚠ Below",
       },
       {
         label: "Energy output",
         target: `${summary.energy_kpi.current_month_target.toLocaleString()} kWh`,
         current: `${summary.energy_kpi.current_month_kwh.toLocaleString()} kWh`,
         ok: summary.energy_kpi.current_month_pct >= 95,
-        status: `${summary.energy_kpi.current_month_pct}%`,
+        status: summary.energy_kpi.current_month_pct >= 95 ? "✅ Met" : summary.energy_kpi.current_month_pct >= 80 ? "⚠ Below" : "❌ Not Met",
       },
     ];
   }, [summary]);
@@ -321,11 +327,8 @@ export default function KpiDashboard({ projectId }: { projectId: string }) {
   }
 
   const warningCount = kpiRows.filter((row) => !row.ok).length;
-  const progressTone = summary.installation_progress.progress_pct < Math.max(0, summary.installation_progress.expected_progress_pct - 10)
-    ? "bg-rose-500"
-    : summary.installation_progress.on_track
-      ? "bg-emerald-500"
-      : "bg-amber-500";
+  const progressGap = summary.installation_progress.progress_pct - summary.installation_progress.expected_progress_pct;
+  const progressTone = progressGap < -10 ? "bg-rose-500" : summary.installation_progress.on_track ? "bg-emerald-500" : "bg-amber-500";
 
   return (
     <div className="space-y-6">
@@ -354,7 +357,7 @@ export default function KpiDashboard({ projectId }: { projectId: string }) {
         <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
           <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Installation Progress</p>
           <p className="mt-2 text-3xl font-semibold text-slate-900">
-            {summary.installation_progress.verified} / {summary.installation_progress.target}
+            {summary.installation_progress.verified}/{summary.installation_progress.target}
           </p>
           <div className="mt-3 h-3 overflow-hidden rounded-full bg-slate-100">
             <div className={`h-full rounded-full ${progressTone}`} style={{ width: `${Math.min(100, summary.installation_progress.progress_pct)}%` }} />
@@ -388,7 +391,7 @@ export default function KpiDashboard({ projectId }: { projectId: string }) {
       <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
         {warningCount > 0 && (
           <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-            {warningCount} KPI{warningCount === 1 ? "" : "s"} need attention. Review before submitting milestone claim.
+            ⚠ {warningCount} KPI{warningCount === 1 ? "" : "s"} need attention before milestone claim.
           </div>
         )}
         <div className="overflow-x-auto">
@@ -407,7 +410,7 @@ export default function KpiDashboard({ projectId }: { projectId: string }) {
                   <td className="py-3 pr-4 font-medium text-slate-900">{row.label}</td>
                   <td className="py-3 pr-4 text-slate-600">{row.target}</td>
                   <td className="py-3 pr-4 text-slate-600">{row.current}</td>
-                  <td className={`py-3 font-medium ${row.ok ? "text-emerald-700" : "text-amber-700"}`}>{row.status}</td>
+                  <td className={`py-3 font-medium ${row.ok ? "text-emerald-700" : row.status.includes("❌") ? "text-rose-700" : "text-amber-700"}`}>{row.status}</td>
                 </tr>
               ))}
             </tbody>
@@ -449,19 +452,19 @@ export default function KpiDashboard({ projectId }: { projectId: string }) {
         <h5 className="text-sm font-semibold text-slate-900">Milestone Readiness</h5>
         <div className="mt-4 space-y-4">
           {Object.entries(summary.milestone_eligibility).map(([key, value], index) => {
-            const eligibility = value as { eligible: boolean; conditions: Record<string, boolean> };
+            const eligibility = value as { eligible: boolean; status?: string; conditions: Record<string, boolean> };
             return (
             <div key={key} className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
               <div className="flex items-center justify-between">
                 <p className="font-semibold text-slate-900">Milestone {index + 1}</p>
-                <span className={`rounded-full px-3 py-1 text-xs font-semibold ${eligibility.eligible ? "bg-emerald-100 text-emerald-700" : "bg-slate-200 text-slate-700"}`}>
-                  {eligibility.eligible ? "CLAIMABLE" : "LOCKED"}
+                <span className={`rounded-full px-3 py-1 text-xs font-semibold ${milestoneStatusTone(eligibility.status)}`}>
+                  {eligibility.status === "PAID" ? "✅ PAID" : eligibility.status === "CLAIMABLE" ? "🟢 CLAIMABLE" : "⏳ Pending"}
                 </span>
               </div>
               <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-2">
                 {Object.entries(eligibility.conditions).map(([condition, met]) => (
                   <div key={condition} className="text-sm">
-                    <span className={met ? "text-emerald-700" : "text-slate-500"}>{met ? "✓" : "•"}</span>{" "}
+                    <span className={met ? "text-emerald-700" : "text-rose-600"}>{met ? "✅" : "❌"}</span>{" "}
                     <span className="text-slate-700">{condition.replace(/_/g, " ")}</span>
                   </div>
                 ))}
