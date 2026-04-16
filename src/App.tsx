@@ -136,8 +136,10 @@ import {
   reviewBlacklistAppeal,
   fetchPaymentClaims,
   submitPaymentClaim,
+  verifyPaymentClaim,
   approvePaymentClaim,
   payPaymentClaim,
+  confirmPaymentClaim,
   flagProjectIssue,
   fetchProjects,
   fetchMilestones,
@@ -184,6 +186,8 @@ import {
 import GisInstallationsMap from "./components/GisInstallationsMap";
 import KpiDashboard from "./components/KpiDashboard";
 import PortfolioKpiSummary from "./components/PortfolioKpiSummary";
+import PortfolioMonitoringView from "./components/PortfolioMonitoringView";
+import { FieldOperationalKpiPanel, MacroKpiPortal, VendorKpiPanel } from "./components/RoleBasedKpiPanels";
 
 // --- Components ---
 
@@ -1131,113 +1135,6 @@ const ForcePasswordReset = ({
 };
 
 // --- Pages ---
-
-const Dashboard = ({ role, onNewTender }: { role: UserRole, onNewTender: () => void }) => {
-  const data = [
-    { name: 'Jan', value: 400 },
-    { name: 'Feb', value: 300 },
-    { name: 'Mar', value: 600 },
-    { name: 'Apr', value: 800 },
-    { name: 'May', value: 500 },
-    { name: 'Jun', value: 900 },
-  ];
-
-  const pieData = [
-    { name: 'SHS', value: 400 },
-    { name: 'Mini-Grid', value: 300 },
-    { name: 'ICS', value: 300 },
-  ];
-
-  const COLORS = ['#059669', '#1d4ed8', '#d97706'];
-
-  return (
-    <div className="space-y-8">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900">Portfolio Overview</h1>
-          <p className="text-slate-500">Welcome back, {role} Dashboard</p>
-        </div>
-        <div className="flex gap-3">
-          <button className="btn-secondary flex items-center gap-2">
-            <Download size={18} /> Export Report
-          </button>
-          <button onClick={onNewTender} className="btn-primary flex items-center gap-2">
-            <Plus size={18} /> New Tender
-          </button>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        <StatCard label="Total Energy Output" value="1.2 GWh" trend="+12%" icon={Activity} color="bg-emerald-600" />
-        <StatCard label="Active Vendors" value="24" trend="+2" icon={Users} color="bg-blue-600" />
-        <StatCard label="Disbursement Pacing" value="78%" trend="+5%" icon={CreditCard} color="bg-amber-600" />
-        <StatCard label="Gender Equity" value="54%" trend="+3%" icon={ClipboardCheck} color="bg-purple-600" />
-      </div>
-
-      <div className="card p-6">
-        <div className="mb-4">
-          <h3 className="text-lg font-bold text-slate-900">GIS Installation Map</h3>
-          <p className="text-sm text-slate-500">Portfolio-wide installation visibility for the RBF Management Team.</p>
-        </div>
-        <GisInstallationsMap showFilters height="550px" />
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="card p-6 lg:col-span-2">
-          <h3 className="text-lg font-bold mb-6">Energy Output Trend (MWh)</h3>
-          <div className="h-[300px]">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={data}>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fill: '#64748b', fontSize: 12}} />
-                <YAxis axisLine={false} tickLine={false} tick={{fill: '#64748b', fontSize: 12}} />
-                <Tooltip 
-                  contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
-                />
-                <Line type="monotone" dataKey="value" stroke="#059669" strokeWidth={3} dot={{r: 4, fill: '#059669'}} activeDot={{r: 6}} />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
-
-        <div className="card p-6">
-          <h3 className="text-lg font-bold mb-6">Technology Distribution</h3>
-          <div className="h-[300px]">
-            <ResponsiveContainer width="100%" height="100%">
-              <PieChart>
-                <Pie
-                  data={pieData}
-                  cx="50%"
-                  cy="50%"
-                  innerRadius={60}
-                  outerRadius={80}
-                  paddingAngle={5}
-                  dataKey="value"
-                >
-                  {pieData.map((entry, index) => (
-                    <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                  ))}
-                </Pie>
-                <Tooltip />
-              </PieChart>
-            </ResponsiveContainer>
-          </div>
-          <div className="mt-4 space-y-2">
-            {pieData.map((item, i) => (
-              <div key={item.name} className="flex items-center justify-between text-sm">
-                <div className="flex items-center gap-2">
-                  <div className="w-3 h-3 rounded-full" style={{backgroundColor: COLORS[i]}} />
-                  <span className="text-slate-600">{item.name}</span>
-                </div>
-                <span className="font-bold">{item.value} units</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-};
 
 const Tenders = ({
   initialView = "list",
@@ -5025,7 +4922,17 @@ const Disbursements = () => {
   const [processingClaimId, setProcessingClaimId] = useState<string | null>(null);
   const currentUser = getStoredUser();
   const canProcessPayments =
-    currentUser?.role === UserRole.ADMIN || currentUser?.role === UserRole.RBF_OFFICIAL || currentUser?.role === UserRole.UNDP_DONOR;
+    currentUser?.role === UserRole.ADMIN || currentUser?.role === UserRole.RBF_OFFICIAL || currentUser?.role === UserRole.UNDP_DONOR || currentUser?.role === UserRole.TAC;
+  const canRmtApprove =
+    currentUser?.role === UserRole.ADMIN || currentUser?.role === UserRole.RBF_OFFICIAL;
+  const canTacEndorse =
+    currentUser?.role === UserRole.TAC;
+  const canPscApprove =
+    currentUser?.role === UserRole.UNDP_DONOR;
+  const canFinancePay =
+    currentUser?.role === UserRole.ADMIN;
+  const canRmtMarkPaid =
+    currentUser?.role === UserRole.ADMIN || currentUser?.role === UserRole.RBF_OFFICIAL;
   const canFlagIssues =
     currentUser?.role === UserRole.UNDP_DONOR || currentUser?.role === UserRole.ADMIN || currentUser?.role === UserRole.RBF_OFFICIAL;
 
@@ -5074,17 +4981,33 @@ const Disbursements = () => {
   };
 
   const processPayment = async (claim: PaymentClaim) => {
-    if (!canProcessPayments || claim.status === "Paid" || claim.paymentLocked) return;
+    if (!canProcessPayments || claim.status === "Completed" || claim.status === "Paid" || claim.paymentLocked) return;
 
     try {
       setProcessingClaimId(claim.id);
-      if (claim.status === "Pending" || claim.status === "Verified") {
-        await approvePaymentClaim(claim.id, "Approved from disbursement dashboard.");
+      let updated = claim;
+      const financeAlreadyPaid = claim.disbursement?.status === "Completed";
+      if (canRmtApprove && (claim.status === "Submitted" || claim.status === "Pending")) {
+        updated = await verifyPaymentClaim(claim.id, "Approved by RMT from disbursement dashboard.");
+        showNotification(`Claim ${claim.id} approved by RMT.`);
+      } else if (canTacEndorse && (claim.status === "RMT Approved" || claim.status === "Verified")) {
+        updated = await approvePaymentClaim(claim.id, "Endorsed by TAC from disbursement dashboard.");
+        showNotification(`Claim ${claim.id} endorsed by TAC.`);
+      } else if (canPscApprove && claim.status === "TAC Endorsed") {
+        updated = await approvePaymentClaim(claim.id, "Approved by PSC from disbursement dashboard.");
+        showNotification(`Claim ${claim.id} approved by PSC and sent to Finance.`);
+      } else if (canFinancePay && (claim.status === "PSC Approved" || claim.status === "Approved") && !financeAlreadyPaid) {
+        updated = await payPaymentClaim(claim.id, undefined, "Finance processed payment from disbursement dashboard.");
+        showNotification(`Finance processed payment for claim ${claim.id}.`);
+      } else if (canRmtMarkPaid && (claim.status === "PSC Approved" || claim.status === "Approved") && financeAlreadyPaid) {
+        updated = await confirmPaymentClaim(claim.id, undefined, "Marked as paid by RMT from disbursement dashboard.");
+        showNotification(`Claim ${claim.id} marked as paid by RMT.`);
+      } else {
+        showNotification("This claim is not ready for the next payment action from your role.");
+        return;
       }
-      const paid = await payPaymentClaim(claim.id, undefined, "Processed from disbursement dashboard.");
-      setClaims(prev => prev.map(item => item.id === claim.id ? paid : item));
+      setClaims(prev => prev.map(item => item.id === claim.id ? updated : item));
       await loadClaims();
-      showNotification(`Claim ${claim.id} processed and marked as Paid.`);
     } catch (err: any) {
       const raw = String(err?.message || "");
       if (isConnectivityError(raw)) {
@@ -5126,11 +5049,54 @@ const Disbursements = () => {
   };
 
   const totalDisbursed = claims
-    .filter(claim => claim.status === "Paid")
+    .filter(claim => claim.status === "Completed" || claim.status === "Paid" || claim.disbursement?.status === "Completed")
     .reduce((sum, claim) => sum + claim.claimAmount, 0);
   const pendingApproval = claims
-    .filter(claim => claim.status === "Pending" || claim.status === "Verified" || claim.status === "Approved")
+    .filter(claim => !["Completed", "Paid", "Rejected"].includes(claim.status))
     .reduce((sum, claim) => sum + claim.claimAmount, 0);
+  const getClaimWorkflowLabel = (claim: PaymentClaim) => {
+    if (claim.status === "Completed" || claim.status === "Paid") return "Paid";
+    if ((claim.status === "PSC Approved" || claim.status === "Approved") && claim.disbursement?.status === "Completed") {
+      return "Finance Paid - Awaiting RMT Closure";
+    }
+    return claim.status;
+  };
+
+  const getClaimWorkflowTone = (claim: PaymentClaim) => {
+    const display = getClaimWorkflowLabel(claim);
+    if (display === "Paid") return "bg-emerald-100 text-emerald-700";
+    if (display === "Finance Paid - Awaiting RMT Closure") return "bg-sky-100 text-sky-700";
+    if (display === "PSC Approved") return "bg-violet-100 text-violet-700";
+    if (display === "RMT Approved" || display === "TAC Endorsed" || display === "Verified" || display === "Approved") return "bg-blue-100 text-blue-700";
+    return "bg-amber-100 text-amber-700";
+  };
+
+  const getClaimActionLabel = (claim: PaymentClaim) => {
+    const financeAlreadyPaid = claim.disbursement?.status === "Completed";
+    if (!canProcessPayments) return "View Only";
+    if (claim.status === "Completed" || claim.status === "Paid") return "Completed";
+    if (claim.paymentLocked) return "Locked";
+    if (processingClaimId === claim.id) return "Processing...";
+    if (canRmtApprove && (claim.status === "Submitted" || claim.status === "Pending")) return "RMT Approve";
+    if (canTacEndorse && (claim.status === "RMT Approved" || claim.status === "Verified")) return "TAC Endorse";
+    if (canPscApprove && claim.status === "TAC Endorsed") return "PSC Approve";
+    if (canFinancePay && (claim.status === "PSC Approved" || claim.status === "Approved") && !financeAlreadyPaid) return "Finance Pay";
+    if (canRmtMarkPaid && (claim.status === "PSC Approved" || claim.status === "Approved") && financeAlreadyPaid) return "Mark As Paid";
+    return "No Action";
+  };
+
+  const canActOnClaim = (claim: PaymentClaim) => {
+    const financeAlreadyPaid = claim.disbursement?.status === "Completed";
+    if (!canProcessPayments || claim.status === "Completed" || claim.status === "Paid" || claim.paymentLocked || processingClaimId === claim.id) return false;
+    return (
+      (canRmtApprove && (claim.status === "Submitted" || claim.status === "Pending"))
+      || (canTacEndorse && (claim.status === "RMT Approved" || claim.status === "Verified"))
+      || (canPscApprove && claim.status === "TAC Endorsed")
+      || (canFinancePay && (claim.status === "PSC Approved" || claim.status === "Approved") && !financeAlreadyPaid)
+      || (canRmtMarkPaid && (claim.status === "PSC Approved" || claim.status === "Approved") && financeAlreadyPaid)
+    );
+  };
+
   const budgetRemaining = Math.max(0, 35800000 - totalDisbursed);
 
   return (
@@ -5196,12 +5162,8 @@ const Disbursements = () => {
                 <td className="px-6 py-4 text-sm text-slate-600">{claim.milestoneId ? `Milestone ${claim.milestoneId}` : "N/A"}</td>
                 <td className="px-6 py-4 font-bold text-slate-900">M {claim.claimAmount.toLocaleString()}</td>
                 <td className="px-6 py-4">
-                  <span className={`badge ${
-                    claim.status === 'Paid' ? 'bg-emerald-100 text-emerald-700' :
-                    claim.status === 'Verified' || claim.status === 'Approved' ? 'bg-blue-100 text-blue-700' :
-                    'bg-amber-100 text-amber-700'
-                  }`}>
-                    {claim.status}
+                  <span className={`badge ${getClaimWorkflowTone(claim)}`}>
+                    {getClaimWorkflowLabel(claim)}
                   </span>
                 </td>
                 <td className="px-6 py-4">
@@ -5209,10 +5171,10 @@ const Disbursements = () => {
                     <button
                       onClick={() => processPayment(claim)}
                       className="text-emerald-600 hover:text-emerald-700 font-medium text-sm disabled:text-slate-400 disabled:cursor-not-allowed text-left"
-                      disabled={!canProcessPayments || claim.status === "Paid" || claim.paymentLocked || processingClaimId === claim.id}
+                      disabled={!canActOnClaim(claim)}
                       title={claim.paymentLocked ? (claim.paymentLockReason || "Payment locked for audit.") : undefined}
                     >
-                      {!canProcessPayments ? "View Only" : claim.status === "Paid" ? "Paid" : claim.paymentLocked ? "Locked" : processingClaimId === claim.id ? "Processing..." : "Process Payment"}
+                      {getClaimActionLabel(claim)}
                     </button>
                     {canFlagIssues && (
                       <button
@@ -8018,12 +7980,6 @@ const VendorDashboard = ({
     if (status === "Rejected") return "bg-rose-100 text-rose-700";
     return "bg-slate-100 text-slate-700";
   };
-  const pendingClaimAmount = milestoneRows
-    .filter(item => item.status !== "Paid")
-    .reduce((sum, item) => sum + Number(item.amount || 0), 0);
-  const averageKpiScore = projects.length
-    ? (projects.reduce((sum, item) => sum + Number(item.uptime || 0), 0) / projects.length).toFixed(1)
-    : "0.0";
   const vendorDashboardMapProjectId = useMemo(() => {
     const latestReportedProjectId = [...installationReports]
       .sort((a, b) => (b.submittedAt || "").localeCompare(a.submittedAt || ""))
@@ -10331,11 +10287,7 @@ const VendorDashboard = ({
         </button>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <StatCard label="Active Projects" value={String(projects.length)} icon={Activity} color="bg-emerald-600" />
-        <StatCard label="Pending Claims" value={`M ${pendingClaimAmount.toLocaleString()}`} icon={CreditCard} color="bg-amber-600" />
-        <StatCard label="Average KPI Score" value={`${averageKpiScore}%`} icon={BarChart3} color="bg-blue-600" />
-      </div>
+      <VendorKpiPanel projects={projects} installationReports={installationReports} />
 
       <div className="card p-6">
         <div className="mb-4">
@@ -10583,6 +10535,15 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
   const [meterCsvUploading, setMeterCsvUploading] = useState(false);
   const [meterCsvMessage, setMeterCsvMessage] = useState<string | null>(null);
   const [fieldworkPage, setFieldworkPage] = useState(1);
+  const [selectedClaimMilestone, setSelectedClaimMilestone] = useState<(Milestone & { projectName?: string }) | null>(null);
+  const [claimDraft, setClaimDraft] = useState({
+    completionDate: "",
+    actualBeneficiaries: "",
+    actualFemaleBeneficiaries: "",
+    notes: "",
+  });
+  const [claimSubmitting, setClaimSubmitting] = useState(false);
+  const [claimMessage, setClaimMessage] = useState<string | null>(null);
 
   const loadData = React.useCallback(async () => {
     setLoading(true);
@@ -10636,6 +10597,9 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
     setMeterCsvFile(null);
     setMeterCsvMessage(null);
     setFieldworkPage(1);
+    setSelectedClaimMilestone(null);
+    setClaimDraft({ completionDate: "", actualBeneficiaries: "", actualFemaleBeneficiaries: "", notes: "" });
+    setClaimMessage(null);
   }, [selectedProject]);
 
   React.useEffect(() => {
@@ -10750,7 +10714,7 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
     [portfolioReports]
   );
   const claimsPendingCount = useMemo(
-    () => claims.filter(claim => !["Paid", "Rejected"].includes(claim.status)).length,
+    () => claims.filter(claim => !["Completed", "Paid", "Rejected"].includes(claim.status)).length,
     [claims]
   );
   const verifiedInstallationsPct = totalInstallations > 0
@@ -10811,8 +10775,74 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
     if (parentProject) {
       setSelectedProject(parentProject);
     }
+    setSelectedClaimMilestone(milestone);
+    setClaimDraft({
+      completionDate: milestone.completedDate || "",
+      actualBeneficiaries: "",
+      actualFemaleBeneficiaries: "",
+      notes: "",
+    });
     setProjectTab("payments");
-    setPlanMessage(`Prepare a payment claim for ${milestone.name}.`);
+    setClaimMessage(`Prepare a payment claim for ${milestone.name}.`);
+  };
+  const handleSubmitProjectClaim = async () => {
+    if (!selectedProject || !selectedClaimMilestone) return;
+    if (!claimDraft.completionDate) {
+      setClaimMessage("Completion date is required before you can submit this claim.");
+      return;
+    }
+
+    const actualBeneficiaries = Number(claimDraft.actualBeneficiaries || 0);
+    const actualFemaleBeneficiaries = Number(claimDraft.actualFemaleBeneficiaries || 0);
+    if (!Number.isFinite(actualBeneficiaries) || actualBeneficiaries <= 0) {
+      setClaimMessage("Actual beneficiaries reached must be greater than zero.");
+      return;
+    }
+    if (!Number.isFinite(actualFemaleBeneficiaries) || actualFemaleBeneficiaries < 0) {
+      setClaimMessage("Actual female beneficiaries must be zero or greater.");
+      return;
+    }
+    if (actualFemaleBeneficiaries > actualBeneficiaries) {
+      setClaimMessage("Actual female beneficiaries cannot exceed total beneficiaries reached.");
+      return;
+    }
+
+    setClaimSubmitting(true);
+    setClaimMessage(null);
+    try {
+      const created = await submitPaymentClaim({
+        projectId: selectedProject.id,
+        milestoneId: selectedClaimMilestone.id,
+        completionDate: claimDraft.completionDate,
+        claimAmount: Number(selectedClaimMilestone.amount || 0),
+        actualBeneficiaries,
+        actualFemaleBeneficiaries,
+        implementationNotes: claimDraft.notes.trim(),
+        declarationAccepted: true,
+      });
+      setClaims((prev) => [created, ...prev]);
+      try {
+        const refreshedMilestones = await fetchMilestones();
+        setMilestones(refreshedMilestones);
+      } catch {
+        setMilestones((prev) =>
+          prev.map((item) =>
+            item.id === selectedClaimMilestone.id
+              ? { ...item, status: "Submitted" }
+              : item
+          )
+        );
+      }
+      await refreshProjectUpdates(selectedProject.id);
+      setSelectedClaimMilestone(null);
+      setClaimDraft({ completionDate: "", actualBeneficiaries: "", actualFemaleBeneficiaries: "", notes: "" });
+      setClaimMessage(`Claim for ${selectedClaimMilestone.name} submitted successfully.`);
+    } catch (err: any) {
+      const raw = String(err?.message || "");
+      setClaimMessage(toFriendlyApiMessage(raw) || "Unable to submit the payment claim.");
+    } finally {
+      setClaimSubmitting(false);
+    }
   };
   const refreshProjectUpdates = async (projectId: string) => {
     try {
@@ -10929,6 +10959,13 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
     if (typeof value !== "number" || Number.isNaN(value)) return "N/A";
     return `LSL ${Number(value).toLocaleString()}`;
   };
+  const displayClaimStatus = (claim: PaymentClaim) => {
+    if (claim.status === "Completed" || claim.status === "Paid") return "Paid";
+    if ((claim.status === "PSC Approved" || claim.status === "Approved") && claim.disbursement?.status === "Completed") {
+      return "Finance Paid - Awaiting RMT Closure";
+    }
+    return claim.status;
+  };
   const formatDuration = (start?: string, end?: string) => {
     if (!start || !end) return "N/A";
     const startDate = new Date(start);
@@ -10946,7 +10983,9 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
   const getMilestoneStateLabel = (milestone: Milestone, projectId: string) => {
     if (milestone.status === "paid" || milestone.status === "Paid") return "PAID";
     const relatedClaim = claimsForProject(projectId).find(claim => claim.milestoneId === milestone.id);
-    if (relatedClaim && ["Pending", "Verified", "Approved"].includes(relatedClaim.status)) return relatedClaim.status.toUpperCase();
+    if (relatedClaim?.status === "PSC Approved") return "APPROVED";
+    if (relatedClaim && ["Submitted", "RMT Approved", "TAC Endorsed", "Pending", "Verified", "Approved"].includes(relatedClaim.status)) return "UNDER REVIEW";
+    if (relatedClaim && ["Completed", "Paid"].includes(relatedClaim.status)) return "PAID";
     if (milestone.status === "claimable" || milestone.status === "Verified") return "CLAIMABLE";
     if (milestone.status === "claimed" || milestone.status === "Submitted") return "UNDER REVIEW";
     if (milestone.status === "pending" || milestone.status === "Pending") return "PENDING";
@@ -10974,9 +11013,28 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
     }
     return { label: "Active", className: "bg-emerald-100 text-emerald-700" };
   };
+  const currentProjectKpiSummary = (projectId: string) =>
+    selectedProjectKpi && selectedProjectKpi.project.id === projectId ? selectedProjectKpi : null;
   const currentMilestoneEligibility = (projectId: string) => {
-    if (!selectedProjectKpi || selectedProjectKpi.project.id !== projectId) return {};
-    return selectedProjectKpi.milestone_eligibility || {};
+    const summary = currentProjectKpiSummary(projectId);
+    if (!summary) return {};
+    return summary.milestone_eligibility || {};
+  };
+  const formatMilestoneConditionLabel = (conditionKey: string) => {
+    const labels: Record<string, string> = {
+      contract_approved: "Contract approved",
+      setup_complete: "Project setup completed",
+      installations_80_pct: "At least 80% of target installations verified",
+      female_pct_50: "Female-headed households at or above 50%",
+      no_blocking_anomaly_flags: "No unresolved blocking anomaly flags",
+      meter_data_present: "Meter data received within the last 30 days",
+      installations_100_pct: "100% of target installations verified",
+      vulnerable_pct_30: "Vulnerable households at or above 30%",
+      low_income_pct_60: "Low-income households at or above 60%",
+      all_anomaly_flags_resolved: "All anomaly flags resolved",
+      milestone_2_paid: "Milestone 2 fully paid",
+    };
+    return labels[conditionKey] || conditionKey.replace(/_/g, " ");
   };
   const getMilestoneConditions = (projectId: string, milestoneNumber?: number) => {
     const key = `milestone_${milestoneNumber || 1}`;
@@ -10986,8 +11044,43 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
   const getMilestoneConditionText = (projectId: string, milestoneNumber?: number) => {
     const conditions = Object.entries(getMilestoneConditions(projectId, milestoneNumber));
     if (conditions.length === 0) return ["No eligibility conditions available yet."];
-    return conditions.map(([key, met]) => `${met ? "✅" : "❌"} ${key.replace(/_/g, " ")}`);
+    return conditions.map(([key, met]) => `${met ? "Met" : "Pending"}: ${formatMilestoneConditionLabel(key)}`);
   };
+  const getMilestoneStateBadgeClass = (label: string) => {
+    if (label === "PAID") return "border-emerald-200 bg-emerald-50 text-emerald-700";
+    if (label === "CLAIMABLE" || label === "APPROVED" || label === "VERIFIED") return "border-sky-200 bg-sky-50 text-sky-700";
+    if (label === "UNDER REVIEW" || label === "PENDING") return "border-amber-200 bg-amber-50 text-amber-700";
+    return "border-slate-200 bg-slate-100 text-slate-600";
+  };
+  const getConditionRowClass = (met: boolean) =>
+    met
+      ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+      : "border-slate-200 bg-slate-50 text-slate-600";
+  const getProjectKpiSnapshot = (project: Project) => {
+    const summary = currentProjectKpiSummary(project.id);
+    return {
+      verified: summary?.installation_progress.verified ?? verifiedInstallationsForProject(project.id),
+      target: summary?.installation_progress.target ?? Number(project.targetInstallations || 0),
+      femalePct: summary?.gender_kpi.female_headed.percentage ?? Number(project.genderImpact || 0),
+      vulnerablePct: summary?.gender_kpi.vulnerable.percentage ?? 0,
+      lowIncomePct: summary?.gender_kpi.low_income.percentage ?? 0,
+      uptimePct: summary?.uptime_kpi.average_uptime_pct ?? Number(project.uptime || 0),
+      energyKwh: summary?.energy_kpi.current_month_kwh ?? Number(project.energyOutput || 0),
+      blockingFlagsCleared: summary?.milestone_eligibility?.milestone_2?.conditions?.no_blocking_anomaly_flags,
+      meterDataPresent: summary?.milestone_eligibility?.milestone_2?.conditions?.meter_data_present,
+      progressPct: summary?.installation_progress.progress_pct ?? Number(project.progress || 0),
+    };
+  };
+  function getProjectKpiDisplay(project: Project) {
+    const snapshot = getProjectKpiSnapshot(project);
+    return {
+      progressLabel: `${Math.round(snapshot.progressPct)}%`,
+      genderLabel: formatPercent(snapshot.femalePct, 0),
+      uptimeLabel: formatPercent(snapshot.uptimePct, 1),
+      energyLabel: `${snapshot.energyKwh.toLocaleString()} kWh`,
+      verifiedLabel: `${snapshot.verified.toLocaleString()} (${formatPercent(snapshot.target > 0 ? (snapshot.verified / snapshot.target) * 100 : 0, 0)})`,
+    };
+  }
   const latestAuditForProject = (projectId: string) => auditLogsForProject(projectId)[0];
   const exportRmtProjectsCsv = () => {
     const header = [
@@ -11005,9 +11098,8 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
       "status",
     ];
     const rows = filteredProjects.map(project => {
-      const verifiedCount = verifiedInstallationsForProject(project.id);
-      const target = Number(project.targetInstallations || 0);
-      const verifiedPct = target > 0 ? ((verifiedCount / target) * 100).toFixed(1) : "0.0";
+      const kpiSnapshot = getProjectKpiSnapshot(project);
+      const verifiedPct = kpiSnapshot.target > 0 ? ((kpiSnapshot.verified / kpiSnapshot.target) * 100).toFixed(1) : "0.0";
       const nextMilestone = nextOpenMilestoneForProject(project.id);
       const milestoneLabel = nextMilestone
         ? `M${milestonesForProject(project.id).findIndex(item => item.id === nextMilestone.id) + 1} - ${getMilestoneStateLabel(nextMilestone, project.id)}`
@@ -11018,11 +11110,11 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
         project.techType,
         project.district || project.region,
         projectWindowLabel(project),
-        String(target),
-        String(verifiedCount),
+        String(kpiSnapshot.target),
+        String(kpiSnapshot.verified),
         verifiedPct,
-        typeof project.genderImpact === "number" ? project.genderImpact.toFixed(1) : "",
-        typeof project.uptime === "number" ? project.uptime.toFixed(1) : "",
+        kpiSnapshot.femalePct.toFixed(1),
+        kpiSnapshot.uptimePct.toFixed(1),
         milestoneLabel,
         project.status,
       ].join(",");
@@ -11427,8 +11519,11 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
     const flaggedCount = flaggedInstallationsForProject(project.id);
     const targetInstallations = Number(project.targetInstallations || 0);
     const verifiedPct = targetInstallations > 0 ? (verifiedCount / targetInstallations) * 100 : 0;
+    const kpiSnapshot = getProjectKpiSnapshot(project);
+    const kpiDisplay = getProjectKpiDisplay(project);
+    const kpiSummary = currentProjectKpiSummary(project.id);
     const paidAmount = projectClaims
-      .filter(claim => claim.status === "Paid")
+      .filter(claim => claim.status === "Completed" || claim.status === "Paid")
       .reduce((sum, claim) => sum + Number(claim.claimAmount || 0), 0);
     const totalContractAmount = Number(budgetForProject(project) || 0);
     const remainingAmount = Math.max(0, totalContractAmount - paidAmount);
@@ -11514,11 +11609,30 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
                   <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
                     <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
                       <p className="text-xs text-slate-500">Verification Snapshot</p>
-                      <div className="mt-2 space-y-1 text-sm text-slate-700">
-                        <p>{verifiedCount >= Math.ceil(targetInstallations * 0.8) ? "✅" : "❌"} Verified installations: {verifiedCount}/{formatMetricValue(project.targetInstallations)}</p>
-                        <p>{(project.genderImpact || 0) >= 50 ? "✅" : "❌"} Gender KPI: {formatPercent(project.genderImpact, 0)}</p>
-                        <p>{flaggedCount === 0 ? "✅" : "❌"} Blocking anomaly flags: {flaggedCount}</p>
-                        <p>{(project.uptime || 0) > 0 ? "✅" : "❌"} Uptime data present: {formatPercent(project.uptime, 1)}</p>
+                      <div className="mt-2 grid gap-2 text-sm">
+                        {[
+                          {
+                            label: `Verified installations: ${kpiSnapshot.verified}/${formatMetricValue(kpiSnapshot.target)}`,
+                            met: kpiSummary?.milestone_eligibility?.milestone_2?.conditions?.installations_80_pct ?? (verifiedCount >= Math.ceil(targetInstallations * 0.8)),
+                          },
+                          {
+                            label: `Female-headed households: ${kpiDisplay.genderLabel}`,
+                            met: kpiSummary?.milestone_eligibility?.milestone_2?.conditions?.female_pct_50 ?? (kpiSnapshot.femalePct >= 50),
+                          },
+                          {
+                            label: `Blocking anomaly flags: ${flaggedCount}`,
+                            met: kpiSummary?.milestone_eligibility?.milestone_2?.conditions?.no_blocking_anomaly_flags ?? (flaggedCount === 0),
+                          },
+                          {
+                            label: `Meter data in last 30 days: ${kpiSummary?.milestone_eligibility?.milestone_2?.conditions?.meter_data_present ? "Available" : "Not yet available"}`,
+                            met: kpiSummary?.milestone_eligibility?.milestone_2?.conditions?.meter_data_present ?? false,
+                          },
+                        ].map((item) => (
+                          <div key={item.label} className={`flex items-center gap-2 rounded-xl border px-3 py-2 ${getConditionRowClass(item.met)}`}>
+                            {item.met ? <CheckCircle2 size={15} /> : <Clock size={15} />}
+                            <span className="font-medium">{item.label}</span>
+                          </div>
+                        ))}
                       </div>
                     </div>
                     <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
@@ -11573,10 +11687,20 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
     const planningReadOnly = setupReadOnly;
     const statusTone = getProjectStatusTone(project);
     const contractValue = Number(project.contractValue ?? budgetForProject(project) ?? 0);
-    const paidAmount = projectClaims.filter(claim => claim.status === "Paid").reduce((sum, claim) => sum + Number(claim.claimAmount || 0), 0);
-    const pendingAmount = projectClaims
-      .filter(claim => claim.status !== "Paid" && claim.status !== "Rejected")
+    const kpiSnapshot = getProjectKpiSnapshot(project);
+    const kpiDisplay = getProjectKpiDisplay(project);
+    const kpiSummary = currentProjectKpiSummary(project.id);
+    const paidAmount = projectClaims
+      .filter(claim => claim.status === "Completed" || claim.status === "Paid")
       .reduce((sum, claim) => sum + Number(claim.claimAmount || 0), 0);
+    const pendingAmount = projectClaims
+      .filter(claim => !["Completed", "Paid", "Rejected"].includes(claim.status))
+      .reduce((sum, claim) => sum + Number(claim.claimAmount || 0), 0);
+    const claimableMilestones = projectMilestones.filter((milestone) => {
+      const alreadyClaimed = projectClaims.some((claim) => claim.milestoneId === milestone.id && claim.status !== "Rejected");
+      const label = getMilestoneStateLabel(milestone, project.id);
+      return label === "CLAIMABLE" && !alreadyClaimed;
+    });
     const nextMilestone = nextOpenMilestoneForProject(project.id);
     const latestAudit = latestAuditForProject(project.id) || project.latestAuditEntry;
     const latestCsvAudit = projectAuditTrail.find(log => log.action === "meter_csv_uploaded");
@@ -11606,9 +11730,9 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
               </div>
               <div className="flex flex-wrap items-center gap-3">
                 <div className="h-3 w-56 overflow-hidden rounded-full bg-slate-100">
-                  <div className="h-full rounded-full bg-gradient-to-r from-emerald-500 via-teal-400 to-sky-500" style={{ width: `${overallProgress}%` }} />
+                  <div className="h-full rounded-full bg-gradient-to-r from-emerald-500 via-teal-400 to-sky-500" style={{ width: `${kpiSnapshot.progressPct}%` }} />
                 </div>
-                <span className="text-sm font-semibold text-slate-700">{overallProgress}%</span>
+                <span className="text-sm font-semibold text-slate-700">{Math.round(kpiSnapshot.progressPct)}%</span>
                 <span className={`rounded-full px-3 py-1 text-xs font-semibold ${statusTone.className}`}>{statusTone.label}</span>
               </div>
             </div>
@@ -11645,7 +11769,7 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
 
           <div className="grid grid-cols-3 gap-3 text-[11px] text-slate-500">
             <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">Milestones</p><p className="font-semibold text-slate-700">{projectMilestones.length}</p></div>
-            <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">Overall Progress</p><p className="font-semibold text-slate-700">{overallProgress}%</p></div>
+            <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">Overall Progress</p><p className="font-semibold text-slate-700">{Math.round(kpiSnapshot.progressPct)}%</p></div>
             <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">Claims</p><p className="font-semibold text-slate-700">{projectClaims.length}</p></div>
           </div>
 
@@ -11715,20 +11839,22 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
               </div>
 
               <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
-                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-[11px] uppercase tracking-wide text-slate-500">Installations</p><p className="mt-1 text-lg font-semibold text-slate-900">{targetInstallations > 0 ? `${verifiedCount}/${targetInstallations}` : "—"}</p></div>
-                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-[11px] uppercase tracking-wide text-slate-500">Female</p><p className="mt-1 text-lg font-semibold text-slate-900">{selectedProjectKpi?.project.id === project.id && selectedProjectKpi.gender_kpi?.female_headed?.percentage != null ? `${selectedProjectKpi.gender_kpi.female_headed.percentage.toFixed(1)}%` : "—"}</p></div>
-                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-[11px] uppercase tracking-wide text-slate-500">Uptime</p><p className="mt-1 text-lg font-semibold text-slate-900">{selectedProjectKpi?.project.id === project.id ? `${selectedProjectKpi.uptime_kpi.average_uptime_pct.toFixed(1)}%` : "—"}</p></div>
-                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-[11px] uppercase tracking-wide text-slate-500">Energy</p><p className="mt-1 text-lg font-semibold text-slate-900">{selectedProjectKpi?.project.id === project.id ? `${selectedProjectKpi.energy_kpi.current_month_kwh.toLocaleString()} kWh` : "—"}</p></div>
+                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-[11px] uppercase tracking-wide text-slate-500">Installations</p><p className="mt-1 text-lg font-semibold text-slate-900">{kpiSnapshot.target > 0 ? `${kpiSnapshot.verified}/${kpiSnapshot.target}` : "—"}</p></div>
+                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-[11px] uppercase tracking-wide text-slate-500">Female</p><p className="mt-1 text-lg font-semibold text-slate-900">{kpiSummary ? kpiDisplay.genderLabel : "—"}</p></div>
+                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-[11px] uppercase tracking-wide text-slate-500">Uptime</p><p className="mt-1 text-lg font-semibold text-slate-900">{kpiSummary ? kpiDisplay.uptimeLabel : "—"}</p></div>
+                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-[11px] uppercase tracking-wide text-slate-500">Energy</p><p className="mt-1 text-lg font-semibold text-slate-900">{kpiSummary ? kpiDisplay.energyLabel : "—"}</p></div>
               </div>
 
               <div className="space-y-3">
                 {projectMilestones.map((milestone, index) => {
                   const label = getMilestoneStateLabel(milestone, project.id);
                   return (
-                    <div key={milestone.id} className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
-                      <div className="flex items-center justify-between">
+                    <div key={milestone.id} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                      <div className="flex items-center justify-between gap-3">
                         <p className="font-semibold text-slate-900">M{milestone.milestoneNumber || index + 1} ({milestone.disbursementPct || milestone.percentage}%)</p>
-                        <p className={`text-sm font-bold ${getMilestoneStateTone(label)}`}>{label === "PAID" ? "✅ PAID" : label === "CLAIMABLE" ? "🟢 CLAIMABLE" : label === "PENDING" ? "⏳ Pending" : label}</p>
+                        <span className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold tracking-wide ${getMilestoneStateBadgeClass(label)}`}>
+                          {label}
+                        </span>
                       </div>
                       <div className="mt-2 space-y-1 text-sm text-slate-600">
                         {getMilestoneConditionText(project.id, milestone.milestoneNumber).map(line => <p key={line}>{line}</p>)}
@@ -11744,7 +11870,10 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
             <div className="space-y-6">
               <div>
                 <h4 className="text-sm font-semibold text-slate-800">Planning</h4>
-                <p className="text-xs text-slate-500">Setup: {setupReadOnly ? "Complete ✅" : "Incomplete ⚠"}</p>
+                <div className="mt-2 inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 shadow-sm">
+                  {setupReadOnly ? <CheckCircle2 size={14} className="text-emerald-600" /> : <Clock size={14} className="text-amber-600" />}
+                  <span>Setup {setupReadOnly ? "Complete" : "In Progress"}</span>
+                </div>
               </div>
 
               <div className={`rounded-2xl border p-4 ${getSetupBannerClass(project)}`}>
@@ -11929,9 +12058,18 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
                 <p className="text-xs text-slate-500">See every submitted installation for this project on the GIS map.</p>
               </div>
               <div className="flex gap-3 text-sm">
-                <span className="rounded-full bg-emerald-100 px-3 py-1 text-emerald-700">🟢 {verifiedCount}</span>
-                <span className="rounded-full bg-amber-100 px-3 py-1 text-amber-700">🟡 {pendingCount}</span>
-                <span className="rounded-full bg-rose-100 px-3 py-1 text-rose-700">🔴 {flaggedCount}</span>
+                <span className="inline-flex items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-emerald-700">
+                  <span className="h-2 w-2 rounded-full bg-emerald-500" />
+                  Verified {verifiedCount}
+                </span>
+                <span className="inline-flex items-center gap-2 rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-amber-700">
+                  <span className="h-2 w-2 rounded-full bg-amber-500" />
+                  Pending {pendingCount}
+                </span>
+                <span className="inline-flex items-center gap-2 rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-rose-700">
+                  <span className="h-2 w-2 rounded-full bg-rose-500" />
+                  Flagged {flaggedCount}
+                </span>
               </div>
               <GisInstallationsMap projectId={project.id} showFilters={true} height="500px" />
             </div>
@@ -11984,7 +12122,7 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
                               <div key={claim.id} className="flex flex-col gap-1 rounded-xl border border-slate-100 bg-white px-3 py-2 text-sm text-slate-600 md:flex-row md:items-center md:justify-between">
                                 <span>{claim.submittedAt ? new Date(claim.submittedAt).toLocaleString() : "N/A"}</span>
                                 <span>{formatCurrency(claim.claimAmount || 0)}</span>
-                                <span className="font-semibold text-slate-900">{claim.status}</span>
+                                <span className="font-semibold text-slate-900">{displayClaimStatus(claim)}</span>
                               </div>
                             ))}
                           </div>
@@ -12132,10 +12270,125 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
                 <h4 className="text-sm font-semibold text-slate-800">Payments</h4>
                 <p className="text-xs text-slate-500">Track milestone claims and payment status.</p>
               </div>
+              {claimMessage && (
+                <div className={`rounded-2xl border px-4 py-3 text-sm ${
+                  claimMessage.toLowerCase().includes("success")
+                    ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                    : "border-amber-200 bg-amber-50 text-amber-800"
+                }`}>
+                  {claimMessage}
+                </div>
+              )}
               <div className="grid gap-3 md:grid-cols-3">
                 <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-xs text-slate-500">Total Contract Value</p><p className="mt-1 text-lg font-semibold text-slate-900">{formatCurrency(contractValue)}</p></div>
                 <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-xs text-slate-500">Total Paid</p><p className="mt-1 text-lg font-semibold text-slate-900">{formatCurrency(paidAmount)}</p></div>
                 <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-xs text-slate-500">Total Pending</p><p className="mt-1 text-lg font-semibold text-slate-900">{formatCurrency(pendingAmount)}</p></div>
+              </div>
+              <div className="grid gap-6 lg:grid-cols-[0.95fr_1.05fr]">
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 space-y-4">
+                  <div>
+                    <p className="text-sm font-semibold text-slate-800">Claimable Milestones</p>
+                    <p className="text-xs text-slate-500">Start a claim for milestones that are eligible and not yet under review.</p>
+                  </div>
+                  {claimableMilestones.length === 0 && (
+                    <p className="text-sm text-slate-500">No claimable milestones are available right now.</p>
+                  )}
+                  {claimableMilestones.map((milestone, index) => (
+                    <div key={milestone.id} className="rounded-2xl border border-slate-200 bg-white p-4">
+                      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                        <div>
+                          <p className="font-semibold text-slate-900">{getMilestoneDisplayName(milestone, index)}</p>
+                          <p className="text-sm text-slate-500">{milestone.description?.trim() || "Eligible for payment claim submission."}</p>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <span className="text-sm font-semibold text-slate-900">{formatCurrency(milestone.amount)}</span>
+                          <button
+                            onClick={() => handleStartClaim({ ...milestone, projectName: project.tenderName || project.projectReference || project.id })}
+                            className="btn-primary text-xs"
+                          >
+                            Start Claim
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 space-y-4">
+                  <div>
+                    <p className="text-sm font-semibold text-slate-800">Claim Composer</p>
+                    <p className="text-xs text-slate-500">Complete the required milestone completion data, then submit the claim to the approval workflow.</p>
+                  </div>
+                  {!selectedClaimMilestone ? (
+                    <p className="text-sm text-slate-500">Select a claimable milestone to open the payment claim form.</p>
+                  ) : (
+                    <div className="space-y-4">
+                      <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
+                        <p className="text-sm font-semibold text-emerald-900">{selectedClaimMilestone.name}</p>
+                        <p className="mt-1 text-xs text-emerald-700">Claim amount: {formatCurrency(selectedClaimMilestone.amount)}</p>
+                      </div>
+                      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                        <div className="space-y-1">
+                          <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">Completion Date</label>
+                          <input
+                            type="date"
+                            className="input-field"
+                            value={claimDraft.completionDate}
+                            onChange={(e) => setClaimDraft((prev) => ({ ...prev, completionDate: e.target.value }))}
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">Claim Amount</label>
+                          <input type="text" className="input-field bg-slate-100" value={formatCurrency(selectedClaimMilestone.amount)} disabled />
+                        </div>
+                        <div className="space-y-1">
+                          <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">Actual Beneficiaries</label>
+                          <input
+                            type="number"
+                            min="0"
+                            className="input-field"
+                            value={claimDraft.actualBeneficiaries}
+                            onChange={(e) => setClaimDraft((prev) => ({ ...prev, actualBeneficiaries: e.target.value }))}
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">Actual Female Beneficiaries</label>
+                          <input
+                            type="number"
+                            min="0"
+                            className="input-field"
+                            value={claimDraft.actualFemaleBeneficiaries}
+                            onChange={(e) => setClaimDraft((prev) => ({ ...prev, actualFemaleBeneficiaries: e.target.value }))}
+                          />
+                        </div>
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">Implementation Notes</label>
+                        <textarea
+                          className="input-field min-h-[110px]"
+                          placeholder="Add any delivery notes, site issues, or evidence summary for reviewers."
+                          value={claimDraft.notes}
+                          onChange={(e) => setClaimDraft((prev) => ({ ...prev, notes: e.target.value }))}
+                        />
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <button onClick={() => void handleSubmitProjectClaim()} className="btn-primary text-xs" disabled={claimSubmitting}>
+                          {claimSubmitting ? "Submitting..." : "Submit Payment Claim"}
+                        </button>
+                        <button
+                          onClick={() => {
+                            setSelectedClaimMilestone(null);
+                            setClaimDraft({ completionDate: "", actualBeneficiaries: "", actualFemaleBeneficiaries: "", notes: "" });
+                            setClaimMessage(null);
+                          }}
+                          className="btn-secondary text-xs"
+                          disabled={claimSubmitting}
+                        >
+                          Clear
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
               <div className="overflow-x-auto rounded-2xl border border-slate-200">
                 <table className="min-w-full divide-y divide-slate-200 text-sm">
@@ -12159,7 +12412,7 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
                         <td className="px-4 py-3 text-slate-700">{projectMilestones.find(m => m.id === claim.milestoneId)?.name || claim.milestoneId || "Milestone"}</td>
                         <td className="px-4 py-3 text-slate-700">{formatCurrency(claim.claimAmount || 0)}</td>
                         <td className="px-4 py-3 text-slate-700">{claim.submittedAt ? new Date(claim.submittedAt).toLocaleString() : "N/A"}</td>
-                        <td className="px-4 py-3 text-slate-700">{claim.status}</td>
+                        <td className="px-4 py-3 text-slate-700">{displayClaimStatus(claim)}</td>
                         <td className="px-4 py-3 text-slate-700">{claim.disbursement?.reference || "—"}</td>
                       </tr>
                     ))}
@@ -12407,9 +12660,8 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
                 </thead>
                 <tbody>
                   {filteredProjects.map(project => {
-                    const verifiedCount = verifiedInstallationsForProject(project.id);
-                    const target = Number(project.targetInstallations || 0);
-                    const verifiedPct = target > 0 ? (verifiedCount / target) * 100 : 0;
+                    const kpiSnapshot = getProjectKpiSnapshot(project);
+                    const kpiDisplay = getProjectKpiDisplay(project);
                     const milestoneRows = milestonesForProject(project.id);
                     const nextMilestone = nextOpenMilestoneForProject(project.id);
                     const nextMilestoneIndex = nextMilestone ? milestoneRows.findIndex(item => item.id === nextMilestone.id) + 1 : milestoneRows.length;
@@ -12423,10 +12675,10 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
                           <td className="px-4 py-3">{project.vendorName || "N/A"}</td>
                           <td className="px-4 py-3">{project.techType || "N/A"}</td>
                           <td className="px-4 py-3">{project.district || project.region || "N/A"}</td>
-                          <td className="px-4 py-3">{formatMetricValue(project.targetInstallations)}</td>
-                          <td className="px-4 py-3">{verifiedCount.toLocaleString()} ({formatPercent(verifiedPct, 0)})</td>
-                          <td className="px-4 py-3">{formatPercent(project.genderImpact, 0)}</td>
-                          <td className="px-4 py-3">{formatPercent(project.uptime, 1)}</td>
+                          <td className="px-4 py-3">{formatMetricValue(kpiSnapshot.target)}</td>
+                          <td className="px-4 py-3">{kpiDisplay.verifiedLabel}</td>
+                          <td className="px-4 py-3">{kpiDisplay.genderLabel}</td>
+                          <td className="px-4 py-3">{kpiDisplay.uptimeLabel}</td>
                           <td className="px-4 py-3">{milestoneLabel}</td>
                           <td className="px-4 py-3"><span className="rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-700">{project.status}</span></td>
                           <td className="px-4 py-3">
@@ -14221,28 +14473,12 @@ const FieldVerifierView = ({ mode = "dashboard" }: { mode?: "dashboard" | "inspe
       )}
 
       {mode === "dashboard" && (
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6">
-        <div className="card p-6">
-          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Pending Verifications</p>
-          <p className="mt-2 text-3xl font-bold text-slate-900">{pendingCount}</p>
-          <p className="mt-2 text-xs text-amber-700">Action required</p>
-        </div>
-        <div className="card p-6">
-          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Verified Today</p>
-          <p className="mt-2 text-3xl font-bold text-slate-900">{verifiedToday}</p>
-          <p className="mt-2 text-xs text-emerald-700">Completed on site</p>
-        </div>
-        <div className="card p-6">
-          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Flagged Today</p>
-          <p className="mt-2 text-3xl font-bold text-slate-900">{flaggedToday}</p>
-          <p className="mt-2 text-xs text-rose-700">Needs review</p>
-        </div>
-        <div className="card p-6">
-          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">This Week Completed</p>
-          <p className="mt-2 text-3xl font-bold text-slate-900">{completedThisWeek}</p>
-          <p className="mt-2 text-xs text-slate-500">Verified, flagged, and partial</p>
-        </div>
-      </div>
+        <FieldOperationalKpiPanel
+          tasks={tasks}
+          reports={reports}
+          projects={projects}
+          assignedDistrict={assignedDistrict}
+        />
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -15957,11 +16193,6 @@ export default function App() {
     setAuthMessage(`Account created for "${username}". Log in now; complete pre-qualification before submitting applications.`);
   };
 
-  const handleNewTender = () => {
-    setTenderView("create");
-    setActiveTab("tenders");
-  };
-
   const resolveNotificationTarget = (note: Notification) => {
     const event = (note.event || "").toLowerCase();
     const linkedId = (note.linkedEntityId || "").trim();
@@ -16135,10 +16366,13 @@ export default function App() {
     if (role === UserRole.TAC) {
       switch (activeTab) {
         case "dashboard":
+        case "payments":
         case "evaluations":
         case "scoring":
         case "blacklisting":
-          return activeTab === "blacklisting" ? <Blacklisting currentUser={currentUser} /> : <TACView mode="technical" />;
+          if (activeTab === "blacklisting") return <Blacklisting currentUser={currentUser} />;
+          if (activeTab === "payments") return <Disbursements />;
+          return <TACView mode="technical" />;
         default:
           return <TACView mode="technical" />;
       }
@@ -16188,9 +16422,23 @@ export default function App() {
         case "endorsements":
         case "kpis":
         case "blacklisting":
-          return activeTab === "blacklisting" ? <Blacklisting currentUser={currentUser} /> : <DoEOfficerView />;
+          return activeTab === "blacklisting" ? (
+            <Blacklisting currentUser={currentUser} />
+          ) : (
+            <PortfolioMonitoringView
+              title="Department of Energy"
+              description={`Regional GIS and KPI monitoring for ${currentUser?.region || "the assigned region"}.`}
+              emptyProjectsMessage="No projects are currently assigned to this regional scope."
+            />
+          );
         default:
-          return <DoEOfficerView />;
+          return (
+            <PortfolioMonitoringView
+              title="Department of Energy"
+              description={`Regional GIS and KPI monitoring for ${currentUser?.region || "the assigned region"}.`}
+              emptyProjectsMessage="No projects are currently assigned to this regional scope."
+            />
+          );
       }
     }
     if (role === UserRole.UNDP_DONOR) {
@@ -16198,13 +16446,22 @@ export default function App() {
         case "dashboard":
         case "impact":
         case "funding":
-          return <DonorView />;
+        case "compliance":
+          return (
+            <MacroKpiPortal
+              title="Project Steering Committee"
+              description="Macro portfolio monitoring for national progress, inclusion compliance, payment pacing, and system alerts."
+            />
+          );
         case "payments":
           return <Disbursements />;
-        case "compliance":
-          return <AuditorView />;
         default:
-          return <DonorView />;
+          return (
+            <MacroKpiPortal
+              title="Project Steering Committee"
+              description="Macro portfolio monitoring for national progress, inclusion compliance, payment pacing, and system alerts."
+            />
+          );
       }
     }
     if (role === UserRole.AUDITOR) {
@@ -16214,15 +16471,33 @@ export default function App() {
         case "verification":
         case "compliance":
         case "blacklisting":
-          return activeTab === "blacklisting" ? <Blacklisting currentUser={currentUser} /> : <AuditorView />;
+          return activeTab === "blacklisting" ? (
+            <Blacklisting currentUser={currentUser} />
+          ) : (
+            <PortfolioMonitoringView
+              title="Auditor Portal"
+              description="Read-only GIS, KPI, and project evidence monitoring for compliance and anomaly review."
+            />
+          );
         default:
-          return <AuditorView />;
+          return (
+            <PortfolioMonitoringView
+              title="Auditor Portal"
+              description="Read-only GIS, KPI, and project evidence monitoring for compliance and anomaly review."
+            />
+          );
       }
     }
 
     // Default RBF Official view
     switch (activeTab) {
-      case "dashboard": return <Dashboard role={role} onNewTender={handleNewTender} />;
+      case "dashboard":
+        return (
+          <MacroKpiPortal
+            title="RMT Dashboard"
+            description="Macro oversight across Lesotho with national progress, district performance, payment pacing, inclusion compliance, and live red flags."
+          />
+        );
       case "evaluations": return <TACView mode="financial" />;
       case "tenders": return (
         <Tenders
@@ -16235,7 +16510,13 @@ export default function App() {
       case "rbf_projects": return <ProjectsHub mode="rbf" />;
       case "blacklisting": return <Blacklisting currentUser={currentUser} />;
       case "payments": return <Disbursements />;
-      default: return <Dashboard role={role} onNewTender={handleNewTender} />;
+      default:
+        return (
+          <MacroKpiPortal
+            title="RMT Dashboard"
+            description="Macro oversight across Lesotho with national progress, district performance, payment pacing, inclusion compliance, and live red flags."
+          />
+        );
     }
   };
 
@@ -16261,6 +16542,7 @@ export default function App() {
     if (role === UserRole.TAC) {
       return [
         ...common,
+        { id: "payments", icon: CreditCard, label: "Claim Reviews" },
         { id: "evaluations", icon: ClipboardCheck, label: "Evaluations", badge: "4" },
         { id: "scoring", icon: BarChart3, label: "Scoring Matrix" },
         { id: "blacklisting", icon: FileWarning, label: "Blacklisting" },

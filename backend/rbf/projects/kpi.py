@@ -6,12 +6,14 @@ from pathlib import Path
 from typing import Any
 
 from django.core.cache import cache
+from django.db import transaction
 from django.db.models import Avg, Count, Min, Q, Sum
 from django.db.models.functions import TruncMonth, TruncWeek
 from django.utils import timezone
 
 from rbf.notifications.models import Notification, NotificationChannel, NotificationStatus
 from rbf.tenders.models import ContractStatus, TenderContract
+from rbf.users.models import User, UserRole
 
 from .audit import log_audit
 from .models import (
@@ -313,11 +315,65 @@ class KpiService:
         result = self._get_milestone_eligibility()
         return result.summary
 
+    def _is_unlockable_status(self, status_value: str | None) -> bool:
+        normalized = str(status_value or "").strip().lower()
+        return normalized in {"locked", "pending"}
+
+    def _unlock_milestone_if_eligible(
+        self,
+        *,
+        milestone: Milestone | None,
+        milestone_number: int,
+        eligible: bool,
+        reason_notes: str,
+    ) -> bool:
+        if milestone is None or not eligible or not self._is_unlockable_status(milestone.status):
+            return False
+
+        with transaction.atomic():
+            milestone.status = "claimable"
+            if not milestone.unlocked_at:
+                milestone.unlocked_at = timezone.now()
+                milestone.save(update_fields=["status", "unlocked_at", "updated_at"])
+            else:
+                milestone.save(update_fields=["status", "updated_at"])
+            Notification.objects.create(
+                recipient_id=str(self.project.vendor_id),
+                recipient_name=self.project.vendor_name,
+                type=NotificationChannel.IN_APP,
+                event="milestone_claimable",
+                title=f"Milestone {milestone_number} Claimable",
+                body=f"Milestone {milestone_number} for Project {self.project.id} is now claimable. Log in to submit your claim.",
+                status=NotificationStatus.SENT,
+                linked_entity_id=str(self.project.id),
+            )
+            log_audit(
+                None,
+                "milestone_claimable_auto_detected",
+                milestone,
+                {
+                    "project_id": str(self.project.id),
+                    "milestone_number": milestone_number,
+                    "notes": reason_notes,
+                },
+            )
+            create_project_activity_update(
+                self.project,
+                None,
+                f"Milestone {milestone_number} Claimable",
+                reason_notes,
+            )
+        return True
+
     def _get_milestone_eligibility(self) -> MilestoneEligibilityResult:
         installation = self.getInstallationProgress()
         gender = self.getGenderKpi()
         readings_cutoff = timezone.now() - timedelta(days=30)
-        blocking_flags = AnomalyFlag.objects.filter(project=self.project, is_resolved=False).exclude(flag_type='duplicate_gps').count()
+        blocking_flags = AnomalyFlag.objects.filter(
+            project=self.project,
+            is_resolved=False,
+            flag_type__in=['zero_uptime', 'output_deviation'],
+        ).count()
         all_flags = AnomalyFlag.objects.filter(project=self.project, is_resolved=False).count()
         meter_present = self._readings_queryset().filter(recorded_at__gte=readings_cutoff).exists()
 
@@ -336,7 +392,7 @@ class KpiService:
                 or PaymentClaim.objects.filter(
                     project=self.project,
                     milestone=milestone_two,
-                    status=PaymentClaimStatus.PAID,
+                    status__in={PaymentClaimStatus.COMPLETED, PaymentClaimStatus.LEGACY_PAID},
                 ).exists()
             )
         )
@@ -346,13 +402,35 @@ class KpiService:
             milestone_one
             and (
                 milestone_one.status in {"paid", "Paid"}
-                or PaymentClaim.objects.filter(project=self.project, milestone=milestone_one, status=PaymentClaimStatus.PAID).exists()
+                or PaymentClaim.objects.filter(
+                    project=self.project,
+                    milestone=milestone_one,
+                    status__in={PaymentClaimStatus.COMPLETED, PaymentClaimStatus.LEGACY_PAID},
+                ).exists()
             )
         )
+        milestone_one_claimable = bool(milestone_one and str(milestone_one.status).strip().lower() in {"claimable", "claimed", "paid"})
+        milestone_two_claimable = bool(milestone_two and str(milestone_two.status).strip().lower() in {"claimable", "claimed", "paid"})
+        milestone_three = _milestone_by_number(self.project, 3)
+        milestone_three_paid = bool(
+            milestone_three
+            and (
+                milestone_three.status in {"paid", "Paid"}
+                or PaymentClaim.objects.filter(
+                    project=self.project,
+                    milestone=milestone_three,
+                    status__in={PaymentClaimStatus.COMPLETED, PaymentClaimStatus.LEGACY_PAID},
+                ).exists()
+            )
+        )
+        milestone_three_claimable = bool(milestone_three and str(milestone_three.status).strip().lower() in {"claimable", "claimed", "paid"})
+        female_pct_met = bool(gender["female_headed"]["met"])
+        vulnerable_pct_met = bool(gender["vulnerable"]["met"])
+        low_income_pct_met = bool(gender["low_income"]["met"])
         summary = {
             "milestone_1": {
                 "eligible": contract_approved and setup_complete,
-                "status": "PAID" if milestone_one_paid else "CLAIMABLE" if contract_approved and setup_complete else "Pending",
+                "status": "PAID" if milestone_one_paid else "CLAIMABLE" if (contract_approved and setup_complete or milestone_one_claimable) else "Pending",
                 "conditions": {
                     "contract_approved": contract_approved,
                     "setup_complete": setup_complete,
@@ -367,13 +445,13 @@ class KpiService:
                 ),
                 "status": "PAID" if milestone_two_paid else "CLAIMABLE" if (
                     verified_ratio >= 0.8
-                    and gender["female_headed"]["met"]
+                    and female_pct_met
                     and blocking_flags == 0
                     and meter_present
-                ) else "Pending",
+                ) or milestone_two_claimable else "Pending",
                 "conditions": {
                     "installations_80_pct": verified_ratio >= 0.8,
-                    "female_pct_50": gender["female_headed"]["met"],
+                    "female_pct_50": female_pct_met,
                     "no_blocking_anomaly_flags": blocking_flags == 0,
                     "meter_data_present": meter_present,
                 },
@@ -381,19 +459,25 @@ class KpiService:
             "milestone_3": {
                 "eligible": (
                     verified_ratio >= 1.0
-                    and gender["all_gender_kpis_met"]
+                    and female_pct_met
+                    and vulnerable_pct_met
+                    and low_income_pct_met
                     and all_flags == 0
                     and milestone_two_paid
                 ),
-                "status": "CLAIMABLE" if (
+                "status": "PAID" if milestone_three_paid else "CLAIMABLE" if (
                     verified_ratio >= 1.0
-                    and gender["all_gender_kpis_met"]
+                    and female_pct_met
+                    and vulnerable_pct_met
+                    and low_income_pct_met
                     and all_flags == 0
                     and milestone_two_paid
-                ) else "Pending",
+                ) or milestone_three_claimable else "Pending",
                 "conditions": {
                     "installations_100_pct": verified_ratio >= 1.0,
-                    "all_gender_kpis_met": gender["all_gender_kpis_met"],
+                    "female_pct_50": female_pct_met,
+                    "vulnerable_pct_30": vulnerable_pct_met,
+                    "low_income_pct_60": low_income_pct_met,
                     "all_anomaly_flags_resolved": all_flags == 0,
                     "milestone_2_paid": milestone_two_paid,
                 },
@@ -401,42 +485,30 @@ class KpiService:
         }
 
         newly_claimable: list[int] = []
-        milestones = _ordered_milestones(self.project)
-        for idx, milestone in enumerate(milestones[:3], start=1):
-            key = f"milestone_{idx}"
-            if not summary[key]["eligible"]:
-                continue
-            if milestone.status in {"claimable", "paid", "Paid"}:
-                continue
-            milestone.status = "claimable"
-            if not milestone.unlocked_at:
-                milestone.unlocked_at = timezone.now()
-                milestone.save(update_fields=["status", "unlocked_at", "updated_at"])
-            else:
-                milestone.save(update_fields=["status", "updated_at"])
-            newly_claimable.append(idx)
-            Notification.objects.create(
-                recipient_id=str(self.project.vendor_id),
-                recipient_name=self.project.vendor_name,
-                type=NotificationChannel.IN_APP,
-                event="milestone_claimable",
-                title=f"Milestone {idx} Claimable",
-                body=f"Milestone {idx} for Project {self.project.id} is now claimable. Log in to submit your claim.",
-                status=NotificationStatus.SENT,
-                linked_entity_id=str(self.project.id),
-            )
-            log_audit(
-                None,
-                "milestone_claimable_auto_detected",
-                milestone,
-                {"project_id": str(self.project.id), "milestone_number": idx},
-            )
-            create_project_activity_update(
-                self.project,
-                None,
-                f"Milestone {idx} Claimable",
-                f"Milestone {idx} became claimable after KPI eligibility was automatically detected.",
-            )
+        if self._unlock_milestone_if_eligible(
+            milestone=milestone_one,
+            milestone_number=1,
+            eligible=summary["milestone_1"]["eligible"],
+            reason_notes="M1 conditions met automatically: contract approved and project setup complete.",
+        ):
+            newly_claimable.append(1)
+        if self._unlock_milestone_if_eligible(
+            milestone=milestone_two,
+            milestone_number=2,
+            eligible=summary["milestone_2"]["eligible"],
+            reason_notes=(
+                f"M2 conditions met automatically: verified={installation['verified']}/{installation['target']}, "
+                f"female={gender['female_headed']['percentage']}%."
+            ),
+        ):
+            newly_claimable.append(2)
+        if self._unlock_milestone_if_eligible(
+            milestone=milestone_three,
+            milestone_number=3,
+            eligible=summary["milestone_3"]["eligible"],
+            reason_notes="M3 conditions met automatically: 100% verified, all KPIs met, all anomaly flags resolved, and M2 paid.",
+        ):
+            newly_claimable.append(3)
         return MilestoneEligibilityResult(summary=summary, newly_claimable=newly_claimable)
 
     def getFullKpiSummary(self) -> dict[str, Any]:
@@ -472,12 +544,69 @@ class KpiService:
             "milestone_eligibility": milestone,
             "generated_at": timezone.now().isoformat(),
         }
+        self._sync_project_snapshot(summary)
         cache.set(cache_key, summary, KPI_SUMMARY_CACHE_TIMEOUT)
         return summary
 
+    def _sync_project_snapshot(self, summary: dict[str, Any]):
+        installation = summary["installation_progress"]
+        gender = summary["gender_kpi"]
+        energy = summary["energy_kpi"]
+        uptime = summary["uptime_kpi"]
+        verified_target = int(installation["target"] or 0)
+        progress_pct = float(installation["progress_pct"] or 0)
+        update_fields: list[str] = []
+
+        normalized_progress = int(round(progress_pct))
+        if self.project.progress != normalized_progress:
+            self.project.progress = normalized_progress
+            update_fields.append("progress")
+
+        normalized_gender = float(gender["female_headed"]["percentage"] or 0)
+        if float(self.project.gender_impact or 0) != normalized_gender:
+            self.project.gender_impact = normalized_gender
+            update_fields.append("gender_impact")
+
+        normalized_uptime = float(uptime["average_uptime_pct"] or 0)
+        if float(self.project.uptime or 0) != normalized_uptime:
+            self.project.uptime = normalized_uptime
+            update_fields.append("uptime")
+
+        normalized_energy = float(energy["current_month_kwh"] or 0)
+        if float(self.project.energy_output or 0) != normalized_energy:
+            self.project.energy_output = normalized_energy
+            update_fields.append("energy_output")
+
+        if verified_target and self.project.target_installations != verified_target:
+            self.project.target_installations = verified_target
+            update_fields.append("target_installations")
+
+        if update_fields:
+            self.project.save(update_fields=update_fields + ["updated_at"])
+
     @classmethod
-    def getPortfolioSummary(cls) -> dict[str, Any]:
-        projects = Project.objects.exclude(status=ProjectStatus.HALTED).order_by("project_reference", "id")
+    def getPortfolioSummary(cls, user: User | None = None) -> dict[str, Any]:
+        projects = Project.objects.exclude(status=ProjectStatus.HALTED)
+        scope_label = "National Portfolio"
+
+        if user is not None and user.role == UserRole.DOE_OFFICER:
+            region = (user.region or "").strip()
+            if region:
+                projects = projects.filter(Q(region__iexact=region) | Q(district__iexact=region))
+                scope_label = f"Regional Portfolio - {region}"
+            else:
+                projects = projects.none()
+                scope_label = "Regional Portfolio"
+        elif user is not None and user.role == UserRole.AUDITOR:
+            scope_label = "Audit Portfolio"
+        elif user is not None and user.role == UserRole.UNDP_DONOR:
+            scope_label = "PSC Portfolio"
+        elif user is not None and user.role == UserRole.TAC:
+            scope_label = "TAC Portfolio"
+        elif user is not None and user.role in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}:
+            scope_label = "RMT Portfolio"
+
+        projects = projects.order_by("project_reference", "id")
         rows = []
         total_target = 0
         total_verified = 0
@@ -488,6 +617,8 @@ class KpiService:
         projects_at_risk = 0
         projects_on_track = 0
         projects_completed = 0
+        total_paid_amount = 0.0
+        pending_claims = 0
 
         for project in projects:
             service = cls(str(project.id))
@@ -495,6 +626,7 @@ class KpiService:
             installation = summary["installation_progress"]
             gender = summary["gender_kpi"]
             uptime = summary["uptime_kpi"]
+            energy = summary["energy_kpi"]
             status_label = (
                 "Completed" if project.status == ProjectStatus.COMPLETED
                 else "At Risk" if not installation["on_track"]
@@ -513,6 +645,13 @@ class KpiService:
             female_denominator += int(gender["total_verified"])
             uptime_weighted += float(uptime["average_uptime_pct"]) * max(1, int(uptime["total_devices_monitored"] or 0))
             uptime_devices += max(1, int(uptime["total_devices_monitored"] or 0))
+            total_paid_amount += sum(
+                float(claim.claim_amount or 0)
+                for claim in project.payment_claims.filter(status__in=[PaymentClaimStatus.COMPLETED, PaymentClaimStatus.LEGACY_PAID])
+            )
+            pending_claims += project.payment_claims.exclude(
+                status__in=[PaymentClaimStatus.COMPLETED, PaymentClaimStatus.LEGACY_PAID, PaymentClaimStatus.REJECTED]
+            ).count()
             rows.append(
                 {
                     "project_id": str(project.id),
@@ -520,9 +659,11 @@ class KpiService:
                     "project_title": project.project_title or f"Project {project.id}",
                     "vendor_name": project.vendor_name,
                     "technology": project.tech_type,
+                    "district": project.district or project.region,
                     "progress_pct": installation["progress_pct"],
                     "female_pct": gender["female_headed"]["percentage"],
                     "uptime_pct": uptime["average_uptime_pct"],
+                    "energy_kwh": energy["current_month_kwh"],
                     "status": status_label,
                 }
             )
@@ -530,6 +671,7 @@ class KpiService:
         overall_progress_pct = (total_verified / total_target * 100.0) if total_target else 0.0
         overall_female_pct = (female_numerator / female_denominator * 100.0) if female_denominator else 0.0
         return {
+            "scope_label": scope_label,
             "total_projects": len(rows),
             "total_installations_target": total_target,
             "total_verified": total_verified,
@@ -540,6 +682,8 @@ class KpiService:
             "projects_at_risk": projects_at_risk,
             "projects_on_track": projects_on_track,
             "projects_completed": projects_completed,
+            "total_paid_amount": _round(total_paid_amount, 2),
+            "pending_claims": pending_claims,
             "projects": rows,
         }
 

@@ -80,14 +80,22 @@ function formatUptime(value?: number): string {
   return `${Number(value).toFixed(1)}%`;
 }
 
+function statusLabelFromGisStatus(value?: string): string {
+  if (value === "green") return "Verified";
+  if (value === "red") return "Flagged";
+  return "Pending";
+}
+
 export function GisInstallationsMap({
   projectId,
   showFilters = true,
   height = "500px",
+  emptyStateMessage,
 }: {
   projectId?: string;
   showFilters?: boolean;
   height?: string;
+  emptyStateMessage?: string;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<any>(null);
@@ -241,22 +249,20 @@ export function GisInstallationsMap({
       });
       marker.bindPopup(`
         <div style="min-width:220px;font-family:inherit;">
-          <div style="font-weight:700;margin-bottom:8px;">Installation ID: ${escapeHtml(String(installation.id))}</div>
+          <div style="font-weight:700;margin-bottom:8px;">${escapeHtml(installation.serialNumber || `INS-${String(installation.id).padStart(3, "0")}`)}</div>
           <div style="font-size:12px;line-height:1.5;">
-            <div><strong>Project ID:</strong> ${escapeHtml(installation.projectId || "N/A")}</div>
-            <div><strong>Project Vendor:</strong> ${escapeHtml(installation.vendorName || "N/A")}</div>
-            <div><strong>Technology:</strong> ${escapeHtml(formatTitleCase(installation.technologyType))}</div>
-            <div><strong>Serial Number:</strong> ${escapeHtml(installation.serialNumber || "N/A")}</div>
             <div><strong>Beneficiary:</strong> ${escapeHtml(installation.beneficiaryName || "N/A")}</div>
             <div><strong>Household:</strong> ${escapeHtml(formatTitleCase(installation.householdType))}</div>
+            <div><strong>Technology:</strong> ${escapeHtml(formatTitleCase(installation.technologyType))}</div>
+            <div><strong>Status:</strong> ${escapeHtml(statusLabelFromGisStatus(installation.gisStatus))}</div>
             <div><strong>Verification:</strong> ${escapeHtml(formatTitleCase(installation.verificationStatus))}</div>
-            <div><strong>GIS Status:</strong> ${escapeHtml(formatTitleCase(installation.gisStatus))}</div>
+            <div><strong>Vendor:</strong> ${escapeHtml(installation.vendorName || "N/A")}</div>
             <div><strong>District:</strong> ${escapeHtml(installation.district || "N/A")}</div>
             <div><strong>Installed:</strong> ${escapeHtml(formatInstalledDate(installation.installationDate))}</div>
             <div><strong>Uptime:</strong> ${escapeHtml(formatUptime(installation.uptimePct))}</div>
           </div>
           <div style="margin-top:10px;">
-            <a href="/api/projects/installations/${encodeURIComponent(installation.id)}/" target="_blank" rel="noreferrer">[View Full Record &rarr;]</a>
+            <a href="/api/projects/installations/${encodeURIComponent(installation.id)}/" target="_blank" rel="noreferrer">View Details</a>
           </div>
         </div>
       `);
@@ -401,7 +407,11 @@ export function GisInstallationsMap({
           <div className="absolute inset-0 z-[400] flex items-center justify-center bg-white/55">
             <div className="rounded-2xl bg-white px-6 py-4 text-center shadow-lg">
               <p className="text-base font-semibold text-slate-900">No installations found</p>
-              <p className="text-sm text-slate-500">No installations found for the selected filters</p>
+              <p className="text-sm text-slate-500">
+                {emptyStateMessage || (projectId
+                  ? "No installations submitted yet for this project. Submit your first installation to see it on the map."
+                  : "No installations found for the selected filters.")}
+              </p>
             </div>
           </div>
         )}

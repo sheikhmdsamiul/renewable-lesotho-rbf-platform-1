@@ -46,8 +46,41 @@ function statusTone(met: boolean) {
 
 function milestoneStatusTone(status?: string) {
   if (status === "PAID") return "bg-emerald-100 text-emerald-700";
-  if (status === "CLAIMABLE") return "bg-lime-100 text-lime-700";
-  return "bg-slate-200 text-slate-700";
+  if (status === "CLAIMABLE") return "bg-sky-100 text-sky-700";
+  if (status === "PENDING") return "bg-amber-100 text-amber-700";
+  return "bg-slate-100 text-slate-700";
+}
+
+function formatMilestoneConditionLabel(conditionKey: string) {
+  const labels: Record<string, string> = {
+    contract_approved: "Contract approved",
+    setup_complete: "Project setup completed",
+    installations_80_pct: "At least 80% of target installations verified",
+    female_pct_50: "Female-headed households at or above 50%",
+    no_blocking_anomaly_flags: "No unresolved blocking anomaly flags",
+    meter_data_present: "Meter data received within the last 30 days",
+    installations_100_pct: "100% of target installations verified",
+    vulnerable_pct_30: "Vulnerable households at or above 30%",
+    low_income_pct_60: "Low-income households at or above 60%",
+    all_anomaly_flags_resolved: "All anomaly flags resolved",
+    milestone_2_paid: "Milestone 2 fully paid",
+  };
+  return labels[conditionKey] || conditionKey.replace(/_/g, " ");
+}
+
+function formatMilestoneStatusLabel(status?: string) {
+  if (!status) return "Pending";
+  return status.charAt(0).toUpperCase() + status.slice(1).toLowerCase();
+}
+
+function metricStatusLabel(ok: boolean, fallback?: "track") {
+  if (ok) return fallback === "track" ? "On track" : "Met";
+  return fallback === "track" ? "Behind target" : "Below target";
+}
+
+function displayMetricValue(value: number, hasData: boolean, suffix = "") {
+  if (!hasData) return "—";
+  return `${value}${suffix}`;
 }
 
 export default function KpiDashboard({ projectId }: { projectId: string }) {
@@ -98,48 +131,51 @@ export default function KpiDashboard({ projectId }: { projectId: string }) {
 
   const kpiRows = useMemo(() => {
     if (!summary) return [];
+    const hasVerifiedInstallations = summary.gender_kpi.total_verified > 0;
+    const hasUptimeData = summary.uptime_kpi.total_devices_monitored > 0;
+    const hasEnergyData = summary.energy_kpi.monthly_data.length > 0;
     return [
       {
         label: "Female-headed HH",
         target: `>=${summary.gender_kpi.female_headed.target}%`,
-        current: `${summary.gender_kpi.female_headed.percentage}%`,
+        current: hasVerifiedInstallations ? `${summary.gender_kpi.female_headed.percentage}%` : "No data",
         ok: summary.gender_kpi.female_headed.met,
-        status: summary.gender_kpi.female_headed.met ? "✅ Met" : "❌ Not Met",
+        status: hasVerifiedInstallations ? metricStatusLabel(summary.gender_kpi.female_headed.met) : "No data",
       },
       {
         label: "Vulnerable groups",
         target: `>=${summary.gender_kpi.vulnerable.target}%`,
-        current: `${summary.gender_kpi.vulnerable.percentage}%`,
+        current: hasVerifiedInstallations ? `${summary.gender_kpi.vulnerable.percentage}%` : "No data",
         ok: summary.gender_kpi.vulnerable.met,
-        status: summary.gender_kpi.vulnerable.met ? "✅ Met" : "⚠ Below",
+        status: hasVerifiedInstallations ? metricStatusLabel(summary.gender_kpi.vulnerable.met) : "No data",
       },
       {
         label: "Low-income HH",
         target: `>=${summary.gender_kpi.low_income.target}%`,
-        current: `${summary.gender_kpi.low_income.percentage}%`,
+        current: hasVerifiedInstallations ? `${summary.gender_kpi.low_income.percentage}%` : "No data",
         ok: summary.gender_kpi.low_income.met,
-        status: summary.gender_kpi.low_income.met ? "✅ Met" : "⚠ Below",
+        status: hasVerifiedInstallations ? metricStatusLabel(summary.gender_kpi.low_income.met) : "No data",
       },
       {
         label: "System uptime",
         target: `>=${summary.uptime_kpi.target_uptime_pct}%`,
-        current: `${summary.uptime_kpi.average_uptime_pct}%`,
+        current: hasUptimeData ? `${summary.uptime_kpi.average_uptime_pct}%` : "No data",
         ok: summary.uptime_kpi.met,
-        status: summary.uptime_kpi.met ? "✅ Met" : "⚠ Below",
+        status: hasUptimeData ? metricStatusLabel(summary.uptime_kpi.met) : "No data",
       },
       {
         label: "Installation progress",
         target: String(summary.installation_progress.target),
         current: String(summary.installation_progress.verified),
         ok: summary.installation_progress.on_track,
-        status: summary.installation_progress.on_track ? "✅ Met" : "⚠ Below",
+        status: metricStatusLabel(summary.installation_progress.on_track, "track"),
       },
       {
         label: "Energy output",
         target: `${summary.energy_kpi.current_month_target.toLocaleString()} kWh`,
-        current: `${summary.energy_kpi.current_month_kwh.toLocaleString()} kWh`,
+        current: hasEnergyData ? `${summary.energy_kpi.current_month_kwh.toLocaleString()} kWh` : "No data",
         ok: summary.energy_kpi.current_month_pct >= 95,
-        status: summary.energy_kpi.current_month_pct >= 95 ? "✅ Met" : summary.energy_kpi.current_month_pct >= 80 ? "⚠ Below" : "❌ Not Met",
+        status: hasEnergyData ? metricStatusLabel(summary.energy_kpi.current_month_pct >= 95, "track") : "No data",
       },
     ];
   }, [summary]);
@@ -329,6 +365,9 @@ export default function KpiDashboard({ projectId }: { projectId: string }) {
   const warningCount = kpiRows.filter((row) => !row.ok).length;
   const progressGap = summary.installation_progress.progress_pct - summary.installation_progress.expected_progress_pct;
   const progressTone = progressGap < -10 ? "bg-rose-500" : summary.installation_progress.on_track ? "bg-emerald-500" : "bg-amber-500";
+  const hasVerifiedInstallations = summary.gender_kpi.total_verified > 0;
+  const hasUptimeData = summary.uptime_kpi.total_devices_monitored > 0;
+  const hasEnergyData = summary.energy_kpi.monthly_data.length > 0;
 
   return (
     <div className="space-y-6">
@@ -366,15 +405,15 @@ export default function KpiDashboard({ projectId }: { projectId: string }) {
         </div>
         <div className={`rounded-2xl border p-5 shadow-sm ${statusTone(summary.gender_kpi.female_headed.met)}`}>
           <p className="text-xs font-semibold uppercase tracking-wide">Female Beneficiary %</p>
-          <p className="mt-2 text-3xl font-semibold">{summary.gender_kpi.female_headed.percentage}%</p>
+          <p className="mt-2 text-3xl font-semibold">{displayMetricValue(summary.gender_kpi.female_headed.percentage, hasVerifiedInstallations, "%")}</p>
           <p className="mt-2 text-xs">Target: {"\u2265"} {summary.gender_kpi.female_headed.target}%</p>
-          <p className="mt-1 text-xs">{summary.gender_kpi.female_trending_up ? "↑" : "↓"} vs last week</p>
+          <p className="mt-1 text-xs">{hasVerifiedInstallations ? `${summary.gender_kpi.female_trending_up ? "↑" : "↓"} vs last week` : "No verified installations yet"}</p>
         </div>
         <div className={`rounded-2xl border p-5 shadow-sm ${statusTone(summary.uptime_kpi.met)}`}>
           <p className="text-xs font-semibold uppercase tracking-wide">Average Uptime</p>
-          <p className="mt-2 text-3xl font-semibold">{summary.uptime_kpi.average_uptime_pct}%</p>
+          <p className="mt-2 text-3xl font-semibold">{displayMetricValue(summary.uptime_kpi.average_uptime_pct, hasUptimeData, "%")}</p>
           <p className="mt-2 text-xs">Target: {"\u2265"} {summary.uptime_kpi.target_uptime_pct}%</p>
-          <p className="mt-1 text-xs">{summary.uptime_kpi.devices_offline} devices offline</p>
+          <p className="mt-1 text-xs">{hasUptimeData ? `${summary.uptime_kpi.devices_offline} devices offline` : "No meter data yet"}</p>
         </div>
         <div className={`rounded-2xl border p-5 shadow-sm ${
           summary.energy_kpi.current_month_pct >= 95 ? "border-emerald-200 bg-emerald-50 text-emerald-700"
@@ -382,16 +421,22 @@ export default function KpiDashboard({ projectId }: { projectId: string }) {
               : "border-rose-200 bg-rose-50 text-rose-700"
         }`}>
           <p className="text-xs font-semibold uppercase tracking-wide">Energy Output</p>
-          <p className="mt-2 text-3xl font-semibold">{summary.energy_kpi.current_month_kwh.toLocaleString()} kWh</p>
+          <p className="mt-2 text-3xl font-semibold">{hasEnergyData ? `${summary.energy_kpi.current_month_kwh.toLocaleString()} kWh` : "—"}</p>
           <p className="mt-2 text-xs">Target: {summary.energy_kpi.current_month_target.toLocaleString()} kWh</p>
-          <p className="mt-1 text-xs">{summary.energy_kpi.current_month_pct}% of target</p>
+          <p className="mt-1 text-xs">{hasEnergyData ? `${summary.energy_kpi.current_month_pct}% of target` : "No data yet"}</p>
         </div>
       </div>
+
+      {!hasVerifiedInstallations && (
+        <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+          No installations verified yet. Submit and verify installations to see KPI data.
+        </div>
+      )}
 
       <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
         {warningCount > 0 && (
           <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-            ⚠ {warningCount} KPI{warningCount === 1 ? "" : "s"} need attention before milestone claim.
+            {warningCount} KPI{warningCount === 1 ? "" : "s"} need attention before the next milestone claim.
           </div>
         )}
         <div className="overflow-x-auto">
@@ -410,7 +455,12 @@ export default function KpiDashboard({ projectId }: { projectId: string }) {
                   <td className="py-3 pr-4 font-medium text-slate-900">{row.label}</td>
                   <td className="py-3 pr-4 text-slate-600">{row.target}</td>
                   <td className="py-3 pr-4 text-slate-600">{row.current}</td>
-                  <td className={`py-3 font-medium ${row.ok ? "text-emerald-700" : row.status.includes("❌") ? "text-rose-700" : "text-amber-700"}`}>{row.status}</td>
+                  <td className={`py-3 font-medium ${
+                    row.status === "No data" ? "text-slate-500" :
+                    row.ok ? "text-emerald-700" :
+                    row.status.includes("Behind") ? "text-amber-700" :
+                    "text-rose-700"
+                  }`}>{row.status}</td>
                 </tr>
               ))}
             </tbody>
@@ -458,14 +508,21 @@ export default function KpiDashboard({ projectId }: { projectId: string }) {
               <div className="flex items-center justify-between">
                 <p className="font-semibold text-slate-900">Milestone {index + 1}</p>
                 <span className={`rounded-full px-3 py-1 text-xs font-semibold ${milestoneStatusTone(eligibility.status)}`}>
-                  {eligibility.status === "PAID" ? "✅ PAID" : eligibility.status === "CLAIMABLE" ? "🟢 CLAIMABLE" : "⏳ Pending"}
+                  {formatMilestoneStatusLabel(eligibility.status)}
                 </span>
               </div>
               <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-2">
                 {Object.entries(eligibility.conditions).map(([condition, met]) => (
-                  <div key={condition} className="text-sm">
-                    <span className={met ? "text-emerald-700" : "text-rose-600"}>{met ? "✅" : "❌"}</span>{" "}
-                    <span className="text-slate-700">{condition.replace(/_/g, " ")}</span>
+                  <div
+                    key={condition}
+                    className={`rounded-xl border px-3 py-2 text-sm ${
+                      met
+                        ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                        : "border-slate-200 bg-white text-slate-600"
+                    }`}
+                  >
+                    <div className="font-medium">{formatMilestoneConditionLabel(condition)}</div>
+                    <div className="mt-1 text-xs uppercase tracking-wide">{met ? "Met" : "Pending"}</div>
                   </div>
                 ))}
               </div>

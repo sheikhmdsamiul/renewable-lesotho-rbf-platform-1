@@ -469,7 +469,7 @@ function mapMilestoneFromApi(api: any): Milestone {
     name: api.name ?? "",
     description: api.description ?? undefined,
     percentage: Number(api.percentage ?? 0),
-    status: api.status ?? "Pending",
+    status: api.status ?? "Submitted",
     amount: Number(api.amount ?? 0),
     amountLsl: api.amount_lsl != null ? Number(api.amount_lsl) : undefined,
     progressPercentage: Number(api.progress_percentage ?? 0),
@@ -2139,7 +2139,7 @@ export async function submitPaymentClaim(payload: PaymentClaimSubmission): Promi
 
 async function reviewPaymentClaim(
   id: string,
-  action: "verify" | "approve" | "reject" | "pay",
+  action: "verify" | "approve" | "reject" | "pay" | "confirm-paid",
   payload?: Record<string, any>
 ): Promise<PaymentClaim> {
   const data = await http<any>(`/api/projects/claims/${id}/${action}/`, {
@@ -2167,6 +2167,17 @@ export async function payPaymentClaim(
   notes?: string
 ): Promise<PaymentClaim> {
   return reviewPaymentClaim(id, "pay", {
+    payment_reference: paymentReference ?? "",
+    notes: notes ?? "",
+  });
+}
+
+export async function confirmPaymentClaim(
+  id: string,
+  paymentReference?: string,
+  notes?: string
+): Promise<PaymentClaim> {
+  return reviewPaymentClaim(id, "confirm-paid", {
     payment_reference: paymentReference ?? "",
     notes: notes ?? "",
   });

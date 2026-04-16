@@ -13,7 +13,7 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
-from .models import InstallationReport, Project, ProspectSyncLog, ProspectSyncStatus
+from .models import InstallationReport, InstallationStatus, Project, ProspectSyncLog, ProspectSyncStatus
 from rbf.users.models import User
 
 
@@ -472,3 +472,37 @@ def queue_installation_sync(report_id: str, *, include_customer: bool = True, in
         SyncToProspectJob.dispatch_async('pushCustomer', customer_payload, record_id=int(report.id), record_type='installation')
     if include_installation:
         SyncToProspectJob.dispatch_async('pushInstallation', installation_payload, record_id=int(report.id), record_type='installation')
+
+
+def queue_project_completion_report_sync(project_id: str):
+    project = Project.objects.filter(id=project_id).first()
+    if not project:
+        return
+
+    verified_installations = InstallationReport.objects.filter(
+        project=project,
+        status=InstallationStatus.VERIFIED,
+    ).count()
+    total_installations = InstallationReport.objects.filter(project=project).count()
+    paid_claims = project.payment_claims.filter(status='Paid').count()
+    payload = [{
+        'external_id': f'final_report_{project.id}',
+        'report_type': 'final_project_report',
+        'reporting_phase': f'PRJ-{project.id}',
+        'project_id': str(project.id),
+        'project_reference': project.project_reference or f'PRJ-{project.id}',
+        'vendor_id': str(project.vendor_id),
+        'vendor_name': project.vendor_name,
+        'country': 'LS',
+        'district': project.district or project.district_zone or project.region or '',
+        'technology_type': project.tech_type or project.technology_type or '',
+        'project_status': project.status,
+        'verified_installations': verified_installations,
+        'submitted_installations': total_installations,
+        'target_installations': int(project.target_installations or project.installation_target or 0),
+        'female_target_pct': int(project.target_female_pct or project.female_target_pct or 0),
+        'energy_output_target_kwh': float(project.energy_output_target_kwh or project.energy_output or 0),
+        'paid_claims': paid_claims,
+        'generated_at': timezone.now().isoformat(),
+    }]
+    SyncToProspectJob.dispatch_async('pushReport', payload, record_id=int(project.id), record_type='project')

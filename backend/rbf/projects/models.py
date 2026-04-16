@@ -287,12 +287,17 @@ class ProjectDocument(models.Model):
 
 
 class PaymentClaimStatus(models.TextChoices):
-    PENDING = 'Pending', 'Pending'
-    VERIFIED = 'Verified', 'Verified'
-    APPROVED = 'Approved', 'Approved'
+    SUBMITTED = 'Submitted', 'Submitted'
+    RMT_APPROVED = 'RMT Approved', 'RMT Approved'
+    TAC_ENDORSED = 'TAC Endorsed', 'TAC Endorsed'
+    PSC_APPROVED = 'PSC Approved', 'PSC Approved'
+    COMPLETED = 'Completed', 'Completed'
     HELD_AUDIT = 'Held/Audit', 'Held/Audit'
-    PAID = 'Paid', 'Paid'
     REJECTED = 'Rejected', 'Rejected'
+    LEGACY_PENDING = 'Pending', 'Pending (Legacy)'
+    LEGACY_VERIFIED = 'Verified', 'Verified (Legacy)'
+    LEGACY_APPROVED = 'Approved', 'Approved (Legacy)'
+    LEGACY_PAID = 'Paid', 'Paid (Legacy)'
 
 
 class InstallationStatus(models.TextChoices):
@@ -320,7 +325,7 @@ class PaymentClaim(models.Model):
     implementation_notes = models.TextField(blank=True)
     evidence_files = models.JSONField(default=list, blank=True)
     declaration_accepted = models.BooleanField(default=False)
-    status = models.CharField(max_length=16, choices=PaymentClaimStatus.choices, default=PaymentClaimStatus.PENDING)
+    status = models.CharField(max_length=16, choices=PaymentClaimStatus.choices, default=PaymentClaimStatus.SUBMITTED)
     submitted_at = models.DateTimeField(auto_now_add=True)
     verified_at = models.DateTimeField(null=True, blank=True)
     approved_at = models.DateTimeField(null=True, blank=True)

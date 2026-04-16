@@ -454,6 +454,7 @@ export interface ProjectKpiSummary {
 }
 
 export interface PortfolioKpiSummary {
+  scope_label?: string;
   total_projects: number;
   total_installations_target: number;
   total_verified: number;
@@ -464,15 +465,19 @@ export interface PortfolioKpiSummary {
   projects_at_risk: number;
   projects_on_track: number;
   projects_completed: number;
+  total_paid_amount?: number;
+  pending_claims?: number;
   projects: Array<{
     project_id: string;
     project_reference: string;
     project_title: string;
     vendor_name: string;
     technology: string;
+    district?: string;
     progress_pct: number;
     female_pct: number;
     uptime_pct: number;
+    energy_kwh?: number;
     status: string;
   }>;
 }
@@ -811,7 +816,17 @@ export interface VendorPrequalificationSubmission {
   declarationAccepted: boolean;
 }
 
-export type PaymentClaimStatus = "Pending" | "Verified" | "Approved" | "Paid" | "Rejected";
+export type PaymentClaimStatus =
+  | "Submitted"
+  | "RMT Approved"
+  | "TAC Endorsed"
+  | "PSC Approved"
+  | "Completed"
+  | "Pending"
+  | "Verified"
+  | "Approved"
+  | "Paid"
+  | "Rejected";
 export type DisbursementStatus = "Initiated" | "Completed" | "Failed";
 
 export interface Disbursement {

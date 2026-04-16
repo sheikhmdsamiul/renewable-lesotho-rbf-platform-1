@@ -426,6 +426,13 @@ class PaymentClaimSerializer(serializers.ModelSerializer):
             return 'Payment is locked because this transaction is linked to a suspended or blacklisted vendor.'
         return None
 
+    def validate(self, attrs):
+        instance = getattr(self, 'instance', None)
+        declaration_accepted = attrs.get('declaration_accepted', getattr(instance, 'declaration_accepted', False))
+        if not declaration_accepted:
+            raise serializers.ValidationError({'declaration_accepted': 'You must accept the declaration before submitting a claim.'})
+        return attrs
+
     class Meta:
         model = PaymentClaim
         fields = '__all__'

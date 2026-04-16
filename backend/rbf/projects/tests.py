@@ -403,10 +403,16 @@ class ProjectApiTests(APITestCase):
             role="TAC Member",
             status="Active",
         )
-        payer = User.objects.create_user(
+        psc_approver = User.objects.create_user(
             username="psc_reviewer",
             password="securePass123",
             role="Project Steering Committee",
+            status="Active",
+        )
+        finance_user = User.objects.create_user(
+            username="finance_admin",
+            password="securePass123",
+            role="Platform Administrator (Super Admin)",
             status="Active",
         )
 
@@ -437,22 +443,200 @@ class ProjectApiTests(APITestCase):
         )
         self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
         claim_id = create_response.data["id"]
-        self.assertEqual(create_response.data["status"], "Pending")
+        self.assertEqual(create_response.data["status"], "Submitted")
 
         self.client.force_authenticate(verifier)
         verify_response = self.client.post(f"/api/projects/claims/{claim_id}/verify/", {}, format="json")
         self.assertEqual(verify_response.status_code, status.HTTP_200_OK)
-        self.assertEqual(verify_response.data["status"], "Verified")
+        self.assertEqual(verify_response.data["status"], "RMT Approved")
 
         self.client.force_authenticate(approver)
         approve_response = self.client.post(f"/api/projects/claims/{claim_id}/approve/", {}, format="json")
         self.assertEqual(approve_response.status_code, status.HTTP_200_OK)
-        self.assertEqual(approve_response.data["status"], "Approved")
+        self.assertEqual(approve_response.data["status"], "TAC Endorsed")
 
-        self.client.force_authenticate(payer)
+        self.client.force_authenticate(psc_approver)
+        psc_response = self.client.post(f"/api/projects/claims/{claim_id}/approve/", {}, format="json")
+        self.assertEqual(psc_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(psc_response.data["status"], "PSC Approved")
+
+        self.client.force_authenticate(finance_user)
         pay_response = self.client.post(f"/api/projects/claims/{claim_id}/pay/", {}, format="json")
         self.assertEqual(pay_response.status_code, status.HTTP_200_OK)
-        self.assertEqual(pay_response.data["status"], "Paid")
+        self.assertEqual(pay_response.data["status"], "PSC Approved")
+
+        self.client.force_authenticate(verifier)
+        confirm_response = self.client.post(f"/api/projects/claims/{claim_id}/confirm-paid/", {}, format="json")
+        self.assertEqual(confirm_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(confirm_response.data["status"], "Completed")
+
+    @patch("rbf.projects.views.queue_project_completion_report_sync")
+    def test_final_milestone_payment_marks_project_completed_and_queues_final_report(self, queue_final_report):
+        User = get_user_model()
+        vendor = User.objects.create_user(
+            username="final_claim_vendor",
+            password="securePass123",
+            role="Vendor",
+            status="Active",
+        )
+        psc_approver = User.objects.create_user(
+            username="final_psc_reviewer",
+            password="securePass123",
+            role="Project Steering Committee",
+            status="Active",
+        )
+        finance_user = User.objects.create_user(
+            username="final_finance_admin",
+            password="securePass123",
+            role="Platform Administrator (Super Admin)",
+            status="Active",
+        )
+        project = Project.objects.create(
+            vendor_id=str(vendor.id),
+            vendor_name=vendor.username,
+            tech_type="SHS",
+            region="Maseru",
+            district="Maseru",
+            status=ProjectStatus.DISBURSEMENT,
+            project_reference="PRJ-FINAL-001",
+            energy_output=100,
+            uptime=97,
+            gender_impact=50,
+        )
+        project.milestones.create(name="M1", milestone_number=1, percentage=20, amount=1000, status="paid")
+        project.milestones.create(name="M2", milestone_number=2, percentage=50, amount=2000, status="paid")
+        milestone3 = project.milestones.create(name="M3", milestone_number=3, percentage=30, amount=3000, status="approved")
+        claim = PaymentClaim.objects.create(
+            project=project,
+            vendor=vendor,
+            milestone=milestone3,
+            claim_amount="3000.00",
+            status=PaymentClaimStatus.TAC_ENDORSED,
+            declaration_accepted=True,
+        )
+
+        self.client.force_authenticate(psc_approver)
+        approve_response = self.client.post(f"/api/projects/claims/{claim.id}/approve/", {}, format="json")
+        self.assertEqual(approve_response.status_code, status.HTTP_200_OK)
+
+        self.client.force_authenticate(finance_user)
+        response = self.client.post(f"/api/projects/claims/{claim.id}/pay/", {}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.client.force_authenticate(User.objects.create_user(
+            username="final_rmt_reviewer",
+            password="securePass123",
+            role="RBF Management Team",
+            status="Active",
+        ))
+        confirm_response = self.client.post(f"/api/projects/claims/{claim.id}/confirm-paid/", {}, format="json")
+        self.assertEqual(confirm_response.status_code, status.HTTP_200_OK)
+        project.refresh_from_db()
+        milestone3.refresh_from_db()
+        self.assertEqual(project.status, ProjectStatus.COMPLETED)
+        self.assertEqual(milestone3.status, "paid")
+        queue_final_report.assert_called_once_with(str(project.id))
+        self.assertTrue(
+            AuditLog.objects.filter(action="project_completed", details__project_id=str(project.id)).exists()
+        )
+
+    @patch("rbf.projects.views.SyncToProspectJob.dispatch_async")
+    def test_meter_csv_upload_returns_invalid_rows_and_creates_anomalies(self, dispatch_async):
+        tender = Tender.objects.create(
+            reference_number="TND-METER-001",
+            name="Meter Tender",
+            department="Dept",
+            category="SHS",
+            status="Awarded",
+            deadline=timezone.now(),
+        )
+        User = get_user_model()
+        vendor = User.objects.create_user(
+            username="meter_vendor",
+            password="securePass123",
+            role="Vendor",
+            status="Active",
+            region="Maseru",
+        )
+        project = Project.objects.create(
+            tender=tender,
+            vendor_id=str(vendor.id),
+            vendor_name=vendor.username,
+            tech_type="SHS",
+            region="Maseru",
+            district="Maseru",
+            status=ProjectStatus.ACTIVE,
+        )
+        TenderContract.objects.create(
+            tender=tender,
+            vendor_id=str(vendor.id),
+            vendor_name=vendor.username,
+            reference_number="CTR-METER-001",
+            status=ContractStatus.APPROVED,
+            project_id=str(project.id),
+        )
+        self._create_completed_setup(project, vendor)
+        installation = InstallationReport.objects.create(
+            project=project,
+            vendor=vendor,
+            gps_lat=-29.31,
+            gps_lng=27.48,
+            serial_number="SERIAL-METER-1",
+            beneficiary_id="BEN-METER-1",
+            meter_id="MTR-CSV-001",
+            status=InstallationStatus.VERIFIED,
+        )
+        stale_installation = InstallationReport.objects.create(
+            project=project,
+            vendor=vendor,
+            gps_lat=-29.32,
+            gps_lng=27.49,
+            serial_number="SERIAL-METER-2",
+            beneficiary_id="BEN-METER-2",
+            meter_id="MTR-CSV-002",
+            status=InstallationStatus.VERIFIED,
+        )
+        SmartMeterReading.objects.create(
+            project=project,
+            installation=installation,
+            meter_id="MTR-CSV-001",
+            kwh=100,
+            uptime_pct=98,
+            recorded_at=timezone.now() - timedelta(days=3),
+        )
+        SmartMeterReading.objects.create(
+            project=project,
+            installation=stale_installation,
+            meter_id="MTR-CSV-002",
+            kwh=90,
+            uptime_pct=95,
+            recorded_at=timezone.now() - timedelta(days=3),
+        )
+
+        csv_bytes = (
+            "meter_id,installation_id,kwh_generated,uptime_pct,latitude,longitude,reading_datetime\n"
+            f"MTR-CSV-001,{installation.id},106,0,-29.31,27.48,2026-04-16T08:30:00Z\n"
+            "BAD-METER,,12,101,-29.31,27.48,not-a-date\n"
+        ).encode("utf-8")
+        self.client.force_authenticate(vendor)
+
+        response = self.client.post(
+            f"/api/projects/{project.id}/meter-csv-upload/",
+            {"file": SimpleUploadedFile("meter.csv", csv_bytes, content_type="text/csv")},
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["rows_ingested"], 1)
+        self.assertEqual(response.data["rows_rejected"], 1)
+        self.assertEqual(len(response.data["invalid_rows"]), 1)
+        self.assertEqual(response.data["anomaly_counts"]["zero_uptime"], 1)
+        self.assertEqual(response.data["anomaly_counts"]["no_data"], 1)
+        self.assertEqual(response.data["anomaly_counts"]["output_deviation"], 1)
+        self.assertTrue(AnomalyFlag.objects.filter(installation=installation, flag_type="zero_uptime").exists())
+        self.assertTrue(AnomalyFlag.objects.filter(installation=stale_installation, flag_type="no_data").exists())
+        self.assertTrue(AnomalyFlag.objects.filter(installation=installation, flag_type="output_deviation").exists())
+        dispatch_async.assert_called()
 
     def test_duplicate_milestone_claim_is_locked_after_submission(self):
         User = get_user_model()
@@ -914,7 +1098,7 @@ class ProjectApiTests(APITestCase):
         approver = User.objects.create_user(
             username="payment_lock_admin",
             password="securePass123",
-            role="Project Steering Committee",
+            role="Platform Administrator (Super Admin)",
             status="Active",
         )
 
@@ -933,7 +1117,7 @@ class ProjectApiTests(APITestCase):
             project=project,
             vendor=vendor,
             claim_amount="5000.00",
-            status=PaymentClaimStatus.APPROVED,
+            status=PaymentClaimStatus.PSC_APPROVED,
             declaration_accepted=True,
         )
 
@@ -947,7 +1131,7 @@ class ProjectApiTests(APITestCase):
         self.assertEqual(pay_response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("frozen", str(pay_response.data).lower())
 
-    def test_project_steering_committee_can_pay_claims_and_flag_project_issues(self):
+    def test_project_steering_committee_can_approve_claims_and_flag_project_issues(self):
         User = get_user_model()
         vendor = User.objects.create_user(
             username="psc_vendor",
@@ -977,18 +1161,18 @@ class ProjectApiTests(APITestCase):
             project=project,
             vendor=vendor,
             claim_amount="7000.00",
-            status=PaymentClaimStatus.APPROVED,
+            status=PaymentClaimStatus.TAC_ENDORSED,
             declaration_accepted=True,
         )
 
         self.client.force_authenticate(psc_user)
-        pay_response = self.client.post(
-            f"/api/projects/claims/{claim.id}/pay/",
-            {"payment_reference": "PMT-PSC-001"},
+        approve_response = self.client.post(
+            f"/api/projects/claims/{claim.id}/approve/",
+            {},
             format="json",
         )
-        self.assertEqual(pay_response.status_code, status.HTTP_200_OK)
-        self.assertEqual(pay_response.data["status"], "Paid")
+        self.assertEqual(approve_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(approve_response.data["status"], "PSC Approved")
 
         audit_logs = self.client.get("/api/projects/audit-logs/")
         self.assertEqual(audit_logs.status_code, status.HTTP_200_OK)
@@ -1299,7 +1483,7 @@ class ProjectKpiTests(APITestCase):
             vendor=self.vendor,
             milestone=milestone1,
             claim_amount="1000.00",
-            status=PaymentClaimStatus.PAID,
+            status=PaymentClaimStatus.COMPLETED,
             declaration_accepted=True,
         )
         self.verified_1 = InstallationReport.objects.create(
@@ -1365,6 +1549,112 @@ class ProjectKpiTests(APITestCase):
         milestone1 = self.project_refresh().milestones.order_by("created_at", "id").first()
         self.assertEqual(milestone1.status, "claimable")
 
+    def test_kpi_summary_syncs_project_snapshot_fields(self):
+        summary = KpiService.for_project(str(self.project.id)).getFullKpiSummary()
+
+        self.project.refresh_from_db()
+
+        self.assertEqual(self.project.progress, round(summary["installation_progress"]["progress_pct"]))
+        self.assertEqual(float(self.project.gender_impact), float(summary["gender_kpi"]["female_headed"]["percentage"]))
+        self.assertEqual(float(self.project.uptime), float(summary["uptime_kpi"]["average_uptime_pct"]))
+        self.assertEqual(float(self.project.energy_output), float(summary["energy_kpi"]["current_month_kwh"]))
+
+    def test_milestone_two_becomes_claimable_with_80_percent_verified_and_non_blocking_flags(self):
+        for index in range(3, 9):
+            InstallationReport.objects.create(
+                project=self.project,
+                vendor=self.vendor,
+                gps_lat=-29.30 - (index * 0.01),
+                gps_lng=27.40 + (index * 0.01),
+                serial_number=f"SER-KPI-{index}",
+                beneficiary_id=f"BEN-KPI-{index}",
+                household_type="female_headed" if index % 2 == 0 else "standard",
+                meter_id=f"MTR-00{index}",
+                status=InstallationStatus.VERIFIED,
+            )
+
+        AnomalyFlag.objects.create(
+            installation=self.verified_1,
+            project=self.project,
+            flag_type="duplicate_gps",
+            description="Duplicate GPS warning",
+        )
+        AnomalyFlag.objects.create(
+            installation=self.verified_2,
+            project=self.project,
+            flag_type="location_mismatch",
+            description="Location mismatch warning",
+        )
+
+        summary = KpiService.for_project(str(self.project.id)).getFullKpiSummary()
+
+        self.assertTrue(summary["milestone_eligibility"]["milestone_2"]["eligible"])
+        self.assertTrue(summary["milestone_eligibility"]["milestone_2"]["conditions"]["no_blocking_anomaly_flags"])
+        milestone2 = self.project_refresh().milestones.get(milestone_number=2)
+        self.assertEqual(milestone2.status, "claimable")
+
+    def test_milestone_two_stays_claimable_after_later_kpi_drop(self):
+        milestone2 = self.project.milestones.get(milestone_number=2)
+        milestone2.status = "claimable"
+        milestone2.save(update_fields=["status", "updated_at"])
+
+        for index in range(3, 11):
+            InstallationReport.objects.create(
+                project=self.project,
+                vendor=self.vendor,
+                gps_lat=-29.10 - (index * 0.01),
+                gps_lng=27.10 + (index * 0.01),
+                serial_number=f"SER-DROP-{index}",
+                beneficiary_id=f"BEN-DROP-{index}",
+                household_type="standard",
+                meter_id=f"MTR-DROP-{index}",
+                status=InstallationStatus.VERIFIED,
+            )
+
+        summary = KpiService.for_project(str(self.project.id)).getFullKpiSummary()
+
+        self.assertFalse(summary["milestone_eligibility"]["milestone_2"]["eligible"])
+        self.assertEqual(summary["milestone_eligibility"]["milestone_2"]["status"], "CLAIMABLE")
+        milestone2.refresh_from_db()
+        self.assertEqual(milestone2.status, "claimable")
+
+    def test_milestone_three_requires_milestone_two_paid_and_zero_open_flags(self):
+        milestone2 = self.project.milestones.get(milestone_number=2)
+        milestone2.status = "paid"
+        milestone2.save(update_fields=["status", "updated_at"])
+        PaymentClaim.objects.create(
+            project=self.project,
+            vendor=self.vendor,
+            milestone=milestone2,
+            claim_amount="2000.00",
+            status=PaymentClaimStatus.COMPLETED,
+            declaration_accepted=True,
+        )
+        for index in range(3, 11):
+            InstallationReport.objects.create(
+                project=self.project,
+                vendor=self.vendor,
+                gps_lat=-29.50 - (index * 0.01),
+                gps_lng=27.60 + (index * 0.01),
+                serial_number=f"SER-M3-{index}",
+                beneficiary_id=f"BEN-M3-{index}",
+                household_type="standard",
+                meter_id=f"MTR-M3-{index}",
+                status=InstallationStatus.VERIFIED,
+            )
+        AnomalyFlag.objects.create(
+            installation=self.verified_1,
+            project=self.project,
+            flag_type="zero_uptime",
+            description="Blocking flag",
+        )
+
+        summary = KpiService.for_project(str(self.project.id)).getFullKpiSummary()
+
+        self.assertFalse(summary["milestone_eligibility"]["milestone_3"]["eligible"])
+        self.assertTrue(summary["milestone_eligibility"]["milestone_3"]["conditions"]["milestone_2_paid"])
+        self.assertFalse(summary["milestone_eligibility"]["milestone_3"]["conditions"]["all_anomaly_flags_resolved"])
+
     def test_project_kpi_endpoint_respects_vendor_and_region_access(self):
         self.client.force_authenticate(self.vendor)
         own_response = self.client.get(f"/api/kpi/project/{self.project.id}")
@@ -1396,10 +1686,79 @@ class ProjectKpiTests(APITestCase):
         response = self.client.get("/api/kpi/portfolio")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn("total_projects", response.data)
+        self.assertIn("scope_label", response.data)
 
         self.client.force_authenticate(self.vendor)
         forbidden = self.client.get("/api/kpi/portfolio")
         self.assertEqual(forbidden.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_portfolio_endpoint_scopes_doe_to_their_region(self):
+        other_project = Project.objects.create(
+            vendor_id=str(self.other_vendor.id),
+            vendor_name=self.other_vendor.username,
+            tech_type="ICS",
+            region="Butha-Buthe",
+            district="Butha-Buthe",
+            status=ProjectStatus.INSTALLATION,
+            target_installations=5,
+            energy_output=20,
+            uptime=95,
+            progress=0,
+        )
+
+        self.client.force_authenticate(self.doe)
+        response = self.client.get("/api/kpi/portfolio")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["scope_label"], "Regional Portfolio - Maseru")
+        self.assertEqual(response.data["total_projects"], 1)
+        self.assertEqual(response.data["projects"][0]["project_id"], str(self.project.id))
+        self.assertNotEqual(response.data["projects"][0]["project_id"], str(other_project.id))
+
+    def test_doe_map_endpoint_is_scoped_to_region(self):
+        other_project = Project.objects.create(
+            vendor_id=str(self.other_vendor.id),
+            vendor_name=self.other_vendor.username,
+            tech_type="ICS",
+            region="Butha-Buthe",
+            district="Butha-Buthe",
+            status=ProjectStatus.INSTALLATION,
+            target_installations=5,
+            energy_output=20,
+            uptime=95,
+            progress=0,
+        )
+        other_report = InstallationReport.objects.create(
+            project=other_project,
+            vendor=self.other_vendor,
+            gps_lat=-28.766,
+            gps_lng=28.249,
+            serial_number="SER-OTHER-1",
+            beneficiary_id="BEN-OTHER-1",
+            beneficiary_name="Outside Region",
+            household_type="standard",
+            installation_date="2025-01-18",
+            status=InstallationStatus.SUBMITTED,
+            gis_status="yellow",
+        )
+        VerificationTask.objects.create(
+            report=other_report,
+            vendor_lat=other_report.gps_lat,
+            vendor_lng=other_report.gps_lng,
+            status=VerificationStatus.PENDING,
+        )
+
+        self.client.force_authenticate(self.doe)
+        response = self.client.get("/api/map/installations")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertGreaterEqual(response.data["data"]["summary"]["total"], 1)
+        districts = {item["district"] for item in response.data["data"]["installations"]}
+        project_ids = {item["project_id"] for item in response.data["data"]["installations"]}
+        self.assertIn("Maseru", districts)
+        self.assertNotIn("Butha-Buthe", districts)
+        self.assertIn(self.project.id, project_ids)
+        self.assertNotIn(other_project.id, project_ids)
 
 
 class ProjectProspectTargetSyncTests(APITestCase):

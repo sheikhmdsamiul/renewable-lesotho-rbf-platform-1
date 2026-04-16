@@ -1,3 +1,5 @@
+from datetime import timedelta
+
 from rest_framework import viewsets, filters
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import PermissionDenied
@@ -60,7 +62,13 @@ from rbf.users.models import UserRole
 from rbf.users.models import User
 from rbf.users.blacklisting import is_vendor_restricted
 from .audit import log_audit
-from .integrations import queue_installation_sync, queue_project_agent_sync, queue_project_targets_sync, SyncToProspectJob
+from .integrations import (
+    queue_installation_sync,
+    queue_project_agent_sync,
+    queue_project_completion_report_sync,
+    queue_project_targets_sync,
+    SyncToProspectJob,
+)
 from .gis import GpsValidator
 from .kpi import KpiService, invalidate_kpi_cache, render_kpi_pdf
 from rbf.notifications.models import Notification, NotificationChannel, NotificationStatus
@@ -93,6 +101,17 @@ def field_verifier_task_scope_filter(user, task_prefix: str = ''):
         user,
         project_prefix=f'{task_prefix}report__project__',
     )
+
+
+def doe_region_filter(user, prefix: str = ''):
+    region = (
+        getattr(user, 'region', '')
+        or getattr(user, 'district', '')
+        or ''
+    ).strip()
+    if not region:
+        return Q(pk__in=[])
+    return Q(**{f'{prefix}region__iexact': region}) | Q(**{f'{prefix}district__iexact': region})
 
 
 def create_project_activity_update(project: Project, author, title: str, body: str):
@@ -132,7 +151,86 @@ def notify_project_oversight(project: Project, title: str, body: str, linked_ent
 
 def refresh_project_kpis(project_id: str):
     invalidate_kpi_cache(project_id)
-    KpiService.for_project(project_id).getMilestoneEligibility()
+    KpiService.for_project(project_id).getFullKpiSummary()
+
+
+def notify_vendor_and_oversight(project: Project, *, vendor, event: str, title: str, body: str, linked_entity_id: str):
+    notifications = [
+        Notification(
+            recipient_id=str(vendor.id),
+            recipient_name=vendor.full_name or vendor.username,
+            type=NotificationChannel.IN_APP,
+            event=event,
+            title=title,
+            body=body,
+            status=NotificationStatus.SENT,
+            linked_entity_id=linked_entity_id,
+        )
+    ]
+    oversight_users = User.objects.filter(role__in={UserRole.RBF_OFFICIAL, UserRole.ADMIN}).only('id', 'full_name', 'username')
+    notifications.extend(
+        Notification(
+            recipient_id=str(user.id),
+            recipient_name=user.full_name or user.username,
+            type=NotificationChannel.IN_APP,
+            event=event,
+            title=title,
+            body=body,
+            status=NotificationStatus.SENT,
+            linked_entity_id=linked_entity_id,
+        )
+        for user in oversight_users
+    )
+    Notification.objects.bulk_create(notifications, ignore_conflicts=True)
+
+
+def create_or_refresh_anomaly(*, installation: InstallationReport, project: Project, flag_type: str, description: str):
+    flag, created = AnomalyFlag.objects.get_or_create(
+        installation=installation,
+        project=project,
+        flag_type=flag_type,
+        is_resolved=False,
+        defaults={'description': description},
+    )
+    if not created and flag.description != description:
+        flag.description = description
+        flag.save(update_fields=['description'])
+    return flag
+
+
+def finalize_project_if_ready(project: Project, actor):
+    milestone_statuses = list(project.milestones.order_by('milestone_number').values_list('status', flat=True)[:3])
+    if len(milestone_statuses) < 3 or any(status_value not in {'paid', 'Paid'} for status_value in milestone_statuses):
+        return False
+    if project.status == ProjectStatus.COMPLETED:
+        return True
+
+    project.status = ProjectStatus.COMPLETED
+    project.save(update_fields=['status', 'updated_at'])
+    create_project_activity_update(
+        project,
+        actor,
+        'Project Completed',
+        'All milestone payments are complete. Final reporting has been queued and the project is now marked completed.',
+    )
+    log_audit(
+        actor,
+        'project_completed',
+        project,
+        {'project_id': str(project.id), 'status': ProjectStatus.COMPLETED},
+    )
+    queue_project_completion_report_sync(str(project.id))
+    vendor = User.objects.filter(id=project.vendor_id).first() or User.objects.filter(username=project.vendor_id).first()
+    if vendor:
+        notify_vendor_and_oversight(
+            project,
+            vendor=vendor,
+            event='project_completed',
+            title='Project Completed',
+            body=f'Project {project.project_reference or project.id} has been marked completed and the final report has been queued.',
+            linked_entity_id=str(project.id),
+        )
+    return True
 
 
 def build_installation_map_queryset(user: User):
@@ -162,6 +260,8 @@ def build_installation_map_queryset(user: User):
         queryset = queryset.filter(vendor=user)
     elif user.role == UserRole.FIELD_VERIFIER:
         queryset = queryset.filter(field_verifier_district_filter(user))
+    elif user.role == UserRole.DOE_OFFICER:
+        queryset = queryset.filter(doe_region_filter(user, prefix='project__'))
 
     return queryset
 
@@ -210,9 +310,13 @@ class ProjectViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = Project.objects.select_related('tender', 'project_setup').prefetch_related('milestones').all().order_by('id')
         user = self.request.user
-        if user.role != UserRole.VENDOR:
-            return qs
-        return qs.filter(vendor_query_filter(user)).distinct()
+        if user.role == UserRole.VENDOR:
+            return qs.filter(vendor_query_filter(user)).distinct()
+        if user.role == UserRole.DOE_OFFICER:
+            return qs.filter(doe_region_filter(user)).distinct()
+        if user.role == UserRole.FIELD_VERIFIER:
+            return qs.filter(field_verifier_district_filter(user, project_prefix='')).distinct()
+        return qs
 
     def _assert_write_permission(self):
         user = self.request.user
@@ -535,37 +639,78 @@ class ProjectViewSet(viewsets.ModelViewSet):
             return Response({'detail': 'CSV file is required.'}, status=status.HTTP_400_BAD_REQUEST)
         if not str(csv_file.name).lower().endswith('.csv'):
             return Response({'detail': 'Only CSV uploads are supported.'}, status=status.HTTP_400_BAD_REQUEST)
+        if csv_file.size > 5 * 1024 * 1024:
+            return Response({'detail': 'CSV file must be 5MB or less.'}, status=status.HTTP_400_BAD_REQUEST)
 
         decoded = csv_file.read().decode('utf-8-sig')
         reader = csv.DictReader(io.StringIO(decoded))
         rows_created = []
         timeseries_payload = []
         upload_time = timezone.now()
+        invalid_rows = []
+        anomaly_counts = {'zero_uptime': 0, 'no_data': 0, 'output_deviation': 0}
 
-        for row in reader:
+        for row_number, row in enumerate(reader, start=2):
             meter_id = str(row.get('meter_id') or '').strip()
+            errors = []
             if not meter_id:
-                continue
+                errors.append('meter_id is required.')
             installation_id = str(row.get('installation_id') or '').strip()
             installation = InstallationReport.objects.filter(
                 id=installation_id,
                 project=project,
-            ).first() if installation_id else InstallationReport.objects.filter(project=project, meter_id=meter_id).first()
+                vendor=request.user,
+            ).first() if installation_id else InstallationReport.objects.filter(project=project, vendor=request.user, meter_id=meter_id).first()
+            if installation is None:
+                errors.append('meter_id or installation_id must match an installation for this vendor and project.')
             try:
                 kwh_value = float(row.get('kwh_generated') or row.get('kwh') or 0)
             except (TypeError, ValueError):
+                errors.append('kwh_generated must be a non-negative number.')
                 kwh_value = 0.0
+            if kwh_value < 0:
+                errors.append('kwh_generated must be a non-negative number.')
             try:
                 uptime_pct = float(row.get('uptime_pct') or 0)
             except (TypeError, ValueError):
+                errors.append('uptime_pct must be a number between 0 and 100.')
                 uptime_pct = 0.0
-            recorded_at_raw = str(row.get('recorded_at') or '').strip()
+            if uptime_pct < 0 or uptime_pct > 100:
+                errors.append('uptime_pct must be a number between 0 and 100.')
+            latitude_raw = row.get('latitude')
+            longitude_raw = row.get('longitude')
             try:
-                recorded_at = timezone.datetime.fromisoformat(recorded_at_raw.replace('Z', '+00:00')) if recorded_at_raw else upload_time
+                latitude = float(latitude_raw)
+                if latitude < -90 or latitude > 90:
+                    raise ValueError
+            except (TypeError, ValueError):
+                errors.append('latitude must be a decimal between -90 and 90.')
+                latitude = None
+            try:
+                longitude = float(longitude_raw)
+                if longitude < -180 or longitude > 180:
+                    raise ValueError
+            except (TypeError, ValueError):
+                errors.append('longitude must be a decimal between -180 and 180.')
+                longitude = None
+            recorded_at_raw = str(row.get('reading_datetime') or row.get('recorded_at') or '').strip()
+            try:
+                recorded_at = timezone.datetime.fromisoformat(recorded_at_raw.replace('Z', '+00:00')) if recorded_at_raw else None
             except ValueError:
-                recorded_at = upload_time
-            if timezone.is_naive(recorded_at):
+                errors.append('reading_datetime must be a valid ISO 8601 datetime.')
+                recorded_at = None
+            if recorded_at is None:
+                errors.append('reading_datetime is required.')
+            elif timezone.is_naive(recorded_at):
                 recorded_at = timezone.make_aware(recorded_at, timezone.get_current_timezone())
+            if errors:
+                invalid_rows.append({'row': row_number, 'meter_id': meter_id, 'errors': errors})
+                continue
+
+            previous_reading = SmartMeterReading.objects.filter(
+                project=project,
+                meter_id=meter_id,
+            ).order_by('-recorded_at', '-id').first()
 
             reading = SmartMeterReading.objects.create(
                 project=project,
@@ -588,9 +733,68 @@ class ProjectViewSet(viewsets.ModelViewSet):
                 'reporting_phase': f'PRJ-{project.id}',
                 'country': 'LS',
             })
+            if installation and uptime_pct == 0:
+                create_or_refresh_anomaly(
+                    installation=installation,
+                    project=project,
+                    flag_type='zero_uptime',
+                    description=f'Meter upload at row {row_number} reported 0% uptime for meter {meter_id}.',
+                )
+                anomaly_counts['zero_uptime'] += 1
+            if installation and previous_reading and previous_reading.kwh > 0:
+                deviation_pct = abs(kwh_value - float(previous_reading.kwh)) / float(previous_reading.kwh) * 100.0
+                if deviation_pct > 5:
+                    create_or_refresh_anomaly(
+                        installation=installation,
+                        project=project,
+                        flag_type='output_deviation',
+                        description=(
+                            f'Meter {meter_id} deviated by {deviation_pct:.1f}% from the previous uploaded reading.'
+                        ),
+                    )
+                    anomaly_counts['output_deviation'] += 1
 
         if not rows_created:
-            return Response({'detail': 'No valid meter rows were found in the uploaded CSV.'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {
+                    'detail': 'No valid meter rows were found in the uploaded CSV.',
+                    'valid_rows': 0,
+                    'invalid_rows': len(invalid_rows),
+                    'errors': invalid_rows,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        cutoff = upload_time - timedelta(hours=48)
+        stale_installations = InstallationReport.objects.filter(
+            project=project,
+            vendor=request.user,
+        ).exclude(meter_id='').exclude(
+            smart_meter_readings__recorded_at__gte=cutoff,
+        ).distinct()
+        for installation in stale_installations:
+            create_or_refresh_anomaly(
+                installation=installation,
+                project=project,
+                flag_type='no_data',
+                description=f'No meter reading has been received for meter {installation.meter_id} in the last 48 hours.',
+            )
+            anomaly_counts['no_data'] += 1
+
+        if any(anomaly_counts.values()):
+            notify_vendor_and_oversight(
+                project,
+                vendor=request.user,
+                event='meter_csv_anomaly_detected',
+                title='Meter Data Anomaly Detected',
+                body=(
+                    f'Meter CSV upload for project {project.project_reference or project.id} created anomaly flags: '
+                    f'zero_uptime={anomaly_counts["zero_uptime"]}, '
+                    f'no_data={anomaly_counts["no_data"]}, '
+                    f'output_deviation={anomaly_counts["output_deviation"]}.'
+                ),
+                linked_entity_id=str(project.id),
+            )
 
         stored_path = default_storage.save(
             f'project_documents/meter_csv_{project.id}_{upload_time.strftime("%Y%m%d%H%M%S")}.csv',
@@ -612,7 +816,12 @@ class ProjectViewSet(viewsets.ModelViewSet):
             request.user,
             'meter_csv_uploaded',
             project,
-            {'project_id': str(project.id), 'rows_ingested': len(rows_created)},
+            {
+                'project_id': str(project.id),
+                'rows_ingested': len(rows_created),
+                'rows_rejected': len(invalid_rows),
+                'anomaly_counts': anomaly_counts,
+            },
         )
         SyncToProspectJob.dispatch_async(
             'pushInstallationTimeSeries',
@@ -625,6 +834,9 @@ class ProjectViewSet(viewsets.ModelViewSet):
             {
                 'status': 'ok',
                 'rows_ingested': len(rows_created),
+                'rows_rejected': len(invalid_rows),
+                'invalid_rows': invalid_rows,
+                'anomaly_counts': anomaly_counts,
                 'uploaded_at': upload_time.isoformat(),
             },
             status=status.HTTP_201_CREATED,
@@ -876,8 +1088,9 @@ class PaymentClaimViewSet(viewsets.ModelViewSet):
 
     WRITE_ROLES = {UserRole.VENDOR}
     VERIFY_ROLES = {UserRole.RBF_OFFICIAL, UserRole.ADMIN}
-    APPROVE_ROLES = {UserRole.TAC}
-    PAY_ROLES = {UserRole.UNDP_DONOR}
+    TAC_APPROVE_ROLES = {UserRole.TAC}
+    PSC_APPROVE_ROLES = {UserRole.UNDP_DONOR}
+    PAY_ROLES = {UserRole.ADMIN}
 
     def get_queryset(self):
         qs = self.queryset.order_by('-submitted_at')
@@ -922,7 +1135,7 @@ class PaymentClaimViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         claim = serializer.save()
-        claim.status = PaymentClaimStatus.PENDING
+        claim.status = PaymentClaimStatus.SUBMITTED
         if claim.milestone and not claim.claim_amount:
             claim.claim_amount = claim.milestone.amount
         claim.save(update_fields=['status', 'claim_amount'])
@@ -975,19 +1188,19 @@ class PaymentClaimViewSet(viewsets.ModelViewSet):
         claim = self.get_object()
         if is_vendor_restricted(claim.vendor):
             return Response({'detail': 'This vendor is suspended or blacklisted. Claim remains on Held/Audit.'}, status=status.HTTP_400_BAD_REQUEST)
-        if claim.status not in {PaymentClaimStatus.PENDING, PaymentClaimStatus.VERIFIED}:
-            return Response({'detail': 'Only pending claims can be verified.'}, status=status.HTTP_400_BAD_REQUEST)
-        claim.status = PaymentClaimStatus.VERIFIED
+        if claim.status not in {PaymentClaimStatus.SUBMITTED, PaymentClaimStatus.LEGACY_PENDING}:
+            return Response({'detail': 'Only submitted claims can be approved by RMT.'}, status=status.HTTP_400_BAD_REQUEST)
+        claim.status = PaymentClaimStatus.RMT_APPROVED
         claim.verified_at = timezone.now()
         claim.reviewed_by = request.user
         claim.remarks = request.data.get('remarks', claim.remarks)
         claim.save(update_fields=['status', 'verified_at', 'reviewed_by', 'remarks'])
-        log_audit(request.user, 'payment_claim_verified', claim, {'status': claim.status})
+        log_audit(request.user, 'claim_rmt_approved', claim, {'status': claim.status})
         create_project_activity_update(
             claim.project,
             request.user,
-            'Payment Claim Verified',
-            f"Payment claim {claim.id} was verified.",
+            'Claim Approved By RMT',
+            f"Payment claim {claim.id} was approved by RMT.",
         )
         tac_users = User.objects.filter(role=UserRole.TAC).only('id', 'full_name', 'username')
         if tac_users:
@@ -998,8 +1211,8 @@ class PaymentClaimViewSet(viewsets.ModelViewSet):
                         recipient_name=user.full_name or user.username,
                         type=NotificationChannel.IN_APP,
                         event='payment_claim_verified',
-                        title='Claim Ready For TAC Review',
-                        body=f'Claim {claim.id} for project {claim.project.project_reference or claim.project.id} was verified by RMT and awaits TAC approval.',
+                        title='Claim Ready For TAC Endorsement',
+                        body=f'Claim {claim.id} for project {claim.project.project_reference or claim.project.id} was approved by RMT and awaits TAC endorsement.',
                         status=NotificationStatus.SENT,
                         linked_entity_id=str(claim.project_id),
                     )
@@ -1012,8 +1225,8 @@ class PaymentClaimViewSet(viewsets.ModelViewSet):
             recipient_name=claim.vendor.full_name or claim.vendor.username,
             type=NotificationChannel.IN_APP,
             event='payment_claim_verified',
-            title='Milestone Claim Verified By RMT',
-            body=f'Claim {claim.id} passed RMT review and is now waiting for TAC approval.',
+            title='Milestone Claim Approved By RMT',
+            body=f'Claim {claim.id} passed RMT review and is now waiting for TAC endorsement.',
             status=NotificationStatus.SENT,
             linked_entity_id=str(claim.project_id),
         )
@@ -1021,40 +1234,85 @@ class PaymentClaimViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def approve(self, request, pk=None):
-        if request.user.role not in self.APPROVE_ROLES:
+        if request.user.role not in (self.TAC_APPROVE_ROLES | self.PSC_APPROVE_ROLES):
             raise PermissionDenied('You do not have permission to approve claims.')
         claim = self.get_object()
         if is_vendor_restricted(claim.vendor):
             return Response({'detail': 'This vendor is suspended or blacklisted. Claim remains on Held/Audit.'}, status=status.HTTP_400_BAD_REQUEST)
-        if claim.status != PaymentClaimStatus.VERIFIED:
-            return Response({'detail': 'Claim must first be verified by RMT before TAC approval.'}, status=status.HTTP_400_BAD_REQUEST)
-        claim.status = PaymentClaimStatus.APPROVED
-        claim.approved_at = timezone.now()
+
+        if request.user.role in self.TAC_APPROVE_ROLES:
+            if claim.status not in {PaymentClaimStatus.RMT_APPROVED, PaymentClaimStatus.LEGACY_VERIFIED}:
+                return Response({'detail': 'Claim must first be approved by RMT before TAC endorsement.'}, status=status.HTTP_400_BAD_REQUEST)
+            claim.status = PaymentClaimStatus.TAC_ENDORSED
+            claim.approved_at = timezone.now()
+            claim.reviewed_by = request.user
+            claim.remarks = request.data.get('remarks', claim.remarks)
+            claim.save(update_fields=['status', 'approved_at', 'reviewed_by', 'remarks'])
+            log_audit(request.user, 'claim_tac_endorsed', claim, {'status': claim.status})
+            create_project_activity_update(
+                claim.project,
+                request.user,
+                'Claim Endorsed By TAC',
+                f"Payment claim {claim.id} was endorsed by TAC.",
+            )
+            psc_users = User.objects.filter(role=UserRole.UNDP_DONOR).only('id', 'full_name', 'username')
+            if psc_users:
+                Notification.objects.bulk_create(
+                    [
+                        Notification(
+                            recipient_id=str(user.id),
+                            recipient_name=user.full_name or user.username,
+                            type=NotificationChannel.IN_APP,
+                            event='payment_claim_approved',
+                            title='Claim Ready For PSC Approval',
+                            body=f'Claim {claim.id} for project {claim.project.project_reference or claim.project.id} was endorsed by TAC and awaits PSC approval.',
+                            status=NotificationStatus.SENT,
+                            linked_entity_id=str(claim.project_id),
+                        )
+                        for user in psc_users
+                    ],
+                    ignore_conflicts=True,
+                )
+            Notification.objects.create(
+                recipient_id=str(claim.vendor_id),
+                recipient_name=claim.vendor.full_name or claim.vendor.username,
+                type=NotificationChannel.IN_APP,
+                event='payment_claim_approved',
+                title='Milestone Claim Endorsed By TAC',
+                body=f'Claim {claim.id} passed TAC review and is now waiting for PSC approval.',
+                status=NotificationStatus.SENT,
+                linked_entity_id=str(claim.project_id),
+            )
+            return Response(self.get_serializer(claim).data, status=status.HTTP_200_OK)
+
+        if claim.status not in {PaymentClaimStatus.TAC_ENDORSED, PaymentClaimStatus.LEGACY_APPROVED}:
+            return Response({'detail': 'Claim must first be endorsed by TAC before PSC approval.'}, status=status.HTTP_400_BAD_REQUEST)
+        claim.status = PaymentClaimStatus.PSC_APPROVED
         claim.reviewed_by = request.user
         claim.remarks = request.data.get('remarks', claim.remarks)
-        claim.save(update_fields=['status', 'approved_at', 'reviewed_by', 'remarks'])
-        log_audit(request.user, 'payment_claim_approved', claim, {'status': claim.status})
+        claim.save(update_fields=['status', 'reviewed_by', 'remarks'])
+        log_audit(request.user, 'claim_psc_approved', claim, {'status': claim.status})
         create_project_activity_update(
             claim.project,
             request.user,
-            'Payment Claim Approved',
-            f"Payment claim {claim.id} was approved by TAC.",
+            'Claim Approved By PSC',
+            f"Payment claim {claim.id} was approved by PSC and is now waiting for Finance payment processing.",
         )
-        psc_users = User.objects.filter(role=UserRole.UNDP_DONOR).only('id', 'full_name', 'username')
-        if psc_users:
+        finance_users = User.objects.filter(role=UserRole.ADMIN).only('id', 'full_name', 'username')
+        if finance_users:
             Notification.objects.bulk_create(
                 [
                     Notification(
                         recipient_id=str(user.id),
                         recipient_name=user.full_name or user.username,
                         type=NotificationChannel.IN_APP,
-                        event='payment_claim_approved',
-                        title='Claim Ready For PSC Approval',
-                        body=f'Claim {claim.id} for project {claim.project.project_reference or claim.project.id} was approved by TAC and awaits PSC payment approval.',
+                        event='payment_claim_psc_approved',
+                        title='Claim Ready For Finance Payment',
+                        body=f'Claim {claim.id} for project {claim.project.project_reference or claim.project.id} was approved by PSC and awaits Finance payment.',
                         status=NotificationStatus.SENT,
                         linked_entity_id=str(claim.project_id),
                     )
-                    for user in psc_users
+                    for user in finance_users
                 ],
                 ignore_conflicts=True,
             )
@@ -1062,9 +1320,9 @@ class PaymentClaimViewSet(viewsets.ModelViewSet):
             recipient_id=str(claim.vendor_id),
             recipient_name=claim.vendor.full_name or claim.vendor.username,
             type=NotificationChannel.IN_APP,
-            event='payment_claim_approved',
-            title='Milestone Claim Approved By TAC',
-            body=f'Claim {claim.id} passed TAC review and is now waiting for PSC payment approval.',
+            event='payment_claim_psc_approved',
+            title='Milestone Claim Approved By PSC',
+            body=f'Claim {claim.id} has PSC approval and is now waiting for Finance payment.',
             status=NotificationStatus.SENT,
             linked_entity_id=str(claim.project_id),
         )
@@ -1075,7 +1333,7 @@ class PaymentClaimViewSet(viewsets.ModelViewSet):
         if request.user.role not in self.APPROVE_ROLES:
             raise PermissionDenied('You do not have permission to reject claims.')
         claim = self.get_object()
-        if claim.status == PaymentClaimStatus.PAID:
+        if claim.status in {PaymentClaimStatus.COMPLETED, PaymentClaimStatus.LEGACY_PAID}:
             return Response({'detail': 'Paid claims cannot be rejected.'}, status=status.HTTP_400_BAD_REQUEST)
         claim.status = PaymentClaimStatus.REJECTED
         claim.reviewed_by = request.user
@@ -1100,11 +1358,79 @@ class PaymentClaimViewSet(viewsets.ModelViewSet):
         claim = self.get_object()
         if is_vendor_restricted(claim.vendor):
             return Response({'detail': 'This vendor is suspended or blacklisted. New disbursements are frozen.'}, status=status.HTTP_400_BAD_REQUEST)
-        if claim.status not in {PaymentClaimStatus.APPROVED, PaymentClaimStatus.PAID}:
-            return Response({'detail': 'Claim must be approved before payment.'}, status=status.HTTP_400_BAD_REQUEST)
+        if claim.status not in {PaymentClaimStatus.PSC_APPROVED, PaymentClaimStatus.LEGACY_APPROVED}:
+            return Response({'detail': 'Claim must be approved by PSC before Finance can pay it.'}, status=status.HTTP_400_BAD_REQUEST)
 
         reference = str(request.data.get('payment_reference') or f"PMT-{uuid.uuid4().hex[:10].upper()}")
-        claim.status = PaymentClaimStatus.PAID
+        claim.payment_reference = reference
+        claim.reviewed_by = request.user
+        claim.save(update_fields=['payment_reference', 'reviewed_by'])
+
+        disbursement, _ = Disbursement.objects.update_or_create(
+            claim=claim,
+            defaults={
+                'amount': claim.claim_amount,
+                'status': DisbursementStatus.COMPLETED,
+                'reference': reference,
+                'notes': request.data.get('notes', ''),
+                'processed_by': request.user,
+            },
+        )
+
+        log_audit(
+            request.user,
+            'finance_payment_processed',
+            claim,
+            {'status': claim.status, 'payment_reference': reference, 'disbursement_id': disbursement.id},
+        )
+        create_project_activity_update(
+            claim.project,
+            request.user,
+            'Finance Payment Processed',
+            f"Finance processed payment for claim {claim.id} with reference {reference}. RMT now needs to mark the claim as paid.",
+        )
+        rmt_users = User.objects.filter(role__in={UserRole.RBF_OFFICIAL, UserRole.ADMIN}).only('id', 'full_name', 'username')
+        if rmt_users:
+            Notification.objects.bulk_create(
+                [
+                    Notification(
+                        recipient_id=str(user.id),
+                        recipient_name=user.full_name or user.username,
+                        type=NotificationChannel.IN_APP,
+                        event='payment_claim_finance_paid',
+                        title='Claim Ready To Mark Paid',
+                        body=f'Finance paid claim {claim.id} for project {claim.project.project_reference or claim.project.id}. RMT can now mark it as paid.',
+                        status=NotificationStatus.SENT,
+                        linked_entity_id=str(claim.project_id),
+                    )
+                    for user in rmt_users
+                ],
+                ignore_conflicts=True,
+            )
+        Notification.objects.create(
+            recipient_id=str(claim.vendor_id),
+            recipient_name=claim.vendor.full_name or claim.vendor.username,
+            type=NotificationChannel.IN_APP,
+            event='payment_claim_paid',
+            title='Finance Payment Processed',
+            body=f'Finance processed payment for claim {claim.id}. RMT will mark the claim as paid after confirmation.',
+            status=NotificationStatus.SENT,
+            linked_entity_id=str(claim.project_id),
+        )
+        return Response(self.get_serializer(claim).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], url_path='confirm-paid')
+    def confirm_paid(self, request, pk=None):
+        if request.user.role not in self.VERIFY_ROLES:
+            raise PermissionDenied('You do not have permission to confirm completed payments.')
+        claim = self.get_object()
+        if claim.status not in {PaymentClaimStatus.PSC_APPROVED, PaymentClaimStatus.COMPLETED, PaymentClaimStatus.LEGACY_APPROVED}:
+            return Response({'detail': 'Claim must be PSC approved before it can be marked as paid.'}, status=status.HTTP_400_BAD_REQUEST)
+        if not hasattr(claim, 'disbursement') or claim.disbursement.status != DisbursementStatus.COMPLETED:
+            return Response({'detail': 'Finance must process the payment before RMT can mark this claim as paid.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        reference = str(request.data.get('payment_reference') or claim.payment_reference or f"PMT-{uuid.uuid4().hex[:10].upper()}")
+        claim.status = PaymentClaimStatus.COMPLETED
         claim.paid_at = timezone.now()
         claim.payment_reference = reference
         claim.reviewed_by = request.user
@@ -1123,29 +1449,31 @@ class PaymentClaimViewSet(viewsets.ModelViewSet):
 
         log_audit(
             request.user,
-            'payment_claim_paid',
+            'payment_confirmed',
             claim,
             {'status': claim.status, 'payment_reference': reference, 'disbursement_id': disbursement.id},
         )
         create_project_activity_update(
             claim.project,
             request.user,
-            'Payment Disbursed',
-            f"Payment claim {claim.id} was paid with reference {reference}.",
+            'Payment Marked As Paid',
+            f"RMT marked payment claim {claim.id} as paid with reference {reference}.",
         )
         Notification.objects.create(
             recipient_id=str(claim.vendor_id),
             recipient_name=claim.vendor.full_name or claim.vendor.username,
             type=NotificationChannel.IN_APP,
-            event='payment_claim_paid',
-            title='Milestone Claim Paid',
-            body=f'Claim {claim.id} for project {claim.project.project_reference or claim.project.id} has been paid.',
+            event='payment_claim_completed',
+            title='Milestone Payment Completed',
+            body=f'Payment of {claim.claim_amount} for claim {claim.id} has been completed. Reference: {reference}.',
             status=NotificationStatus.SENT,
             linked_entity_id=str(claim.project_id),
         )
         if claim.milestone:
             claim.milestone.status = 'paid'
             claim.milestone.save(update_fields=['status', 'updated_at'])
+        refresh_project_kpis(str(claim.project_id))
+        finalize_project_if_ready(claim.project, request.user)
         return Response(self.get_serializer(claim).data, status=status.HTTP_200_OK)
 
 
@@ -1845,6 +2173,13 @@ class PortfolioKpiView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        if request.user.role not in {UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.UNDP_DONOR}:
+        if request.user.role not in {
+            UserRole.RBF_OFFICIAL,
+            UserRole.ADMIN,
+            UserRole.UNDP_DONOR,
+            UserRole.TAC,
+            UserRole.DOE_OFFICER,
+            UserRole.AUDITOR,
+        }:
             raise PermissionDenied('You do not have permission to access the portfolio KPI dashboard.')
-        return Response(KpiService.getPortfolioSummary())
+        return Response(KpiService.getPortfolioSummary(request.user))
