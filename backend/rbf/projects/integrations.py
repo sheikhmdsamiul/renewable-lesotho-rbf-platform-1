@@ -3,6 +3,7 @@ import json
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from typing import Any
 from socket import timeout as SocketTimeout
 from urllib.error import HTTPError, URLError
@@ -13,7 +14,7 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
-from .models import InstallationReport, InstallationStatus, Project, ProspectSyncLog, ProspectSyncStatus
+from .models import InstallationReport, InstallationStatus, Project, ProspectSyncLog, ProspectSyncStatus, SmartMeterReading
 from rbf.users.models import User
 
 
@@ -63,6 +64,55 @@ def derive_installation_gender(household_type: Any) -> str:
     return 'F' if str(household_type or '').strip().lower() == 'female_headed' else 'M'
 
 
+def normalize_project_technology(value: Any) -> str:
+    raw = str(value or '').strip().upper()
+    normalized = ' '.join(raw.replace('_', ' ').replace('/', ' ').split())
+    mapping = {
+        'SOLAR HOME SYSTEM': 'SHS',
+        'IMPROVED COOKSTOVE': 'ICS',
+        'MINI-GRID': 'GMG',
+        'MINI GRID': 'GMG',
+        'SOLAR MINI-GRID': 'GMG',
+        'SOLAR MINI GRID': 'GMG',
+        'SOLAR WATER PUMP': 'SWP',
+        'PRODUCTIVE USE': 'PUE',
+    }
+    return mapping.get(normalized, raw)
+
+
+def build_project_target_payload(project: Project) -> list[dict[str, Any]]:
+    reporting_phase = f'PRJ-{project.id}'
+    effective_date = project.start_date or timezone.localdate()
+    program_end_date = project.end_date or (effective_date + timedelta(days=365))
+    base_fields = {
+        'country': 'LS',
+        'reporting_phase': reporting_phase,
+        'program': 'RBF Lesotho',
+        'effective_date': effective_date.isoformat(),
+        'program_end_date': program_end_date.isoformat(),
+    }
+    return [
+        {
+            **base_fields,
+            'metric': 'installation_target',
+            'target_value': project.installation_target,
+            'unit_of_measurement': 'number',
+        },
+        {
+            **base_fields,
+            'metric': 'female_beneficiary_target',
+            'target_value': project.female_target_pct or 50,
+            'unit_of_measurement': 'percentage',
+        },
+        {
+            **base_fields,
+            'metric': 'monthly_energy_output_kwh',
+            'target_value': project.energy_output_target_kwh,
+            'unit_of_measurement': 'kWh',
+        },
+    ]
+
+
 class ProspectService:
     DEVICE_CATEGORY_MAP = {
         'SHS': 'solar_home_system',
@@ -83,6 +133,10 @@ class ProspectService:
         'getInstallations': '/v1/out/installations',
         'getTargets': '/v1/out/targets',
     }
+    READ_TOKENS = {
+        'getInstallations': 'PROSPECT_TOKEN_OUT_INSTALLATIONS',
+        'getTargets': 'PROSPECT_TOKEN_OUT_TARGETS',
+    }
     WRITE_TOKENS = {
         'pushAgent': 'PROSPECT_TOKEN_IN_AGENTS',
         'pushCustomer': 'PROSPECT_TOKEN_IN_CUSTOMERS',
@@ -99,6 +153,7 @@ class ProspectService:
         read_token: str,
         write_token: str,
         write_tokens: dict[str, str] | None = None,
+        read_tokens: dict[str, str] | None = None,
         timeout: int = 30,
         batch_size: int = 10000,
     ):
@@ -108,6 +163,10 @@ class ProspectService:
         self.write_tokens = {
             method_name: str(token or '').strip()
             for method_name, token in (write_tokens or {}).items()
+        }
+        self.read_tokens = {
+            method_name: str(token or '').strip()
+            for method_name, token in (read_tokens or {}).items()
         }
         self.timeout = timeout
         self.batch_size = batch_size
@@ -121,6 +180,10 @@ class ProspectService:
             write_tokens={
                 method_name: getattr(settings, setting_name, '')
                 for method_name, setting_name in cls.WRITE_TOKENS.items()
+            },
+            read_tokens={
+                method_name: getattr(settings, setting_name, '')
+                for method_name, setting_name in cls.READ_TOKENS.items()
             },
             timeout=getattr(settings, 'PROSPECT_TIMEOUT_SECONDS', 30),
             batch_size=getattr(settings, 'PROSPECT_BATCH_SIZE', 10000),
@@ -146,10 +209,14 @@ class ProspectService:
             )
         return token
 
-    def _token_for_read(self) -> str:
-        token = self.read_token
+    def _token_for_read(self, method_name: str) -> str:
+        token = self.read_tokens.get(method_name) or self.read_token
         if not token:
-            raise ProspectServiceError('Prospect read token is not configured.')
+            setting_name = self.READ_TOKENS.get(method_name, 'PROSPECT_READ_TOKEN')
+            raise ProspectServiceError(
+                f'Prospect read token is not configured for {method_name}. '
+                f'Expected {setting_name} or PROSPECT_READ_TOKEN.'
+            )
         return token
 
     def _request(self, method: str, endpoint: str, *, payload: dict[str, Any] | None = None, query: dict[str, Any] | None = None, token: str) -> dict[str, Any]:
@@ -201,9 +268,9 @@ class ProspectService:
             responses.append(response)
         return {'responses': responses}
 
-    def _get_records(self, endpoint: str, *, query: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    def _get_records(self, method_name: str, endpoint: str, *, query: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         self._ensure_configured()
-        token = self._token_for_read()
+        token = self._token_for_read(method_name)
         response = self._request(
             'GET',
             endpoint,
@@ -238,13 +305,13 @@ class ProspectService:
         query = {'size': size, 'page': page}
         if filters:
             query.update(filters)
-        return self._get_records(self.READ_ENDPOINTS['getInstallations'], query=query)
+        return self._get_records('getInstallations', self.READ_ENDPOINTS['getInstallations'], query=query)
 
     def getTargets(self, size: int = 100, page: int = 1, filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         query = {'size': size, 'page': page}
         if filters:
             query.update(filters)
-        return self._get_records(self.READ_ENDPOINTS['getTargets'], query=query)
+        return self._get_records('getTargets', self.READ_ENDPOINTS['getTargets'], query=query)
 
 
 class SyncToProspectJob:
@@ -342,8 +409,12 @@ class SyncToProspectJob:
         record_type: str = '',
         log_id: int | None = None,
         delay_seconds: int = 0,
+        run_immediately: bool = False,
     ):
         def _enqueue():
+            if run_immediately and delay_seconds <= 0:
+                cls(method_name, data, record_id, record_type, log_id=log_id).run()
+                return
             if delay_seconds <= 0:
                 _executor.submit(cls(method_name, data, record_id, record_type, log_id=log_id).run)
                 return
@@ -357,43 +428,18 @@ class SyncToProspectJob:
         transaction.on_commit(_enqueue)
 
 
-def queue_project_targets_sync(project_id: str):
+def queue_project_targets_sync(project_id: str, *, run_immediately: bool = False, record_type: str = 'target'):
     project = Project.objects.filter(id=project_id).first()
     if not project:
         return
-    reporting_phase = f'PRJ-{project.id}'
-    effective_date = project.start_date.isoformat() if project.start_date else timezone.now().date().isoformat()
-    payload = [
-        {
-            'external_id': f'target_{project.id}_installations',
-            'metric': 'installation_target',
-            'target_value': project.installation_target,
-            'unit_of_measurement': 'number',
-            'effective_date': effective_date,
-            'country': 'LS',
-            'reporting_phase': reporting_phase,
-            'program': 'RBF Lesotho',
-        },
-        {
-            'external_id': f'target_{project.id}_female_pct',
-            'metric': 'female_beneficiary_target',
-            'target_value': project.female_target_pct or 50,
-            'unit_of_measurement': 'percentage',
-            'country': 'LS',
-            'reporting_phase': reporting_phase,
-            'program': 'RBF Lesotho',
-        },
-        {
-            'external_id': f'target_{project.id}_energy_kwh',
-            'metric': 'monthly_energy_output_kwh',
-            'target_value': project.energy_output_target_kwh,
-            'unit_of_measurement': 'kWh',
-            'country': 'LS',
-            'reporting_phase': reporting_phase,
-            'program': 'RBF Lesotho',
-        },
-    ]
-    SyncToProspectJob.dispatch_async('pushTarget', payload, record_id=int(project.id), record_type='target')
+    payload = build_project_target_payload(project)
+    SyncToProspectJob.dispatch_async(
+        'pushTarget',
+        payload,
+        record_id=int(project.id),
+        record_type=record_type,
+        run_immediately=run_immediately,
+    )
 
 
 def queue_project_agent_sync(project_id: str):
@@ -425,7 +471,8 @@ def queue_project_agent_sync(project_id: str):
 def _build_installation_sync_payload(report: InstallationReport) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]]]:
     project_setup = getattr(report.project, 'project_setup', None)
     district = report.project.district or report.project.district_zone or report.project.region or ''
-    device_category = ProspectService.DEVICE_CATEGORY_MAP.get(str(report.project.tech_type or '').upper(), '')
+    project_technology = normalize_project_technology(report.project.tech_type or report.project.technology_type)
+    device_category = ProspectService.DEVICE_CATEGORY_MAP.get(project_technology, '')
     customer_payload = {
         'data': [{
             'external_id': str(report.id),
@@ -506,3 +553,38 @@ def queue_project_completion_report_sync(project_id: str):
         'generated_at': timezone.now().isoformat(),
     }]
     SyncToProspectJob.dispatch_async('pushReport', payload, record_id=int(project.id), record_type='project')
+
+
+def build_project_timeseries_payload(project: Project) -> list[dict[str, Any]]:
+    readings = SmartMeterReading.objects.filter(project=project).select_related('installation').order_by('-recorded_at', '-id')
+    return [
+        {
+            'external_id': f'meter_{project.id}_{reading.id}',
+            'installation_id': str(reading.installation_id) if reading.installation_id else '',
+            'meter_id': reading.meter_id,
+            'recorded_at': reading.recorded_at.isoformat(),
+            'kwh_generated': reading.kwh,
+            'output_energy_interval_wh': round(float(reading.kwh) * 1000, 2),
+            'uptime_pct': reading.uptime_pct,
+            'project_id': str(project.id),
+            'reporting_phase': f'PRJ-{project.id}',
+            'country': 'LS',
+        }
+        for reading in readings
+    ]
+
+
+def queue_project_timeseries_sync(project_id: str) -> int:
+    project = Project.objects.filter(id=project_id).first()
+    if not project:
+        return 0
+    payload = build_project_timeseries_payload(project)
+    if not payload:
+        return 0
+    SyncToProspectJob.dispatch_async(
+        'pushInstallationTimeSeries',
+        payload,
+        record_id=int(project.id),
+        record_type='project',
+    )
+    return len(payload)

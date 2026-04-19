@@ -95,6 +95,10 @@ class VendorPrequalification(models.Model):
     # Bank and contact details
     bank_account_name = models.CharField(max_length=255, blank=True)
     bank_account_number = models.CharField(max_length=32, blank=True)
+    bank_name = models.CharField(max_length=255, blank=True)
+    bank_branch = models.CharField(max_length=255, blank=True)
+    bank_swift_code = models.CharField(max_length=64, blank=True)
+    bank_sort_code = models.CharField(max_length=64, blank=True)
     contact_number = models.CharField(max_length=20, blank=True)
     email = models.EmailField(blank=True)
     gender_of_focal_person = models.CharField(max_length=16, choices=GENDER_CHOICES, blank=True)
@@ -243,3 +247,56 @@ class BlacklistAppeal(models.Model):
 
     def __str__(self):
         return f"Appeal {self.id} - {self.vendor} ({self.status})"
+
+
+class OrganizationType(models.TextChoices):
+    GOVERNMENT = 'Government', 'Government'
+    INTERNATIONAL = 'International', 'International'
+    NGO = 'NGO', 'NGO'
+
+
+class Organization(models.Model):
+    name = models.CharField(max_length=255, unique=True)
+    type = models.CharField(max_length=32, choices=OrganizationType.choices)
+    contact_person = models.CharField(max_length=255, blank=True)
+    email = models.EmailField(blank=True)
+    phone = models.CharField(max_length=32, blank=True)
+    address = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['name']
+
+    def __str__(self):
+        return self.name
+
+
+class PlatformConfiguration(models.Model):
+    platform_name = models.CharField(max_length=255, default='Renewable Lesotho RBF PLATFORM')
+    country_code = models.CharField(max_length=8, default='LS')
+    country_name = models.CharField(max_length=64, default='Lesotho')
+    default_currency = models.CharField(max_length=8, default='LSL')
+    timezone = models.CharField(max_length=64, default='Africa/Maseru')
+    female_target_minimum = models.PositiveIntegerField(default=50)
+    vulnerable_target_minimum = models.PositiveIntegerField(default=30)
+    low_income_target_minimum = models.PositiveIntegerField(default=60)
+    uptime_target = models.PositiveIntegerField(default=99)
+    anomaly_deviation_threshold = models.PositiveIntegerField(default=5)
+    gps_duplicate_radius_m = models.PositiveIntegerField(default=10)
+    gps_verification_max_distance_m = models.PositiveIntegerField(default=50)
+    m2_verification_required_pct = models.PositiveIntegerField(default=80)
+    m3_verification_required_pct = models.PositiveIntegerField(default=100)
+    email_notifications_enabled = models.BooleanField(default=True)
+    sms_notifications_enabled = models.BooleanField(default=False)
+    max_file_size_mb = models.PositiveIntegerField(default=10)
+    allowed_file_types = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Platform Configuration'
+        verbose_name_plural = 'Platform Configuration'
+
+    def __str__(self):
+        return self.platform_name

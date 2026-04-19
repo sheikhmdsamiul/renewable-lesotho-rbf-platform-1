@@ -13,6 +13,8 @@ import {
   VerificationTask,
   VendorPrequalification,
   VendorPrequalificationSubmission,
+  VendorBankDetails,
+  DisbursementSheet,
   PaymentClaim,
   PaymentClaimSubmission,
   Disbursement,
@@ -31,6 +33,10 @@ import {
   ProjectKpiSummary,
   PortfolioKpiSummary,
   ProspectSyncLog,
+  Organization,
+  PlatformConfiguration,
+  SystemHealthPayload,
+  SuperAdminDashboardSummary,
 } from "./types";
 
 const env = (import.meta as any)?.env ?? {};
@@ -98,6 +104,28 @@ function normalizeFileUrl(raw?: string): string | undefined {
     return raw;
   }
   return raw;
+}
+
+function normalizeTechnologyType(raw?: string): string | undefined {
+  const value = String(raw || "").trim();
+  if (!value) return undefined;
+  const key = value.toLowerCase();
+  const mapping: Record<string, string> = {
+    shs: "SHS",
+    "solar home system": "SHS",
+    ics: "ICS",
+    "improved cookstove": "ICS",
+    gmg: "GMG",
+    "mini-grid": "GMG",
+    "mini grid": "GMG",
+    "solar mini-grid": "GMG",
+    "solar mini grid": "GMG",
+    swp: "SWP",
+    "solar water pump": "SWP",
+    pue: "PUE",
+    "productive use": "PUE",
+  };
+  return mapping[key] || value.toUpperCase();
 }
 
 function extractApiErrorDetail(text: string): string {
@@ -226,6 +254,7 @@ function mapTenderFromApi(api: any): Tender {
     tenderSecurityRequired: api.tender_security_required ?? undefined,
     contactDetails: api.contact_details ?? undefined,
     technologyTypes: api.technology_types ?? undefined,
+    targetDistricts: Array.isArray(api.target_districts) ? api.target_districts : undefined,
     targetSiteType: api.target_site_type ?? undefined,
     isVerified: api.is_verified ?? undefined,
     fundingSource: api.funding_source ?? undefined,
@@ -296,6 +325,119 @@ function mapUserFromApi(api: any): User {
   };
 }
 
+function mapOrganizationFromApi(api: any): Organization {
+  return {
+    id: String(api.id ?? ""),
+    name: api.name ?? "",
+    type: api.type ?? "Government",
+    contactPerson: api.contact_person ?? undefined,
+    email: api.email ?? undefined,
+    phone: api.phone ?? undefined,
+    address: api.address ?? undefined,
+    createdAt: api.created_at ?? undefined,
+    updatedAt: api.updated_at ?? undefined,
+  };
+}
+
+function mapPlatformConfigurationFromApi(api: any): PlatformConfiguration {
+  return {
+    id: api.id != null ? String(api.id) : undefined,
+    platformName: api.platform_name ?? "",
+    countryCode: api.country_code ?? "",
+    countryName: api.country_name ?? "",
+    defaultCurrency: api.default_currency ?? "",
+    timezone: api.timezone ?? "",
+    femaleTargetMinimum: Number(api.female_target_minimum ?? 0),
+    vulnerableTargetMinimum: Number(api.vulnerable_target_minimum ?? 0),
+    lowIncomeTargetMinimum: Number(api.low_income_target_minimum ?? 0),
+    uptimeTarget: Number(api.uptime_target ?? 0),
+    anomalyDeviationThreshold: Number(api.anomaly_deviation_threshold ?? 0),
+    gpsDuplicateRadiusM: Number(api.gps_duplicate_radius_m ?? 0),
+    gpsVerificationMaxDistanceM: Number(api.gps_verification_max_distance_m ?? 0),
+    m2VerificationRequiredPct: Number(api.m2_verification_required_pct ?? 0),
+    m3VerificationRequiredPct: Number(api.m3_verification_required_pct ?? 0),
+    emailNotificationsEnabled: Boolean(api.email_notifications_enabled),
+    smsNotificationsEnabled: Boolean(api.sms_notifications_enabled),
+    maxFileSizeMb: Number(api.max_file_size_mb ?? 0),
+    allowedFileTypes: Array.isArray(api.allowed_file_types) ? api.allowed_file_types : [],
+    lesothoBoundary: api.lesotho_boundary
+      ? {
+          path: api.lesotho_boundary.path ?? "",
+          exists: Boolean(api.lesotho_boundary.exists),
+          lastModified: api.lesotho_boundary.last_modified ?? undefined,
+        }
+      : undefined,
+  };
+}
+
+function mapSystemHealthFromApi(api: any): SystemHealthPayload {
+  return {
+    database: {
+      status: api.database?.status ?? "",
+      error: api.database?.error ?? undefined,
+      slowQueriesLast24h: Number(api.database?.slow_queries_last_24h ?? 0),
+      tableSizes: api.database?.table_sizes ?? {},
+    },
+    queue: {
+      workerStatus: api.queue?.worker_status ?? "",
+      pendingJobsCount: Number(api.queue?.pending_jobs_count ?? 0),
+      failedJobsCount: Number(api.queue?.failed_jobs_count ?? 0),
+      processingRateLast24h: Number(api.queue?.processing_rate_last_24h ?? 0),
+    },
+    scheduler: {
+      status: api.scheduler?.status ?? "",
+      lastMonthlyReportSync: api.scheduler?.last_monthly_report_sync ?? undefined,
+    },
+    prospectApi: {
+      status: api.prospect_api?.status ?? "",
+    },
+    storage: {
+      totalBytes: Number(api.storage?.total_bytes ?? 0),
+      usedBytes: Number(api.storage?.used_bytes ?? 0),
+      freeBytes: Number(api.storage?.free_bytes ?? 0),
+      filesUploadedToday: Number(api.storage?.files_uploaded_today ?? 0),
+    },
+    errors: Array.isArray(api.errors)
+      ? api.errors.map((item: any) => ({
+          id: String(item.id ?? ""),
+          methodName: item.method_name ?? "",
+          errorMessage: item.error_message ?? undefined,
+          updatedAt: item.updated_at ?? undefined,
+        }))
+      : [],
+  };
+}
+
+function mapSuperAdminDashboardSummaryFromApi(api: any): SuperAdminDashboardSummary {
+  return {
+    stats: {
+      totalUsers: Number(api.stats?.total_users ?? 0),
+      activeProjects: Number(api.stats?.active_projects ?? 0),
+      totalVendors: Number(api.stats?.total_vendors ?? 0),
+      pendingPrequalifications: Number(api.stats?.pending_prequalifications ?? 0),
+    },
+    systemHealth: mapSystemHealthFromApi(api.system_health ?? {}),
+    recentActivity: Array.isArray(api.recent_activity)
+      ? api.recent_activity.map((item: any) => ({
+          id: String(item.id ?? ""),
+          timestamp: item.timestamp ?? undefined,
+          actor: item.actor ?? "System",
+          role: item.role ?? undefined,
+          action: item.action ?? "",
+          module: item.module ?? undefined,
+          record: item.record != null ? String(item.record) : undefined,
+          notes: item.notes ?? undefined,
+          oldStatus: item.old_status ?? undefined,
+          newStatus: item.new_status ?? undefined,
+        }))
+      : [],
+    prospectSyncSummary: {
+      failedJobs: Number(api.prospect_sync_summary?.failed_jobs ?? 0),
+      lastSyncAt: api.prospect_sync_summary?.last_sync_at ?? undefined,
+    },
+  };
+}
+
 function randomRef(): string {
   const n = Math.floor(100000 + Math.random() * 900000);
   return `REF-${n}`;
@@ -329,6 +471,7 @@ function mapTenderToApi(ui: Partial<Tender>): any {
     tender_security_required: ui.tenderSecurityRequired ?? false,
     contact_details: ui.contactDetails ?? "",
     technology_types: ui.technologyTypes ?? [],
+    target_districts: ui.targetDistricts ?? [],
     target_site_type: ui.targetSiteType ?? null,
     is_verified: ui.isVerified ?? false,
     funding_source: ui.fundingSource ?? null,
@@ -344,9 +487,9 @@ function buildTenderForm(payload: Partial<Tender> & { scheduleFile?: File | null
   const form = new FormData();
   Object.entries(apiPayload).forEach(([k, v]) => {
     if (v == null) return;
-    if (k === 'technology_types' && Array.isArray(v)) {
+    if ((k === 'technology_types' || k === 'target_districts') && Array.isArray(v)) {
       // JSONField expects JSON-encoded string
-      form.append('technology_types', JSON.stringify(v));
+      form.append(k, JSON.stringify(v));
       return;
     }
     if (Array.isArray(v)) {
@@ -836,6 +979,10 @@ function mapVendorPrequalificationFromApi(api: any): VendorPrequalification {
     districtsCovered: Number(api.districts_covered ?? 0),
     femaleBeneficiaryTarget: Number(api.female_beneficiary_target ?? 50),
     vulnerableGroupTarget: Number(api.vulnerable_group_target ?? 30),
+    bankName: api.bank_name ?? undefined,
+    bankBranch: api.bank_branch ?? undefined,
+    bankSwiftCode: api.bank_swift_code ?? undefined,
+    bankSortCode: api.bank_sort_code ?? undefined,
     bankAccountName: api.bank_account_name ?? undefined,
     bankAccountNumber: api.bank_account_number ?? undefined,
     contactNumber: api.contact_number ?? undefined,
@@ -871,6 +1018,7 @@ function mapPaymentClaimFromApi(api: any): PaymentClaim {
     projectId: String(api.project ?? ""),
     vendorId: String(api.vendor ?? ""),
     milestoneId: api.milestone != null ? String(api.milestone) : undefined,
+    milestone_details: api.milestone_details ? mapMilestoneFromApi(api.milestone_details) : undefined,
     completionDate: api.completion_date ?? undefined,
     claimAmount: Number(api.claim_amount ?? 0),
     actualBeneficiaries: Number(api.actual_beneficiaries ?? 0),
@@ -888,6 +1036,13 @@ function mapPaymentClaimFromApi(api: any): PaymentClaim {
     reviewedBy: api.reviewed_by != null ? String(api.reviewed_by) : undefined,
     reviewedByUsername: api.reviewed_by_username ?? undefined,
     vendorUsername: api.vendor_username ?? undefined,
+    vendorLegalName: api.vendor_legal_name ?? undefined,
+    vendorBankName: api.vendor_bank_name ?? undefined,
+    vendorBankBranch: api.vendor_bank_branch ?? undefined,
+    vendorBankSwiftCode: api.vendor_bank_swift_code ?? undefined,
+    vendorBankSortCode: api.vendor_bank_sort_code ?? undefined,
+    vendorAccountHolderName: api.vendor_account_holder_name ?? undefined,
+    vendorAccountNumber: api.vendor_account_number ?? undefined,
     disbursement: api.disbursement ? mapDisbursementFromApi(api.disbursement) : undefined,
     paymentLocked: Boolean(api.payment_locked),
     paymentLockReason: api.payment_lock_reason ?? undefined,
@@ -909,6 +1064,8 @@ function mapAuditLogFromApi(api: any): AuditLog {
     recordType: api.record_type ?? undefined,
     actorRole: api.actor_role ?? undefined,
     module: api.module ?? undefined,
+    oldStatus: api.old_status ?? undefined,
+    newStatus: api.new_status ?? undefined,
   };
 }
 
@@ -944,6 +1101,7 @@ function mapProspectSyncLogFromApi(api: any): ProspectSyncLog {
     methodName: api.method_name ?? "",
     status: api.status ?? "",
     attempts: Number(api.attempts ?? 0),
+    payload: api.payload ?? undefined,
     errorMessage: api.error_message ?? undefined,
     createdAt: api.created_at ?? undefined,
     updatedAt: api.updated_at ?? undefined,
@@ -1067,6 +1225,53 @@ async function http<T>(url: string, init?: ApiRequestInit): Promise<T> {
   }
 
   throw lastError ?? new Error("Request failed");
+}
+
+async function httpBlob(url: string, init?: ApiRequestInit): Promise<Blob> {
+  const token = typeof window !== "undefined" ? localStorage.getItem(ACCESS_TOKEN_KEY) : null;
+  const initHeaders = headersInitToObject(init?.headers as HeadersInit | undefined);
+  const skipAuth = Boolean(getHeaderValue(initHeaders, "X-Skip-Auth"));
+  const timeoutMs = init?.timeoutMs ?? requestTimeoutMs;
+  const headers: Record<string, string> = { ...initHeaders };
+
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === "x-skip-auth") {
+      delete headers[key];
+    }
+  }
+  if (token && !skipAuth) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+
+  const { headers: _ignoredHeaders, timeoutMs: _ignoredTimeoutMs, ...requestInit } = init ?? {};
+  const requestUrls = /^https?:\/\//i.test(url)
+    ? [url]
+    : API_BASE_CANDIDATES.map((base) => joinApiUrl(base, url));
+
+  let lastError: Error | null = null;
+  for (let i = 0; i < requestUrls.length; i += 1) {
+    const requestUrl = requestUrls[i];
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(requestUrl, {
+        ...requestInit,
+        headers,
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(`HTTP ${res.status} ${res.statusText}: ${extractApiErrorDetail(text) || text}`);
+      }
+      return await res.blob();
+    } catch (error: any) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      if (i === requestUrls.length - 1) throw lastError;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+  throw lastError ?? new Error("Download failed");
 }
 
 async function refreshAccessToken(): Promise<string | null> {
@@ -1539,7 +1744,7 @@ export async function assignTenderContract(contractId: string, payload?: {
   targetInstallations?: number;
   techType?: string;
   energyOutput?: number;
-  district?: string;
+  districts?: string[];
   verificationMethod?: string;
   targetFemalePct?: number;
   targetVulnerablePct?: number;
@@ -1548,9 +1753,9 @@ export async function assignTenderContract(contractId: string, payload?: {
   const body: any = {};
   if (payload?.projectDurationMonths != null) body.project_duration_months = payload.projectDurationMonths;
   if (payload?.targetInstallations != null) body.installation_target = payload.targetInstallations;
-  if (payload?.techType) body.technology_type = payload.techType;
+  if (payload?.techType) body.technology_type = normalizeTechnologyType(payload.techType);
   if (payload?.energyOutput != null) body.energy_output_target_kwh = payload.energyOutput;
-  if (payload?.district) body.district_zone = payload.district;
+  if (payload?.districts?.length) body.district_zones = payload.districts;
   if (payload?.verificationMethod) body.verification_method = payload.verificationMethod;
   if (payload?.targetFemalePct != null) body.female_target_pct = payload.targetFemalePct;
   if (payload?.targetVulnerablePct != null) body.vulnerable_target_pct = payload.targetVulnerablePct;
@@ -1577,6 +1782,24 @@ export async function rejectTenderContract(contractId: string, reason: string): 
 export async function fetchProjects(): Promise<Project[]> {
   const data = await http<any>(`/api/projects/`);
   return unwrapListResponse<any>(data).map(mapProjectFromApi);
+}
+
+export async function triggerProjectProspectSync(
+  projectId: string,
+  action:
+    | "push_target"
+    | "push_agent"
+    | "push_installations"
+    | "push_installation_updates"
+    | "push_installation_timeseries"
+    | "push_report"
+    | "refresh_status"
+    | "sync_all_available",
+): Promise<{ status: string; action: string; queued_methods: string[]; details?: Record<string, any>; message?: string }> {
+  return await http<any>(`/api/projects/${projectId}/prospect-sync/`, {
+    method: "POST",
+    body: JSON.stringify({ action }),
+  });
 }
 
 export async function fetchProjectKpiSummary(projectId: string): Promise<ProjectKpiSummary> {
@@ -2041,6 +2264,10 @@ export async function submitVendorPrequalification(
   form.append('districts_covered', String(payload.districtsCovered ?? 0));
   form.append('female_beneficiary_target', String(payload.femaleBeneficiaryTarget ?? 50));
   form.append('vulnerable_group_target', String(payload.vulnerableGroupTarget ?? 30));
+  form.append('bank_name', payload.bankName ?? "");
+  form.append('bank_branch', payload.bankBranch ?? "");
+  form.append('bank_swift_code', payload.bankSwiftCode ?? "");
+  form.append('bank_sort_code', payload.bankSortCode ?? "");
   form.append('bank_account_name', payload.bankAccountName ?? "");
   form.append('bank_account_number', payload.bankAccountNumber ?? "");
   form.append('contact_number', payload.contactNumber ?? "");
@@ -2183,6 +2410,61 @@ export async function confirmPaymentClaim(
   });
 }
 
+export async function fetchVendorBankDetails(id: string): Promise<VendorBankDetails> {
+  const data = await http<any>(`/api/projects/claims/${id}/view_bank_details/`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  return {
+    vendorLegalName: data.vendor_legal_name ?? undefined,
+    vendorBankName: data.vendor_bank_name ?? undefined,
+    vendorBankBranch: data.vendor_bank_branch ?? undefined,
+    vendorBankSwiftCode: data.vendor_bank_swift_code ?? undefined,
+    vendorBankSortCode: data.vendor_bank_sort_code ?? undefined,
+    vendorAccountHolderName: data.vendor_account_holder_name ?? undefined,
+    vendorAccountNumber: data.vendor_account_number ?? undefined,
+  };
+}
+
+export async function fetchVendorBankDetailsWithAccess(
+  id: string,
+  revealFull = false
+): Promise<VendorBankDetails> {
+  const data = await http<any>(`/api/projects/claims/${id}/view_bank_details/`, {
+    method: "POST",
+    body: JSON.stringify({ reveal_full: revealFull }),
+  });
+  return {
+    vendorLegalName: data.vendor_legal_name ?? undefined,
+    vendorBankName: data.vendor_bank_name ?? undefined,
+    vendorBankBranch: data.vendor_bank_branch ?? undefined,
+    vendorBankSwiftCode: data.vendor_bank_swift_code ?? undefined,
+    vendorBankSortCode: data.vendor_bank_sort_code ?? undefined,
+    vendorAccountHolderName: data.vendor_account_holder_name ?? undefined,
+    vendorAccountNumber: data.vendor_account_number ?? undefined,
+  };
+}
+
+export async function fetchDisbursementSheet(id: string): Promise<DisbursementSheet> {
+  const data = await http<any>(`/api/projects/claims/${id}/disbursement-sheet/`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  return {
+    claimId: data.claim_id != null ? String(data.claim_id) : undefined,
+    projectId: data.project_id != null ? String(data.project_id) : undefined,
+    claimStatus: data.claim_status ?? undefined,
+    totalApprovedAmount: data.total_approved_amount != null ? Number(data.total_approved_amount) : undefined,
+    vendorLegalName: data.vendor_legal_name ?? undefined,
+    vendorBankName: data.vendor_bank_name ?? undefined,
+    vendorBankBranch: data.vendor_bank_branch ?? undefined,
+    vendorBankSwiftCode: data.vendor_bank_swift_code ?? undefined,
+    vendorBankSortCode: data.vendor_bank_sort_code ?? undefined,
+    vendorAccountHolderName: data.vendor_account_holder_name ?? undefined,
+    vendorAccountNumber: data.vendor_account_number ?? undefined,
+  };
+}
+
 export async function fetchDisbursements(): Promise<Disbursement[]> {
   const data = await http<any>(`/api/projects/disbursements/`);
   return unwrapListResponse<any>(data).map(mapDisbursementFromApi);
@@ -2194,6 +2476,53 @@ export async function fetchAuditLogs(projectId?: string): Promise<AuditLog[]> {
     : "";
   const data = await http<any>(`/api/projects/audit-logs/${query}`);
   return unwrapListResponse<any>(data).map(mapAuditLogFromApi);
+}
+
+export async function fetchSystemAuditLogs(params?: {
+  actor?: string;
+  actorRole?: string;
+  action?: string;
+  module?: string;
+  dateFrom?: string;
+  dateTo?: string;
+  recordId?: string;
+}): Promise<AuditLog[]> {
+  const query = new URLSearchParams();
+  if (params?.actor) query.set("actor", params.actor);
+  if (params?.actorRole) query.set("actor_role", params.actorRole);
+  if (params?.action) query.set("action", params.action);
+  if (params?.module) query.set("module", params.module);
+  if (params?.dateFrom) query.set("date_from", params.dateFrom);
+  if (params?.dateTo) query.set("date_to", params.dateTo);
+  if (params?.recordId) query.set("record_id", params.recordId);
+  const url = query.toString() ? `/api/projects/audit-logs/?${query.toString()}` : `/api/projects/audit-logs/`;
+  const data = await http<any>(url);
+  return unwrapListResponse<any>(data).map(mapAuditLogFromApi);
+}
+
+export async function exportSystemAuditLogs(
+  format: "csv" | "pdf",
+  params?: {
+    actor?: string;
+    actorRole?: string;
+    action?: string;
+    module?: string;
+    dateFrom?: string;
+    dateTo?: string;
+    recordId?: string;
+  },
+): Promise<Blob> {
+  const query = new URLSearchParams();
+  if (params?.actor) query.set("actor", params.actor);
+  if (params?.actorRole) query.set("actor_role", params.actorRole);
+  if (params?.action) query.set("action", params.action);
+  if (params?.module) query.set("module", params.module);
+  if (params?.dateFrom) query.set("date_from", params.dateFrom);
+  if (params?.dateTo) query.set("date_to", params.dateTo);
+  if (params?.recordId) query.set("record_id", params.recordId);
+  const base = format === "csv" ? "/api/projects/audit-logs/export-csv/" : "/api/projects/audit-logs/export-pdf/";
+  const url = query.toString() ? `${base}?${query.toString()}` : base;
+  return await httpBlob(url);
 }
 
 export async function fetchSmartMeterReadings(projectId?: string): Promise<SmartMeterReading[]> {
@@ -2218,6 +2547,62 @@ export async function fetchProspectSyncLogs(params?: {
   const url = query.toString() ? `/api/projects/prospect-sync-logs/?${query.toString()}` : `/api/projects/prospect-sync-logs/`;
   const data = await http<any>(url);
   return unwrapListResponse<any>(data).map(mapProspectSyncLogFromApi);
+}
+
+export async function fetchProspectSyncSummary(): Promise<{
+  failedJobs: number;
+  lastSyncAt?: string;
+  rows: Array<{
+    dataType: string;
+    ourCount: number;
+    prospectCount: number;
+    match: boolean;
+    lastSync?: string;
+    note?: string;
+  }>;
+}> {
+  const data = await http<any>(`/api/projects/prospect-sync-logs/summary/`);
+  return {
+    failedJobs: Number(data.failed_jobs ?? 0),
+    lastSyncAt: data.last_sync_at ?? undefined,
+    rows: Array.isArray(data.rows)
+      ? data.rows.map((row: any) => ({
+          dataType: row.data_type ?? "",
+          ourCount: Number(row.our_count ?? 0),
+          prospectCount: Number(row.prospect_count ?? 0),
+          match: Boolean(row.match),
+          lastSync: row.last_sync ?? undefined,
+          note: row.note ?? undefined,
+        }))
+      : [],
+  };
+}
+
+export async function checkProspectConnection(): Promise<{ readTokenOk: boolean; writeTokenOk: boolean; baseUrl?: string }> {
+  const data = await http<any>(`/api/projects/prospect-sync-logs/check-connection/`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  return {
+    readTokenOk: Boolean(data.read_token_ok),
+    writeTokenOk: Boolean(data.write_token_ok),
+    baseUrl: data.base_url ?? undefined,
+  };
+}
+
+export async function retryProspectSyncJob(id: string): Promise<void> {
+  await http<any>(`/api/projects/prospect-sync-logs/${id}/retry/`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export async function retryAllFailedProspectSyncJobs(): Promise<{ count: number }> {
+  const data = await http<any>(`/api/projects/prospect-sync-logs/retry-failed/`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  return { count: Number(data.count ?? 0) };
 }
 
 export async function refreshProspectSyncPanel(payload?: {
@@ -2451,6 +2836,121 @@ export async function deactivateAdminManagedUser(userId: string): Promise<User> 
     body: JSON.stringify({}),
   });
   return mapUserFromApi(data);
+}
+
+export async function resetAdminManagedUserPassword(userId: string): Promise<{ temporaryPassword?: string; emailError?: string }> {
+  const data = await http<any>(`/api/users/${userId}/reset-password/`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  return {
+    temporaryPassword: data?.temporary_password ?? undefined,
+    emailError: data?.email_error ?? undefined,
+  };
+}
+
+export async function fetchSuperAdminDashboardSummary(): Promise<SuperAdminDashboardSummary> {
+  const data = await http<any>(`/api/users/admin/dashboard/`);
+  return mapSuperAdminDashboardSummaryFromApi(data);
+}
+
+export async function fetchOrganizations(): Promise<Organization[]> {
+  const data = await http<any>(`/api/users/organizations/`);
+  return unwrapListResponse<any>(data).map(mapOrganizationFromApi);
+}
+
+export async function createOrganization(payload: {
+  name: string;
+  type: "Government" | "International" | "NGO";
+  contactPerson?: string;
+  email?: string;
+  phone?: string;
+  address?: string;
+}): Promise<Organization> {
+  const data = await http<any>(`/api/users/organizations/`, {
+    method: "POST",
+    body: JSON.stringify({
+      name: payload.name,
+      type: payload.type,
+      contact_person: payload.contactPerson ?? "",
+      email: payload.email ?? "",
+      phone: payload.phone ?? "",
+      address: payload.address ?? "",
+    }),
+  });
+  return mapOrganizationFromApi(data);
+}
+
+export async function updateOrganization(id: string, payload: {
+  name: string;
+  type: "Government" | "International" | "NGO";
+  contactPerson?: string;
+  email?: string;
+  phone?: string;
+  address?: string;
+}): Promise<Organization> {
+  const data = await http<any>(`/api/users/organizations/${id}/`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      name: payload.name,
+      type: payload.type,
+      contact_person: payload.contactPerson ?? "",
+      email: payload.email ?? "",
+      phone: payload.phone ?? "",
+      address: payload.address ?? "",
+    }),
+  });
+  return mapOrganizationFromApi(data);
+}
+
+export async function deleteOrganization(id: string): Promise<void> {
+  await http<void>(`/api/users/organizations/${id}/`, {
+    method: "DELETE",
+  });
+}
+
+export async function fetchPlatformConfiguration(): Promise<PlatformConfiguration> {
+  const data = await http<any>(`/api/users/platform-configuration/`);
+  return mapPlatformConfigurationFromApi(data);
+}
+
+export async function updatePlatformConfiguration(payload: Partial<PlatformConfiguration>): Promise<PlatformConfiguration> {
+  const data = await http<any>(`/api/users/platform-configuration/`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      platform_name: payload.platformName,
+      country_code: payload.countryCode,
+      country_name: payload.countryName,
+      default_currency: payload.defaultCurrency,
+      timezone: payload.timezone,
+      female_target_minimum: payload.femaleTargetMinimum,
+      vulnerable_target_minimum: payload.vulnerableTargetMinimum,
+      low_income_target_minimum: payload.lowIncomeTargetMinimum,
+      uptime_target: payload.uptimeTarget,
+      anomaly_deviation_threshold: payload.anomalyDeviationThreshold,
+      gps_duplicate_radius_m: payload.gpsDuplicateRadiusM,
+      gps_verification_max_distance_m: payload.gpsVerificationMaxDistanceM,
+      m2_verification_required_pct: payload.m2VerificationRequiredPct,
+      m3_verification_required_pct: payload.m3VerificationRequiredPct,
+      email_notifications_enabled: payload.emailNotificationsEnabled,
+      sms_notifications_enabled: payload.smsNotificationsEnabled,
+      max_file_size_mb: payload.maxFileSizeMb,
+      allowed_file_types: payload.allowedFileTypes,
+    }),
+  });
+  return mapPlatformConfigurationFromApi(data);
+}
+
+export async function refreshBoundaryFile(): Promise<void> {
+  await http<void>(`/api/users/platform-configuration/refresh-boundary/`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export async function fetchSystemHealth(): Promise<SystemHealthPayload> {
+  const data = await http<any>(`/api/users/system-health/`);
+  return mapSystemHealthFromApi(data);
 }
 
 export async function registerVendor(payload: {

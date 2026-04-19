@@ -11,6 +11,7 @@ from .models import (
     VerificationTask,
     SmartMeterReading,
     PaymentClaim,
+    PaymentClaimStatus,
     Disbursement,
     AuditLog,
     ProspectSyncLog,
@@ -18,6 +19,8 @@ from .models import (
 )
 from rbf.tenders.models import TenderContract
 from django.conf import settings
+from rbf.users.models import UserRole
+from .bank_details import get_vendor_bank_snapshot
 
 
 class MilestoneSerializer(serializers.ModelSerializer):
@@ -413,10 +416,73 @@ class DisbursementSerializer(serializers.ModelSerializer):
 
 class PaymentClaimSerializer(serializers.ModelSerializer):
     vendor_username = serializers.CharField(source='vendor.username', read_only=True)
+    vendor_legal_name = serializers.SerializerMethodField()
+    vendor_bank_name = serializers.SerializerMethodField()
+    vendor_bank_branch = serializers.SerializerMethodField()
+    vendor_bank_swift_code = serializers.SerializerMethodField()
+    vendor_bank_sort_code = serializers.SerializerMethodField()
+    vendor_account_holder_name = serializers.SerializerMethodField()
+    vendor_account_number = serializers.SerializerMethodField()
     reviewed_by_username = serializers.CharField(source='reviewed_by.username', read_only=True)
     disbursement = DisbursementSerializer(read_only=True)
     payment_locked = serializers.SerializerMethodField()
     payment_lock_reason = serializers.SerializerMethodField()
+    milestone_details = MilestoneSerializer(source='milestone', read_only=True)
+
+    def get_vendor_legal_name(self, obj: PaymentClaim):
+        if obj.vendor.organization_name:
+            return obj.vendor.organization_name
+        if obj.vendor.full_name:
+            return obj.vendor.full_name
+        return obj.vendor.username
+
+    def _has_partial_bank_visibility(self, obj: PaymentClaim):
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        return (
+            user is not None
+            and user.role == UserRole.UNDP_DONOR
+            and obj.status in {PaymentClaimStatus.TAC_ENDORSED, PaymentClaimStatus.PSC_APPROVED}
+        )
+
+    def get_vendor_bank_name(self, obj: PaymentClaim):
+        snapshot = get_vendor_bank_snapshot(obj.vendor)
+        if self._has_partial_bank_visibility(obj):
+            return snapshot['bank_name']
+        return None
+
+    def get_vendor_bank_branch(self, obj: PaymentClaim):
+        snapshot = get_vendor_bank_snapshot(obj.vendor)
+        if self._has_partial_bank_visibility(obj):
+            return snapshot['bank_branch']
+        return None
+
+    def get_vendor_bank_swift_code(self, obj: PaymentClaim):
+        snapshot = get_vendor_bank_snapshot(obj.vendor)
+        if self._has_partial_bank_visibility(obj):
+            return snapshot['bank_swift_code']
+        return None
+
+    def get_vendor_bank_sort_code(self, obj: PaymentClaim):
+        snapshot = get_vendor_bank_snapshot(obj.vendor)
+        if self._has_partial_bank_visibility(obj):
+            return snapshot['bank_sort_code']
+        return None
+
+    def get_vendor_account_holder_name(self, obj: PaymentClaim):
+        snapshot = get_vendor_bank_snapshot(obj.vendor)
+        if self._has_partial_bank_visibility(obj):
+            return snapshot['bank_account_name']
+        return None
+
+    def get_vendor_account_number(self, obj: PaymentClaim):
+        snapshot = get_vendor_bank_snapshot(obj.vendor)
+        account_number = snapshot['bank_account_number']
+        if self._has_partial_bank_visibility(obj):
+            if len(account_number) <= 4:
+                return '****'
+            return '*' * max(0, len(account_number) - 4) + account_number[-4:]
+        return None
 
     def get_payment_locked(self, obj: PaymentClaim):
         return bool(obj.vendor and obj.vendor.role == 'Vendor' and obj.vendor.status in {'Suspended', 'Blacklisted'})
@@ -444,10 +510,18 @@ class PaymentClaimSerializer(serializers.ModelSerializer):
             'paid_at',
             'reviewed_by',
             'reviewed_by_username',
-            'vendor_username',
+                'vendor_username',
+            'vendor_legal_name',
+            'vendor_bank_name',
+            'vendor_bank_branch',
+            'vendor_bank_swift_code',
+            'vendor_bank_sort_code',
+            'vendor_account_holder_name',
+            'vendor_account_number',
             'disbursement',
             'payment_locked',
             'payment_lock_reason',
+            'milestone_details',
         ]
 
 

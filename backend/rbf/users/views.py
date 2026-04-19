@@ -2,12 +2,17 @@ import random
 import string
 import time
 from datetime import timedelta
+from pathlib import Path
+import shutil
 
 from django.conf import settings
 from django.core.cache import cache
 from django.core.mail import send_mail
 from django.core.management import call_command
 from django.contrib.sessions.models import Session
+from django.db import connections
+from django.db.utils import OperationalError
+from django.utils._os import safe_join
 from rest_framework import viewsets
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
@@ -31,6 +36,8 @@ from .models import (
     BlacklistAppeal,
     BlacklistAppealStatus,
     BlacklistCaseStatus,
+    Organization,
+    PlatformConfiguration,
     User,
     UserRole,
     UserStatus,
@@ -45,6 +52,8 @@ _OTP_FALLBACK = {}
 from .serializers import (
     AdminManagedUserDetailSerializer,
     AdminManagedUserSerializer,
+    OrganizationSerializer,
+    PlatformConfigurationSerializer,
     BlacklistAppealSerializer,
     ChangePasswordSerializer,
     CustomTokenObtainPairSerializer,
@@ -54,6 +63,119 @@ from .serializers import (
 )
 from rbf.projects.audit import log_audit, AuditLogger
 from rbf.projects.integrations import SyncToProspectJob, normalize_prospect_gender
+from rbf.projects.models import AuditLog, Project, ProjectStatus, ProspectSyncLog, ProspectSyncStatus
+from rbf.notifications.models import Notification
+
+
+DEFAULT_ORGANIZATIONS = [
+    {
+        'name': 'Ministry of Energy',
+        'type': 'Government',
+        'contact_person': 'Permanent Secretary',
+        'email': 'energy@gov.ls',
+        'phone': '+266 2231 0000',
+        'address': 'Maseru, Lesotho',
+    },
+    {
+        'name': 'UNDP',
+        'type': 'International',
+        'contact_person': 'Programme Specialist',
+        'email': 'registry.ls@undp.org',
+        'phone': '+266 2231 6800',
+        'address': 'United Nations House, Maseru',
+    },
+    {
+        'name': 'Department of Energy',
+        'type': 'Government',
+        'contact_person': 'Director of Energy',
+        'email': 'doe@gov.ls',
+        'phone': '+266 2231 0200',
+        'address': 'Maseru, Lesotho',
+    },
+    {
+        'name': 'EU Delegation',
+        'type': 'International',
+        'contact_person': 'Cooperation Section',
+        'email': 'delegation-lesotho@eeas.europa.eu',
+        'phone': '+266 2231 4200',
+        'address': 'Maseru, Lesotho',
+    },
+    {
+        'name': 'PSC Members Secretariat',
+        'type': 'Government',
+        'contact_person': 'PSC Coordinator',
+        'email': 'psc@gov.ls',
+        'phone': '+266 2232 1100',
+        'address': 'Maseru, Lesotho',
+    },
+]
+
+
+def ensure_default_organizations():
+    if Organization.objects.exists():
+        return
+    Organization.objects.bulk_create([Organization(**payload) for payload in DEFAULT_ORGANIZATIONS], ignore_conflicts=True)
+
+
+def build_system_health_payload():
+    db_ok = True
+    db_error = None
+    try:
+        connections['default'].cursor()
+    except OperationalError as exc:
+        db_ok = False
+        db_error = str(exc)
+
+    media_path = Path(getattr(settings, 'MEDIA_ROOT', settings.BASE_DIR))
+    usage = shutil.disk_usage(media_path)
+    pending_jobs = ProspectSyncLog.objects.filter(status=ProspectSyncStatus.PENDING).count()
+    failed_jobs = ProspectSyncLog.objects.filter(status=ProspectSyncStatus.FAILED).count()
+    processing_rate = ProspectSyncLog.objects.filter(
+        status=ProspectSyncStatus.SUCCESS,
+        created_at__gte=timezone.now() - timedelta(hours=24),
+    ).count()
+    files_uploaded_today = (
+        Project.objects.filter(created_at__date=timezone.localdate()).count()
+        + AuditLog.objects.filter(created_at__date=timezone.localdate(), action__icontains='uploaded').count()
+    )
+    recent_errors = list(
+        ProspectSyncLog.objects.filter(status=ProspectSyncStatus.FAILED)
+        .order_by('-updated_at')
+        .values('id', 'method_name', 'error_message', 'updated_at')[:20]
+    )
+    recent_activity = ProspectSyncLog.objects.order_by('-updated_at').first()
+    return {
+        'database': {
+            'status': 'Connected' if db_ok else 'Disconnected',
+            'error': db_error,
+            'slow_queries_last_24h': 0,
+            'table_sizes': {
+                'users': User.objects.count(),
+                'projects': Project.objects.count(),
+                'audit_logs': AuditLog.objects.count(),
+            },
+        },
+        'queue': {
+            'worker_status': 'Running',
+            'pending_jobs_count': pending_jobs,
+            'failed_jobs_count': failed_jobs,
+            'processing_rate_last_24h': processing_rate,
+        },
+        'scheduler': {
+            'status': 'Running',
+            'last_monthly_report_sync': recent_activity.updated_at.isoformat() if recent_activity else None,
+        },
+        'prospect_api': {
+            'status': 'Connected' if getattr(settings, 'PROSPECT_BASE_URL', '') else 'Not Configured',
+        },
+        'storage': {
+            'total_bytes': usage.total,
+            'used_bytes': usage.used,
+            'free_bytes': usage.free,
+            'files_uploaded_today': files_uploaded_today,
+        },
+        'errors': recent_errors,
+    }
 
 
 class IsAdminOrRbfOfficial:
@@ -286,6 +408,48 @@ class UserViewSet(viewsets.ModelViewSet):
         AuditLogger.log('user_deactivated', 'users', user.id, 'user', old_status='Active', new_status='Inactive', notes='User deactivated by Super Admin.')
         return Response(AdminManagedUserDetailSerializer(user).data, status=status.HTTP_200_OK)
 
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated], url_path='reset-password')
+    def reset_password(self, request, pk=None):
+        self._assert_super_admin(request.user)
+        user = self.get_object()
+        if user.role in {UserRole.VENDOR, UserRole.ADMIN}:
+            return Response({'detail': 'Password reset is only available for admin-managed non-vendor users.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        temporary_password = generate_temporary_password(12)
+        user.set_password(temporary_password)
+        user.must_change_password = True
+        user.save(update_fields=['password', 'must_change_password'])
+        self._invalidate_user_sessions(user)
+        AuditLogger.log('user_password_reset', 'users', user.id, 'user', notes='Temporary password reset by Super Admin.')
+
+        email_error = None
+        email_configured = bool(settings.EMAIL_HOST_USER and settings.EMAIL_HOST_PASSWORD) or settings.DEBUG
+        if user.email and email_configured:
+            try:
+                send_mail(
+                    subject='Your password has been reset',
+                    message=(
+                        'Your password has been reset by the platform administrator.\n'
+                        f'Username: {user.username}\n'
+                        f'Temporary password: {temporary_password}\n'
+                        'Please sign in and change your password immediately.'
+                    ),
+                    from_email=settings.DEFAULT_FROM_EMAIL,
+                    recipient_list=[user.email],
+                    fail_silently=False,
+                )
+            except Exception as exc:  # noqa: BLE001
+                email_error = str(exc)
+        elif user.email:
+            email_error = 'Email service is not configured.'
+
+        payload = {
+            'status': 'ok',
+            'temporary_password': temporary_password if settings.DEBUG else None,
+            'email_error': email_error,
+        }
+        return Response(payload, status=status.HTTP_200_OK)
+
     @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated], url_path='management/meta')
     def management_meta(self, request):
         self._assert_super_admin(request.user)
@@ -315,6 +479,145 @@ class UserViewSet(viewsets.ModelViewSet):
         user.save(update_fields=['status', 'is_active'])
         log_audit(request.user, 'vendor_account_approved', user, {'username': user.username})
         return Response(UserSerializer(user).data, status=status.HTTP_200_OK)
+
+
+class OrganizationViewSet(viewsets.ModelViewSet):
+    queryset = Organization.objects.all()
+    serializer_class = OrganizationSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        if not (self.request.user and self.request.user.is_authenticated and self.request.user.role == UserRole.ADMIN):
+            return Organization.objects.none()
+        ensure_default_organizations()
+        return self.queryset.order_by('name')
+
+    def _assert_super_admin(self):
+        if not (self.request.user and self.request.user.is_authenticated and self.request.user.role == UserRole.ADMIN):
+            raise PermissionDenied('Only Platform Administrator (Super Admin) can manage organizations.')
+
+    def create(self, request, *args, **kwargs):
+        self._assert_super_admin()
+        return super().create(request, *args, **kwargs)
+
+    def update(self, request, *args, **kwargs):
+        self._assert_super_admin()
+        return super().update(request, *args, **kwargs)
+
+    def partial_update(self, request, *args, **kwargs):
+        self._assert_super_admin()
+        return super().partial_update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        self._assert_super_admin()
+        return super().destroy(request, *args, **kwargs)
+
+
+class PlatformConfigurationView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def _assert_super_admin(self, user):
+        if not (user and user.is_authenticated and user.role == UserRole.ADMIN):
+            raise PermissionDenied('Only Platform Administrator (Super Admin) can manage system configuration.')
+
+    def _get_config(self):
+        config = PlatformConfiguration.objects.order_by('id').first()
+        if config is None:
+            config = PlatformConfiguration.objects.create(
+                allowed_file_types=['PDF', 'DOCX', 'JPG', 'PNG', 'XLSX'],
+            )
+        return config
+
+    def get(self, request):
+        self._assert_super_admin(request.user)
+        serializer = PlatformConfigurationSerializer(self._get_config())
+        boundary_path = Path(settings.BASE_DIR) / 'public' / 'geojson' / 'lesotho.geojson'
+        payload = dict(serializer.data)
+        payload['lesotho_boundary'] = {
+            'path': str(boundary_path),
+            'exists': boundary_path.exists(),
+            'last_modified': timezone.datetime.fromtimestamp(boundary_path.stat().st_mtime, tz=timezone.utc).isoformat() if boundary_path.exists() else None,
+        }
+        return Response(payload, status=status.HTTP_200_OK)
+
+    def patch(self, request):
+        self._assert_super_admin(request.user)
+        serializer = PlatformConfigurationSerializer(self._get_config(), data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        AuditLogger.log('platform_configuration_updated', 'configuration', serializer.instance.id, 'platform_configuration', notes='Platform configuration updated by Super Admin.')
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class PlatformConfigurationBoundaryRefreshView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not (request.user and request.user.is_authenticated and request.user.role == UserRole.ADMIN):
+            raise PermissionDenied('Only Platform Administrator (Super Admin) can refresh the Lesotho boundary file.')
+        call_command('download_lesotho_geojson')
+        AuditLogger.log('lesotho_boundary_refreshed', 'configuration', None, 'boundary', notes='Boundary file re-downloaded by Super Admin.')
+        return Response({'status': 'ok'}, status=status.HTTP_200_OK)
+
+
+class SystemHealthView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not (request.user and request.user.is_authenticated and request.user.role == UserRole.ADMIN):
+            raise PermissionDenied('Only Platform Administrator (Super Admin) can view system health.')
+        return Response(build_system_health_payload(), status=status.HTTP_200_OK)
+
+
+class SuperAdminDashboardView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not (request.user and request.user.is_authenticated and request.user.role == UserRole.ADMIN):
+            raise PermissionDenied('Only Platform Administrator (Super Admin) can view the dashboard summary.')
+
+        ensure_default_organizations()
+        health_payload = build_system_health_payload()
+        recent_activity = AuditLog.objects.select_related('actor').order_by('-created_at')[:20]
+        latest_sync = ProspectSyncLog.objects.order_by('-updated_at').first()
+
+        payload = {
+            'stats': {
+                'total_users': User.objects.exclude(role=UserRole.VENDOR).count(),
+                'active_projects': Project.objects.filter(status__in={
+                    ProjectStatus.ACTIVE,
+                    ProjectStatus.INSTALLATION,
+                    ProjectStatus.VERIFICATION,
+                    ProjectStatus.DISBURSEMENT,
+                    ProjectStatus.CONTRACTING,
+                }).count(),
+                'total_vendors': User.objects.filter(role=UserRole.VENDOR).count(),
+                'pending_prequalifications': VendorPrequalification.objects.filter(
+                    status__in={PrequalificationStatus.PENDING, PrequalificationStatus.UNDER_REVIEW}
+                ).count(),
+            },
+            'system_health': health_payload,
+            'recent_activity': [
+                {
+                    'id': log.id,
+                    'timestamp': log.created_at,
+                    'actor': log.actor.full_name or log.actor.username if log.actor else 'System',
+                    'role': log.actor_role,
+                    'action': log.action,
+                    'module': log.module,
+                    'record': log.entity_id or log.record_id or '',
+                    'notes': log.notes,
+                    'old_status': log.old_status,
+                    'new_status': log.new_status,
+                }
+                for log in recent_activity
+            ],
+            'prospect_sync_summary': {
+                'failed_jobs': ProspectSyncLog.objects.filter(status=ProspectSyncStatus.FAILED).count(),
+                'last_sync_at': latest_sync.updated_at if latest_sync else None,
+            },
+        }
+        return Response(payload, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated], parser_classes=[MultiPartParser, FormParser])
     def initiate_blacklisting(self, request, pk=None):
@@ -352,6 +655,12 @@ class VendorPrequalificationViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser, *viewsets.ModelViewSet.parser_classes]
 
+    def _refresh_vendor_resubmission_priority(self, preq: VendorPrequalification, response: Response) -> Response:
+        preq.submitted_at = timezone.now()
+        preq.save(update_fields=['submitted_at'])
+        response.data = self.get_serializer(preq).data
+        return response
+
     def get_queryset(self):
         user = self.request.user
         if IsReviewerRole.check(user):
@@ -373,6 +682,7 @@ class VendorPrequalificationViewSet(viewsets.ModelViewSet):
             if preq.status != PrequalificationStatus.CLARIFICATION_REQUESTED:
                 raise PermissionDenied('Only submissions marked Partial (Resubmit) can be edited.')
             response = super().update(request, *args, **kwargs)
+            response = self._refresh_vendor_resubmission_priority(preq, response)
             log_audit(request.user, 'prequalification_resubmitted', preq, {'vendor_id': preq.vendor_id})
             return response
         if not IsReviewerRole.check(request.user):
@@ -385,6 +695,7 @@ class VendorPrequalificationViewSet(viewsets.ModelViewSet):
             if preq.status != PrequalificationStatus.CLARIFICATION_REQUESTED:
                 raise PermissionDenied('Only submissions marked Partial (Resubmit) can be edited.')
             response = super().partial_update(request, *args, **kwargs)
+            response = self._refresh_vendor_resubmission_priority(preq, response)
             log_audit(request.user, 'prequalification_resubmitted', preq, {'vendor_id': preq.vendor_id})
             return response
         if not IsReviewerRole.check(request.user):

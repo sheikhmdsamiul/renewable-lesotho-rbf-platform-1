@@ -21,6 +21,8 @@ import {
   Plus,
   Filter,
   Download,
+  ExternalLink,
+  Check,
   CheckCircle2,
   AlertCircle,
   AlertTriangle,
@@ -94,6 +96,8 @@ import {
   AnomalyFlag,
   ProspectSyncLog,
   VerificationTask,
+  DisbursementSheet,
+  VendorBankDetails,
 } from "./types";
 import { MOCK_TENDERS, MOCK_NOTIFICATIONS } from "./constants";
 import {
@@ -138,10 +142,10 @@ import {
   submitPaymentClaim,
   verifyPaymentClaim,
   approvePaymentClaim,
-  payPaymentClaim,
   confirmPaymentClaim,
   flagProjectIssue,
   fetchProjects,
+  triggerProjectProspectSync,
   fetchMilestones,
   createMilestone,
   updateMilestone,
@@ -174,6 +178,8 @@ import {
   submitProjectSetup,
   testProjectSetupConnection,
   fetchProjectKpiSummary,
+  fetchDisbursementSheet,
+  fetchVendorBankDetailsWithAccess,
   fetchAuditLogs,
   fetchSmartMeterReadings,
   fetchAnomalyFlags,
@@ -188,6 +194,7 @@ import KpiDashboard from "./components/KpiDashboard";
 import PortfolioKpiSummary from "./components/PortfolioKpiSummary";
 import PortfolioMonitoringView from "./components/PortfolioMonitoringView";
 import { FieldOperationalKpiPanel, MacroKpiPortal, VendorKpiPanel } from "./components/RoleBasedKpiPanels";
+import SuperAdminPortal from "./components/SuperAdminPortal";
 
 // --- Components ---
 
@@ -614,7 +621,7 @@ const Register = ({
     deviceId: "",
   });
 
-  const techOptions = ["SHS", "ICS", "Mini-grid", "SWP", "PUE"];
+  const techOptions = ["SHS", "ICS", "GMG", "SWP", "PUE"];
   const districts = ["Maseru", "Leribe", "Berea", "Mafeteng", "Mohale's Hoek", "Quthing", "Qacha's Nek", "Mokhotlong", "Thaba-Tseka", "Butha-Buthe"];
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -1165,6 +1172,9 @@ const Tenders = ({
   const [awardRankingRows, setAwardRankingRows] = useState<TenderAwardRankingRow[]>([]);
   const [notifyEmail, setNotifyEmail] = useState(true);
   const [isActioning, setIsActioning] = useState(false);
+  const [districtDropdownOpen, setDistrictDropdownOpen] = useState(false);
+  const lesothoDistrictOptions = ["Berea", "Butha-Buthe", "Leribe", "Mafeteng", "Maseru", "Mohale's Hoek", "Mokhotlong", "Qacha's Nek", "Quthing", "Thaba-Tseka"];
+  const tenderTechnologyTypeOptions = ["SHS", "ICS", "GMG", "SWP", "PUE"];
   const [tenderContracts, setTenderContracts] = useState<TenderContract[]>([]);
   const [contractMessage, setContractMessage] = useState<string | null>(null);
   const [contractRejectionReason, setContractRejectionReason] = useState("");
@@ -1174,7 +1184,7 @@ const Tenders = ({
     targetInstallations: 500,
     techType: "SHS",
     energyOutput: 20000,
-    district: "Maseru",
+    districts: ["Maseru"],
     verificationMethod: "Manual",
     targetFemalePct: 50,
     targetVulnerablePct: 30,
@@ -1194,6 +1204,7 @@ const Tenders = ({
   React.useEffect(() => {
     if (!activeContract || String(activeContract.status).toLowerCase() !== "approved") {
       setAssignmentMeta(null);
+      setDistrictDropdownOpen(false);
       return;
     }
     let cancelled = false;
@@ -1203,12 +1214,18 @@ const Tenders = ({
         if (cancelled) return;
         setAssignmentMeta(meta);
         const defaults = meta.assignment_defaults || {};
+        const defaultDistricts = Array.isArray(defaults.district_zones)
+          ? defaults.district_zones.map((value: string) => String(value || "").trim()).filter(Boolean)
+          : String(defaults.district_zone || "")
+              .split(",")
+              .map((value: string) => value.trim())
+              .filter(Boolean);
         setContractAssignmentDraft({
           projectDurationMonths: Number(defaults.project_duration_months ?? 12),
           targetInstallations: Number(defaults.installation_target ?? 500),
           techType: defaults.technology_type || activeContract.referenceNumber || "SHS",
           energyOutput: Number(defaults.energy_output_target_kwh ?? 20000),
-          district: defaults.district_zone || "Maseru",
+          districts: defaultDistricts.length ? defaultDistricts : ["Maseru"],
           verificationMethod: String(defaults.verification_method || "manual").toLowerCase(),
           targetFemalePct: Number(defaults.female_target_pct ?? 50),
           targetVulnerablePct: Number(defaults.vulnerable_target_pct ?? 30),
@@ -1217,6 +1234,7 @@ const Tenders = ({
       } catch (err: any) {
         if (!cancelled) {
           setAssignmentMeta(null);
+          setDistrictDropdownOpen(false);
           setContractMessage(toActionError(err, "Unable to load project assignment form."));
         }
       }
@@ -1241,6 +1259,7 @@ const Tenders = ({
     lastDateSecurity: "",
     dateOpening: "",
     technologyTypes: [],
+    targetDistricts: [],
     targetSiteType: "Household",
     biddersEligibility: "",
     instruction: "",
@@ -1273,6 +1292,16 @@ const Tenders = ({
     });
   };
 
+  const handleTargetDistrictToggle = (district: string) => {
+    setFormData(prev => {
+      const current = prev.targetDistricts || [];
+      if (current.includes(district)) {
+        return { ...prev, targetDistricts: current.filter(value => value !== district) };
+      }
+      return { ...prev, targetDistricts: [...current, district] };
+    });
+  };
+
   const toFormDataFromTender = (tender: Tender): Partial<Tender> => ({
     ...defaultFormData,
     id: tender.id,
@@ -1290,6 +1319,7 @@ const Tenders = ({
     lastDateSecurity: tender.lastDateSecurity ?? "",
     dateOpening: tender.dateOpening ?? "",
     technologyTypes: tender.technologyTypes ?? [],
+    targetDistricts: tender.targetDistricts ?? [],
     targetSiteType: tender.targetSiteType ?? defaultFormData.targetSiteType,
     biddersEligibility: tender.biddersEligibility ?? "",
     instruction: tender.instruction ?? "",
@@ -1465,12 +1495,13 @@ const Tenders = ({
           targetInstallations: 500,
           techType: full.technologyTypes?.[0] || full.category || "SHS",
           energyOutput: 20000,
-          district: "Maseru",
+          districts: full.targetDistricts?.length ? full.targetDistricts : ["Maseru"],
           verificationMethod: "Manual",
           targetFemalePct: 50,
           targetVulnerablePct: 30,
           targetLowIncomePct: 60,
         });
+        setDistrictDropdownOpen(false);
       }
       setView(nextView);
     } catch (err: any) {
@@ -1594,6 +1625,10 @@ const Tenders = ({
     payload.deadline = payload.lastDateSubmission;
     if (!payload.technologyTypes || payload.technologyTypes.length === 0) {
       setTenderError("Select at least one Technology Type.");
+      return;
+    }
+    if (!payload.targetDistricts || payload.targetDistricts.length === 0) {
+      setTenderError("Select at least one Target District.");
       return;
     }
     if (!payload.scheduleFile && !(isEditing && hasExistingSchedule)) {
@@ -1751,7 +1786,7 @@ const Tenders = ({
         targetInstallations: contractAssignmentDraft.targetInstallations,
         techType: contractAssignmentDraft.techType,
         energyOutput: contractAssignmentDraft.energyOutput,
-        district: contractAssignmentDraft.district,
+        districts: contractAssignmentDraft.districts,
         verificationMethod: contractAssignmentDraft.verificationMethod,
         targetFemalePct: contractAssignmentDraft.targetFemalePct,
         targetVulnerablePct: contractAssignmentDraft.targetVulnerablePct,
@@ -2068,7 +2103,7 @@ const Tenders = ({
               <div className="space-y-2">
                 <label className="text-sm font-bold text-slate-700">Technology Type * (Multi-select)</label>
                 <div className="flex flex-wrap gap-2 pt-1">
-                  {['Mini-grid', 'SHS', 'ICS', 'SWP', 'PUE', 'SAS'].map(tech => (
+                  {tenderTechnologyTypeOptions.map(tech => (
                     <label key={tech} className="flex items-center gap-2 px-3 py-1.5 bg-slate-50 rounded-lg border border-slate-200 cursor-pointer hover:bg-slate-100">
                       <input 
                         type="checkbox" 
@@ -2077,6 +2112,23 @@ const Tenders = ({
                         onChange={() => handleTechToggle(tech)}
                       />
                       <span className="text-sm font-medium">{tech}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+              <div className="space-y-2 md:col-span-2">
+                <label className="text-sm font-bold text-slate-700">Target District / Lot Area * (Multi-select)</label>
+                <p className="text-xs text-slate-500">This defines the tender legal boundary and pre-fills the milestone assignment districts.</p>
+                <div className="flex flex-wrap gap-2 pt-1">
+                  {lesothoDistrictOptions.map(district => (
+                    <label key={district} className="flex items-center gap-2 px-3 py-1.5 bg-slate-50 rounded-lg border border-slate-200 cursor-pointer hover:bg-slate-100">
+                      <input
+                        type="checkbox"
+                        className="w-4 h-4 rounded text-emerald-600"
+                        checked={formData.targetDistricts?.includes(district)}
+                        onChange={() => handleTargetDistrictToggle(district)}
+                      />
+                      <span className="text-sm font-medium">{district}</span>
                     </label>
                   ))}
                 </div>
@@ -2685,7 +2737,7 @@ const Tenders = ({
             <div className="space-y-4">
               <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Technical Mapping</h3>
               <div className="flex flex-wrap gap-2">
-                {(selectedTender.technologyTypes || ["SHS", "Mini-Grid"]).map(tech => (
+                {(selectedTender.technologyTypes || ["SHS", "GMG"]).map(tech => (
                   <span key={tech} className="px-2 py-1 bg-slate-100 rounded text-xs font-bold text-slate-600">{tech}</span>
                 ))}
               </div>
@@ -3256,13 +3308,57 @@ const Tenders = ({
                                 onChange={(e) => setContractAssignmentDraft(prev => ({ ...prev, energyOutput: Number(e.target.value) || 0 }))}
                               />
                             </div>
-                            <div>
-                              <label className="text-xs font-semibold text-slate-600">District</label>
-                              <select className="input-field mt-1" disabled={Boolean(activeContract.projectId)} value={contractAssignmentDraft.district} onChange={(e) => setContractAssignmentDraft(prev => ({ ...prev, district: e.target.value }))}>
-                                {(assignmentMeta?.assignment_fields?.district_zone || ["Maseru"]).map((value: string) => (
-                                  <option key={value} value={value}>{value}</option>
-                                ))}
-                              </select>
+                            <div className="md:col-span-2">
+                              <label className="text-xs font-semibold text-slate-600">Districts</label>
+                              <div className="relative mt-1">
+                                <button
+                                  type="button"
+                                  disabled={Boolean(activeContract.projectId)}
+                                  onClick={() => setDistrictDropdownOpen((prev) => !prev)}
+                                  className="input-field flex min-h-[46px] w-full items-center justify-between text-left disabled:cursor-not-allowed disabled:bg-slate-50"
+                                >
+                                  <span className="truncate pr-3 text-sm text-slate-700">
+                                    {contractAssignmentDraft.districts.length > 0
+                                      ? contractAssignmentDraft.districts.join(", ")
+                                      : "Select one or more districts"}
+                                  </span>
+                                  <span className="shrink-0 text-xs font-semibold text-slate-500">
+                                    {contractAssignmentDraft.districts.length}
+                                  </span>
+                                </button>
+                                {districtDropdownOpen && !activeContract.projectId && (
+                                  <div className="absolute z-30 mt-2 w-full rounded-xl border border-slate-200 bg-white p-3 shadow-xl">
+                                    <div className="mb-3 text-[11px] text-slate-500">
+                                      {contractAssignmentDraft.districts.length > 0
+                                        ? `${contractAssignmentDraft.districts.length} district${contractAssignmentDraft.districts.length === 1 ? "" : "s"} selected`
+                                        : "Select at least one district"}
+                                    </div>
+                                    <div className="max-h-64 overflow-y-auto">
+                                      <div className="grid grid-cols-1 gap-x-4 gap-y-2 sm:grid-cols-2">
+                                        {(
+                                          assignmentMeta?.assignment_fields?.district_zones
+                                          || assignmentMeta?.assignment_fields?.district_zone
+                                          || lesothoDistrictOptions
+                                        ).map((value: string) => (
+                                          <label key={value} className="flex min-w-0 items-center gap-2 rounded-lg border border-slate-100 px-3 py-2 text-sm text-slate-700">
+                                            <input
+                                              type="checkbox"
+                                              checked={contractAssignmentDraft.districts.includes(value)}
+                                              onChange={(e) => setContractAssignmentDraft(prev => ({
+                                                ...prev,
+                                                districts: e.target.checked
+                                                  ? [...prev.districts, value]
+                                                  : prev.districts.filter((district) => district !== value),
+                                              }))}
+                                            />
+                                            <span className="truncate">{value}</span>
+                                          </label>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
                             </div>
                             <div>
                               <label className="text-xs font-semibold text-slate-600">Verification method</label>
@@ -4320,10 +4416,28 @@ const PreQualification = () => {
                     <h3 className="font-bold text-slate-900 border-b border-slate-100 pb-2">Financial & Contact</h3>
                     <div className="space-y-3">
                       <div className="flex items-center justify-between text-sm">
-                        <span className="text-slate-500">Bank Account</span>
-                        <span className="text-slate-900 font-medium">
-                          {selectedVendor.bankAccountName || "N/A"} {selectedVendor.bankAccountNumber ? `• ${selectedVendor.bankAccountNumber}` : ""}
-                        </span>
+                        <span className="text-slate-500">Bank Name</span>
+                        <span className="text-slate-900 font-medium">{selectedVendor.bankName || "N/A"}</span>
+                      </div>
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="text-slate-500">Branch</span>
+                        <span className="text-slate-900 font-medium">{selectedVendor.bankBranch || "N/A"}</span>
+                      </div>
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="text-slate-500">Account Holder</span>
+                        <span className="text-slate-900 font-medium">{selectedVendor.bankAccountName || "N/A"}</span>
+                      </div>
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="text-slate-500">Account Number</span>
+                        <span className="text-slate-900 font-medium">{selectedVendor.bankAccountNumber || "N/A"}</span>
+                      </div>
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="text-slate-500">SWIFT Code</span>
+                        <span className="text-slate-900 font-medium">{selectedVendor.bankSwiftCode || "N/A"}</span>
+                      </div>
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="text-slate-500">Sort Code</span>
+                        <span className="text-slate-900 font-medium">{selectedVendor.bankSortCode || "N/A"}</span>
                       </div>
                       <div className="flex items-center justify-between text-sm">
                         <span className="text-slate-500">Focal Person</span>
@@ -4920,6 +5034,15 @@ const Disbursements = () => {
   const [notification, setNotification] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [processingClaimId, setProcessingClaimId] = useState<string | null>(null);
+  const [selectedClaimForReview, setSelectedClaimForReview] = useState<PaymentClaim | null>(null);
+  const [reviewNotes, setReviewNotes] = useState<string>("");
+  const [selectedClaimForDisbursement, setSelectedClaimForDisbursement] = useState<PaymentClaim | null>(null);
+  const [selectedClaimForBankDetails, setSelectedClaimForBankDetails] = useState<PaymentClaim | null>(null);
+  const [selectedVendorClaimDetails, setSelectedVendorClaimDetails] = useState<PaymentClaim | null>(null);
+  const [transactionRef, setTransactionRef] = useState<string>("");
+  const [vendorBankDetails, setVendorBankDetails] = useState<VendorBankDetails | null>(null);
+  const [disbursementSheetDetails, setDisbursementSheetDetails] = useState<DisbursementSheet | null>(null);
+  const [bankDetailsLoading, setBankDetailsLoading] = useState(false);
   const currentUser = getStoredUser();
   const canProcessPayments =
     currentUser?.role === UserRole.ADMIN || currentUser?.role === UserRole.RBF_OFFICIAL || currentUser?.role === UserRole.UNDP_DONOR || currentUser?.role === UserRole.TAC;
@@ -4929,12 +5052,11 @@ const Disbursements = () => {
     currentUser?.role === UserRole.TAC;
   const canPscApprove =
     currentUser?.role === UserRole.UNDP_DONOR;
-  const canFinancePay =
-    currentUser?.role === UserRole.ADMIN;
   const canRmtMarkPaid =
     currentUser?.role === UserRole.ADMIN || currentUser?.role === UserRole.RBF_OFFICIAL;
   const canFlagIssues =
     currentUser?.role === UserRole.UNDP_DONOR || currentUser?.role === UserRole.ADMIN || currentUser?.role === UserRole.RBF_OFFICIAL;
+  const isVendorView = currentUser?.role === UserRole.VENDOR;
 
   const showNotification = (msg: string) => {
     setNotification(msg);
@@ -4980,40 +5102,179 @@ const Disbursements = () => {
     showNotification("Payment schedule exported.");
   };
 
-  const processPayment = async (claim: PaymentClaim) => {
-    if (!canProcessPayments || claim.status === "Completed" || claim.status === "Paid" || claim.paymentLocked) return;
+  const openClaimReview = (claim: PaymentClaim) => {
+    setSelectedClaimForReview(claim);
+    setReviewNotes("");
+    setVendorBankDetails(null);
+    setDisbursementSheetDetails(null);
+  };
+
+  const loadVendorBankDetails = async (claim: PaymentClaim, revealFull = false) => {
+    setBankDetailsLoading(true);
+    try {
+      const details = await fetchVendorBankDetailsWithAccess(claim.id, revealFull);
+      setVendorBankDetails(details);
+      showNotification("Vendor bank details are now visible and recorded for audit.");
+    } catch (err: any) {
+      const raw = String(err?.message || "");
+      if (isConnectivityError(raw)) {
+        showNotification(`Cannot connect to backend (${API_BASE}).`);
+      } else {
+        showNotification(toFriendlyApiMessage(raw) || "Failed to load vendor bank details.");
+      }
+    } finally {
+      setBankDetailsLoading(false);
+    }
+  };
+
+  const canOpenStandaloneBankDetails = (claim: PaymentClaim) => {
+    if (currentUser?.role === UserRole.UNDP_DONOR) {
+      return claim.status === "TAC Endorsed" || claim.status === "PSC Approved";
+    }
+    if (currentUser?.role === UserRole.ADMIN || currentUser?.role === UserRole.RBF_OFFICIAL) {
+      return claim.status === "PSC Approved" || claim.status === "Approved" || claim.status === "Completed" || claim.status === "Paid";
+    }
+    return false;
+  };
+
+  const openBankDetailsModal = (claim: PaymentClaim) => {
+    if (!canOpenStandaloneBankDetails(claim)) {
+      showNotification("Bank details are not available for this claim yet.");
+      return;
+    }
+    setSelectedClaimForBankDetails(claim);
+    setVendorBankDetails(null);
+    setDisbursementSheetDetails(null);
+    void (async () => {
+      setBankDetailsLoading(true);
+      try {
+        if (currentUser?.role === UserRole.UNDP_DONOR) {
+          const details = await fetchVendorBankDetailsWithAccess(claim.id, false);
+          setVendorBankDetails(details);
+        } else {
+          const details = await fetchDisbursementSheet(claim.id);
+          setDisbursementSheetDetails(details);
+        }
+      } catch (err: any) {
+        const raw = String(err?.message || "");
+        if (isConnectivityError(raw)) {
+          showNotification(`Cannot connect to backend (${API_BASE}).`);
+        } else {
+          showNotification(toFriendlyApiMessage(raw) || "Failed to load vendor bank details.");
+          setSelectedClaimForBankDetails(null);
+        }
+      } finally {
+        setBankDetailsLoading(false);
+      }
+    })();
+  };
+
+  const submitApproval = async (action: "approve" | "reject") => {
+    if (!selectedClaimForReview) return;
 
     try {
-      setProcessingClaimId(claim.id);
-      let updated = claim;
-      const financeAlreadyPaid = claim.disbursement?.status === "Completed";
-      if (canRmtApprove && (claim.status === "Submitted" || claim.status === "Pending")) {
-        updated = await verifyPaymentClaim(claim.id, "Approved by RMT from disbursement dashboard.");
-        showNotification(`Claim ${claim.id} approved by RMT.`);
-      } else if (canTacEndorse && (claim.status === "RMT Approved" || claim.status === "Verified")) {
-        updated = await approvePaymentClaim(claim.id, "Endorsed by TAC from disbursement dashboard.");
-        showNotification(`Claim ${claim.id} endorsed by TAC.`);
-      } else if (canPscApprove && claim.status === "TAC Endorsed") {
-        updated = await approvePaymentClaim(claim.id, "Approved by PSC from disbursement dashboard.");
-        showNotification(`Claim ${claim.id} approved by PSC and sent to Finance.`);
-      } else if (canFinancePay && (claim.status === "PSC Approved" || claim.status === "Approved") && !financeAlreadyPaid) {
-        updated = await payPaymentClaim(claim.id, undefined, "Finance processed payment from disbursement dashboard.");
-        showNotification(`Finance processed payment for claim ${claim.id}.`);
-      } else if (canRmtMarkPaid && (claim.status === "PSC Approved" || claim.status === "Approved") && financeAlreadyPaid) {
-        updated = await confirmPaymentClaim(claim.id, undefined, "Marked as paid by RMT from disbursement dashboard.");
-        showNotification(`Claim ${claim.id} marked as paid by RMT.`);
+      setProcessingClaimId(selectedClaimForReview.id);
+      let updated = selectedClaimForReview;
+      const remarks = reviewNotes || "";
+
+      if (action === "reject") {
+        showNotification(`Claim ${selectedClaimForReview.id} rejected with notes.`);
+      } else if (canRmtApprove && (selectedClaimForReview.status === "Submitted" || selectedClaimForReview.status === "Pending")) {
+        // RMT Managerial Review: Contractual & Compliance Check
+        updated = await verifyPaymentClaim(selectedClaimForReview.id, remarks || "Approved by RMT - Contractual and compliance check complete.");
+        showNotification(`Claim ${selectedClaimForReview.id} approved by RMT. Moving to TAC review.`);
+      } else if (canTacEndorse && (selectedClaimForReview.status === "RMT Approved" || selectedClaimForReview.status === "Verified")) {
+        // TAC Technical Review: Data Audit & Hardware Verification
+        updated = await approvePaymentClaim(selectedClaimForReview.id, remarks || "Endorsed by TAC - Technical audit and hardware verification complete.");
+        showNotification(`Claim ${selectedClaimForReview.id} endorsed by TAC. Moving to PSC approval.`);
+      } else if (canPscApprove && selectedClaimForReview.status === "TAC Endorsed") {
+        // PSC Financial Authorization: Budget Check & Final Approval
+        updated = await approvePaymentClaim(selectedClaimForReview.id, remarks || "Approved by PSC - Budget available, approved for payment.");
+        showNotification(`Claim ${selectedClaimForReview.id} approved by PSC. Ready for disbursement.`);
       } else {
-        showNotification("This claim is not ready for the next payment action from your role.");
+        showNotification("This claim is not ready for the next approval action from your role.");
+        setSelectedClaimForReview(null);
         return;
       }
-      setClaims(prev => prev.map(item => item.id === claim.id ? updated : item));
+      setClaims(prev => prev.map(item => item.id === selectedClaimForReview.id ? updated : item));
+      setSelectedClaimForReview(null);
+      setReviewNotes("");
       await loadClaims();
     } catch (err: any) {
       const raw = String(err?.message || "");
       if (isConnectivityError(raw)) {
         showNotification(`Cannot connect to backend (${API_BASE}).`);
       } else {
-        showNotification(toFriendlyApiMessage(raw) || "Failed to process payment.");
+        showNotification(toFriendlyApiMessage(raw) || "Failed to process approval.");
+      }
+    } finally {
+      setProcessingClaimId(null);
+    }
+  };
+
+  const processPayment = async (claim: PaymentClaim) => {
+    if (!canProcessPayments || claim.status === "Completed" || claim.status === "Paid" || claim.paymentLocked) return;
+    
+    if ((claim.status === "PSC Approved" || claim.status === "Approved") && canRmtMarkPaid) {
+      openDisbursementModal(claim);
+    } else {
+      openClaimReview(claim);
+    }
+  };
+
+  const openDisbursementModal = (claim: PaymentClaim) => {
+    if (claim.status !== "PSC Approved" && claim.status !== "Approved") {
+      showNotification("Only claims approved by PSC can be disbursed.");
+      return;
+    }
+    setSelectedClaimForDisbursement(claim);
+    setTransactionRef("");
+    setDisbursementSheetDetails(null);
+    void (async () => {
+      setBankDetailsLoading(true);
+      try {
+        const details = await fetchDisbursementSheet(claim.id);
+        setDisbursementSheetDetails(details);
+      } catch (err: any) {
+        const raw = String(err?.message || "");
+        if (isConnectivityError(raw)) {
+          showNotification(`Cannot connect to backend (${API_BASE}).`);
+        } else {
+          showNotification(toFriendlyApiMessage(raw) || "Failed to load disbursement sheet.");
+        }
+      } finally {
+        setBankDetailsLoading(false);
+      }
+    })();
+  };
+
+  const submitDisbursement = async () => {
+    if (!selectedClaimForDisbursement) return;
+    if (!transactionRef.trim()) {
+      showNotification("Transaction or reference ID is required.");
+      return;
+    }
+
+    try {
+      setProcessingClaimId(selectedClaimForDisbursement.id);
+      const updated = await confirmPaymentClaim(
+        selectedClaimForDisbursement.id,
+        transactionRef.trim(),
+        `Payment confirmed by RMT. Reference ID: ${transactionRef.trim()}`
+      );
+      
+      showNotification(`Claim ${selectedClaimForDisbursement.id} marked as PAID. Ledger entry created.`);
+      setClaims(prev => prev.map(item => item.id === selectedClaimForDisbursement.id ? updated : item));
+      setSelectedClaimForDisbursement(null);
+      setTransactionRef("");
+      setDisbursementSheetDetails(null);
+      await loadClaims();
+    } catch (err: any) {
+      const raw = String(err?.message || "");
+      if (isConnectivityError(raw)) {
+        showNotification(`Cannot connect to backend (${API_BASE}).`);
+      } else {
+        showNotification(toFriendlyApiMessage(raw) || "Failed to confirm disbursement.");
       }
     } finally {
       setProcessingClaimId(null);
@@ -5056,45 +5317,55 @@ const Disbursements = () => {
     .reduce((sum, claim) => sum + claim.claimAmount, 0);
   const getClaimWorkflowLabel = (claim: PaymentClaim) => {
     if (claim.status === "Completed" || claim.status === "Paid") return "Paid";
-    if ((claim.status === "PSC Approved" || claim.status === "Approved") && claim.disbursement?.status === "Completed") {
-      return "Finance Paid - Awaiting RMT Closure";
-    }
     return claim.status;
   };
 
   const getClaimWorkflowTone = (claim: PaymentClaim) => {
     const display = getClaimWorkflowLabel(claim);
     if (display === "Paid") return "bg-emerald-100 text-emerald-700";
-    if (display === "Finance Paid - Awaiting RMT Closure") return "bg-sky-100 text-sky-700";
     if (display === "PSC Approved") return "bg-violet-100 text-violet-700";
     if (display === "RMT Approved" || display === "TAC Endorsed" || display === "Verified" || display === "Approved") return "bg-blue-100 text-blue-700";
     return "bg-amber-100 text-amber-700";
   };
 
   const getClaimActionLabel = (claim: PaymentClaim) => {
-    const financeAlreadyPaid = claim.disbursement?.status === "Completed";
+    // Approval workflow actions
     if (!canProcessPayments) return "View Only";
-    if (claim.status === "Completed" || claim.status === "Paid") return "Completed";
+    if (claim.status === "Completed" || claim.status === "Paid") return "Paid";
     if (claim.paymentLocked) return "Locked";
     if (processingClaimId === claim.id) return "Processing...";
-    if (canRmtApprove && (claim.status === "Submitted" || claim.status === "Pending")) return "RMT Approve";
-    if (canTacEndorse && (claim.status === "RMT Approved" || claim.status === "Verified")) return "TAC Endorse";
-    if (canPscApprove && claim.status === "TAC Endorsed") return "PSC Approve";
-    if (canFinancePay && (claim.status === "PSC Approved" || claim.status === "Approved") && !financeAlreadyPaid) return "Finance Pay";
-    if (canRmtMarkPaid && (claim.status === "PSC Approved" || claim.status === "Approved") && financeAlreadyPaid) return "Mark As Paid";
+    if (canRmtApprove && (claim.status === "Submitted" || claim.status === "Pending")) return "RMT Review";
+    if (canTacEndorse && (claim.status === "RMT Approved" || claim.status === "Verified")) return "TAC Review";
+    if (canPscApprove && claim.status === "TAC Endorsed") return "PSC Review";
+    
+    // Disbursement action (after all approvals)
+    if (canRmtMarkPaid && (claim.status === "PSC Approved" || claim.status === "Approved")) return "Confirm Payment";
+    
     return "No Action";
   };
 
   const canActOnClaim = (claim: PaymentClaim) => {
-    const financeAlreadyPaid = claim.disbursement?.status === "Completed";
     if (!canProcessPayments || claim.status === "Completed" || claim.status === "Paid" || claim.paymentLocked || processingClaimId === claim.id) return false;
     return (
       (canRmtApprove && (claim.status === "Submitted" || claim.status === "Pending"))
       || (canTacEndorse && (claim.status === "RMT Approved" || claim.status === "Verified"))
       || (canPscApprove && claim.status === "TAC Endorsed")
-      || (canFinancePay && (claim.status === "PSC Approved" || claim.status === "Approved") && !financeAlreadyPaid)
-      || (canRmtMarkPaid && (claim.status === "PSC Approved" || claim.status === "Approved") && financeAlreadyPaid)
+      || (canRmtMarkPaid && (claim.status === "PSC Approved" || claim.status === "Approved"))
     );
+  };
+
+  const getBankDetailsActionLabel = () => {
+    if (currentUser?.role === UserRole.UNDP_DONOR) return "View Bank Details";
+    if (currentUser?.role === UserRole.ADMIN || currentUser?.role === UserRole.RBF_OFFICIAL) return "View Vendor Bank Details";
+    return "View Bank Details";
+  };
+
+  const getNextApprovalStep = (claim: PaymentClaim): string => {
+    if (canRmtApprove && (claim.status === "Submitted" || claim.status === "Pending")) return "RMT Managerial Review";
+    if (canTacEndorse && (claim.status === "RMT Approved" || claim.status === "Verified")) return "TAC Technical Review";
+    if (canPscApprove && claim.status === "TAC Endorsed") return "PSC Financial Authorization";
+    if (canRmtMarkPaid && (claim.status === "PSC Approved" || claim.status === "Approved")) return "RMT Payment Confirmation";
+    return "No Action Required";
   };
 
   const budgetRemaining = Math.max(0, 35800000 - totalDisbursed);
@@ -5159,7 +5430,7 @@ const Disbursements = () => {
                   <div className="font-medium text-slate-900">{claim.vendorUsername || `Vendor ${claim.vendorId}`}</div>
                   <div className="text-xs text-slate-500">PRJ-{claim.projectId}</div>
                 </td>
-                <td className="px-6 py-4 text-sm text-slate-600">{claim.milestoneId ? `Milestone ${claim.milestoneId}` : "N/A"}</td>
+                <td className="px-6 py-4 text-sm text-slate-600">{claim.milestone_details ? `Milestone ${claim.milestone_details.milestoneNumber || claim.milestoneId}` : "N/A"}</td>
                 <td className="px-6 py-4 font-bold text-slate-900">M {claim.claimAmount.toLocaleString()}</td>
                 <td className="px-6 py-4">
                   <span className={`badge ${getClaimWorkflowTone(claim)}`}>
@@ -5168,15 +5439,33 @@ const Disbursements = () => {
                 </td>
                 <td className="px-6 py-4">
                   <div className="flex flex-col gap-2">
-                    <button
-                      onClick={() => processPayment(claim)}
-                      className="text-emerald-600 hover:text-emerald-700 font-medium text-sm disabled:text-slate-400 disabled:cursor-not-allowed text-left"
-                      disabled={!canActOnClaim(claim)}
-                      title={claim.paymentLocked ? (claim.paymentLockReason || "Payment locked for audit.") : undefined}
-                    >
-                      {getClaimActionLabel(claim)}
-                    </button>
-                    {canFlagIssues && (
+                    {isVendorView ? (
+                      <button
+                        onClick={() => setSelectedVendorClaimDetails(claim)}
+                        className="text-emerald-600 hover:text-emerald-700 font-medium text-sm text-left"
+                      >
+                        View Details
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => processPayment(claim)}
+                        className="text-emerald-600 hover:text-emerald-700 font-medium text-sm disabled:text-slate-400 disabled:cursor-not-allowed text-left"
+                        disabled={!canActOnClaim(claim)}
+                        title={claim.paymentLocked ? (claim.paymentLockReason || "Payment locked for audit.") : undefined}
+                      >
+                        {getClaimActionLabel(claim)}
+                      </button>
+                    )}
+                    {canOpenStandaloneBankDetails(claim) && (
+                      <button
+                        onClick={() => openBankDetailsModal(claim)}
+                        className="text-blue-600 hover:text-blue-700 font-medium text-sm text-left disabled:text-slate-400"
+                        disabled={bankDetailsLoading && selectedClaimForBankDetails?.id === claim.id}
+                      >
+                        {bankDetailsLoading && selectedClaimForBankDetails?.id === claim.id ? "Loading bank details..." : getBankDetailsActionLabel()}
+                      </button>
+                    )}
+                    {canFlagIssues && !isVendorView && (
                       <button
                         onClick={() => flagClaimIssue(claim)}
                         className="text-amber-600 hover:text-amber-700 font-medium text-sm text-left"
@@ -5206,6 +5495,597 @@ const Disbursements = () => {
           </tbody>
         </table>
       </div>
+
+      <AnimatePresence>
+        {selectedClaimForBankDetails && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/40 p-4"
+            onClick={() => setSelectedClaimForBankDetails(null)}
+          >
+            <motion.div
+              initial={{ scale: 0.96, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.96, opacity: 0 }}
+              onClick={(e) => e.stopPropagation()}
+              className="w-full max-w-3xl overflow-hidden rounded-2xl bg-white shadow-2xl"
+            >
+              <div className="flex items-center justify-between bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 px-6 py-5 text-white">
+                <div>
+                  <h2 className="text-2xl font-bold">Vendor Bank Details</h2>
+                  <p className="mt-1 text-sm text-blue-200">CLM-{String(selectedClaimForBankDetails.id).padStart(3, "0")}</p>
+                </div>
+                <button
+                  onClick={() => setSelectedClaimForBankDetails(null)}
+                  className="rounded-lg p-2 transition-colors hover:bg-slate-700"
+                >
+                  <X size={24} />
+                </button>
+              </div>
+
+              <div className="max-h-[80vh] space-y-6 overflow-y-auto p-6 md:p-8">
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
+                  <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                    <div>
+                      <p className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">
+                        {currentUser?.role === UserRole.UNDP_DONOR ? "PSC Authorization View" : "RMT Verification View"}
+                      </p>
+                      <p className="mt-2 text-sm text-slate-700">
+                        {currentUser?.role === UserRole.UNDP_DONOR
+                          ? "PSC can review the vendor account destination with a masked account number by default. Use View Details to reveal the full number and log the action."
+                          : "RMT can review the full vendor banking profile before confirming payment."}
+                      </p>
+                    </div>
+                    {currentUser?.role === UserRole.UNDP_DONOR && (
+                      <button
+                        onClick={() => loadVendorBankDetails(selectedClaimForBankDetails, true)}
+                        disabled={bankDetailsLoading}
+                        className="btn-secondary text-xs px-3 py-2"
+                      >
+                        {bankDetailsLoading ? "Loading..." : "View Details"}
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="mt-5 grid grid-cols-1 gap-4 md:grid-cols-2">
+                    <div>
+                      <p className="text-xs font-bold uppercase text-slate-400">Vendor Legal Name</p>
+                      <p className="mt-1 text-base font-semibold text-slate-900">
+                        {disbursementSheetDetails?.vendorLegalName || vendorBankDetails?.vendorLegalName || selectedClaimForBankDetails.vendorLegalName || selectedClaimForBankDetails.vendorUsername}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs font-bold uppercase text-slate-400">Bank Name</p>
+                      <p className="mt-1 text-base font-semibold text-slate-900">
+                        {disbursementSheetDetails?.vendorBankName || vendorBankDetails?.vendorBankName || selectedClaimForBankDetails.vendorBankName || "Not provided"}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs font-bold uppercase text-slate-400">Branch</p>
+                      <p className="mt-1 text-base font-semibold text-slate-900">
+                        {disbursementSheetDetails?.vendorBankBranch || vendorBankDetails?.vendorBankBranch || selectedClaimForBankDetails.vendorBankBranch || "Not provided"}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs font-bold uppercase text-slate-400">Account Holder</p>
+                      <p className="mt-1 text-base font-semibold text-slate-900">
+                        {disbursementSheetDetails?.vendorAccountHolderName || vendorBankDetails?.vendorAccountHolderName || selectedClaimForBankDetails.vendorAccountHolderName || "Not provided"}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs font-bold uppercase text-slate-400">SWIFT / Sort Code</p>
+                      <p className="mt-1 text-base font-semibold text-slate-900">
+                        {[disbursementSheetDetails?.vendorBankSwiftCode, disbursementSheetDetails?.vendorBankSortCode]
+                          .filter(Boolean)
+                          .join(" • ") || "Not provided"}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs font-bold uppercase text-slate-400">Claim Amount</p>
+                      <p className="mt-1 text-base font-semibold text-emerald-700">
+                        M {(disbursementSheetDetails?.totalApprovedAmount ?? selectedClaimForBankDetails.claimAmount).toLocaleString()}
+                      </p>
+                    </div>
+                    <div className="md:col-span-2">
+                      <p className="text-xs font-bold uppercase text-slate-400">Account Number</p>
+                      <p className="mt-1 break-all text-base font-semibold text-slate-900">
+                        {disbursementSheetDetails?.vendorAccountNumber || vendorBankDetails?.vendorAccountNumber || selectedClaimForBankDetails.vendorAccountNumber || "Not available"}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex justify-end border-t border-slate-200 pt-4">
+                  <button
+                    onClick={() => setSelectedClaimForBankDetails(null)}
+                    className="rounded-lg border border-slate-200 px-4 py-2 font-semibold text-slate-700 transition-colors hover:bg-slate-50"
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {selectedVendorClaimDetails && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/40 p-4"
+            onClick={() => setSelectedVendorClaimDetails(null)}
+          >
+            <motion.div
+              initial={{ scale: 0.96, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.96, opacity: 0 }}
+              onClick={(e) => e.stopPropagation()}
+              className="w-full max-w-3xl overflow-hidden rounded-2xl bg-white shadow-2xl"
+            >
+              <div className="flex items-center justify-between bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 px-6 py-5 text-white">
+                <div>
+                  <h2 className="text-2xl font-bold">Claim Details</h2>
+                  <p className="mt-1 text-sm text-blue-200">CLM-{String(selectedVendorClaimDetails.id).padStart(3, "0")}</p>
+                </div>
+                <button
+                  onClick={() => setSelectedVendorClaimDetails(null)}
+                  className="rounded-lg p-2 transition-colors hover:bg-slate-700"
+                >
+                  <X size={24} />
+                </button>
+              </div>
+
+              <div className="max-h-[80vh] space-y-6 overflow-y-auto p-6 md:p-8">
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                    <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Project</p>
+                    <p className="mt-1 text-base font-semibold text-slate-900">PRJ-{selectedVendorClaimDetails.projectId}</p>
+                  </div>
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                    <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Status</p>
+                    <p className="mt-1 text-base font-semibold text-slate-900">{getClaimWorkflowLabel(selectedVendorClaimDetails)}</p>
+                  </div>
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                    <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Claim Amount</p>
+                    <p className="mt-1 text-base font-semibold text-slate-900">M {selectedVendorClaimDetails.claimAmount.toLocaleString()}</p>
+                  </div>
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                    <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Submitted</p>
+                    <p className="mt-1 text-base font-semibold text-slate-900">
+                      {selectedVendorClaimDetails.submittedAt ? new Date(selectedVendorClaimDetails.submittedAt).toLocaleString() : "N/A"}
+                    </p>
+                  </div>
+                  <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 md:col-span-2">
+                    <p className="text-xs font-bold uppercase tracking-wide text-emerald-700">Payment Proof</p>
+                    <p className="mt-1 text-lg font-semibold text-emerald-900">
+                      {selectedVendorClaimDetails.paymentReference || selectedVendorClaimDetails.disbursement?.reference || "Not available yet"}
+                    </p>
+                    <p className="mt-2 text-sm text-emerald-800">
+                      {selectedVendorClaimDetails.paidAt
+                        ? `Confirmed on ${new Date(selectedVendorClaimDetails.paidAt).toLocaleString()}`
+                        : selectedVendorClaimDetails.disbursement?.processedAt
+                          ? `Recorded on ${new Date(selectedVendorClaimDetails.disbursement.processedAt).toLocaleString()}`
+                          : "Payment proof will appear here after RMT confirms the payment."}
+                    </p>
+                  </div>
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                    <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Milestone</p>
+                    <p className="mt-1 text-base font-semibold text-slate-900">
+                      {selectedVendorClaimDetails.milestone_details
+                        ? `Milestone ${selectedVendorClaimDetails.milestone_details.milestoneNumber || selectedVendorClaimDetails.milestoneId}`
+                        : selectedVendorClaimDetails.milestoneId || "N/A"}
+                    </p>
+                  </div>
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                    <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Processed By</p>
+                    <p className="mt-1 text-base font-semibold text-slate-900">
+                      {selectedVendorClaimDetails.disbursement?.processedByUsername || selectedVendorClaimDetails.reviewedByUsername || "RMT"}
+                    </p>
+                  </div>
+                </div>
+
+                {(selectedVendorClaimDetails.remarks || selectedVendorClaimDetails.disbursement?.notes) && (
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                    <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Notes</p>
+                    <p className="mt-2 text-sm text-slate-700">
+                      {selectedVendorClaimDetails.disbursement?.notes || selectedVendorClaimDetails.remarks}
+                    </p>
+                  </div>
+                )}
+
+                <div className="flex justify-end border-t border-slate-200 pt-4">
+                  <button
+                    onClick={() => setSelectedVendorClaimDetails(null)}
+                    className="rounded-lg border border-slate-200 px-4 py-2 font-semibold text-slate-700 transition-colors hover:bg-slate-50"
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Claim Review Modal */}
+      <AnimatePresence>
+        {selectedClaimForReview && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/40 flex items-center justify-center z-[1000] p-4"
+            onClick={() => setSelectedClaimForReview(null)}
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              onClick={(e) => e.stopPropagation()}
+              className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto"
+            >
+              <div className="sticky top-0 bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 text-white px-8 py-6 flex items-center justify-between">
+                <div>
+                  <h2 className="text-2xl font-bold">Payment Claim Review</h2>
+                  <p className="text-sm text-blue-200 mt-1">CLM-{String(selectedClaimForReview.id).padStart(3, "0")}</p>
+                </div>
+                <button
+                  onClick={() => setSelectedClaimForReview(null)}
+                  className="p-2 hover:bg-slate-700 rounded-lg transition-colors"
+                >
+                  <X size={24} />
+                </button>
+              </div>
+
+              <div className="p-8 space-y-6">
+                {/* Claim Header Info */}
+                <div className="grid grid-cols-2 gap-4 mb-6 pb-6 border-b border-slate-200">
+                  <div>
+                    <p className="text-xs font-bold text-slate-400 uppercase mb-1">Vendor</p>
+                    <p className="text-lg font-semibold text-slate-900">{selectedClaimForReview.vendorUsername || `Vendor ${selectedClaimForReview.vendorId}`}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs font-bold text-slate-400 uppercase mb-1">Project</p>
+                    <p className="text-lg font-semibold text-slate-900">PRJ-{selectedClaimForReview.projectId}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs font-bold text-slate-400 uppercase mb-1">Milestone</p>
+                    <p className="text-lg font-semibold text-slate-900">
+                      {selectedClaimForReview.milestone_details ? `Milestone ${selectedClaimForReview.milestone_details.milestoneNumber || selectedClaimForReview.milestoneId}` : "N/A"}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs font-bold text-slate-400 uppercase mb-1">Claim Amount</p>
+                    <p className="text-lg font-bold text-emerald-600">M {selectedClaimForReview.claimAmount.toLocaleString()}</p>
+                  </div>
+                </div>
+
+                {/* Implementation Details */}
+                <div className="space-y-3 pb-6 border-b border-slate-200">
+                  <h3 className="text-sm font-bold text-slate-900 uppercase">Implementation Details</h3>
+                  <div>
+                    <p className="text-xs text-slate-500 mb-1">Implementation Notes</p>
+                    <div className="bg-slate-50 rounded-lg p-4 min-h-[100px] text-sm text-slate-700">
+                      {selectedClaimForReview.implementationNotes || "No implementation notes provided."}
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <p className="text-xs text-slate-500 mb-1">Actual Beneficiaries</p>
+                      <p className="text-lg font-semibold text-slate-900">{selectedClaimForReview.actualBeneficiaries}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-slate-500 mb-1">Female Beneficiaries</p>
+                      <p className="text-lg font-semibold text-slate-900">{selectedClaimForReview.actualFemaleBeneficiaries}</p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Evidence Files */}
+                <div className="space-y-3 pb-6 border-b border-slate-200">
+                  <h3 className="text-sm font-bold text-slate-900 uppercase">Supporting Evidence</h3>
+                  {selectedClaimForReview.evidenceFiles && selectedClaimForReview.evidenceFiles.length > 0 ? (
+                    <div className="space-y-2">
+                      {selectedClaimForReview.evidenceFiles.map((file, idx) => (
+                        <a
+                          key={idx}
+                          href={file}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center gap-3 p-3 bg-slate-50 hover:bg-blue-50 rounded-lg transition-colors group"
+                        >
+                          <FileText size={18} className="text-slate-400 group-hover:text-blue-600" />
+                          <span className="text-sm font-medium text-slate-700 group-hover:text-blue-600 truncate">{file.split('/').pop()}</span>
+                          <ExternalLink size={14} className="text-slate-400 group-hover:text-blue-600 ml-auto flex-shrink-0" />
+                        </a>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-slate-500">No evidence files attached.</p>
+                  )}
+                </div>
+
+                {/* Approval Workflow Status */}
+                <div className="space-y-3 pb-6 border-b border-slate-200">
+                  <h3 className="text-sm font-bold text-slate-900 uppercase">Approval Workflow</h3>
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-3">
+                      <div className={`w-3 h-3 rounded-full ${selectedClaimForReview.status && ["Submitted", "Pending"].includes(selectedClaimForReview.status) ? "bg-amber-500" : "bg-emerald-500"}`}></div>
+                      <span className="text-sm"><strong>1. RMT Managerial Review:</strong> Contractual check (vs. milestone schedule) & compliance check (red flags)</span>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <div className={`w-3 h-3 rounded-full ${["RMT Approved", "Verified"].includes(selectedClaimForReview.status) ? "bg-amber-500" : ["Submitted", "Pending"].includes(selectedClaimForReview.status) ? "bg-slate-300" : "bg-emerald-500"}`}></div>
+                      <span className="text-sm"><strong>2. TAC Technical Review:</strong> Data audit (GIS, energy reports) & hardware verification</span>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <div className={`w-3 h-3 rounded-full ${selectedClaimForReview.status === "TAC Endorsed" ? "bg-amber-500" : !["TAC Endorsed", "RMT Approved", "Verified", "Submitted", "Pending"].includes(selectedClaimForReview.status) ? "bg-emerald-500" : "bg-slate-300"}`}></div>
+                      <span className="text-sm"><strong>3. PSC Financial Authorization:</strong> Budget check & final donor approval</span>
+                    </div>
+                  </div>
+                  <p className="text-xs text-slate-500 mt-3 p-3 bg-blue-50 rounded-lg">
+                    <strong>Current Status:</strong> {getClaimWorkflowLabel(selectedClaimForReview)} | <strong>Next Step:</strong> {getNextApprovalStep(selectedClaimForReview)}
+                  </p>
+
+                  {currentUser?.role === UserRole.UNDP_DONOR && (
+                    <div className="space-y-4 rounded-lg border border-slate-200 bg-slate-50 p-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <p className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Final Authorization View</p>
+                          <p className="mt-2 text-sm text-slate-700">PSC sees the bank name, branch, account holder, and a masked account number by default to verify where public funds will be sent.</p>
+                        </div>
+                        <button
+                          onClick={() => selectedClaimForReview && loadVendorBankDetails(selectedClaimForReview, true)}
+                          disabled={bankDetailsLoading}
+                          className="btn-secondary text-xs px-3 py-2"
+                        >
+                          {bankDetailsLoading ? 'Loading...' : 'View Details'}
+                        </button>
+                      </div>
+
+                      <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-2">
+                        <div>
+                          <p className="text-xs text-slate-400 uppercase">Vendor Legal Name</p>
+                          <p className="font-semibold text-slate-900">{selectedClaimForReview.vendorLegalName || selectedClaimForReview.vendorUsername}</p>
+                        </div>
+                        <div>
+                          <p className="text-xs text-slate-400 uppercase">Bank Name</p>
+                          <p className="font-semibold text-slate-900">{selectedClaimForReview.vendorBankName || 'Not provided'}</p>
+                        </div>
+                        <div>
+                          <p className="text-xs text-slate-400 uppercase">Branch</p>
+                          <p className="font-semibold text-slate-900">{selectedClaimForReview.vendorBankBranch || 'Not provided'}</p>
+                        </div>
+                        <div>
+                          <p className="text-xs text-slate-400 uppercase">Account Holder</p>
+                          <p className="font-semibold text-slate-900">{selectedClaimForReview.vendorAccountHolderName || 'Not provided'}</p>
+                        </div>
+                        <div className="md:col-span-2">
+                          <p className="text-xs text-slate-400 uppercase">Account Number</p>
+                          <p className="font-semibold text-slate-900">
+                            {vendorBankDetails?.vendorAccountNumber || selectedClaimForReview.vendorAccountNumber || 'Hidden until viewed'}
+                          </p>
+                        </div>
+                      </div>
+                      <p className="text-xs text-slate-500">
+                        Selecting <strong>View Details</strong> reveals the full account number and records the action in the audit log.
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+                {/* Review Notes Input */}
+                <div className="space-y-3">
+                  <label className="text-sm font-bold text-slate-900 uppercase">Review & Approval Notes</label>
+                  <textarea
+                    value={reviewNotes}
+                    onChange={(e) => setReviewNotes(e.target.value)}
+                    placeholder="Document your review findings, ensure contractual/compliance/technical checks are complete..."
+                    className="w-full p-4 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    rows={4}
+                  />
+                </div>
+
+                {/* Action Buttons */}
+                <div className="flex gap-3 pt-6 border-t border-slate-200">
+                  <button
+                    onClick={() => setSelectedClaimForReview(null)}
+                    className="flex-1 px-4 py-3 border border-slate-200 text-slate-700 font-semibold rounded-lg hover:bg-slate-50 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => submitApproval("approve")}
+                    disabled={processingClaimId === selectedClaimForReview.id}
+                    className="flex-1 px-4 py-3 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2"
+                  >
+                    {processingClaimId === selectedClaimForReview.id ? (
+                      <>
+                        <motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity }} className="inline-block">
+                          <Check size={18} />
+                        </motion.div>
+                        Processing...
+                      </>
+                    ) : (
+                      <>
+                        <Check size={18} />
+                        {getClaimActionLabel(selectedClaimForReview) === "No Action" ? "Approve" : getClaimActionLabel(selectedClaimForReview)}
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Disbursement Confirmation Modal */}
+      <AnimatePresence>
+        {selectedClaimForDisbursement && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/40 flex items-center justify-center z-[1000] p-4"
+            onClick={() => setSelectedClaimForDisbursement(null)}
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              onClick={(e) => e.stopPropagation()}
+              className="flex max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl"
+            >
+              <div className="bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 text-white px-8 py-6 flex items-center justify-between rounded-t-2xl">
+                <div>
+                  <h2 className="text-2xl font-bold">Confirm Payment</h2>
+                  <p className="text-sm text-blue-200 mt-1">CLM-{String(selectedClaimForDisbursement.id).padStart(3, "0")}</p>
+                </div>
+                <button
+                  onClick={() => setSelectedClaimForDisbursement(null)}
+                  className="p-2 hover:bg-slate-700 rounded-lg transition-colors"
+                >
+                  <X size={24} />
+                </button>
+              </div>
+
+              <div className="grid flex-1 gap-6 overflow-y-auto p-6 md:grid-cols-[1.3fr_0.9fr] md:p-8">
+                <div className="space-y-6">
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 space-y-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <p className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Disbursement Sheet</p>
+                        <p className="text-sm text-slate-700 mt-1">Use this full-access verification sheet to enter the vendor payment into IFMS or the bank portal.</p>
+                      </div>
+                      {bankDetailsLoading && <p className="text-xs text-slate-500">Loading bank details...</p>}
+                    </div>
+                    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                      <div className="sm:col-span-2 xl:col-span-1">
+                        <p className="text-xs font-bold text-slate-400 uppercase mb-1">Vendor Legal Name</p>
+                        <p className="text-lg font-semibold text-slate-900 break-words">
+                          {disbursementSheetDetails?.vendorLegalName || selectedClaimForDisbursement.vendorLegalName || selectedClaimForDisbursement.vendorUsername}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-xs font-bold text-slate-400 uppercase mb-1">Total Approved Amount</p>
+                        <p className="text-lg font-bold text-emerald-600">
+                          M {(disbursementSheetDetails?.totalApprovedAmount ?? selectedClaimForDisbursement.claimAmount).toLocaleString()}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-xs font-bold text-slate-400 uppercase mb-1">Claim Status</p>
+                        <p className="text-lg font-semibold text-slate-900">
+                          {disbursementSheetDetails?.claimStatus || selectedClaimForDisbursement.status}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-xs font-bold text-slate-400 uppercase mb-1">Bank Name</p>
+                        <p className="text-lg font-semibold text-slate-900 break-words">
+                          {disbursementSheetDetails?.vendorBankName || selectedClaimForDisbursement.vendorBankName || "Not provided"}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-xs font-bold text-slate-400 uppercase mb-1">Branch</p>
+                        <p className="text-lg font-semibold text-slate-900 break-words">
+                          {disbursementSheetDetails?.vendorBankBranch || selectedClaimForDisbursement.vendorBankBranch || "Not provided"}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-xs font-bold text-slate-400 uppercase mb-1">SWIFT / Sort Code</p>
+                        <p className="text-lg font-semibold text-slate-900 break-words">
+                          {[disbursementSheetDetails?.vendorBankSwiftCode || selectedClaimForDisbursement.vendorBankSwiftCode, disbursementSheetDetails?.vendorBankSortCode || selectedClaimForDisbursement.vendorBankSortCode].filter(Boolean).join(" • ") || "Not provided"}
+                        </p>
+                      </div>
+                      <div className="sm:col-span-2 xl:col-span-1">
+                        <p className="text-xs font-bold text-slate-400 uppercase mb-1">Account Holder Name</p>
+                        <p className="text-lg font-semibold text-slate-900 break-words">
+                          {disbursementSheetDetails?.vendorAccountHolderName || selectedClaimForDisbursement.vendorAccountHolderName || "Not provided"}
+                        </p>
+                      </div>
+                      <div className="sm:col-span-2 xl:col-span-2">
+                        <p className="text-xs font-bold text-slate-400 uppercase mb-1">Full Account Number</p>
+                        <p className="text-lg font-semibold text-slate-900 break-all">
+                          {disbursementSheetDetails?.vendorAccountNumber || selectedClaimForDisbursement.vendorAccountNumber || "Not provided"}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-6">
+                  <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 space-y-2">
+                    <h3 className="font-semibold text-blue-900 text-sm">Disbursement Instructions</h3>
+                    <p className="text-sm text-blue-800">
+                      This claim has PSC approval and is ready for RMT payment confirmation. Complete the transfer first, then paste the transaction or reference ID from the bank receipt.
+                    </p>
+                    <ul className="text-sm text-blue-800 list-disc ml-5 space-y-1">
+                      <li><strong>Transaction/Reference ID:</strong> The IFMS or bank receipt identifier you want vendors to see as payment proof.</li>
+                    </ul>
+                  </div>
+
+                  <div className="space-y-4 rounded-2xl border border-slate-200 bg-white p-4">
+                    <div>
+                      <label className="text-sm font-bold text-slate-900 uppercase mb-2 block">Enter Transaction/Reference ID.</label>
+                      <input
+                        type="text"
+                        value={transactionRef}
+                        onChange={(e) => setTransactionRef(e.target.value)}
+                        placeholder="Paste the bank receipt or IFMS transaction ID"
+                        className="w-full p-3 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-4">
+                    <p className="text-xs text-emerald-900 font-semibold mb-2">System Actions (Upon Submission)</p>
+                    <ul className="text-xs text-emerald-800 list-disc ml-5 space-y-1">
+                      <li>Update the claim to paid status.</li>
+                      <li>Save the bank transaction/reference ID as vendor-facing payment proof.</li>
+                      <li>Update the linked disbursement record and milestone payment state.</li>
+                      <li>Close the project automatically if the final milestone is paid.</li>
+                    </ul>
+                  </div>
+                </div>
+              </div>
+
+              <div className="border-t border-slate-200 bg-white px-6 py-4 md:px-8">
+                <div className="flex flex-col gap-3 sm:flex-row">
+                  <button
+                    onClick={() => setSelectedClaimForDisbursement(null)}
+                    className="flex-1 px-4 py-3 border border-slate-200 text-slate-700 font-semibold rounded-lg hover:bg-slate-50 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => submitDisbursement()}
+                    disabled={processingClaimId === selectedClaimForDisbursement.id || !transactionRef.trim()}
+                    className="flex-1 px-4 py-3 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2"
+                  >
+                    {processingClaimId === selectedClaimForDisbursement.id ? (
+                      <>
+                        <motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity }} className="inline-block">
+                          <Check size={18} />
+                        </motion.div>
+                        Processing...
+                      </>
+                    ) : (
+                      <>
+                        <Check size={18} />
+                        Submit
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 };
@@ -5756,6 +6636,10 @@ const PreQualificationSubmission = () => {
     femaleCommitment: 50,
     vulnerableInclusion: 30,
     districtsCovered: "",
+    bankName: "",
+    bankBranch: "",
+    bankSwiftCode: "",
+    bankSortCode: "",
     bankAccountName: "",
     bankAccountNumber: "",
     focalPersonGender: "Male",
@@ -5781,7 +6665,7 @@ const PreQualificationSubmission = () => {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [editingPrequalId, setEditingPrequalId] = useState<string | null>(null);
 
-  const techSectors = ["SHS", "ICS", "GMG", "SAS", "PUE", "SWP"];
+  const techSectors = ["SHS", "ICS", "GMG", "SWP", "PUE"];
 
   // Load vendor's existing pre-qualification status
   React.useEffect(() => {
@@ -5816,6 +6700,10 @@ const PreQualificationSubmission = () => {
       femaleCommitment: prequal.femaleBeneficiaryTarget ?? 50,
       vulnerableInclusion: prequal.vulnerableGroupTarget ?? 30,
       districtsCovered: String(prequal.districtsCovered ?? ""),
+      bankName: prequal.bankName ?? "",
+      bankBranch: prequal.bankBranch ?? "",
+      bankSwiftCode: prequal.bankSwiftCode ?? "",
+      bankSortCode: prequal.bankSortCode ?? "",
       bankAccountName: prequal.bankAccountName ?? "",
       bankAccountNumber: prequal.bankAccountNumber ?? "",
       focalPersonGender: prequal.genderOfFocalPerson ?? "Male",
@@ -5890,6 +6778,10 @@ const PreQualificationSubmission = () => {
           districtsCovered: Number(formData.districtsCovered || 0),
           femaleBeneficiaryTarget: formData.femaleCommitment,
           vulnerableGroupTarget: formData.vulnerableInclusion,
+          bankName: formData.bankName.trim(),
+          bankBranch: formData.bankBranch.trim(),
+          bankSwiftCode: formData.bankSwiftCode.trim(),
+          bankSortCode: formData.bankSortCode.trim(),
           bankAccountName: formData.bankAccountName,
           bankAccountNumber: formData.bankAccountNumber,
           contactNumber: formData.contactNumber,
@@ -6295,15 +7187,31 @@ const PreQualificationSubmission = () => {
               </div>
 
               <div className="space-y-1">
-                <label className="text-sm font-bold text-slate-700 ml-1">Bank Details (Account Name & Number) *</label>
+                <label className="text-sm font-bold text-slate-700 ml-1">Bank Details *</label>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <input 
-                    required type="text" className="input-field" placeholder="Account Name"
+                    required type="text" className="input-field" placeholder="Bank Name"
+                    value={formData.bankName} onChange={(e) => setFormData({...formData, bankName: e.target.value})}
+                  />
+                  <input 
+                    required type="text" className="input-field" placeholder="Branch"
+                    value={formData.bankBranch} onChange={(e) => setFormData({...formData, bankBranch: e.target.value})}
+                  />
+                  <input 
+                    required type="text" className="input-field" placeholder="Account Holder"
                     value={formData.bankAccountName} onChange={(e) => setFormData({...formData, bankAccountName: e.target.value})}
                   />
                   <input 
                     required type="text" className="input-field" placeholder="Account Number"
                     value={formData.bankAccountNumber} onChange={(e) => setFormData({...formData, bankAccountNumber: e.target.value})}
+                  />
+                  <input 
+                    type="text" className="input-field" placeholder="SWIFT Code"
+                    value={formData.bankSwiftCode} onChange={(e) => setFormData({...formData, bankSwiftCode: e.target.value})}
+                  />
+                  <input 
+                    type="text" className="input-field" placeholder="Sort Code"
+                    value={formData.bankSortCode} onChange={(e) => setFormData({...formData, bankSortCode: e.target.value})}
                   />
                 </div>
               </div>
@@ -7867,7 +8775,7 @@ const VendorDashboard = ({
   const contractingRef = React.useRef<HTMLDivElement | null>(null);
 
   const districts = ["Maseru", "Leribe", "Berea", "Mafeteng", "Mohale's Hoek", "Quthing", "Qacha's Nek", "Mokhotlong", "Thaba-Tseka", "Butha-Buthe"];
-  const techTypes = ["SHS", "ICS", "Mini-grid", "SWP", "PUE"];
+  const techTypes = ["SHS", "ICS", "GMG", "SWP", "PUE"];
 
   const loadVendorData = React.useCallback(async () => {
     try {
@@ -10544,6 +11452,9 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
   });
   const [claimSubmitting, setClaimSubmitting] = useState(false);
   const [claimMessage, setClaimMessage] = useState<string | null>(null);
+  const [selectedVendorPaymentClaim, setSelectedVendorPaymentClaim] = useState<PaymentClaim | null>(null);
+  const [prospectSyncSubmitting, setProspectSyncSubmitting] = useState<string | null>(null);
+  const [prospectSyncMessage, setProspectSyncMessage] = useState<string | null>(null);
 
   const loadData = React.useCallback(async () => {
     setLoading(true);
@@ -10600,6 +11511,8 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
     setSelectedClaimMilestone(null);
     setClaimDraft({ completionDate: "", actualBeneficiaries: "", actualFemaleBeneficiaries: "", notes: "" });
     setClaimMessage(null);
+    setProspectSyncSubmitting(null);
+    setProspectSyncMessage(null);
   }, [selectedProject]);
 
   React.useEffect(() => {
@@ -10961,9 +11874,6 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
   };
   const displayClaimStatus = (claim: PaymentClaim) => {
     if (claim.status === "Completed" || claim.status === "Paid") return "Paid";
-    if ((claim.status === "PSC Approved" || claim.status === "Approved") && claim.disbursement?.status === "Completed") {
-      return "Finance Paid - Awaiting RMT Closure";
-    }
     return claim.status;
   };
   const formatDuration = (start?: string, end?: string) => {
@@ -11403,6 +12313,43 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
     }
   };
 
+  const handleProjectProspectSync = async (
+    project: Project,
+    action:
+      | "push_target"
+      | "push_agent"
+      | "push_installations"
+      | "push_installation_updates"
+      | "push_installation_timeseries"
+      | "push_report"
+      | "refresh_status"
+      | "sync_all_available",
+    label: string,
+  ) => {
+    setProspectSyncSubmitting(action);
+    setProspectSyncMessage(null);
+    try {
+      const result = await triggerProjectProspectSync(project.id, action);
+      setProspectSyncMessage(result.message || `${label} queued successfully.`);
+      if (selectedProject?.id === project.id) {
+        const [audits, updates] = await Promise.all([
+          fetchAuditLogs(project.id),
+          fetchProjectUpdates(project.id),
+        ]);
+        setProjectAuditLogs(audits);
+        setProjectUpdates(prev => {
+          const otherProjects = prev.filter(update => update.projectId !== project.id);
+          return [...updates, ...otherProjects];
+        });
+      }
+    } catch (err: any) {
+      const raw = String(err?.message || "");
+      setProspectSyncMessage(toFriendlyApiMessage(raw) || `Unable to queue ${label}.`);
+    } finally {
+      setProspectSyncSubmitting(null);
+    }
+  };
+
   const downloadMeterCsvTemplate = () => {
     triggerDownload(
       "meter_data_template.csv",
@@ -11837,6 +12784,37 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
                   </p>
                 </div>
               </div>
+
+              {isRbfPortal && (
+                <div className="rounded-2xl border border-blue-100 bg-blue-50 p-5">
+                  <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-blue-700">Prospect Sync Fallback</p>
+                  <p className="mt-2 text-sm text-slate-700">
+                    If automatic sync misses Prospect, re-send the exact workflow step from here.
+                  </p>
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {[
+                      ["push_target", "1. Sync Targets"],
+                      ["push_agent", "2. Sync Vendor Setup"],
+                      ["push_installations", "3. Sync Installations"],
+                      ["push_report", "5. Sync Monthly Report"],
+                      ["push_installation_updates", "6. Sync Verification Updates"],
+                      ["push_installation_timeseries", "7. Sync Meter Data"],
+                      ["refresh_status", "Refresh Status"],
+                      ["sync_all_available", "Sync All Available"],
+                    ].map(([action, label]) => (
+                      <button
+                        key={action}
+                        onClick={() => void handleProjectProspectSync(project, action as any, label)}
+                        disabled={prospectSyncSubmitting !== null}
+                        className="btn-secondary text-xs"
+                      >
+                        {prospectSyncSubmitting === action ? "Queuing..." : label}
+                      </button>
+                    ))}
+                  </div>
+                  {prospectSyncMessage && <p className="mt-3 text-sm text-slate-600">{prospectSyncMessage}</p>}
+                </div>
+              )}
 
               <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
                 <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-[11px] uppercase tracking-wide text-slate-500">Installations</p><p className="mt-1 text-lg font-semibold text-slate-900">{kpiSnapshot.target > 0 ? `${kpiSnapshot.verified}/${kpiSnapshot.target}` : "—"}</p></div>
@@ -12398,13 +13376,14 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
                       <th className="px-4 py-3">Amount</th>
                       <th className="px-4 py-3">Submitted</th>
                       <th className="px-4 py-3">Status</th>
+                      <th className="px-4 py-3">Payment Proof</th>
                       <th className="px-4 py-3">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 bg-white">
                     {projectClaims.length === 0 && (
                       <tr>
-                        <td colSpan={5} className="px-4 py-6 text-center text-sm text-slate-500">No payment claims submitted yet.</td>
+                        <td colSpan={6} className="px-4 py-6 text-center text-sm text-slate-500">No payment claims submitted yet.</td>
                       </tr>
                     )}
                     {projectClaims.map(claim => (
@@ -12413,12 +13392,142 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
                         <td className="px-4 py-3 text-slate-700">{formatCurrency(claim.claimAmount || 0)}</td>
                         <td className="px-4 py-3 text-slate-700">{claim.submittedAt ? new Date(claim.submittedAt).toLocaleString() : "N/A"}</td>
                         <td className="px-4 py-3 text-slate-700">{displayClaimStatus(claim)}</td>
-                        <td className="px-4 py-3 text-slate-700">{claim.disbursement?.reference || "—"}</td>
+                        <td className="px-4 py-3 text-slate-700">
+                          {claim.paymentReference || claim.disbursement?.reference ? (
+                            <div className="space-y-1">
+                              <p className="font-medium text-slate-900">{claim.paymentReference || claim.disbursement?.reference}</p>
+                              <p className="text-xs text-slate-500">
+                                {claim.paidAt
+                                  ? `Confirmed ${new Date(claim.paidAt).toLocaleString()}`
+                                  : claim.disbursement?.processedAt
+                                    ? `Recorded ${new Date(claim.disbursement.processedAt).toLocaleString()}`
+                                    : "Payment reference available"}
+                              </p>
+                              <p className="text-xs text-emerald-700">Visible as payment proof after RMT confirmation.</p>
+                            </div>
+                          ) : (
+                            "—"
+                          )}
+                        </td>
+                        <td className="px-4 py-3 text-slate-700">
+                          <button
+                            onClick={() => setSelectedVendorPaymentClaim(claim)}
+                            className="font-medium text-emerald-600 transition-colors hover:text-emerald-700"
+                          >
+                            View Details
+                          </button>
+                        </td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
+
+              <AnimatePresence>
+                {selectedVendorPaymentClaim && (
+                  <motion.div
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/40 p-4"
+                    onClick={() => setSelectedVendorPaymentClaim(null)}
+                  >
+                    <motion.div
+                      initial={{ scale: 0.96, opacity: 0 }}
+                      animate={{ scale: 1, opacity: 1 }}
+                      exit={{ scale: 0.96, opacity: 0 }}
+                      onClick={(e) => e.stopPropagation()}
+                      className="w-full max-w-3xl overflow-hidden rounded-2xl bg-white shadow-2xl"
+                    >
+                      <div className="flex items-center justify-between bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 px-6 py-5 text-white">
+                        <div>
+                          <h3 className="text-2xl font-bold">Payment Details</h3>
+                          <p className="mt-1 text-sm text-blue-200">Claim CLM-{String(selectedVendorPaymentClaim.id).padStart(3, "0")}</p>
+                        </div>
+                        <button
+                          onClick={() => setSelectedVendorPaymentClaim(null)}
+                          className="rounded-lg p-2 transition-colors hover:bg-slate-700"
+                        >
+                          <X size={24} />
+                        </button>
+                      </div>
+
+                      <div className="max-h-[80vh] space-y-6 overflow-y-auto p-6 md:p-8">
+                        <div className="grid gap-4 md:grid-cols-2">
+                          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                            <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Milestone</p>
+                            <p className="mt-1 text-base font-semibold text-slate-900">
+                              {projectMilestones.find(m => m.id === selectedVendorPaymentClaim.milestoneId)?.name || selectedVendorPaymentClaim.milestoneId || "Milestone"}
+                            </p>
+                          </div>
+                          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                            <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Status</p>
+                            <p className="mt-1 text-base font-semibold text-slate-900">{displayClaimStatus(selectedVendorPaymentClaim)}</p>
+                          </div>
+                          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                            <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Claim Amount</p>
+                            <p className="mt-1 text-base font-semibold text-slate-900">{formatCurrency(selectedVendorPaymentClaim.claimAmount || 0)}</p>
+                          </div>
+                          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                            <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Submitted</p>
+                            <p className="mt-1 text-base font-semibold text-slate-900">
+                              {selectedVendorPaymentClaim.submittedAt ? new Date(selectedVendorPaymentClaim.submittedAt).toLocaleString() : "N/A"}
+                            </p>
+                          </div>
+                          <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 md:col-span-2">
+                            <p className="text-xs font-bold uppercase tracking-wide text-emerald-700">Payment Proof</p>
+                            <p className="mt-1 text-lg font-semibold text-emerald-900">
+                              {selectedVendorPaymentClaim.paymentReference || selectedVendorPaymentClaim.disbursement?.reference || "Not available"}
+                            </p>
+                            <p className="mt-2 text-sm text-emerald-800">
+                              {selectedVendorPaymentClaim.paidAt
+                                ? `Confirmed on ${new Date(selectedVendorPaymentClaim.paidAt).toLocaleString()}`
+                                : selectedVendorPaymentClaim.disbursement?.processedAt
+                                  ? `Recorded on ${new Date(selectedVendorPaymentClaim.disbursement.processedAt).toLocaleString()}`
+                                  : "Payment reference available"}
+                            </p>
+                            {!selectedVendorPaymentClaim.paymentReference && !selectedVendorPaymentClaim.disbursement?.reference && (
+                              <p className="mt-2 text-sm text-amber-800">
+                                Payment proof will appear here after RMT confirms the payment.
+                              </p>
+                            )}
+                          </div>
+                          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                            <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Processed By</p>
+                            <p className="mt-1 text-base font-semibold text-slate-900">
+                              {selectedVendorPaymentClaim.disbursement?.processedByUsername || selectedVendorPaymentClaim.reviewedByUsername || "RMT"}
+                            </p>
+                          </div>
+                          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                            <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Payment Record Status</p>
+                            <p className="mt-1 text-base font-semibold text-slate-900">
+                              {selectedVendorPaymentClaim.disbursement?.status || "Completed"}
+                            </p>
+                          </div>
+                        </div>
+
+                        {(selectedVendorPaymentClaim.remarks || selectedVendorPaymentClaim.disbursement?.notes) && (
+                          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                            <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Notes</p>
+                            <p className="mt-2 text-sm text-slate-700">
+                              {selectedVendorPaymentClaim.disbursement?.notes || selectedVendorPaymentClaim.remarks}
+                            </p>
+                          </div>
+                        )}
+
+                        <div className="flex justify-end border-t border-slate-200 pt-4">
+                          <button
+                            onClick={() => setSelectedVendorPaymentClaim(null)}
+                            className="rounded-lg border border-slate-200 px-4 py-2 font-semibold text-slate-700 transition-colors hover:bg-slate-50"
+                          >
+                            Close
+                          </button>
+                        </div>
+                      </div>
+                    </motion.div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </div>
           )}
 
@@ -16397,22 +17506,16 @@ export default function App() {
     if (role === UserRole.ADMIN) {
       switch (activeTab) {
         case "dashboard":
-        case "tenders":
-          return (
-            <Tenders
-              initialView={tenderView}
-              initialTenderId={pendingTenderId}
-              onTenderOpened={() => setPendingTenderId(null)}
-            />
-          );
-        case "blacklisting":
-          return <Blacklisting currentUser={currentUser} />;
         case "users":
-        case "roles":
-        case "logs":
-          return <AdminView />;
+        case "organizations":
+        case "system_configuration":
+        case "prospect_sync":
+        case "audit_logs":
+        case "notifications":
+        case "system_health":
+          return <SuperAdminPortal section={activeTab as any} notifications={notifications} onNotificationSelect={handleNotificationSelect} />;
         default:
-          return <AdminView />;
+          return <SuperAdminPortal section="dashboard" notifications={notifications} onNotificationSelect={handleNotificationSelect} />;
       }
     }
     if (role === UserRole.DOE_OFFICER) {
@@ -16562,13 +17665,13 @@ export default function App() {
     if (role === UserRole.ADMIN) {
       return [
         ...common,
-        { id: "tenders", icon: FileText, label: "Tender Management" },
-        { id: "blacklisting", icon: FileWarning, label: "Blacklisting" },
         { id: "users", icon: Users, label: "User Management" },
-        { id: "roles", icon: Settings, label: "Role Config" },
-        { id: "notifications", icon: Bell, label: "Notification Logs" },
-        { id: "monitoring", icon: Activity, label: "System Monitoring" },
-        { id: "logs", icon: FileText, label: "System Logs" },
+        { id: "organizations", icon: Globe, label: "Organizations" },
+        { id: "system_configuration", icon: Settings, label: "System Configuration" },
+        { id: "prospect_sync", icon: History, label: "Prospect Sync" },
+        { id: "audit_logs", icon: FileText, label: "Audit Logs" },
+        { id: "notifications", icon: Bell, label: "Notifications" },
+        { id: "system_health", icon: Activity, label: "System Health" },
       ];
     }
 

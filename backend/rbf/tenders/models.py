@@ -50,6 +50,7 @@ class Tender(models.Model):
     tender_security_required = models.BooleanField(default=False)
     contact_details = models.CharField(max_length=255, blank=True)
     technology_types = models.JSONField(default=list, blank=True)
+    target_districts = models.JSONField(default=list, blank=True)
     target_site_type = models.CharField(max_length=64, blank=True)
     schedule_file = models.FileField(upload_to='tender_schedules/', blank=True)
     rfp_documents_file = models.FileField(upload_to='tender_documents/', blank=True)

@@ -24,7 +24,13 @@ from rbf.projects.models import (
     VerificationStatus,
     VerificationTask,
 )
-from rbf.users.models import BlacklistedIdentifier, BlacklistCaseStatus, VendorBlacklistCase
+from rbf.users.models import (
+    BlacklistedIdentifier,
+    BlacklistCaseStatus,
+    Organization,
+    PlatformConfiguration,
+    VendorBlacklistCase,
+)
 
 
 class UserApiTests(APITestCase):
@@ -130,6 +136,49 @@ class UserApiTests(APITestCase):
         self.assertFalse(managed.is_active)
         self.assertEqual(managed.status, "Inactive")
         self.assertTrue(AuditLog.objects.filter(action="user_deactivated", record_id=managed.id).exists())
+
+    def test_super_admin_dashboard_and_configuration_routes(self):
+        User = get_user_model()
+        admin = User.objects.create_user(
+            username="super_admin_dashboard",
+            password="securePass123",
+            role="Platform Administrator (Super Admin)",
+            status="Active",
+            email="super-admin-dashboard@example.com",
+        )
+        User.objects.create_user(
+            username="vendor_for_dashboard",
+            password="securePass123",
+            role="Vendor",
+            status="Active",
+            email="vendor-dashboard@example.com",
+            gender="Male",
+            region="Maseru",
+            mobile_number="26655555559",
+            national_id="ID-DASH-1",
+            address="Maseru",
+            organization_name="Vendor Dashboard Ltd",
+            organization_type="Private",
+            technology_types=["SHS"],
+            registration_certificate_name="reg.pdf",
+            tax_id="TIN-DASH-1",
+        )
+        self.client.force_authenticate(admin)
+
+        dashboard_response = self.client.get("/api/users/admin/dashboard/")
+        config_response = self.client.get("/api/users/platform-configuration/")
+        health_response = self.client.get("/api/users/system-health/")
+        orgs_response = self.client.get("/api/users/organizations/")
+
+        self.assertEqual(dashboard_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(config_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(health_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(orgs_response.status_code, status.HTTP_200_OK)
+        self.assertGreaterEqual(dashboard_response.data["stats"]["total_users"], 1)
+        self.assertEqual(config_response.data["country_name"], "Lesotho")
+        self.assertTrue(PlatformConfiguration.objects.exists())
+        self.assertTrue(Organization.objects.exists())
+        self.assertEqual(health_response.data["database"]["status"], "Connected")
 
     def test_change_password_clears_must_change_password(self):
         User = get_user_model()
@@ -639,6 +688,12 @@ class UserApiTests(APITestCase):
                 "tax_id": "TIN-123",
                 "hq_address": "Maseru HQ",
                 "technology_types": ["SHS", "Mini-grid"],
+                "bank_name": "First National Bank",
+                "bank_branch": "Maseru Main",
+                "bank_swift_code": "FNBLLSMX",
+                "bank_sort_code": "12-34-56",
+                "bank_account_name": "Solar Vendor Ltd",
+                "bank_account_number": "123456789012",
                 "declaration_accepted": True,
             },
             format="json",
@@ -646,6 +701,10 @@ class UserApiTests(APITestCase):
         self.assertEqual(submit_response.status_code, status.HTTP_201_CREATED)
         preq_id = submit_response.data["id"]
         self.assertEqual(submit_response.data["status"], "Pending")
+        self.assertEqual(submit_response.data["bank_name"], "First National Bank")
+        self.assertEqual(submit_response.data["bank_branch"], "Maseru Main")
+        self.assertEqual(submit_response.data["bank_account_name"], "Solar Vendor Ltd")
+        self.assertEqual(submit_response.data["bank_account_number"], "123456789012")
 
         self.client.force_authenticate(reviewer)
         review_response = self.client.post(
@@ -705,6 +764,12 @@ class UserApiTests(APITestCase):
             {
                 "company_name": "Updated Vendor Ltd",
                 "technology_types": ["SHS", "Mini-grid"],
+                "bank_name": "Standard Lesotho Bank",
+                "bank_branch": "Maputsoe",
+                "bank_swift_code": "STLBLSMX",
+                "bank_sort_code": "65-43-21",
+                "bank_account_name": "Updated Vendor Ltd",
+                "bank_account_number": "9988776655",
                 "declaration_accepted": True,
                 "contact_number": "26655555555",
                 "email": "vendor@example.com",
@@ -716,6 +781,10 @@ class UserApiTests(APITestCase):
         preq.refresh_from_db()
         self.assertEqual(preq.company_name, "Updated Vendor Ltd")
         self.assertEqual(preq.technology_types, ["SHS", "Mini-grid"])
+        self.assertEqual(preq.bank_name, "Standard Lesotho Bank")
+        self.assertEqual(preq.bank_branch, "Maputsoe")
+        self.assertEqual(preq.bank_account_name, "Updated Vendor Ltd")
+        self.assertEqual(preq.bank_account_number, "9988776655")
         self.assertEqual(preq.status, "Pending")
         self.assertIsNone(preq.reviewed_by)
         self.assertIsNone(preq.reviewed_at)
@@ -875,7 +944,7 @@ class UserApiTests(APITestCase):
             project=project,
             vendor=vendor,
             claim_amount="1000.00",
-            status=PaymentClaimStatus.APPROVED,
+            status=PaymentClaimStatus.LEGACY_APPROVED,
             declaration_accepted=True,
         )
         disbursement = Disbursement.objects.create(
@@ -887,7 +956,7 @@ class UserApiTests(APITestCase):
             project=related_project,
             vendor=related_vendor,
             claim_amount="1200.00",
-            status=PaymentClaimStatus.APPROVED,
+            status=PaymentClaimStatus.LEGACY_APPROVED,
             declaration_accepted=True,
         )
         InstallationReport.objects.create(

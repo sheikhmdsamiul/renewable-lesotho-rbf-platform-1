@@ -1,11 +1,13 @@
 from datetime import timedelta
+from types import SimpleNamespace
 
 from rest_framework import status
-from rest_framework.test import APITestCase
+from rest_framework.test import APITestCase, APIRequestFactory, force_authenticate
 from django.contrib.auth import get_user_model
 from django.conf import settings
 from django.core.cache import cache
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import SimpleTestCase, override_settings
 from django.utils import timezone
 from unittest.mock import patch
 
@@ -115,6 +117,21 @@ class ProjectApiTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         queue_targets.assert_called_once_with(str(response.data["id"]))
+
+    @patch("rbf.projects.views.queue_project_targets_sync")
+    def test_project_prospect_sync_endpoint_queues_target_sync(self, queue_targets):
+        project = Project.objects.create(**self._project_payload())
+        self.client.force_authenticate(self.admin_user)
+
+        response = self.client.post(
+            f"/api/projects/{project.id}/prospect-sync/",
+            {"action": "push_target"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        queue_targets.assert_called_once_with(str(project.id))
+        self.assertEqual(response.data["queued_methods"], ["pushTarget"])
 
     @patch("rbf.projects.views.queue_project_targets_sync")
     def test_project_update_queues_prospect_targets_when_target_fields_change(self, queue_targets):
@@ -409,13 +426,6 @@ class ProjectApiTests(APITestCase):
             role="Project Steering Committee",
             status="Active",
         )
-        finance_user = User.objects.create_user(
-            username="finance_admin",
-            password="securePass123",
-            role="Platform Administrator (Super Admin)",
-            status="Active",
-        )
-
         project = Project.objects.create(
             vendor_id=str(vendor.id),
             vendor_name=vendor.username,
@@ -460,18 +470,154 @@ class ProjectApiTests(APITestCase):
         self.assertEqual(psc_response.status_code, status.HTTP_200_OK)
         self.assertEqual(psc_response.data["status"], "PSC Approved")
 
-        self.client.force_authenticate(finance_user)
-        pay_response = self.client.post(f"/api/projects/claims/{claim_id}/pay/", {}, format="json")
-        self.assertEqual(pay_response.status_code, status.HTTP_200_OK)
-        self.assertEqual(pay_response.data["status"], "PSC Approved")
-
         self.client.force_authenticate(verifier)
-        confirm_response = self.client.post(f"/api/projects/claims/{claim_id}/confirm-paid/", {}, format="json")
+        confirm_response = self.client.post(
+            f"/api/projects/claims/{claim_id}/confirm-paid/",
+            {"payment_reference": "BANK-REF-001"},
+            format="json",
+        )
         self.assertEqual(confirm_response.status_code, status.HTTP_200_OK)
         self.assertEqual(confirm_response.data["status"], "Completed")
+        self.assertEqual(confirm_response.data["payment_reference"], "BANK-REF-001")
 
-    @patch("rbf.projects.views.queue_project_completion_report_sync")
-    def test_final_milestone_payment_marks_project_completed_and_queues_final_report(self, queue_final_report):
+    def test_psc_bank_view_is_masked_by_default_and_can_reveal_full_number_with_audit_log(self):
+        User = get_user_model()
+        vendor = User.objects.create_user(
+            username="bank_vendor",
+            password="securePass123",
+            role="Vendor",
+            status="Active",
+            organization_name="Banked Vendor Ltd",
+            bank_name="First National Bank",
+            bank_branch="Maseru Main",
+            bank_account_name="Banked Vendor Ltd",
+            bank_account_number="123456789012",
+            bank_swift_code="FNBLLSMX",
+            bank_sort_code="12-34-56",
+        )
+        psc_user = User.objects.create_user(
+            username="psc_bank_viewer",
+            password="securePass123",
+            role="Project Steering Committee",
+            status="Active",
+        )
+        project = Project.objects.create(
+            vendor_id=str(vendor.id),
+            vendor_name=vendor.username,
+            tech_type="SHS",
+            region="Maseru",
+            status=ProjectStatus.DISBURSEMENT,
+        )
+        claim = PaymentClaim.objects.create(
+            project=project,
+            vendor=vendor,
+            claim_amount="9000.00",
+            status=PaymentClaimStatus.TAC_ENDORSED,
+            declaration_accepted=True,
+        )
+
+        self.client.force_authenticate(psc_user)
+        detail_response = self.client.get(f"/api/projects/claims/{claim.id}/")
+        self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail_response.data["vendor_account_number"], "********9012")
+
+        view_response = self.client.post(
+            f"/api/projects/claims/{claim.id}/view_bank_details/",
+            {"reveal_full": True},
+            format="json",
+        )
+        self.assertEqual(view_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(view_response.data["vendor_account_number"], "123456789012")
+        self.assertTrue(
+            AuditLog.objects.filter(
+                action="claim_vendor_bank_details_viewed",
+                entity_id=str(claim.id),
+                details__requested_by="PSC",
+                details__visibility="full_reveal",
+            ).exists()
+        )
+
+    def test_confirm_paid_requires_payment_reference(self):
+        User = get_user_model()
+        vendor = User.objects.create_user(
+            username="no_ref_vendor",
+            password="securePass123",
+            role="Vendor",
+            status="Active",
+        )
+        rmt_user = User.objects.create_user(
+            username="rmt_no_ref",
+            password="securePass123",
+            role="RBF Management Team",
+            status="Active",
+        )
+        project = Project.objects.create(
+            vendor_id=str(vendor.id),
+            vendor_name=vendor.username,
+            tech_type="SHS",
+            region="Maseru",
+            status=ProjectStatus.DISBURSEMENT,
+        )
+        claim = PaymentClaim.objects.create(
+            project=project,
+            vendor=vendor,
+            claim_amount="4000.00",
+            status=PaymentClaimStatus.PSC_APPROVED,
+            declaration_accepted=True,
+        )
+
+        self.client.force_authenticate(rmt_user)
+        response = self.client.post(f"/api/projects/claims/{claim.id}/confirm-paid/", {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("payment_reference", str(response.data))
+
+    def test_rmt_can_view_disbursement_sheet_after_psc_approval(self):
+        User = get_user_model()
+        vendor = User.objects.create_user(
+            username="sheet_vendor",
+            password="securePass123",
+            role="Vendor",
+            status="Active",
+            organization_name="Sheet Vendor Ltd",
+        )
+        rmt_user = User.objects.create_user(
+            username="rmt_sheet_viewer",
+            password="securePass123",
+            role="RBF Management Team",
+            status="Active",
+        )
+        project = Project.objects.create(
+            vendor_id=str(vendor.id),
+            vendor_name=vendor.username,
+            tech_type="SHS",
+            region="Maseru",
+            status=ProjectStatus.DISBURSEMENT,
+        )
+        claim = PaymentClaim.objects.create(
+            project=project,
+            vendor=vendor,
+            claim_amount="7650.00",
+            status=PaymentClaimStatus.PSC_APPROVED,
+            declaration_accepted=True,
+        )
+
+        self.client.force_authenticate(rmt_user)
+        response = self.client.post(f"/api/projects/claims/{claim.id}/disbursement-sheet/", {}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["claim_id"], str(claim.id))
+        self.assertEqual(response.data["vendor_legal_name"], "Sheet Vendor Ltd")
+        self.assertEqual(response.data["total_approved_amount"], "7650.00")
+        self.assertTrue(
+            AuditLog.objects.filter(
+                action="claim_disbursement_sheet_viewed",
+                entity_id=str(claim.id),
+                details__requested_by="RMT",
+                details__visibility="full",
+            ).exists()
+        )
+
+    def test_final_milestone_payment_marks_project_completed_without_queuing_live_prospect_report(self):
         User = get_user_model()
         vendor = User.objects.create_user(
             username="final_claim_vendor",
@@ -483,12 +629,6 @@ class ProjectApiTests(APITestCase):
             username="final_psc_reviewer",
             password="securePass123",
             role="Project Steering Committee",
-            status="Active",
-        )
-        finance_user = User.objects.create_user(
-            username="final_finance_admin",
-            password="securePass123",
-            role="Platform Administrator (Super Admin)",
             status="Active",
         )
         project = Project.objects.create(
@@ -519,23 +659,22 @@ class ProjectApiTests(APITestCase):
         approve_response = self.client.post(f"/api/projects/claims/{claim.id}/approve/", {}, format="json")
         self.assertEqual(approve_response.status_code, status.HTTP_200_OK)
 
-        self.client.force_authenticate(finance_user)
-        response = self.client.post(f"/api/projects/claims/{claim.id}/pay/", {}, format="json")
-
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.client.force_authenticate(User.objects.create_user(
             username="final_rmt_reviewer",
             password="securePass123",
             role="RBF Management Team",
             status="Active",
         ))
-        confirm_response = self.client.post(f"/api/projects/claims/{claim.id}/confirm-paid/", {}, format="json")
+        confirm_response = self.client.post(
+            f"/api/projects/claims/{claim.id}/confirm-paid/",
+            {"payment_reference": "BANK-REF-FINAL-001"},
+            format="json",
+        )
         self.assertEqual(confirm_response.status_code, status.HTTP_200_OK)
         project.refresh_from_db()
         milestone3.refresh_from_db()
         self.assertEqual(project.status, ProjectStatus.COMPLETED)
         self.assertEqual(milestone3.status, "paid")
-        queue_final_report.assert_called_once_with(str(project.id))
         self.assertTrue(
             AuditLog.objects.filter(action="project_completed", details__project_id=str(project.id)).exists()
         )
@@ -1177,6 +1316,20 @@ class ProjectApiTests(APITestCase):
         audit_logs = self.client.get("/api/projects/audit-logs/")
         self.assertEqual(audit_logs.status_code, status.HTTP_200_OK)
 
+        export_csv = self.client.get("/api/projects/audit-logs/export-csv/?module=paymentclaim")
+        self.assertEqual(export_csv.status_code, status.HTTP_200_OK)
+        self.assertEqual(export_csv["Content-Type"], "text/csv")
+        self.assertIn("Action", export_csv.content.decode("utf-8"))
+
+        with patch("rbf.tenders.pba_pdf._render_pdf") as mock_render:
+            def _fake_render(_html, output_path, _ref):
+                output_path.write_bytes(b"%PDF-1.4\n%fake\n")
+
+            mock_render.side_effect = _fake_render
+            export_pdf = self.client.get("/api/projects/audit-logs/export-pdf/?module=paymentclaim")
+        self.assertEqual(export_pdf.status_code, status.HTTP_200_OK)
+        self.assertEqual(export_pdf["Content-Type"], "application/pdf")
+
         flag_response = self.client.post(
             f"/api/projects/{project.id}/flag_issue/",
             {"category": "payment_delay", "details": "PSC flagged delayed payment clearance for review."},
@@ -1399,7 +1552,6 @@ class ProjectApiTests(APITestCase):
         self.assertEqual(first_call.args[1]["reporting_phase"], "PRJ-42")
         self.assertEqual(first_call.args[1]["size"], 25)
         self.assertEqual(first_call.kwargs["record_type"], "sync_panel")
-
 
 class ProjectKpiTests(APITestCase):
     def setUp(self):
@@ -1790,17 +1942,20 @@ class ProjectProspectTargetSyncTests(APITestCase):
         dispatch_async.assert_called_once()
         method_name, payload = dispatch_async.call_args[0]
         self.assertEqual(method_name, "pushTarget")
-        self.assertEqual(payload[0]["external_id"], f"target_{project.id}_installations")
         self.assertEqual(payload[0]["metric"], "installation_target")
         self.assertEqual(payload[0]["target_value"], 500)
         self.assertEqual(payload[0]["country"], "LS")
         self.assertEqual(payload[0]["effective_date"], project.start_date.isoformat())
-        self.assertEqual(payload[1]["external_id"], f"target_{project.id}_female_pct")
+        self.assertEqual(payload[0]["program_end_date"], project.end_date.isoformat())
+        self.assertNotIn("external_id", payload[0])
         self.assertEqual(payload[1]["metric"], "female_beneficiary_target")
         self.assertEqual(payload[1]["target_value"], 50)
-        self.assertEqual(payload[2]["external_id"], f"target_{project.id}_energy_kwh")
+        self.assertEqual(payload[1]["effective_date"], project.start_date.isoformat())
+        self.assertEqual(payload[1]["program_end_date"], project.end_date.isoformat())
         self.assertEqual(payload[2]["metric"], "monthly_energy_output_kwh")
         self.assertEqual(payload[2]["target_value"], 20000)
+        self.assertEqual(payload[2]["effective_date"], project.start_date.isoformat())
+        self.assertEqual(payload[2]["program_end_date"], project.end_date.isoformat())
 
     @patch.object(ProspectService, "_post_records")
     def test_push_agent_accepts_raw_record_array(self, post_records):
@@ -1903,7 +2058,7 @@ class ProjectProspectTargetSyncTests(APITestCase):
         self.assertEqual(dispatch_async.call_args.kwargs["record_type"], "user")
 
     @patch("rbf.projects.integrations.SyncToProspectJob.dispatch_async")
-    def test_queue_project_targets_sync_includes_external_id_for_prospect(self, dispatch_async):
+    def test_queue_project_targets_sync_uses_prospect_required_dates_without_external_id(self, dispatch_async):
         project = Project.objects.create(
             vendor_id="vendor-2",
             vendor_name="Vendor",
@@ -1926,8 +2081,10 @@ class ProjectProspectTargetSyncTests(APITestCase):
         queue_project_targets_sync(str(project.id))
 
         _, payload = dispatch_async.call_args[0]
-        self.assertEqual(payload[0]["external_id"], f"target_{project.id}_installations")
         self.assertEqual(payload[0]["unit_of_measurement"], "number")
+        self.assertEqual(payload[0]["effective_date"], project.start_date.isoformat())
+        self.assertEqual(payload[0]["program_end_date"], project.end_date.isoformat())
+        self.assertNotIn("external_id", payload[0])
 
     @patch("rbf.projects.integrations.SyncToProspectJob.dispatch_async")
     def test_queue_installation_sync_uses_project_setup_device_details(self, dispatch_async):
@@ -1978,3 +2135,111 @@ class ProjectProspectTargetSyncTests(APITestCase):
         self.assertEqual(second_call[1]["data"][0]["model"], "TN-001")
         self.assertEqual(second_call[1]["data"][0]["device_category"], "solar_home_system")
         self.assertEqual(second_call[1]["data"][0]["usage_category"], "household")
+
+    @patch("rbf.projects.integrations.SyncToProspectJob.dispatch_async")
+    def test_queue_installation_sync_normalizes_legacy_project_technology_for_device_category(self, dispatch_async):
+        User = get_user_model()
+        vendor = User.objects.create_user(
+            username="legacy_tech_vendor",
+            password="securePass123",
+            role="Vendor",
+            status="Active",
+        )
+        project = Project.objects.create(
+            vendor_id=str(vendor.id),
+            vendor_name=vendor.username,
+            tech_type="Mini-grid",
+            region="Maseru",
+            district="Maseru",
+            status=ProjectStatus.ACTIVE,
+        )
+        report = InstallationReport.objects.create(
+            project=project,
+            vendor=vendor,
+            gps_lat=-29.1511,
+            gps_lng=27.7425,
+            serial_number="MG-001",
+            beneficiary_id="BEN-LEGACY-001",
+            household_type="standard",
+        )
+
+        queue_installation_sync(str(report.id), include_customer=False, include_installation=True)
+
+        dispatch_async.assert_called_once()
+        method_name, payload = dispatch_async.call_args[0]
+        self.assertEqual(method_name, "pushInstallation")
+        self.assertEqual(payload["data"][0]["device_category"], "mini_grid")
+
+
+class ProspectSyncLogViewSetTests(SimpleTestCase):
+    @override_settings(
+        PROSPECT_BASE_URL="https://prospect.example.test/api",
+        PROSPECT_READ_TOKEN="read-token",
+        PROSPECT_WRITE_TOKEN="write-token",
+    )
+    def test_check_connection_returns_configured_status(self):
+        from rbf.projects.views import ProspectSyncLogViewSet
+        from rbf.users.models import UserRole
+
+        request = APIRequestFactory().post("/api/projects/prospect-sync-logs/check-connection/", {}, format="json")
+        user = SimpleNamespace(role=UserRole.ADMIN, is_active=True, is_authenticated=True)
+        force_authenticate(request, user=user)
+
+        response = ProspectSyncLogViewSet.as_view({"post": "check_connection"})(request)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.data,
+            {
+                "read_token_ok": True,
+                "write_token_ok": True,
+                "base_url": "https://prospect.example.test/api",
+            },
+        )
+
+    @override_settings(
+        PROSPECT_BASE_URL="https://prospect.example.test/api",
+        PROSPECT_API_SECRET="shared-read-secret",
+        PROSPECT_READ_TOKEN="",
+        PROSPECT_WRITE_TOKEN="",
+        PROSPECT_TOKEN_IN_AGENTS="agents-secret",
+        PROSPECT_TOKEN_IN_TARGETS="targets-secret",
+        PROSPECT_TOKEN_IN_CUSTOMERS="customers-secret",
+        PROSPECT_TOKEN_IN_INSTALLATIONS="installations-secret",
+        PROSPECT_TOKEN_IN_INSTALLATIONS_TS="installations-ts-secret",
+        PROSPECT_TOKEN_IN_REPORTS="reports-secret",
+        PROSPECT_TOKEN_OUT_INSTALLATIONS="shared-read-secret",
+        PROSPECT_TOKEN_OUT_TARGETS="shared-read-secret",
+    )
+    def test_check_connection_accepts_per_endpoint_write_tokens_and_shared_read_secret(self):
+        from rbf.projects.views import ProspectSyncLogViewSet
+        from rbf.users.models import UserRole
+
+        request = APIRequestFactory().post("/api/projects/prospect-sync-logs/check-connection/", {}, format="json")
+        user = SimpleNamespace(role=UserRole.ADMIN, is_active=True, is_authenticated=True)
+        force_authenticate(request, user=user)
+
+        response = ProspectSyncLogViewSet.as_view({"post": "check_connection"})(request)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["read_token_ok"], True)
+        self.assertEqual(response.data["write_token_ok"], True)
+
+
+class ProspectServiceConfigurationTests(SimpleTestCase):
+    def test_prospect_service_uses_method_specific_read_tokens(self):
+        service = ProspectService(
+            base_url="http://prospect.test/api",
+            write_token="",
+            write_tokens={},
+            read_token="fallback-read-token",
+            read_tokens={
+                "getInstallations": "installations-read-token",
+                "getTargets": "targets-read-token",
+            },
+            timeout=5,
+            batch_size=100,
+        )
+
+        self.assertEqual(service._token_for_read("getInstallations"), "installations-read-token")
+        self.assertEqual(service._token_for_read("getTargets"), "targets-read-token")

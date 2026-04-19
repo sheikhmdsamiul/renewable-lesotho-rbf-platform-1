@@ -42,7 +42,7 @@ from rbf.users.models import User
 from rbf.users.blacklisting import is_vendor_restricted
 from rbf.projects.models import Project, Milestone, MilestoneStatus, ProjectStatus, VerificationMethod
 from rbf.projects.audit import log_audit, AuditLogger
-from rbf.projects.integrations import SyncToProspectJob
+from rbf.projects.integrations import SyncToProspectJob, queue_project_targets_sync
 from rbf.projects.serializers import ProjectSerializer
 from rbf.notifications.models import Notification, NotificationChannel, NotificationStatus
 from rbf.notifications.services import NotificationService
@@ -162,6 +162,25 @@ def _assignment_defaults(contract: TenderContract):
     technology_type = contract.tender.category
     if isinstance(contract.tender.technology_types, list) and contract.tender.technology_types:
         technology_type = contract.tender.technology_types[0]
+    tender_target_districts = [
+        str(value or '').strip()
+        for value in (contract.tender.target_districts if isinstance(contract.tender.target_districts, list) else [])
+        if str(value or '').strip()
+    ]
+    bid_districts = []
+    if bid:
+        for site in bid.sites.all():
+            district = str(getattr(site, 'district', '') or '').strip()
+            if district and district not in bid_districts:
+                bid_districts.append(district)
+    assignment_districts = tender_target_districts or bid_districts
+    if not assignment_districts:
+        fallback_district = (
+            (vendor.verification_zone if vendor and vendor.verification_zone else '')
+            or (vendor.region if vendor and vendor.region else '')
+        )
+        if str(fallback_district or '').strip():
+            assignment_districts = [str(fallback_district).strip()]
     installation_target = len(list(bid.sites.all())) if bid else 0
     start_date = contract.tender.awarded_at.date() if contract.tender.awarded_at else timezone.now().date()
     contract_value = _contract_value(contract)
@@ -170,10 +189,8 @@ def _assignment_defaults(contract: TenderContract):
         'installation_target': installation_target or 1,
         'technology_type': _normalize_technology_type(technology_type),
         'energy_output_target_kwh': '20000.00',
-        'district_zone': (
-            (vendor.verification_zone if vendor and vendor.verification_zone else '')
-            or (vendor.region if vendor and vendor.region else '')
-        ),
+        'district_zone': ', '.join(assignment_districts),
+        'district_zones': assignment_districts,
         'verification_method': VerificationMethod.MANUAL,
         'female_target_pct': 50,
         'vulnerable_target_pct': 30,
@@ -181,6 +198,21 @@ def _assignment_defaults(contract: TenderContract):
         'start_date': start_date.isoformat(),
         'disbursement_preview': _disbursement_preview(contract_value),
     }
+
+
+def _assignment_technology_choices(contract: TenderContract) -> list[str]:
+    tender_technology_types = contract.tender.technology_types if isinstance(contract.tender.technology_types, list) else []
+    normalized_choices = []
+    for value in tender_technology_types:
+        normalized = _normalize_technology_type(value)
+        if normalized and normalized not in normalized_choices:
+            normalized_choices.append(normalized)
+    if normalized_choices:
+        return normalized_choices
+    normalized_category = _normalize_technology_type(contract.tender.category)
+    if normalized_category:
+        return [normalized_category]
+    return [choice for choice, _label in Project._meta.get_field('technology_type').choices]
 
 
 def _contract_value(contract: TenderContract) -> Decimal:
@@ -224,6 +256,9 @@ def _disbursement_preview(contract_value: Decimal) -> dict:
 def _create_project_assignment(request, contract: TenderContract, assignment_data: dict):
     tender = contract.tender
     vendor = assignment_data['vendor']
+    district_zones = [str(value or '').strip() for value in assignment_data.get('district_zones', []) if str(value or '').strip()]
+    primary_district = district_zones[0] if district_zones else str(assignment_data.get('district_zone') or '').strip()
+    district_zone_label = ', '.join(district_zones) if district_zones else primary_district
     start_date = assignment_data.get('start_date') or (
         tender.awarded_at.date() if tender.awarded_at else timezone.now().date()
     )
@@ -245,8 +280,8 @@ def _create_project_assignment(request, contract: TenderContract, assignment_dat
         tech_type=_normalize_technology_type(assignment_data['technology_type']),
         technology_type=_normalize_technology_type(assignment_data['technology_type']),
         region=vendor.region or '',
-        district=str(assignment_data.get('district_zone') or ''),
-        district_zone=str(assignment_data.get('district_zone') or ''),
+        district=primary_district,
+        district_zone=district_zone_label,
         status=ProjectStatus.SETUP_PENDING,
         contract_file=contract.signed_file,
         created_by=request.user,
@@ -298,42 +333,7 @@ def _create_project_assignment(request, contract: TenderContract, assignment_dat
         new_status=project.status,
         notes='Project created and milestone assignment saved from approved contract.',
     )
-    target_payload = [
-        {
-            'external_id': f'target_{project.id}_installations',
-            'metric': 'installation_target',
-            'target_value': project.installation_target,
-            'country': 'LS',
-            'reporting_phase': f'PRJ-{project.id}',
-            'program': 'RBF Lesotho',
-            'effective_date': project.start_date.isoformat() if project.start_date else timezone.now().date().isoformat(),
-            'unit_of_measurement': 'number',
-        },
-        {
-            'external_id': f'target_{project.id}_female_pct',
-            'metric': 'female_beneficiary_target',
-            'target_value': 50,
-            'country': 'LS',
-            'reporting_phase': f'PRJ-{project.id}',
-            'program': 'RBF Lesotho',
-            'unit_of_measurement': 'percentage',
-        },
-        {
-            'external_id': f'target_{project.id}_energy_kwh',
-            'metric': 'monthly_energy_output_kwh',
-            'target_value': str(project.energy_output_target_kwh),
-            'country': 'LS',
-            'reporting_phase': f'PRJ-{project.id}',
-            'program': 'RBF Lesotho',
-            'unit_of_measurement': 'kWh',
-        },
-    ]
-    SyncToProspectJob.dispatch_async(
-        'pushTarget',
-        target_payload,
-        record_id=int(project.id),
-        record_type='project',
-    )
+    queue_project_targets_sync(str(project.id), run_immediately=True, record_type='project')
     NotificationService.send(
         str(vendor.id),
         'Project Assigned',
@@ -346,7 +346,7 @@ def _create_project_assignment(request, contract: TenderContract, assignment_dat
         request.user,
         'prospect_sync_queued',
         project,
-        {'endpoint': '/v1/in/targets', 'project_id': str(project.id)},
+        {'endpoint': '/v1/in/targets', 'project_id': str(project.id), 'mode': 'immediate'},
     )
     return project
 
@@ -2046,6 +2046,7 @@ class TenderContractViewSet(viewsets.ModelViewSet):
             contract_value = _contract_value(contract)
             defaults = _assignment_defaults(contract)
             technology_type = defaults['technology_type']
+            technology_choices = _assignment_technology_choices(contract)
             return Response({
                 'contract': TenderContractSerializer(contract, context={'request': request}).data,
                 'contract_details': {
@@ -2058,10 +2059,11 @@ class TenderContractViewSet(viewsets.ModelViewSet):
                 'assignment_defaults': defaults,
                 'assignment_fields': {
                     'project_duration_months': [6, 12, 18],
-                    'technology_type': [choice for choice, _label in Project._meta.get_field('technology_type').choices],
-                    'technology_type_read_only': bool(contract.bid_id),
+                    'technology_type': technology_choices,
+                    'technology_type_read_only': len(technology_choices) == 1,
                     'verification_method': [choice for choice, _label in Project._meta.get_field('verification_method').choices],
                     'district_zone': LESOTHO_DISTRICTS,
+                    'district_zones': LESOTHO_DISTRICTS,
                 },
                 'disbursement_preview': defaults['disbursement_preview'],
             })

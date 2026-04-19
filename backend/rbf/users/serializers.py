@@ -8,6 +8,9 @@ from rest_framework.exceptions import AuthenticationFailed
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from .blacklisting import get_active_blacklist_case, normalize_identifier
 from .models import (
+    Organization,
+    OrganizationType,
+    PlatformConfiguration,
     BlacklistedIdentifier,
     BlacklistAppeal,
     BlacklistAppealStatus,
@@ -403,6 +406,27 @@ class AdminManagedUserDetailSerializer(AdminManagedUserSerializer):
         ]
 
 
+class OrganizationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Organization
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class PlatformConfigurationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PlatformConfiguration
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def validate_allowed_file_types(self, value):
+        if value in (None, ''):
+            return []
+        if isinstance(value, str):
+            return [item.strip().upper() for item in value.split('/') if item.strip()]
+        return [str(item).strip().upper() for item in value if str(item).strip()]
+
+
 class ChangePasswordSerializer(serializers.Serializer):
     current_password = serializers.CharField(write_only=True, required=False, allow_blank=True)
     new_password = serializers.CharField(write_only=True, min_length=8)
@@ -452,6 +476,10 @@ class VendorPrequalificationSerializer(serializers.ModelSerializer):
             'districts_covered',
             'female_beneficiary_target',
             'vulnerable_group_target',
+            'bank_name',
+            'bank_branch',
+            'bank_swift_code',
+            'bank_sort_code',
             'bank_account_name',
             'bank_account_number',
             'contact_number',

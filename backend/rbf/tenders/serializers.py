@@ -87,14 +87,19 @@ def is_site_specific_stage(stage_value) -> bool:
 
 def normalize_technology_type(value) -> str:
     raw = str(value or '').strip().upper()
+    normalized = ' '.join(raw.replace('_', ' ').replace('/', ' ').split())
     mapping = {
         'SOLAR HOME SYSTEM': TechnologyType.SHS,
         'IMPROVED COOKSTOVE': TechnologyType.ICS,
         'MINI-GRID': TechnologyType.GMG,
+        'MINI GRID': TechnologyType.GMG,
+        'SOLAR MINI-GRID': TechnologyType.GMG,
+        'SOLAR MINI GRID': TechnologyType.GMG,
         'SOLAR WATER PUMP': TechnologyType.SWP,
         'PRODUCTIVE USE': TechnologyType.PUE,
     }
-    return mapping.get(raw, raw if raw in {choice for choice, _ in TechnologyType.choices} else '')
+    canonical_choices = {choice for choice, _ in TechnologyType.choices}
+    return mapping.get(normalized, raw if raw in canonical_choices else '')
 
 
 @lru_cache(maxsize=1)
@@ -1077,16 +1082,42 @@ class ProjectAssignmentSerializer(serializers.Serializer):
 
     project_duration_months = serializers.ChoiceField(choices=PROJECT_DURATION_CHOICES)
     installation_target = serializers.IntegerField(min_value=1)
-    technology_type = serializers.ChoiceField(choices=TechnologyType.choices)
+    technology_type = serializers.CharField()
     energy_output_target_kwh = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal('0.01'))
-    district_zone = serializers.CharField(allow_blank=False)
+    district_zone = serializers.CharField(allow_blank=False, required=False)
+    district_zones = serializers.ListField(
+        child=serializers.CharField(allow_blank=False),
+        required=False,
+        allow_empty=False,
+    )
     verification_method = serializers.ChoiceField(choices=VerificationMethod.choices)
     female_target_pct = serializers.IntegerField(min_value=50, max_value=100, required=False, default=50)
     vulnerable_target_pct = serializers.IntegerField(min_value=30, max_value=100, required=False, default=30)
     low_income_target_pct = serializers.IntegerField(min_value=60, max_value=100, required=False, default=60)
     start_date = serializers.DateField(required=False, allow_null=True, input_formats=['%Y-%m-%d'])
 
+    def validate_technology_type(self, value):
+        normalized = normalize_technology_type(value)
+        if normalized:
+            return normalized
+        raise serializers.ValidationError(f'"{value}" is not a valid choice.')
+
     def validate(self, attrs):
+        district_values = attrs.get('district_zones')
+        if not district_values:
+            raw_district = str(attrs.get('district_zone') or '').strip()
+            if raw_district:
+                district_values = [raw_district]
+        normalized_districts = []
+        for value in district_values or []:
+            cleaned = str(value or '').strip()
+            if cleaned and cleaned not in normalized_districts:
+                normalized_districts.append(cleaned)
+        if not normalized_districts:
+            raise serializers.ValidationError({'district_zones': 'Select at least one district.'})
+        attrs['district_zones'] = normalized_districts
+        attrs['district_zone'] = normalized_districts[0]
+
         contract = self.context.get('contract')
         if contract is None:
             return attrs
@@ -1200,6 +1231,8 @@ class TenderSerializer(serializers.ModelSerializer):
 
         if payload.get('technology_types') is None:
             payload['technology_types'] = []
+        if payload.get('target_districts') is None:
+            payload['target_districts'] = []
 
         return super().to_internal_value(payload)
 
@@ -1216,6 +1249,9 @@ class TenderSerializer(serializers.ModelSerializer):
         technology_types = attrs.get('technology_types', instance.technology_types if instance else [])
         if not technology_types:
             errors['technology_types'] = 'Select at least one technology type.'
+        target_districts = attrs.get('target_districts', instance.target_districts if instance else [])
+        if not target_districts:
+            errors['target_districts'] = 'Select at least one target district.'
 
         def validate_file(field_name, max_size_mb=10, allowed_ext=None):
             file_obj = attrs.get(field_name)

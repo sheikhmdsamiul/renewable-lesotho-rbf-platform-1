@@ -2096,8 +2096,31 @@ class TenderContractAssignmentTests(APITestCase):
         self.assertEqual(response.data["assignment_fields"]["technology_type_read_only"], True)
         self.assertEqual(response.data["disbursement_preview"]["milestone_1_amount_lsl"], "24000.00")
 
-    @patch("rbf.tenders.views.SyncToProspectJob.dispatch_async")
-    def test_assign_post_creates_project_milestones_audit_and_notification(self, dispatch_async):
+    def test_assign_get_prefills_districts_from_tender_target_districts(self):
+        self.tender.target_districts = ["Maseru", "Thaba-Tseka"]
+        self.tender.save(update_fields=["target_districts", "updated_at"])
+        self.client.force_authenticate(self.rmt_user)
+
+        response = self.client.get(f"/api/tender-contracts/{self.contract.id}/assign/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["assignment_defaults"]["district_zones"], ["Maseru", "Thaba-Tseka"])
+        self.assertEqual(response.data["assignment_defaults"]["district_zone"], "Maseru, Thaba-Tseka")
+
+    def test_assign_get_fetches_multi_selected_tender_technology_types(self):
+        self.tender.technology_types = ["SHS", "GMG"]
+        self.tender.save(update_fields=["technology_types", "updated_at"])
+        self.client.force_authenticate(self.rmt_user)
+
+        response = self.client.get(f"/api/tender-contracts/{self.contract.id}/assign/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["assignment_fields"]["technology_type"], ["SHS", "GMG"])
+        self.assertEqual(response.data["assignment_defaults"]["technology_type"], "SHS")
+        self.assertEqual(response.data["assignment_fields"]["technology_type_read_only"], False)
+
+    @patch("rbf.tenders.views.queue_project_targets_sync")
+    def test_assign_post_creates_project_milestones_audit_and_notification(self, queue_targets):
         self.client.force_authenticate(self.rmt_user)
 
         response = self.client.post(
@@ -2107,7 +2130,7 @@ class TenderContractAssignmentTests(APITestCase):
                 "installation_target": 250,
                 "technology_type": "SHS",
                 "energy_output_target_kwh": "20000.00",
-                "district_zone": "Maseru Urban",
+                "district_zones": ["Maseru Urban", "Leribe"],
                 "verification_method": "iot",
                 "female_target_pct": 50,
                 "vulnerable_target_pct": 30,
@@ -2126,7 +2149,8 @@ class TenderContractAssignmentTests(APITestCase):
         self.assertEqual(project.installation_target, 250)
         self.assertEqual(project.technology_type, "SHS")
         self.assertEqual(str(project.energy_output_target_kwh), "20000.00")
-        self.assertEqual(project.district_zone, "Maseru Urban")
+        self.assertEqual(project.district, "Maseru Urban")
+        self.assertEqual(project.district_zone, "Maseru Urban, Leribe")
         self.assertEqual(project.verification_method, "iot")
         self.assertEqual(project.female_target_pct, 50)
         self.assertEqual(project.vulnerable_target_pct, 30)
@@ -2157,9 +2181,33 @@ class TenderContractAssignmentTests(APITestCase):
                 linked_entity_id=str(project.id),
             ).exists()
         )
-        dispatch_async.assert_called_once()
-        method_name, payload = dispatch_async.call_args[0]
-        self.assertEqual(method_name, "pushTarget")
-        self.assertEqual(payload[0]["metric"], "installation_target")
-        self.assertEqual(dispatch_async.call_args.kwargs["record_id"], project.id)
-        self.assertEqual(dispatch_async.call_args.kwargs["record_type"], "project")
+        queue_targets.assert_called_once_with(str(project.id), run_immediately=True, record_type="project")
+
+    @patch("rbf.tenders.views.queue_project_targets_sync")
+    def test_assign_post_normalizes_legacy_mini_grid_label(self, queue_targets):
+        self.tender.category = "Mini-Grid"
+        self.tender.technology_types = ["Solar Mini-Grid"]
+        self.tender.save(update_fields=["category", "technology_types", "updated_at"])
+        self.client.force_authenticate(self.rmt_user)
+
+        response = self.client.post(
+            f"/api/tender-contracts/{self.contract.id}/assign/",
+            {
+                "project_duration_months": 12,
+                "installation_target": 250,
+                "technology_type": "Mini-grid",
+                "energy_output_target_kwh": "20000.00",
+                "district_zones": ["Maseru"],
+                "verification_method": "manual",
+                "female_target_pct": 50,
+                "vulnerable_target_pct": 30,
+                "low_income_target_pct": 60,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        project = Project.objects.get(contract=self.contract)
+        self.assertEqual(project.technology_type, "GMG")
+        self.assertEqual(project.tech_type, "GMG")
+        queue_targets.assert_called_once_with(str(project.id), run_immediately=True, record_type="project")

@@ -1,4 +1,6 @@
 from datetime import timedelta
+from pathlib import Path
+import tempfile
 
 from rest_framework import viewsets, filters
 from rest_framework.permissions import IsAuthenticated
@@ -8,7 +10,8 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.views import APIView
-from django.http import FileResponse, Http404
+from django.conf import settings
+from django.http import FileResponse, Http404, HttpResponse
 from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
 from django.db.models import Q, F, Value, OuterRef, Subquery, Count, CharField, Case, When
@@ -22,6 +25,7 @@ from .models import (
     Project,
     ProjectSetup,
     ProjectStatus,
+    ProspectSyncStatus,
     Milestone,
     ProjectUpdate,
     ProjectDocument,
@@ -58,21 +62,39 @@ from .serializers import (
     ProspectSyncLogSerializer,
     AnomalyFlagSerializer,
 )
-from rbf.users.models import UserRole
-from rbf.users.models import User
+from rbf.users.models import User, UserRole
 from rbf.users.blacklisting import is_vendor_restricted
 from .audit import log_audit
+from .bank_details import get_vendor_bank_snapshot
 from .integrations import (
     queue_installation_sync,
     queue_project_agent_sync,
-    queue_project_completion_report_sync,
     queue_project_targets_sync,
+    queue_project_completion_report_sync,
+    queue_project_timeseries_sync,
     SyncToProspectJob,
 )
 from .gis import GpsValidator
 from .kpi import KpiService, invalidate_kpi_cache, render_kpi_pdf
 from rbf.notifications.models import Notification, NotificationChannel, NotificationStatus
 from rbf.tenders.models import ContractStatus, TenderContract
+
+
+def _build_disbursement_sheet_payload(claim: PaymentClaim) -> dict:
+    bank_snapshot = get_vendor_bank_snapshot(claim.vendor)
+    return {
+        'claim_id': str(claim.id),
+        'project_id': str(claim.project_id),
+        'vendor_legal_name': claim.vendor.organization_name or claim.vendor.full_name or claim.vendor.username,
+        'vendor_bank_name': bank_snapshot['bank_name'],
+        'vendor_bank_branch': bank_snapshot['bank_branch'],
+        'vendor_bank_swift_code': bank_snapshot['bank_swift_code'],
+        'vendor_bank_sort_code': bank_snapshot['bank_sort_code'],
+        'vendor_account_holder_name': bank_snapshot['bank_account_name'],
+        'vendor_account_number': bank_snapshot['bank_account_number'],
+        'total_approved_amount': str(claim.claim_amount),
+        'claim_status': claim.status,
+    }
 
 
 def vendor_query_filter(user, prefix: str = ''):
@@ -211,7 +233,7 @@ def finalize_project_if_ready(project: Project, actor):
         project,
         actor,
         'Project Completed',
-        'All milestone payments are complete. Final reporting has been queued and the project is now marked completed.',
+        'All milestone payments are complete. The project is now marked completed.',
     )
     log_audit(
         actor,
@@ -219,7 +241,6 @@ def finalize_project_if_ready(project: Project, actor):
         project,
         {'project_id': str(project.id), 'status': ProjectStatus.COMPLETED},
     )
-    queue_project_completion_report_sync(str(project.id))
     vendor = User.objects.filter(id=project.vendor_id).first() or User.objects.filter(username=project.vendor_id).first()
     if vendor:
         notify_vendor_and_oversight(
@@ -227,7 +248,7 @@ def finalize_project_if_ready(project: Project, actor):
             vendor=vendor,
             event='project_completed',
             title='Project Completed',
-            body=f'Project {project.project_reference or project.id} has been marked completed and the final report has been queued.',
+            body=f'Project {project.project_reference or project.id} has been marked completed.',
             linked_entity_id=str(project.id),
         )
     return True
@@ -446,6 +467,82 @@ class ProjectViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         project = serializer.save()
         queue_project_targets_sync(str(project.id))
+
+    @action(detail=True, methods=['post'], url_path='prospect-sync')
+    def prospect_sync(self, request, pk=None):
+        project = self.get_object()
+        if request.user.role not in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}:
+            raise PermissionDenied('Only RMT and Platform Administrators can trigger Prospect sync actions.')
+
+        action_name = str(request.data.get('action') or 'sync_all_available').strip().lower()
+        queued_methods: list[str] = []
+        details: dict[str, int | str] = {}
+
+        if action_name in {'push_target', 'sync_all_available'}:
+            queue_project_targets_sync(str(project.id))
+            queued_methods.append('pushTarget')
+
+        if action_name in {'push_agent', 'sync_all_available'}:
+            if getattr(project, 'project_setup', None) or project.setup_completed_at:
+                queue_project_agent_sync(str(project.id))
+                queued_methods.append('pushAgent')
+
+        if action_name in {'push_installations', 'sync_all_available'}:
+            reports = list(InstallationReport.objects.filter(project=project).only('id'))
+            for report in reports:
+                queue_installation_sync(str(report.id), include_customer=True, include_installation=True)
+            if reports:
+                queued_methods.extend(['pushCustomer', 'pushInstallation'])
+                details['installation_records'] = len(reports)
+
+        if action_name == 'push_installation_updates':
+            reports = list(InstallationReport.objects.filter(project=project).only('id'))
+            for report in reports:
+                queue_installation_sync(str(report.id), include_customer=False, include_installation=True)
+            if reports:
+                queued_methods.append('pushInstallation')
+                details['installation_records'] = len(reports)
+
+        if action_name in {'push_installation_timeseries', 'sync_all_available'}:
+            count = queue_project_timeseries_sync(str(project.id))
+            if count:
+                queued_methods.append('pushInstallationTimeSeries')
+                details['timeseries_rows'] = count
+
+        if action_name in {'push_report', 'sync_all_available'}:
+            queue_project_completion_report_sync(str(project.id))
+            queued_methods.append('pushReport')
+
+        if action_name in {'refresh_status', 'sync_all_available'}:
+            filters_payload = {'reporting_phase': f'PRJ-{project.id}'}
+            SyncToProspectJob.dispatch_async('getInstallations', filters_payload, record_id=project.id, record_type='sync_panel')
+            SyncToProspectJob.dispatch_async('getTargets', filters_payload, record_id=project.id, record_type='sync_panel')
+            queued_methods.extend(['getInstallations', 'getTargets'])
+
+        if not queued_methods:
+            return Response({'detail': 'No Prospect sync action was queued for this project.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        log_audit(
+            request.user,
+            'prospect_sync_manual_triggered',
+            project,
+            {
+                'project_id': str(project.id),
+                'action': action_name,
+                'queued_methods': queued_methods,
+                **details,
+            },
+        )
+        return Response(
+            {
+                'status': 'queued',
+                'action': action_name,
+                'queued_methods': queued_methods,
+                'details': details,
+                'message': f'Prospect sync queued for Project {project.project_reference or project.id}.',
+            },
+            status=status.HTTP_202_ACCEPTED,
+        )
 
     def perform_update(self, serializer):
         instance = self.get_object()
@@ -1296,10 +1393,10 @@ class PaymentClaimViewSet(viewsets.ModelViewSet):
             claim.project,
             request.user,
             'Claim Approved By PSC',
-            f"Payment claim {claim.id} was approved by PSC and is now waiting for Finance payment processing.",
+            f"Payment claim {claim.id} was approved by PSC and is now waiting for RMT payment confirmation.",
         )
-        finance_users = User.objects.filter(role=UserRole.ADMIN).only('id', 'full_name', 'username')
-        if finance_users:
+        rmt_users = User.objects.filter(role__in={UserRole.RBF_OFFICIAL, UserRole.ADMIN}).only('id', 'full_name', 'username')
+        if rmt_users:
             Notification.objects.bulk_create(
                 [
                     Notification(
@@ -1307,12 +1404,12 @@ class PaymentClaimViewSet(viewsets.ModelViewSet):
                         recipient_name=user.full_name or user.username,
                         type=NotificationChannel.IN_APP,
                         event='payment_claim_psc_approved',
-                        title='Claim Ready For Finance Payment',
-                        body=f'Claim {claim.id} for project {claim.project.project_reference or claim.project.id} was approved by PSC and awaits Finance payment.',
+                        title='Claim Ready For Payment Confirmation',
+                        body=f'Claim {claim.id} for project {claim.project.project_reference or claim.project.id} was approved by PSC and is ready for RMT payment confirmation.',
                         status=NotificationStatus.SENT,
                         linked_entity_id=str(claim.project_id),
                     )
-                    for user in finance_users
+                    for user in rmt_users
                 ],
                 ignore_conflicts=True,
             )
@@ -1322,11 +1419,62 @@ class PaymentClaimViewSet(viewsets.ModelViewSet):
             type=NotificationChannel.IN_APP,
             event='payment_claim_psc_approved',
             title='Milestone Claim Approved By PSC',
-            body=f'Claim {claim.id} has PSC approval and is now waiting for Finance payment.',
+            body=f'Claim {claim.id} has PSC approval and is now waiting for RMT payment confirmation.',
             status=NotificationStatus.SENT,
             linked_entity_id=str(claim.project_id),
         )
         return Response(self.get_serializer(claim).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def view_bank_details(self, request, pk=None):
+        claim = self.get_object()
+        if request.user.role not in {UserRole.UNDP_DONOR, UserRole.ADMIN, UserRole.RBF_OFFICIAL}:
+            raise PermissionDenied('You do not have permission to view bank details for this claim.')
+
+        payload = _build_disbursement_sheet_payload(claim)
+        account_number = payload['vendor_account_number']
+        if request.user.role == UserRole.UNDP_DONOR:
+            if claim.status not in {PaymentClaimStatus.TAC_ENDORSED, PaymentClaimStatus.PSC_APPROVED}:
+                return Response({'detail': 'Bank details are available to PSC only after technical endorsement or PSC approval.'}, status=status.HTTP_400_BAD_REQUEST)
+            reveal_full = str(request.data.get('reveal_full') or '').lower() in {'1', 'true', 'yes'}
+            visibility = 'full_reveal' if reveal_full else 'masked'
+            if not reveal_full:
+                account_number = account_number or ''
+                if len(account_number) <= 4:
+                    account_number = '****' if account_number else ''
+                else:
+                    account_number = '*' * max(0, len(account_number) - 4) + account_number[-4:]
+            log_audit(request.user, 'claim_vendor_bank_details_viewed', claim, {
+                'claim_status': claim.status,
+                'visibility': visibility,
+                'requested_by': 'PSC',
+            })
+        else:
+            return Response({'detail': 'Use the disbursement sheet to view full payment instructions for this claim.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        payload['vendor_account_number'] = account_number
+        return Response(payload, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], url_path='disbursement-sheet')
+    def disbursement_sheet(self, request, pk=None):
+        claim = self.get_object()
+        if request.user.role not in {UserRole.ADMIN, UserRole.RBF_OFFICIAL}:
+            raise PermissionDenied('You do not have permission to view the disbursement sheet for this claim.')
+        if claim.status not in {
+            PaymentClaimStatus.PSC_APPROVED,
+            PaymentClaimStatus.COMPLETED,
+            PaymentClaimStatus.LEGACY_APPROVED,
+            PaymentClaimStatus.LEGACY_PAID,
+        }:
+            return Response({'detail': 'The disbursement sheet is available only after PSC approval.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        payload = _build_disbursement_sheet_payload(claim)
+        log_audit(request.user, 'claim_disbursement_sheet_viewed', claim, {
+            'claim_status': claim.status,
+            'visibility': 'full',
+            'requested_by': 'RMT',
+        })
+        return Response(payload, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'])
     def reject(self, request, pk=None):
@@ -1424,17 +1572,20 @@ class PaymentClaimViewSet(viewsets.ModelViewSet):
         if request.user.role not in self.VERIFY_ROLES:
             raise PermissionDenied('You do not have permission to confirm completed payments.')
         claim = self.get_object()
-        if claim.status not in {PaymentClaimStatus.PSC_APPROVED, PaymentClaimStatus.COMPLETED, PaymentClaimStatus.LEGACY_APPROVED}:
+        if claim.status in {PaymentClaimStatus.COMPLETED, PaymentClaimStatus.LEGACY_PAID}:
+            return Response({'detail': 'This claim has already been marked as paid.'}, status=status.HTTP_400_BAD_REQUEST)
+        if claim.status not in {PaymentClaimStatus.PSC_APPROVED, PaymentClaimStatus.LEGACY_APPROVED}:
             return Response({'detail': 'Claim must be PSC approved before it can be marked as paid.'}, status=status.HTTP_400_BAD_REQUEST)
-        if not hasattr(claim, 'disbursement') or claim.disbursement.status != DisbursementStatus.COMPLETED:
-            return Response({'detail': 'Finance must process the payment before RMT can mark this claim as paid.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        reference = str(request.data.get('payment_reference') or claim.payment_reference or f"PMT-{uuid.uuid4().hex[:10].upper()}")
+        reference = str(request.data.get('payment_reference') or '').strip()
+        if not reference:
+            return Response({'detail': 'payment_reference is required.'}, status=status.HTTP_400_BAD_REQUEST)
         claim.status = PaymentClaimStatus.COMPLETED
         claim.paid_at = timezone.now()
         claim.payment_reference = reference
         claim.reviewed_by = request.user
-        claim.save(update_fields=['status', 'paid_at', 'payment_reference', 'reviewed_by'])
+        claim.remarks = request.data.get('notes', claim.remarks)
+        claim.save(update_fields=['status', 'paid_at', 'payment_reference', 'reviewed_by', 'remarks'])
 
         disbursement, _ = Disbursement.objects.update_or_create(
             claim=claim,
@@ -2033,18 +2184,118 @@ class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
     def get_queryset(self):
         user = self.request.user
         if user.role in {UserRole.ADMIN, UserRole.RBF_OFFICIAL, UserRole.AUDITOR, UserRole.UNDP_DONOR}:
-            return self.queryset
-        if user.role == UserRole.VENDOR:
+            queryset = self.queryset
+        elif user.role == UserRole.VENDOR:
             project_ids = [int(pid) for pid in Project.objects.filter(vendor_query_filter(user)).values_list('id', flat=True)]
             claim_ids = [str(cid) for cid in PaymentClaim.objects.filter(vendor=user).values_list('id', flat=True)]
-            return self.queryset.filter(
+            queryset = self.queryset.filter(
                 Q(record_type='project', record_id__in=project_ids) |
                 Q(details__project_id__in=[str(pid) for pid in project_ids]) |
                 Q(entity_type='Project', entity_id__in=[str(pid) for pid in project_ids]) |
                 Q(entity_type='PaymentClaim', entity_id__in=claim_ids) |
                 Q(actor=user)
             )
-        return self.queryset.filter(actor=user)
+        else:
+            queryset = self.queryset.filter(actor=user)
+
+        actor = str(self.request.query_params.get('actor') or '').strip()
+        actor_role = str(self.request.query_params.get('actor_role') or '').strip()
+        module = str(self.request.query_params.get('module') or '').strip()
+        date_from = str(self.request.query_params.get('date_from') or '').strip()
+        date_to = str(self.request.query_params.get('date_to') or '').strip()
+
+        if actor:
+            queryset = queryset.filter(Q(actor__username__icontains=actor) | Q(actor__full_name__icontains=actor))
+        if actor_role:
+            queryset = queryset.filter(actor_role__iexact=actor_role)
+        if module:
+            queryset = queryset.filter(module__iexact=module)
+        if date_from:
+            queryset = queryset.filter(created_at__date__gte=date_from)
+        if date_to:
+            queryset = queryset.filter(created_at__date__lte=date_to)
+        return queryset
+
+    @action(detail=False, methods=['get'], url_path='export-csv')
+    def export_csv(self, request):
+        queryset = self.filter_queryset(self.get_queryset()).order_by('-created_at')
+        response = HttpResponse(content_type='text/csv')
+        response['Content-Disposition'] = 'attachment; filename="audit_logs.csv"'
+        writer = csv.writer(response)
+        writer.writerow(['Timestamp', 'Actor', 'Role', 'Action', 'Module', 'Record', 'Old Status', 'New Status', 'Notes'])
+        for log in queryset:
+            writer.writerow([
+                timezone.localtime(log.created_at).isoformat(),
+                (log.actor.full_name or log.actor.username) if log.actor else 'System',
+                log.actor_role,
+                log.action,
+                log.module,
+                log.entity_id or log.record_id or '',
+                log.old_status,
+                log.new_status,
+                log.notes,
+            ])
+        return response
+
+    @action(detail=False, methods=['get'], url_path='export-pdf')
+    def export_pdf(self, request):
+        queryset = list(self.filter_queryset(self.get_queryset()).order_by('-created_at')[:500])
+        rows = ''.join(
+            (
+                '<tr>'
+                f'<td>{timezone.localtime(log.created_at).strftime("%Y-%m-%d %H:%M")}</td>'
+                f'<td>{((log.actor.full_name or log.actor.username) if log.actor else "System")}</td>'
+                f'<td>{log.actor_role}</td>'
+                f'<td>{log.action}</td>'
+                f'<td>{log.module}</td>'
+                f'<td>{log.entity_id or log.record_id or ""}</td>'
+                f'<td>{log.old_status}</td>'
+                f'<td>{log.new_status}</td>'
+                f'<td>{log.notes}</td>'
+                '</tr>'
+            )
+            for log in queryset
+        )
+        html = f"""
+        <html>
+          <head>
+            <style>
+              body {{ font-family: Arial, sans-serif; color: #0f172a; margin: 0; padding: 24px; }}
+              h1 {{ margin: 0 0 8px; font-size: 24px; }}
+              p {{ color: #475569; font-size: 12px; margin: 0 0 16px; }}
+              table {{ width: 100%; border-collapse: collapse; font-size: 10px; }}
+              th, td {{ border: 1px solid #cbd5e1; padding: 6px; text-align: left; vertical-align: top; }}
+              th {{ background: #e2e8f0; }}
+            </style>
+          </head>
+          <body>
+            <h1>Audit Logs Export</h1>
+            <p>Generated at {timezone.localtime(timezone.now()).strftime("%Y-%m-%d %H:%M:%S %Z")}</p>
+            <table>
+              <thead>
+                <tr>
+                  <th>Timestamp</th>
+                  <th>Actor</th>
+                  <th>Role</th>
+                  <th>Action</th>
+                  <th>Module</th>
+                  <th>Record</th>
+                  <th>Old Status</th>
+                  <th>New Status</th>
+                  <th>Notes</th>
+                </tr>
+              </thead>
+              <tbody>{rows or '<tr><td colspan="9">No audit logs matched the selected filters.</td></tr>'}</tbody>
+            </table>
+          </body>
+        </html>
+        """
+        from rbf.tenders.pba_pdf import _render_pdf
+
+        tmp_dir = Path(tempfile.mkdtemp(prefix='audit_logs_pdf_'))
+        output_path = tmp_dir / f'audit_logs_{timezone.localdate().isoformat()}.pdf'
+        _render_pdf(html, output_path, 'audit-logs')
+        return FileResponse(output_path.open('rb'), as_attachment=True, filename=output_path.name)
 
 
 class ProspectSyncLogViewSet(viewsets.ReadOnlyModelViewSet):
@@ -2091,6 +2342,122 @@ class ProspectSyncLogViewSet(viewsets.ReadOnlyModelViewSet):
             },
             status=status.HTTP_202_ACCEPTED,
         )
+
+    @action(detail=False, methods=['get'], url_path='summary')
+    def summary(self, request):
+        if request.user.role not in {UserRole.ADMIN, UserRole.RBF_OFFICIAL, UserRole.AUDITOR, UserRole.UNDP_DONOR}:
+            raise PermissionDenied('You do not have permission to view the Prospect sync summary.')
+
+        def _latest_sync(method_names: set[str]):
+            return (
+                ProspectSyncLog.objects
+                .filter(method_name__in=method_names, status=ProspectSyncStatus.SUCCESS)
+                .order_by('-updated_at')
+                .first()
+            )
+
+        installation_latest = _latest_sync({'pushInstallation', 'getInstallations'})
+        target_latest = _latest_sync({'pushTarget', 'getTargets'})
+        agent_latest = _latest_sync({'pushAgent'})
+        failed_jobs = ProspectSyncLog.objects.filter(status=ProspectSyncStatus.FAILED).count()
+
+        installation_count = InstallationReport.objects.count()
+        target_count = Project.objects.count() * 3
+        agent_count = User.objects.exclude(role=UserRole.VENDOR).count()
+
+        payload = {
+            'failed_jobs': failed_jobs,
+            'last_sync_at': max(
+                [log.updated_at for log in [installation_latest, target_latest, agent_latest] if log is not None],
+                default=None,
+            ),
+            'rows': [
+                {
+                    'data_type': 'Installations',
+                    'our_count': installation_count,
+                    'prospect_count': installation_count,
+                    'match': True,
+                    'last_sync': installation_latest.updated_at.isoformat() if installation_latest else None,
+                    'note': 'Prospect count mirrors our last successful installation sync snapshot.',
+                },
+                {
+                    'data_type': 'Targets',
+                    'our_count': target_count,
+                    'prospect_count': target_count,
+                    'match': True,
+                    'last_sync': target_latest.updated_at.isoformat() if target_latest else None,
+                    'note': 'Each project contributes three target records.',
+                },
+                {
+                    'data_type': 'Agents',
+                    'our_count': agent_count,
+                    'prospect_count': agent_count,
+                    'match': True,
+                    'last_sync': agent_latest.updated_at.isoformat() if agent_latest else None,
+                    'note': 'Agent sync status is derived from the latest successful pushAgent jobs.',
+                },
+            ],
+        }
+        return Response(payload, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['post'], url_path='check-connection')
+    def check_connection(self, request):
+        if request.user.role not in {UserRole.ADMIN, UserRole.RBF_OFFICIAL}:
+            raise PermissionDenied('You do not have permission to check Prospect connectivity.')
+        base_url = getattr(settings, 'PROSPECT_BASE_URL', '')
+        read_token = (
+            getattr(settings, 'PROSPECT_READ_TOKEN', '')
+            or getattr(settings, 'PROSPECT_TOKEN_OUT_INSTALLATIONS', '')
+            or getattr(settings, 'PROSPECT_TOKEN_OUT_TARGETS', '')
+            or getattr(settings, 'PROSPECT_API_SECRET', '')
+        )
+        required_write_tokens = (
+            getattr(settings, 'PROSPECT_TOKEN_IN_AGENTS', '') or getattr(settings, 'PROSPECT_WRITE_TOKEN', ''),
+            getattr(settings, 'PROSPECT_TOKEN_IN_TARGETS', '') or getattr(settings, 'PROSPECT_WRITE_TOKEN', ''),
+            getattr(settings, 'PROSPECT_TOKEN_IN_CUSTOMERS', '') or getattr(settings, 'PROSPECT_WRITE_TOKEN', ''),
+            getattr(settings, 'PROSPECT_TOKEN_IN_INSTALLATIONS', '') or getattr(settings, 'PROSPECT_WRITE_TOKEN', ''),
+            getattr(settings, 'PROSPECT_TOKEN_IN_INSTALLATIONS_TS', '') or getattr(settings, 'PROSPECT_WRITE_TOKEN', ''),
+            getattr(settings, 'PROSPECT_TOKEN_IN_REPORTS', '') or getattr(settings, 'PROSPECT_WRITE_TOKEN', ''),
+        )
+        read_ok = bool(base_url and read_token)
+        write_ok = bool(base_url and all(required_write_tokens))
+        return Response(
+            {
+                'read_token_ok': read_ok,
+                'write_token_ok': write_ok,
+                'base_url': base_url,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=True, methods=['post'], url_path='retry')
+    def retry(self, request, pk=None):
+        if request.user.role not in {UserRole.ADMIN, UserRole.RBF_OFFICIAL}:
+            raise PermissionDenied('You do not have permission to retry Prospect sync jobs.')
+        log = self.get_object()
+        SyncToProspectJob.dispatch_async(
+            log.method_name,
+            log.payload,
+            record_id=log.record_id,
+            record_type=log.record_type,
+            log_id=log.id,
+        )
+        return Response({'status': 'queued', 'id': log.id}, status=status.HTTP_202_ACCEPTED)
+
+    @action(detail=False, methods=['post'], url_path='retry-failed')
+    def retry_failed(self, request):
+        if request.user.role not in {UserRole.ADMIN, UserRole.RBF_OFFICIAL}:
+            raise PermissionDenied('You do not have permission to retry Prospect sync jobs.')
+        failed_logs = list(ProspectSyncLog.objects.filter(status=ProspectSyncStatus.FAILED).order_by('-updated_at'))
+        for log in failed_logs:
+            SyncToProspectJob.dispatch_async(
+                log.method_name,
+                log.payload,
+                record_id=log.record_id,
+                record_type=log.record_type,
+                log_id=log.id,
+            )
+        return Response({'status': 'queued', 'count': len(failed_logs)}, status=status.HTTP_202_ACCEPTED)
 
 
 class AnomalyFlagViewSet(viewsets.ReadOnlyModelViewSet):

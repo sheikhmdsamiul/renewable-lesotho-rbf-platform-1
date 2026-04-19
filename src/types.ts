@@ -130,6 +130,7 @@ export interface Tender {
   tenderSecurityRequired?: boolean;
   contactDetails?: string;
   technologyTypes?: string[];
+  targetDistricts?: string[];
   targetSiteType?: "Household" | "Business" | "School" | "Clinic";
   isVerified?: boolean;
   fundingSource?: string;
@@ -521,11 +522,111 @@ export interface User {
   blacklistSummary?: BlacklistSummary | null;
 }
 
+export interface Organization {
+  id: string;
+  name: string;
+  type: "Government" | "International" | "NGO";
+  contactPerson?: string;
+  email?: string;
+  phone?: string;
+  address?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface PlatformConfiguration {
+  id?: string;
+  platformName: string;
+  countryCode: string;
+  countryName: string;
+  defaultCurrency: string;
+  timezone: string;
+  femaleTargetMinimum: number;
+  vulnerableTargetMinimum: number;
+  lowIncomeTargetMinimum: number;
+  uptimeTarget: number;
+  anomalyDeviationThreshold: number;
+  gpsDuplicateRadiusM: number;
+  gpsVerificationMaxDistanceM: number;
+  m2VerificationRequiredPct: number;
+  m3VerificationRequiredPct: number;
+  emailNotificationsEnabled: boolean;
+  smsNotificationsEnabled: boolean;
+  maxFileSizeMb: number;
+  allowedFileTypes: string[];
+  lesothoBoundary?: {
+    path: string;
+    exists: boolean;
+    lastModified?: string | null;
+  };
+}
+
+export interface SystemHealthPayload {
+  database: {
+    status: string;
+    error?: string | null;
+    slowQueriesLast24h: number;
+    tableSizes: Record<string, number>;
+  };
+  queue: {
+    workerStatus: string;
+    pendingJobsCount: number;
+    failedJobsCount: number;
+    processingRateLast24h: number;
+  };
+  scheduler: {
+    status: string;
+    lastMonthlyReportSync?: string | null;
+  };
+  prospectApi: {
+    status: string;
+  };
+  storage: {
+    totalBytes: number;
+    usedBytes: number;
+    freeBytes: number;
+    filesUploadedToday: number;
+  };
+  errors: Array<{
+    id: string;
+    methodName: string;
+    errorMessage?: string;
+    updatedAt?: string;
+  }>;
+}
+
+export interface SuperAdminDashboardSummary {
+  stats: {
+    totalUsers: number;
+    activeProjects: number;
+    totalVendors: number;
+    pendingPrequalifications: number;
+  };
+  systemHealth: SystemHealthPayload;
+  recentActivity: Array<{
+    id: string;
+    timestamp?: string;
+    actor: string;
+    role?: string;
+    action: string;
+    module?: string;
+    record?: string;
+    notes?: string;
+    oldStatus?: string;
+    newStatus?: string;
+  }>;
+  prospectSyncSummary: {
+    failedJobs: number;
+    lastSyncAt?: string | null;
+  };
+}
+
 export interface ProspectSyncLog {
   id: string;
   methodName: string;
   status: string;
   attempts: number;
+  payload?: unknown;
   errorMessage?: string;
   createdAt?: string;
   updatedAt?: string;
@@ -775,6 +876,10 @@ export interface VendorPrequalification {
   districtsCovered: number;
   femaleBeneficiaryTarget: number;
   vulnerableGroupTarget: number;
+  bankName?: string;
+  bankBranch?: string;
+  bankSwiftCode?: string;
+  bankSortCode?: string;
   bankAccountName?: string;
   bankAccountNumber?: string;
   contactNumber?: string;
@@ -787,6 +892,23 @@ export interface VendorPrequalification {
   reviewedAt?: string;
   reviewedBy?: string;
   reviewedByUsername?: string;
+}
+
+export interface VendorBankDetails {
+  vendorLegalName?: string;
+  vendorBankName?: string;
+  vendorBankBranch?: string;
+  vendorBankSwiftCode?: string;
+  vendorBankSortCode?: string;
+  vendorAccountHolderName?: string;
+  vendorAccountNumber?: string;
+}
+
+export interface DisbursementSheet extends VendorBankDetails {
+  claimId?: string;
+  projectId?: string;
+  claimStatus?: PaymentClaimStatus;
+  totalApprovedAmount?: number;
 }
 
 export interface VendorPrequalificationSubmission {
@@ -808,6 +930,10 @@ export interface VendorPrequalificationSubmission {
   districtsCovered?: number;
   femaleBeneficiaryTarget?: number;
   vulnerableGroupTarget?: number;
+  bankName?: string;
+  bankBranch?: string;
+  bankSwiftCode?: string;
+  bankSortCode?: string;
   bankAccountName?: string;
   bankAccountNumber?: string;
   contactNumber?: string;
@@ -846,6 +972,7 @@ export interface PaymentClaim {
   projectId: string;
   vendorId: string;
   milestoneId?: string;
+  milestone_details?: Milestone;
   completionDate?: string;
   claimAmount: number;
   actualBeneficiaries: number;
@@ -863,6 +990,13 @@ export interface PaymentClaim {
   reviewedBy?: string;
   reviewedByUsername?: string;
   vendorUsername?: string;
+  vendorLegalName?: string;
+  vendorBankName?: string;
+  vendorBankBranch?: string;
+  vendorBankSwiftCode?: string;
+  vendorBankSortCode?: string;
+  vendorAccountHolderName?: string;
+  vendorAccountNumber?: string;
   disbursement?: Disbursement;
   paymentLocked?: boolean;
   paymentLockReason?: string;
@@ -894,6 +1028,8 @@ export interface AuditLog {
   recordType?: string;
   actorRole?: string;
   module?: string;
+  oldStatus?: string;
+  newStatus?: string;
 }
 
 export interface AnomalyFlag {
