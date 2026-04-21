@@ -2,8 +2,9 @@ import hashlib
 import json
 import logging
 import time
+from decimal import Decimal
 from concurrent.futures import ThreadPoolExecutor
-from datetime import timedelta
+from datetime import timedelta, timezone as dt_timezone
 from typing import Any
 from socket import timeout as SocketTimeout
 from urllib.error import HTTPError, URLError
@@ -80,7 +81,7 @@ def normalize_project_technology(value: Any) -> str:
     return mapping.get(normalized, raw)
 
 
-def build_project_target_payload(project: Project) -> list[dict[str, Any]]:
+def build_project_target_payload(project: Project) -> dict[str, Any]:
     reporting_phase = f'PRJ-{project.id}'
     effective_date = project.start_date or timezone.localdate()
     program_end_date = project.end_date or (effective_date + timedelta(days=365))
@@ -91,26 +92,28 @@ def build_project_target_payload(project: Project) -> list[dict[str, Any]]:
         'effective_date': effective_date.isoformat(),
         'program_end_date': program_end_date.isoformat(),
     }
-    return [
-        {
-            **base_fields,
-            'metric': 'installation_target',
-            'target_value': project.installation_target,
-            'unit_of_measurement': 'number',
-        },
-        {
-            **base_fields,
-            'metric': 'female_beneficiary_target',
-            'target_value': project.female_target_pct or 50,
-            'unit_of_measurement': 'percentage',
-        },
-        {
-            **base_fields,
-            'metric': 'monthly_energy_output_kwh',
-            'target_value': project.energy_output_target_kwh,
-            'unit_of_measurement': 'kWh',
-        },
-    ]
+    return {
+        'data': [
+            {
+                **base_fields,
+                'metric': 'installation_target',
+                'target_value': int(project.installation_target),
+                'unit_of_measurement': 'number',
+            },
+            {
+                **base_fields,
+                'metric': 'female_beneficiary_target',
+                'target_value': int(project.female_target_pct or 50),
+                'unit_of_measurement': 'percentage',
+            },
+            {
+                **base_fields,
+                'metric': 'monthly_energy_output_kwh',
+                'target_value': float(project.energy_output_target_kwh),
+                'unit_of_measurement': 'kWh',
+            },
+        ]
+    }
 
 
 class ProspectService:
@@ -224,7 +227,8 @@ class ProspectService:
         url = f'{self.base_url}{endpoint}'
         if query:
             url = f'{url}?{urlencode(query)}'
-        data = None if payload is None else json.dumps(payload).encode('utf-8')
+        sanitized_payload = sanitize_for_json(payload)
+        data = None if sanitized_payload is None else json.dumps(sanitized_payload).encode('utf-8')
         request = Request(url, data=data, headers=self._headers(token), method=method)
         try:
             with urlopen(request, timeout=self.timeout) as response:
@@ -314,6 +318,16 @@ class ProspectService:
         return self._get_records('getTargets', self.READ_ENDPOINTS['getTargets'], query=query)
 
 
+def sanitize_for_json(data: Any) -> Any:
+    if isinstance(data, dict):
+        return {k: sanitize_for_json(v) for k, v in data.items()}
+    if isinstance(data, list):
+        return [sanitize_for_json(v) for v in data]
+    if isinstance(data, Decimal):
+        return float(data)
+    return data
+
+
 class SyncToProspectJob:
     MAX_ATTEMPTS = 3
     RETRY_DELAYS_SECONDS = (60, 300, 900)
@@ -340,10 +354,11 @@ class SyncToProspectJob:
             raise ValueError(f'Unsupported Prospect sync method: {self.method_name}')
         service = ProspectService.from_settings()
         log = ProspectSyncLog.objects.filter(id=self.log_id).first() if self.log_id else None
+        sanitized_data = sanitize_for_json(self.data)
         if log is None:
             log = ProspectSyncLog.objects.create(
                 method_name=self.method_name,
-                payload=self.data,
+                payload=sanitized_data,
                 status=ProspectSyncStatus.PENDING,
                 attempts=0,
                 record_id=self.record_id,
@@ -351,7 +366,7 @@ class SyncToProspectJob:
             )
         else:
             log.method_name = self.method_name
-            log.payload = self.data
+            log.payload = sanitized_data
             log.record_id = self.record_id
             log.record_type = self.record_type
             log.status = ProspectSyncStatus.PENDING
@@ -463,6 +478,7 @@ def queue_project_agent_sync(project_id: str):
             'gender': normalize_prospect_gender(getattr(vendor, 'gender', '') or ''),
             'country': 'LS',
             'location_area_1': location_area_1,
+            'company': getattr(vendor, 'org_name', '') or '',
         }]
     }
     SyncToProspectJob.dispatch_async('pushAgent', payload, record_id=int(vendor.id), record_type='user')
@@ -498,12 +514,10 @@ def _build_installation_sync_payload(report: InstallationReport) -> tuple[dict[s
             'latitude': float(report.gps_lat),
             'longitude': float(report.gps_lng),
             'country': 'LS',
+            'location_area_1': district,
             'usage_category': 'household',
             'usage_sub_category': report.household_type or '',
-            'location_area_1': district,
-            'status': str(report.status or '').lower(),
-            'verification_status': str(getattr(getattr(report, 'verification_task', None), 'status', '') or '').lower(),
-            'gis_status': str(report.gis_status or '').lower(),
+            'rated_power_w': float(getattr(project_setup, 'rated_power_w', 0)) if project_setup and getattr(project_setup, 'rated_power_w', None) else None,
             'is_test': False,
         }]
     }
@@ -532,46 +546,47 @@ def queue_project_completion_report_sync(project_id: str):
     ).count()
     total_installations = InstallationReport.objects.filter(project=project).count()
     paid_claims = project.payment_claims.filter(status='Paid').count()
-    payload = [{
-        'external_id': f'final_report_{project.id}',
-        'report_type': 'final_project_report',
-        'reporting_phase': f'PRJ-{project.id}',
-        'project_id': str(project.id),
-        'project_reference': project.project_reference or f'PRJ-{project.id}',
-        'vendor_id': str(project.vendor_id),
-        'vendor_name': project.vendor_name,
-        'country': 'LS',
-        'district': project.district or project.district_zone or project.region or '',
-        'technology_type': project.tech_type or project.technology_type or '',
-        'project_status': project.status,
-        'verified_installations': verified_installations,
-        'submitted_installations': total_installations,
-        'target_installations': int(project.target_installations or project.installation_target or 0),
-        'female_target_pct': int(project.target_female_pct or project.female_target_pct or 0),
-        'energy_output_target_kwh': float(project.energy_output_target_kwh or project.energy_output or 0),
-        'paid_claims': paid_claims,
-        'generated_at': timezone.now().isoformat(),
-    }]
+    payload = {
+        'data': [{
+            'external_id': f'report_{project.id}_{timezone.now().year}_{timezone.now().month:02d}',
+            'country': 'LS',
+            'reporting_phase': f'PRJ-{project.id}',
+        }]
+    }
     SyncToProspectJob.dispatch_async('pushReport', payload, record_id=int(project.id), record_type='project')
 
 
-def build_project_timeseries_payload(project: Project) -> list[dict[str, Any]]:
-    readings = SmartMeterReading.objects.filter(project=project).select_related('installation').order_by('-recorded_at', '-id')
-    return [
-        {
-            'external_id': f'meter_{project.id}_{reading.id}',
-            'installation_id': str(reading.installation_id) if reading.installation_id else '',
-            'meter_id': reading.meter_id,
-            'recorded_at': reading.recorded_at.isoformat(),
-            'kwh_generated': reading.kwh,
-            'output_energy_interval_wh': round(float(reading.kwh) * 1000, 2),
-            'uptime_pct': reading.uptime_pct,
-            'project_id': str(project.id),
-            'reporting_phase': f'PRJ-{project.id}',
-            'country': 'LS',
-        }
-        for reading in readings
-    ]
+def build_project_timeseries_payload(project: Project) -> dict[str, Any]:
+    readings = SmartMeterReading.objects.filter(project=project).select_related('installation').order_by('meter_id', 'recorded_at')
+    if not readings:
+        return {}
+
+    cumulative_data = {}
+    for reading in readings:
+        meter_id = reading.meter_id
+        if meter_id not in cumulative_data:
+            cumulative_data[meter_id] = []
+        cumulative_data[meter_id].append(reading)
+
+    payload_data = []
+    for meter_id, meter_readings in cumulative_data.items():
+        cumulative_wh = 0
+        for reading in meter_readings:
+            cumulative_wh += float(reading.kwh) * 1000
+            installation = reading.installation
+            project_setup = getattr(installation.project if installation else project, 'project_setup', None)
+            manufacturer = getattr(project_setup, 'device_brand', '') if project_setup else ''
+            payload_data.append({
+                'metered_at': reading.recorded_at.astimezone(dt_timezone.utc).isoformat(timespec='milliseconds'),
+                'interval_seconds': 3600,
+                'serial_number': meter_id,
+                'manufacturer': manufacturer,
+                'output_energy_interval_wh': round(float(reading.kwh) * 1000, 2),
+                'output_energy_cumulative_wh': round(cumulative_wh, 2),
+                'output_power_w': None,
+            })
+
+    return {'data': payload_data}
 
 
 def queue_project_timeseries_sync(project_id: str) -> int:
@@ -587,4 +602,4 @@ def queue_project_timeseries_sync(project_id: str) -> int:
         record_id=int(project.id),
         record_type='project',
     )
-    return len(payload)
+    return len(payload.get('data', []))

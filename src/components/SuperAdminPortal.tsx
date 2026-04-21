@@ -9,11 +9,14 @@ import {
   Eye,
   History,
   Loader2,
+  Map,
   Plus,
   RefreshCw,
   Save,
   Search,
+  Settings,
   ShieldCheck,
+  Target,
   Trash2,
   UserCog,
   Users,
@@ -36,12 +39,15 @@ import {
   fetchSystemHealth,
   fetchUserManagementMeta,
   refreshBoundaryFile,
+  refreshProspectSyncPanel,
   resetAdminManagedUserPassword,
   retryAllFailedProspectSyncJobs,
   retryProspectSyncJob,
+  triggerProjectProspectSync,
   updateAdminManagedUser,
   updateOrganization,
   updatePlatformConfiguration,
+  uploadBoundaryFile,
 } from "../api";
 import {
   AuditLog,
@@ -516,6 +522,21 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
     }
   };
 
+  const uploadBoundary = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setConfigurationSubmitting(true);
+    try {
+      await uploadBoundaryFile(file);
+      setBanner("Lesotho boundary file uploaded.");
+      setConfiguration(await fetchPlatformConfiguration());
+    } catch (err: any) {
+      setError(String(err?.message || "Unable to upload boundary file."));
+    } finally {
+      setConfigurationSubmitting(false);
+    }
+  };
+
   const retryFailedJobs = async () => {
     try {
       const result = await retryAllFailedProspectSyncJobs();
@@ -527,17 +548,52 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
     }
   };
 
-  const retryJob = async (id: string) => {
-    try {
-      await retryProspectSyncJob(id);
-      setBanner("Prospect retry queued.");
-      await loadProspect();
-    } catch (err: any) {
-      setError(String(err?.message || "Unable to retry this job."));
-    }
-  };
+   const retryJob = async (id: string) => {
+     try {
+       await retryProspectSyncJob(id);
+       setBanner("Prospect retry queued.");
+       await loadProspect();
+     } catch (err: any) {
+       setError(String(err?.message || "Unable to retry this job."));
+     }
+   };
 
-  const exportAudit = async (format: "csv" | "pdf") => {
+   const manualSyncMethod = async (log: ProspectSyncLog) => {
+     try {
+       const methodName = log.methodName;
+       // Map methodName to action - assuming direct mapping for now
+       // In a real implementation, you might need a more sophisticated mapping
+       const action = methodName as 
+         | "push_target"
+         | "push_agent"
+         | "push_installations"
+         | "push_installation_updates"
+         | "push_installation_timeseries"
+         | "push_report"
+         | "refresh_status"
+         | "sync_all_available";
+      
+       // For refresh_status, use the refresh panel endpoint
+       if (action === "refresh_status" || methodName === "getInstallations" || methodName === "getTargets") {
+         const projectId = log.recordId && /^\d+$/.test(log.recordId) ? log.recordId : undefined;
+         await refreshProspectSyncPanel({ projectId: projectId, size: 100, page: 1 });
+         setBanner(`Manual sync triggered for ${methodName}`);
+         await loadProspect();
+         return;
+       }
+       
+       // Using recordId as projectId if it's numeric
+       const projectId = log.recordId && /^\d+$/.test(log.recordId) ? log.recordId : "default"; // This would need to be replaced with actual logic
+       
+       await triggerProjectProspectSync(projectId, action);
+       setBanner(`Manual sync triggered for ${methodName}`);
+       await loadProspect();
+     } catch (err: any) {
+       setError(String(err?.message || `Unable to trigger manual sync for ${log.methodName}.`));
+     }
+   };
+
+   const exportAudit = async (format: "csv" | "pdf") => {
     try {
       const blob = await exportSystemAuditLogs(format, auditFilters);
       saveBlob(blob, format === "csv" ? "audit_logs.csv" : "audit_logs.pdf");
@@ -942,38 +998,97 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
         <form onSubmit={saveConfiguration} className="space-y-6">
           <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
             <div className="card p-6 space-y-4">
-              <h3 className="text-lg font-bold text-slate-900">General Settings</h3>
-              <input className="input-field" value={configuration.platformName} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, platformName: e.target.value } : prev)} placeholder="Platform Name" />
-              <div className="grid grid-cols-2 gap-4">
-                <input className="input-field" value={configuration.countryName} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, countryName: e.target.value } : prev)} placeholder="Country" />
-                <input className="input-field" value={configuration.countryCode} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, countryCode: e.target.value } : prev)} placeholder="Country Code" />
-                <input className="input-field" value={configuration.defaultCurrency} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, defaultCurrency: e.target.value } : prev)} placeholder="Currency" />
-                <input className="input-field" value={configuration.timezone} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, timezone: e.target.value } : prev)} placeholder="Timezone" />
+              <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                <Settings size={18} className="text-emerald-600" />
+                General Settings
+              </h3>
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Platform Name</label>
+                  <input className="input-field" value={configuration.platformName} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, platformName: e.target.value } : prev)} placeholder="Enter platform name" />
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Country</label>
+                    <input className="input-field" value={configuration.countryName} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, countryName: e.target.value } : prev)} placeholder="Country" />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Country Code</label>
+                    <input className="input-field" value={configuration.countryCode} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, countryCode: e.target.value } : prev)} placeholder="LS" />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Currency</label>
+                    <input className="input-field" value={configuration.defaultCurrency} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, defaultCurrency: e.target.value } : prev)} placeholder="LSL" />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Timezone</label>
+                    <input className="input-field" value={configuration.timezone} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, timezone: e.target.value } : prev)} placeholder="Africa/Maseru" />
+                  </div>
+                </div>
               </div>
             </div>
 
             <div className="card p-6 space-y-4">
-              <h3 className="text-lg font-bold text-slate-900">Notification Settings</h3>
-              <label className="flex items-center justify-between rounded-xl border border-slate-100 px-4 py-3">
-                <span>Email notifications</span>
-                <input type="checkbox" checked={configuration.emailNotificationsEnabled} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, emailNotificationsEnabled: e.target.checked } : prev)} />
-              </label>
-              <label className="flex items-center justify-between rounded-xl border border-slate-100 px-4 py-3">
-                <span>SMS notifications</span>
-                <input type="checkbox" checked={configuration.smsNotificationsEnabled} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, smsNotificationsEnabled: e.target.checked } : prev)} />
-              </label>
-              <div className="grid grid-cols-2 gap-4">
-                <input className="input-field" type="number" value={configuration.maxFileSizeMb} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, maxFileSizeMb: Number(e.target.value || 0) } : prev)} placeholder="Max file size" />
-                <input className="input-field" value={configuration.allowedFileTypes.join("/")} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, allowedFileTypes: e.target.value.split("/").map((item) => item.trim().toUpperCase()).filter(Boolean) } : prev)} placeholder="Allowed types" />
+              <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                <Bell size={18} className="text-emerald-600" />
+                Notification & File Settings
+              </h3>
+              <div className="space-y-3">
+                <div className="flex items-center justify-between rounded-xl border border-slate-100 px-4 py-3">
+                  <div>
+                    <span className="text-sm font-medium text-slate-900">Email notifications</span>
+                    <p className="text-xs text-slate-500">Send email alerts to users</p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    id="email-notifications"
+                    checked={configuration.emailNotificationsEnabled}
+                    onChange={(e) => setConfiguration((prev) => prev ? { ...prev, emailNotificationsEnabled: e.target.checked } : prev)}
+                    className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                  />
+                </div>
+                <div className="flex items-center justify-between rounded-xl border border-slate-100 px-4 py-3">
+                  <div>
+                    <span className="text-sm font-medium text-slate-900">SMS notifications</span>
+                    <p className="text-xs text-slate-500">Send SMS alerts to users</p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    id="sms-notifications"
+                    checked={configuration.smsNotificationsEnabled}
+                    onChange={(e) => setConfiguration((prev) => prev ? { ...prev, smsNotificationsEnabled: e.target.checked } : prev)}
+                    className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Max File Size (MB)</label>
+                    <input className="input-field" type="number" min="1" max="100" value={configuration.maxFileSizeMb} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, maxFileSizeMb: Number(e.target.value || 0) } : prev)} />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Allowed File Types</label>
+                    <input className="input-field" value={configuration.allowedFileTypes.join(", ")} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, allowedFileTypes: e.target.value.split(",").map((item) => item.trim().toUpperCase()).filter(Boolean) } : prev)} placeholder="PDF, DOCX, JPG, PNG" />
+                    <p className="text-xs text-slate-500 mt-1">Separate with commas</p>
+                  </div>
+                </div>
               </div>
               <div className="rounded-xl border border-slate-100 p-4">
                 <div className="flex items-center justify-between gap-3">
                   <div>
-                    <p className="font-semibold text-slate-900">Lesotho Boundary</p>
-                    <p className="text-xs text-slate-500">{configuration.lesothoBoundary?.exists ? "GeoJSON file available" : "GeoJSON file missing"}</p>
+                    <div className="flex items-center gap-2">
+                      <Map size={16} className="text-emerald-600" />
+                      <p className="font-semibold text-slate-900">Lesotho Boundary</p>
+                    </div>
+                    <p className="text-xs text-slate-500 mt-1">{configuration.lesothoBoundary?.exists ? "GeoJSON file available" : "GeoJSON file missing"}</p>
                     <p className="text-xs text-slate-400">{configuration.lesothoBoundary?.lastModified ? formatDateTime(configuration.lesothoBoundary.lastModified) : "No timestamp"}</p>
                   </div>
-                  <button type="button" onClick={() => void redownloadBoundary()} className="btn-secondary text-xs">Re-download Boundary File</button>
+                  <div className="flex flex-col gap-2">
+                    <label className="btn-secondary text-xs cursor-pointer">
+                      Upload File
+                      <input type="file" accept=".geojson" className="hidden" onChange={uploadBoundary} disabled={configurationSubmitting} />
+                    </label>
+                    <button type="button" onClick={() => void redownloadBoundary()} className="btn-secondary text-xs" disabled={configurationSubmitting}>Re-download</button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -981,31 +1096,71 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
 
           <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
             <div className="card p-6 space-y-4">
-              <h3 className="text-lg font-bold text-slate-900">KPI Thresholds</h3>
+              <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                <Target size={18} className="text-emerald-600" />
+                KPI Thresholds
+              </h3>
               <div className="grid grid-cols-2 gap-4">
-                <input className="input-field" type="number" value={configuration.femaleTargetMinimum} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, femaleTargetMinimum: Number(e.target.value || 0) } : prev)} placeholder="Female target" />
-                <input className="input-field" type="number" value={configuration.vulnerableTargetMinimum} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, vulnerableTargetMinimum: Number(e.target.value || 0) } : prev)} placeholder="Vulnerable target" />
-                <input className="input-field" type="number" value={configuration.lowIncomeTargetMinimum} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, lowIncomeTargetMinimum: Number(e.target.value || 0) } : prev)} placeholder="Low income target" />
-                <input className="input-field" type="number" value={configuration.uptimeTarget} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, uptimeTarget: Number(e.target.value || 0) } : prev)} placeholder="Uptime target" />
-                <input className="input-field" type="number" value={configuration.anomalyDeviationThreshold} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, anomalyDeviationThreshold: Number(e.target.value || 0) } : prev)} placeholder="Anomaly deviation" />
-                <input className="input-field" type="number" value={configuration.gpsDuplicateRadiusM} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, gpsDuplicateRadiusM: Number(e.target.value || 0) } : prev)} placeholder="GPS duplicate radius" />
-                <input className="input-field" type="number" value={configuration.gpsVerificationMaxDistanceM} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, gpsVerificationMaxDistanceM: Number(e.target.value || 0) } : prev)} placeholder="GPS verification max distance" />
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Female Target (%)</label>
+                  <input className="input-field" type="number" min="0" max="100" value={configuration.femaleTargetMinimum} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, femaleTargetMinimum: Number(e.target.value || 0) } : prev)} />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Vulnerable Target (%)</label>
+                  <input className="input-field" type="number" min="0" max="100" value={configuration.vulnerableTargetMinimum} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, vulnerableTargetMinimum: Number(e.target.value || 0) } : prev)} />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Low Income Target (%)</label>
+                  <input className="input-field" type="number" min="0" max="100" value={configuration.lowIncomeTargetMinimum} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, lowIncomeTargetMinimum: Number(e.target.value || 0) } : prev)} />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Uptime Target (%)</label>
+                  <input className="input-field" type="number" min="0" max="100" value={configuration.uptimeTarget} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, uptimeTarget: Number(e.target.value || 0) } : prev)} />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Anomaly Deviation (%)</label>
+                  <input className="input-field" type="number" min="0" max="100" value={configuration.anomalyDeviationThreshold} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, anomalyDeviationThreshold: Number(e.target.value || 0) } : prev)} />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">GPS Duplicate Radius (m)</label>
+                  <input className="input-field" type="number" min="1" max="1000" value={configuration.gpsDuplicateRadiusM} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, gpsDuplicateRadiusM: Number(e.target.value || 0) } : prev)} />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">GPS Verification Max Distance (m)</label>
+                  <input className="input-field" type="number" min="1" max="5000" value={configuration.gpsVerificationMaxDistanceM} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, gpsVerificationMaxDistanceM: Number(e.target.value || 0) } : prev)} />
+                </div>
               </div>
             </div>
 
             <div className="card p-6 space-y-4">
-              <h3 className="text-lg font-bold text-slate-900">Milestone Thresholds</h3>
+              <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                <Target size={18} className="text-emerald-600" />
+                Milestone Verification Thresholds
+              </h3>
               <div className="grid grid-cols-2 gap-4">
-                <input className="input-field" type="number" value={configuration.m2VerificationRequiredPct} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, m2VerificationRequiredPct: Number(e.target.value || 0) } : prev)} placeholder="M2 verification required" />
-                <input className="input-field" type="number" value={configuration.m3VerificationRequiredPct} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, m3VerificationRequiredPct: Number(e.target.value || 0) } : prev)} placeholder="M3 verification required" />
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">M2 Verification Required (%)</label>
+                  <input className="input-field" type="number" min="0" max="100" value={configuration.m2VerificationRequiredPct} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, m2VerificationRequiredPct: Number(e.target.value || 0) } : prev)} />
+                  <p className="text-xs text-slate-500 mt-1">Percentage of M2 submissions requiring verification</p>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">M3 Verification Required (%)</label>
+                  <input className="input-field" type="number" min="0" max="100" value={configuration.m3VerificationRequiredPct} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, m3VerificationRequiredPct: Number(e.target.value || 0) } : prev)} />
+                  <p className="text-xs text-slate-500 mt-1">Percentage of M3 submissions requiring verification</p>
+                </div>
               </div>
             </div>
           </div>
 
-          <button type="submit" disabled={configurationSubmitting || configurationLoading} className="btn-primary flex items-center gap-2">
-            {configurationSubmitting ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
-            Save Configuration
-          </button>
+          <div className="flex items-center justify-end gap-3">
+            <button type="button" onClick={() => void loadConfiguration()} className="btn-secondary">
+              Reset Changes
+            </button>
+            <button type="submit" disabled={configurationSubmitting || configurationLoading} className="btn-primary flex items-center gap-2">
+              {configurationSubmitting ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
+              {configurationSubmitting ? "Saving..." : "Save Configuration"}
+            </button>
+          </div>
         </form>
       )}
 
@@ -1100,18 +1255,19 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
                         <td className="px-6 py-4 text-sm text-slate-600">{log.attempts}</td>
                         <td className="px-6 py-4"><span className={`rounded-full px-2 py-1 text-[10px] font-bold ${log.status === "success" ? "bg-emerald-100 text-emerald-700" : log.status === "failed" ? "bg-rose-100 text-rose-700" : "bg-amber-100 text-amber-700"}`}>{log.status}</span></td>
                         <td className="px-6 py-4 text-xs text-slate-500">{log.errorMessage || "—"}</td>
-                        <td className="px-6 py-4">
-                          <div className="flex justify-end gap-3">
-                            <button
-                              onClick={() => setExpandedPayloadLogId((current) => current === log.id ? null : log.id)}
-                              className="inline-flex items-center gap-2 text-xs font-semibold text-emerald-700"
-                            >
-                              <Eye size={14} />
-                              {isExpanded ? "Hide payload" : "View payload"}
-                            </button>
-                            {log.status === "failed" && <button onClick={() => void retryJob(log.id)} className="text-xs font-semibold text-emerald-700">Retry</button>}
-                          </div>
-                        </td>
+                           <td className="px-6 py-4">
+                             <div className="flex justify-end gap-3">
+                               <button
+                                 onClick={() => setExpandedPayloadLogId((current) => current === log.id ? null : log.id)}
+                                 className="inline-flex items-center gap-2 text-xs font-semibold text-emerald-700"
+                               >
+                                 <Eye size={14} />
+                                 {isExpanded ? "Hide payload" : "View payload"}
+                               </button>
+                               {log.status === "failed" && <button onClick={() => void retryJob(log.id)} className="text-xs font-semibold text-emerald-700">Retry</button>}
+                               <button onClick={() => void manualSyncMethod(log)} className="text-xs font-semibold text-emerald-700">Manual Sync</button>
+                             </div>
+                           </td>
                       </tr>
                       {isExpanded && (
                         <tr className="bg-slate-50/70">

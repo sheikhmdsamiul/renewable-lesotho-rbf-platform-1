@@ -2948,6 +2948,23 @@ export async function refreshBoundaryFile(): Promise<void> {
   });
 }
 
+export async function uploadBoundaryFile(file: File): Promise<void> {
+  const formData = new FormData();
+  formData.append("file", file);
+  const token = localStorage.getItem("access_token");
+  const response = await fetch(`${API_BASE_URL}/api/users/platform-configuration/upload-boundary/`, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${token}`,
+    },
+    body: formData,
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: "Upload failed" }));
+    throw new Error(error.error || "Failed to upload boundary file");
+  }
+}
+
 export async function fetchSystemHealth(): Promise<SystemHealthPayload> {
   const data = await http<any>(`/api/users/system-health/`);
   return mapSystemHealthFromApi(data);

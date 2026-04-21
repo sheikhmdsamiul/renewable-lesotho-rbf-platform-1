@@ -776,6 +776,79 @@ class ProjectApiTests(APITestCase):
         self.assertTrue(AnomalyFlag.objects.filter(installation=stale_installation, flag_type="no_data").exists())
         self.assertTrue(AnomalyFlag.objects.filter(installation=installation, flag_type="output_deviation").exists())
         dispatch_async.assert_called()
+        sync_method, payload = dispatch_async.call_args[0][:2]
+        self.assertEqual(sync_method, "pushInstallationTimeSeries")
+        self.assertEqual(len(payload["data"]), 1)
+        self.assertEqual(payload["data"][0]["serial_number"], "MTR-CSV-001")
+        self.assertEqual(payload["data"][0]["output_energy_interval_wh"], 106000.0)
+        self.assertEqual(payload["data"][0]["output_energy_cumulative_wh"], 206000.0)
+        self.assertEqual(payload["data"][0]["output_power_w"], None)
+        self.assertTrue(payload["data"][0]["metered_at"].endswith("+00:00"))
+
+    @patch("rbf.projects.views.SyncToProspectJob.dispatch_async")
+    def test_meter_csv_upload_accepts_non_numeric_installation_identifier(self, dispatch_async):
+        tender = Tender.objects.create(
+            reference_number="TND-METER-ALT-ID",
+            name="Meter Tender Alt Id",
+            department="Dept",
+            category="SHS",
+            status="Awarded",
+            deadline=timezone.now(),
+        )
+        vendor = get_user_model().objects.create_user(
+            username="meter_alt_id_vendor",
+            password="securePass123",
+            role="Vendor",
+            status="Active",
+            bank_name="Test Bank",
+            bank_account_name="Vendor Test",
+            bank_account_number="1234567890",
+        )
+        project = Project.objects.create(
+            tender=tender,
+            vendor_id=str(vendor.id),
+            vendor_name=vendor.username,
+            tech_type="SHS",
+            region="Maseru",
+            district="Maseru",
+            status=ProjectStatus.ACTIVE,
+        )
+        TenderContract.objects.create(
+            tender=tender,
+            vendor_id=str(vendor.id),
+            vendor_name=vendor.username,
+            reference_number="CTR-METER-ALT-ID",
+            status=ContractStatus.APPROVED,
+            project_id=str(project.id),
+        )
+        self._create_completed_setup(project, vendor)
+        installation = InstallationReport.objects.create(
+            project=project,
+            vendor=vendor,
+            gps_lat=-29.31,
+            gps_lng=27.48,
+            serial_number="INS-001",
+            beneficiary_id="BEN-ALT-001",
+            meter_id="MTR-ALT-001",
+            status=InstallationStatus.VERIFIED,
+        )
+
+        csv_bytes = (
+            "meter_id,installation_id,kwh_generated,uptime_pct,latitude,longitude,reading_datetime\n"
+            "MTR-ALT-001,INS-001,12,99,-29.31,27.48,2026-04-16T08:30:00Z\n"
+        ).encode("utf-8")
+        self.client.force_authenticate(vendor)
+
+        response = self.client.post(
+            f"/api/projects/{project.id}/meter-csv-upload/",
+            {"file": SimpleUploadedFile("meter.csv", csv_bytes, content_type="text/csv")},
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        reading = SmartMeterReading.objects.get(project=project, meter_id="MTR-ALT-001")
+        self.assertEqual(reading.installation_id, installation.id)
+        dispatch_async.assert_called()
 
     def test_duplicate_milestone_claim_is_locked_after_submission(self):
         User = get_user_model()

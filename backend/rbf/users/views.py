@@ -1,7 +1,8 @@
+import json
 import random
 import string
 import time
-from datetime import timedelta
+from datetime import timedelta, datetime
 from pathlib import Path
 import shutil
 
@@ -536,7 +537,7 @@ class PlatformConfigurationView(APIView):
         payload['lesotho_boundary'] = {
             'path': str(boundary_path),
             'exists': boundary_path.exists(),
-            'last_modified': timezone.datetime.fromtimestamp(boundary_path.stat().st_mtime, tz=timezone.utc).isoformat() if boundary_path.exists() else None,
+            'last_modified': datetime.utcfromtimestamp(boundary_path.stat().st_mtime).isoformat() + "+00:00" if boundary_path.exists() else None,
         }
         return Response(payload, status=status.HTTP_200_OK)
 
@@ -557,6 +558,32 @@ class PlatformConfigurationBoundaryRefreshView(APIView):
             raise PermissionDenied('Only Platform Administrator (Super Admin) can refresh the Lesotho boundary file.')
         call_command('download_lesotho_geojson')
         AuditLogger.log('lesotho_boundary_refreshed', 'configuration', None, 'boundary', notes='Boundary file re-downloaded by Super Admin.')
+        return Response({'status': 'ok'}, status=status.HTTP_200_OK)
+
+
+class PlatformConfigurationBoundaryUploadView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not (request.user and request.user.is_authenticated and request.user.role == UserRole.ADMIN):
+            raise PermissionDenied('Only Platform Administrator (Super Admin) can upload the Lesotho boundary file.')
+        file = request.FILES.get('file')
+        if not file:
+            return Response({'error': 'No file provided.'}, status=status.HTTP_400_BAD_REQUEST)
+        if not file.name.lower().endswith('.geojson'):
+            return Response({'error': 'File must be a GeoJSON file.'}, status=status.HTTP_400_BAD_REQUEST)
+        boundary_path = Path(settings.BASE_DIR) / 'public' / 'geojson' / 'lesotho.geojson'
+        boundary_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            payload = json.loads(file.read().decode('utf-8'))
+        except Exception:
+            return Response({'error': 'Invalid JSON file.'}, status=status.HTTP_400_BAD_REQUEST)
+        geometry = payload.get('geometry') or {}
+        if geometry.get('type') not in {'Polygon', 'MultiPolygon'} or not geometry.get('coordinates'):
+            return Response({'error': 'Invalid GeoJSON: must contain a Polygon or MultiPolygon.'}, status=status.HTTP_400_BAD_REQUEST)
+        with boundary_path.open('w', encoding='utf-8') as handle:
+            json.dump(payload, handle)
+        AuditLogger.log('lesotho_boundary_uploaded', 'configuration', None, 'boundary', notes='Boundary file uploaded by Super Admin.')
         return Response({'status': 'ok'}, status=status.HTTP_200_OK)
 
 

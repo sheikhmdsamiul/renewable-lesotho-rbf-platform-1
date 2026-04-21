@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import timedelta, timezone as dt_timezone
 from pathlib import Path
 import tempfile
 
@@ -742,7 +742,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
         decoded = csv_file.read().decode('utf-8-sig')
         reader = csv.DictReader(io.StringIO(decoded))
         rows_created = []
-        timeseries_payload = []
+        csv_output_power_by_reading_id = {}
         upload_time = timezone.now()
         invalid_rows = []
         anomaly_counts = {'zero_uptime': 0, 'no_data': 0, 'output_deviation': 0}
@@ -753,11 +753,19 @@ class ProjectViewSet(viewsets.ModelViewSet):
             if not meter_id:
                 errors.append('meter_id is required.')
             installation_id = str(row.get('installation_id') or '').strip()
-            installation = InstallationReport.objects.filter(
-                id=installation_id,
-                project=project,
-                vendor=request.user,
-            ).first() if installation_id else InstallationReport.objects.filter(project=project, vendor=request.user, meter_id=meter_id).first()
+            installation_lookup = InstallationReport.objects.filter(project=project, vendor=request.user)
+            installation = None
+            if installation_id:
+                if installation_id.isdigit():
+                    installation = installation_lookup.filter(id=int(installation_id)).first()
+                else:
+                    installation = installation_lookup.filter(
+                        Q(meter_id=installation_id)
+                        | Q(serial_number=installation_id)
+                        | Q(beneficiary_id=installation_id)
+                    ).first()
+            if installation is None and meter_id:
+                installation = installation_lookup.filter(meter_id=meter_id).first()
             if installation is None:
                 errors.append('meter_id or installation_id must match an installation for this vendor and project.')
             try:
@@ -774,30 +782,41 @@ class ProjectViewSet(viewsets.ModelViewSet):
                 uptime_pct = 0.0
             if uptime_pct < 0 or uptime_pct > 100:
                 errors.append('uptime_pct must be a number between 0 and 100.')
-            latitude_raw = row.get('latitude')
-            longitude_raw = row.get('longitude')
-            try:
-                latitude = float(latitude_raw)
-                if latitude < -90 or latitude > 90:
-                    raise ValueError
-            except (TypeError, ValueError):
-                errors.append('latitude must be a decimal between -90 and 90.')
-                latitude = None
-            try:
-                longitude = float(longitude_raw)
-                if longitude < -180 or longitude > 180:
-                    raise ValueError
-            except (TypeError, ValueError):
-                errors.append('longitude must be a decimal between -180 and 180.')
-                longitude = None
+            output_power_raw = row.get('output_power_w')
+            output_power_w = None
+            if output_power_raw not in (None, ''):
+                try:
+                    output_power_w = float(output_power_raw)
+                except (TypeError, ValueError):
+                    errors.append('output_power_w must be a number when provided.')
+            latitude_raw = str(row.get('latitude') or '').strip()
+            longitude_raw = str(row.get('longitude') or '').strip()
+            latitude = None
+            longitude = None
+            if latitude_raw:
+                try:
+                    latitude = float(latitude_raw)
+                    if latitude < -90 or latitude > 90:
+                        raise ValueError
+                except (TypeError, ValueError):
+                    errors.append('latitude must be a decimal between -90 and 90 when provided.')
+                    latitude = None
+            if longitude_raw:
+                try:
+                    longitude = float(longitude_raw)
+                    if longitude < -180 or longitude > 180:
+                        raise ValueError
+                except (TypeError, ValueError):
+                    errors.append('longitude must be a decimal between -180 and 180 when provided.')
+                    longitude = None
             recorded_at_raw = str(row.get('reading_datetime') or row.get('recorded_at') or '').strip()
             try:
                 recorded_at = timezone.datetime.fromisoformat(recorded_at_raw.replace('Z', '+00:00')) if recorded_at_raw else None
             except ValueError:
-                errors.append('reading_datetime must be a valid ISO 8601 datetime.')
+                errors.append('reading_datetime/recorded_at must be a valid ISO 8601 datetime.')
                 recorded_at = None
             if recorded_at is None:
-                errors.append('reading_datetime is required.')
+                errors.append('reading_datetime or recorded_at is required.')
             elif timezone.is_naive(recorded_at):
                 recorded_at = timezone.make_aware(recorded_at, timezone.get_current_timezone())
             if errors:
@@ -818,18 +837,9 @@ class ProjectViewSet(viewsets.ModelViewSet):
                 recorded_at=recorded_at,
             )
             rows_created.append(reading)
-            timeseries_payload.append({
-                'external_id': f'meter_{project.id}_{reading.id}',
-                'installation_id': str(installation.id) if installation else '',
-                'meter_id': meter_id,
-                'recorded_at': recorded_at.isoformat(),
-                'kwh_generated': kwh_value,
-                'output_energy_interval_wh': round(kwh_value * 1000, 2),
-                'uptime_pct': uptime_pct,
-                'project_id': str(project.id),
-                'reporting_phase': f'PRJ-{project.id}',
-                'country': 'LS',
-            })
+            if output_power_w is not None:
+                csv_output_power_by_reading_id[reading.id] = output_power_w
+            # Timeseries payload will be built after all readings are processed
             if installation and uptime_pct == 0:
                 create_or_refresh_anomaly(
                     installation=installation,
@@ -920,6 +930,42 @@ class ProjectViewSet(viewsets.ModelViewSet):
                 'anomaly_counts': anomaly_counts,
             },
         )
+        # Build timeseries payload with cumulative data
+        timeseries_payload = {'data': []}
+        if rows_created:
+            new_reading_ids = {reading.id for reading in rows_created}
+            meter_ids = {reading.meter_id for reading in rows_created}
+            cumulative_wh_by_id = {}
+            running_wh_by_meter = {}
+            readings_for_payload = SmartMeterReading.objects.filter(
+                project=project,
+                meter_id__in=meter_ids,
+            ).select_related('installation').order_by('meter_id', 'recorded_at', 'id')
+
+            for reading in readings_for_payload:
+                running_wh_by_meter.setdefault(reading.meter_id, 0.0)
+                running_wh_by_meter[reading.meter_id] += float(reading.kwh) * 1000
+                if reading.id in new_reading_ids:
+                    cumulative_wh_by_id[reading.id] = round(running_wh_by_meter[reading.meter_id], 2)
+
+            for reading in sorted(rows_created, key=lambda item: (item.meter_id, item.recorded_at, item.id)):
+                project_setup = getattr(
+                    reading.installation.project if reading.installation else project,
+                    'project_setup',
+                    None,
+                )
+                manufacturer = getattr(project_setup, 'device_brand', '') if project_setup else ''
+                metered_at = reading.recorded_at.astimezone(dt_timezone.utc).isoformat(timespec='milliseconds')
+                timeseries_payload['data'].append({
+                    'metered_at': metered_at,
+                    'interval_seconds': 3600,
+                    'serial_number': reading.meter_id,
+                    'manufacturer': manufacturer,
+                    'output_energy_interval_wh': round(float(reading.kwh) * 1000, 2),
+                    'output_energy_cumulative_wh': cumulative_wh_by_id.get(reading.id, round(float(reading.kwh) * 1000, 2)),
+                    'output_power_w': csv_output_power_by_reading_id.get(reading.id),
+                })
+
         SyncToProspectJob.dispatch_async(
             'pushInstallationTimeSeries',
             timeseries_payload,

@@ -12353,7 +12353,7 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
   const downloadMeterCsvTemplate = () => {
     triggerDownload(
       "meter_data_template.csv",
-      "meter_id,installation_id,recorded_at,kwh_generated,uptime_pct\nMETER-001,,2026-04-01T08:00:00Z,12.5,98.7\n",
+      "meter_id,installation_id,recorded_at,kwh_generated,uptime_pct,output_power_w\nMETER-001,INS-001,2026-04-01T08:00:00Z,12.5,98.7,\n",
       "text/csv;charset=utf-8"
     );
   };

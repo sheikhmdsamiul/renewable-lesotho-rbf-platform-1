@@ -15,6 +15,7 @@ from .views import (
     OrganizationViewSet,
     PlatformConfigurationView,
     PlatformConfigurationBoundaryRefreshView,
+    PlatformConfigurationBoundaryUploadView,
     SystemHealthView,
     SuperAdminDashboardView,
 )
@@ -37,6 +38,7 @@ urlpatterns = [
     path('admin/dashboard/', SuperAdminDashboardView.as_view(), name='super_admin_dashboard'),
     path('platform-configuration/', PlatformConfigurationView.as_view(), name='platform_configuration'),
     path('platform-configuration/refresh-boundary/', PlatformConfigurationBoundaryRefreshView.as_view(), name='platform_configuration_refresh_boundary'),
+    path('platform-configuration/upload-boundary/', PlatformConfigurationBoundaryUploadView.as_view(), name='platform_configuration_upload_boundary'),
     path('system-health/', SystemHealthView.as_view(), name='system_health'),
 ]
 urlpatterns += router.urls

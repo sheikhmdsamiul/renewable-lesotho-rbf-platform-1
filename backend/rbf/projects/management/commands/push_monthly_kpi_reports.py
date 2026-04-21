@@ -17,11 +17,11 @@ class Command(BaseCommand):
             KpiService.for_project(str(project.id)).getFullKpiSummary()
             SyncToProspectJob.dispatch_async(
                 'pushReport',
-                {
+                {'data': [{
                     'external_id': f'report_{project.id}_{month_key}',
                     'country': 'LS',
                     'reporting_phase': f'PRJ-{project.id}',
-                },
+                }]},
             )
             queued += 1
         self.stdout.write(self.style.SUCCESS(f'Queued monthly KPI Prospect reports for {queued} project(s).'))
