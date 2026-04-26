@@ -49,7 +49,10 @@ import {
   Database,
   Upload,
   MapPin,
-  Trash2
+  Trash2,
+  Building2,
+  Gavel,
+  FolderKanban
 } from "lucide-react";
 import { 
   LineChart, 
@@ -98,6 +101,8 @@ import {
   VerificationTask,
   DisbursementSheet,
   VendorBankDetails,
+  VendorProfile,
+  VendorDirectoryEntry,
 } from "./types";
 import { MOCK_TENDERS, MOCK_NOTIFICATIONS } from "./constants";
 import {
@@ -124,6 +129,7 @@ import {
   updateAdminManagedUser,
   deactivateAdminManagedUser,
   fetchVendorPrequalifications,
+  fetchVendorDirectory,
   fetchBlacklistCases,
   fetchBlacklistAppeals,
   submitVendorPrequalification,
@@ -139,12 +145,14 @@ import {
   submitBlacklistAppeal,
   reviewBlacklistAppeal,
   fetchPaymentClaims,
+  fetchMyProfile,
   submitPaymentClaim,
   verifyPaymentClaim,
   approvePaymentClaim,
   confirmPaymentClaim,
   flagProjectIssue,
   fetchProjects,
+  createProjectUpdate,
   triggerProjectProspectSync,
   fetchMilestones,
   createMilestone,
@@ -180,9 +188,11 @@ import {
   fetchProjectKpiSummary,
   fetchDisbursementSheet,
   fetchVendorBankDetailsWithAccess,
+  fetchVendorProfile,
   fetchAuditLogs,
   fetchSmartMeterReadings,
   fetchAnomalyFlags,
+  resolveAnomalyFlag,
   fetchProspectSyncLogs,
   refreshProspectSyncPanel,
   requestProjectSetupChange,
@@ -4136,6 +4146,7 @@ const Monitoring = () => {
 
 const PreQualification = () => {
   const [selectedVendor, setSelectedVendor] = useState<VendorPrequalification | null>(null);
+  const [vendorTab, setVendorTab] = useState<"profile" | "documents">("profile");
   const [vendors, setVendors] = useState<VendorPrequalification[]>([]);
   const [notification, setNotification] = useState<string | null>(null);
   const [reviewerComments, setReviewerComments] = useState("");
@@ -8646,6 +8657,7 @@ const VendorDashboard = ({
   onBidOpened,
   initialSection,
   showOnlyContracting,
+  onViewProfile,
 }: {
   currentUser?: User | null;
   onGoToPrequal?: () => void;
@@ -8654,6 +8666,7 @@ const VendorDashboard = ({
   onBidOpened?: () => void;
   initialSection?: "contracting" | null;
   showOnlyContracting?: boolean;
+  onViewProfile?: () => void;
 }) => {
   const [view, setView] = useState<"dashboard" | "new-application" | "new-claim" | "details" | "bid">("dashboard");
   const [isPreQualified, setIsPreQualified] = useState(false);
@@ -11377,8 +11390,848 @@ const VendorDashboard = ({
   );
 };
 
-const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
+type VendorProfileTab = "company" | "documents" | "bids" | "projects" | "performance" | "payments" | "audit";
+
+interface VendorProfileViewProps {
+  vendorId?: string;
+  viewerRole: string;
+  onClose?: () => void;
+  embedded?: boolean;
+  useOwnProfile?: boolean;
+}
+
+const formatVendorMoney = (value?: number | null) => `LSL ${Number(value ?? 0).toLocaleString()}`;
+  const formatCurrency = (value?: number | null) => `LSL ${Number(value ?? 0).toLocaleString()}`;
+
+const VendorProfileView = ({ vendorId, viewerRole, onClose, embedded = false, useOwnProfile = false }: VendorProfileViewProps) => {
+  const [activeTab, setActiveTab] = useState<VendorProfileTab>("company");
+  const [profile, setProfile] = useState<VendorProfile | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const isVendor = viewerRole === UserRole.VENDOR;
+  const isRmt = viewerRole === UserRole.RBF_OFFICIAL;
+  const isTac = viewerRole === UserRole.TAC;
+  const isPsc = viewerRole === UserRole.UNDP_DONOR;
+  const isDoe = viewerRole === UserRole.DOE_OFFICER;
+  const isAuditor = viewerRole === UserRole.AUDITOR;
+  const isAdmin = viewerRole === UserRole.ADMIN;
+
+  const canViewCompany = isVendor || isRmt || isTac || isPsc || isDoe || isAuditor || isAdmin;
+  const canViewDocuments = canViewCompany;
+  const canViewBids = isVendor || isRmt || isTac || isAuditor || isAdmin;
+  const canViewProjects = isVendor || isRmt || isTac || isPsc || isDoe || isAuditor || isAdmin;
+  const canViewPerformance = isVendor || isRmt || isTac || isDoe || isAuditor || isAdmin;
+  const canViewPayments = isVendor || isRmt || isPsc || isAuditor || isAdmin;
+  const canViewAudit = (isVendor && useOwnProfile) || isRmt || isAuditor || isAdmin;
+  const canViewFinancialDetails = isVendor || isRmt || isPsc || isAuditor || isAdmin;
+  const canEditProfile = isVendor && useOwnProfile;
+
+  const maskAccountNumber = (num?: string) => {
+    if (!num) return "N/A";
+    if (isVendor && useOwnProfile) return num;
+    const last4 = num.slice(-4);
+    return `**** ${last4}`;
+  };
+
+  const visibleTabs = [
+    { key: "company", label: "Company Profile", icon: Building2, show: canViewCompany },
+    { key: "documents", label: "Documents", icon: FileText, show: canViewDocuments },
+    { key: "bids", label: "Bids & Tenders", icon: Gavel, show: canViewBids },
+    { key: "projects", label: "Projects", icon: FolderKanban, show: canViewProjects },
+    { key: "performance", label: "Performance", icon: TrendingUp, show: canViewPerformance },
+    { key: "payments", label: "Payments", icon: CreditCard, show: canViewPayments },
+    { key: "audit", label: "Audit Trail", icon: History, show: canViewAudit },
+  ].filter((tab) => tab.show);
+
+  React.useEffect(() => {
+    const loadProfile = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const data = useOwnProfile ? await fetchMyProfile() : await fetchVendorProfile(String(vendorId ?? ""));
+        setProfile(data);
+      } catch (err: any) {
+        console.error("Failed to load vendor profile:", err);
+        setError(String(err?.message || "Unable to load vendor profile."));
+        setProfile(null);
+      } finally {
+        setLoading(false);
+      }
+    };
+    loadProfile();
+  }, [vendorId, useOwnProfile]);
+
+  React.useEffect(() => {
+    if (!visibleTabs.some((tab) => tab.key === activeTab)) {
+      setActiveTab((visibleTabs[0]?.key as VendorProfileTab) || "company");
+    }
+  }, [activeTab, visibleTabs]);
+
+  const evaluationGroups = React.useMemo(() => {
+    const bids = profile?.bids_data?.bids ?? [];
+    const evaluations = profile?.bids_data?.evaluations ?? [];
+    const bidById = new Map<string, TenderBid>(bids.map((bid) => [String(bid.id), bid] as const));
+
+    const grouped = new Map<string, {
+      key: string;
+      tenderLabel: string;
+      tenderReference?: string;
+      bidId?: string;
+      stageLabel?: string;
+      evaluations: TenderBidEvaluation[];
+    }>();
+
+    evaluations.forEach((evaluation) => {
+      const bid = bidById.get(String(evaluation.bid));
+      const tenderId = String(bid?.tender || "");
+      const stageLabel = bid?.stage_badge || bid?.stage || "N/A";
+      const tenderLabel = bid?.tender_name || bid?.tender_reference || tenderId || `Bid ${evaluation.bid}`;
+      const tenderReference = bid?.tender_reference;
+      const groupKey = tenderId || `bid-${evaluation.bid}`;
+      const existing = grouped.get(groupKey);
+
+      if (existing) {
+        existing.evaluations.push(evaluation);
+        return;
+      }
+
+      grouped.set(groupKey, {
+        key: groupKey,
+        tenderLabel,
+        tenderReference,
+        bidId: bid?.id || evaluation.bid,
+        stageLabel,
+        evaluations: [evaluation],
+      });
+    });
+
+    return Array.from(grouped.values()).sort((left, right) => {
+      const leftDate = left.evaluations[0]?.createdAt ? new Date(left.evaluations[0].createdAt).getTime() : 0;
+      const rightDate = right.evaluations[0]?.createdAt ? new Date(right.evaluations[0].createdAt).getTime() : 0;
+      return rightDate - leftDate;
+    });
+  }, [profile?.bids_data]);
+
+  const renderTabContent = () => {
+    if (loading) return <div className="p-8 text-center text-slate-500">Loading vendor profile...</div>;
+    if (error) return <div className="p-8 text-center text-rose-600">{error}</div>;
+    if (!profile) return <div className="p-8 text-center text-slate-500">Profile not found.</div>;
+
+    const bidsData = profile.bids_data;
+    const projectsData = profile.projects_data;
+    const performanceData = profile.performance_data;
+    const paymentsData = profile.payments_data;
+    const auditTrail = profile.audit_trail;
+    const documents = profile.documents;
+    const projects = projectsData?.projects ?? [];
+    const activeProjects = projects.filter((project) => String(project.status).toLowerCase() !== "completed");
+    const completedProjects = projects.filter((project) => String(project.status).toLowerCase() === "completed");
+    const metricTone = (status?: string) =>
+      status === "Met" ? "text-emerald-600" : "text-amber-600";
+
+    switch (activeTab) {
+      case "company":
+        if (!canViewCompany) return <div className="p-8 text-center text-slate-500">Access denied</div>;
+        return (
+          <div className="space-y-6">
+            <div className="card p-4">
+              <h4 className="font-bold text-slate-900 border-b pb-2 mb-3">Contact Information</h4>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+                <div className="flex justify-between"><span className="text-slate-500">Company Name</span><span className="font-medium">{profile?.organization_name || "N/A"}</span></div>
+                <div className="flex justify-between"><span className="text-slate-500">Organization Type</span><span className="font-medium">{profile?.organization_type || "N/A"}</span></div>
+                <div className="flex justify-between"><span className="text-slate-500">Registration Number</span><span className="font-medium">{profile?.registration_certificate_name || "N/A"}</span></div>
+                <div className="flex justify-between"><span className="text-slate-500">Tax ID / VAT</span><span className="font-medium">{profile?.tax_id || "N/A"}</span></div>
+                <div className="flex justify-between"><span className="text-slate-500">Email Address</span><span className="font-medium">{profile?.email || "N/A"}</span></div>
+                <div className="flex justify-between"><span className="text-slate-500">Contact Number</span><span className="font-medium">{profile?.mobile_number || "N/A"}</span></div>
+                <div className="flex justify-between md:col-span-2"><span className="text-slate-500">Physical Address</span><span className="font-medium">{profile?.address || "N/A"}</span></div>
+                <div className="flex justify-between"><span className="text-slate-500">Primary District</span><span className="font-medium">{profile?.region || "N/A"}</span></div>
+              </div>
+            </div>
+            <div className="card p-4">
+              <h4 className="font-bold text-slate-900 border-b pb-2 mb-3">Focal Person</h4>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+                <div className="flex justify-between"><span className="text-slate-500">Full Name</span><span className="font-medium">{profile?.full_name || "N/A"}</span></div>
+                <div className="flex justify-between"><span className="text-slate-500">Gender</span><span className="font-medium">{profile?.gender || "N/A"}</span></div>
+                <div className="flex justify-between"><span className="text-slate-500">Role</span><span className="font-medium">{profile?.role || "N/A"}</span></div>
+                <div className="flex justify-between"><span className="text-slate-500">National ID</span><span className="font-medium">{profile?.national_id ? `***${profile.national_id.slice(-4)}` : "N/A"}</span></div>
+              </div>
+            </div>
+            {canViewFinancialDetails && (
+              <div className="card p-4">
+                <h4 className="font-bold text-slate-900 border-b pb-2 mb-3">Bank Details</h4>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+                  <div className="flex justify-between"><span className="text-slate-500">Bank Name</span><span className="font-medium">{profile?.bank_name || profile?.prequalification?.bank_name || "N/A"}</span></div>
+                  <div className="flex justify-between"><span className="text-slate-500">Branch</span><span className="font-medium">{profile?.bank_branch || profile?.prequalification?.bank_branch || "N/A"}</span></div>
+                  <div className="flex justify-between"><span className="text-slate-500">Account Name</span><span className="font-medium">{profile?.bank_account_name || profile?.prequalification?.bank_account_name || "N/A"}</span></div>
+                  <div className="flex justify-between"><span className="text-slate-500">Account Number</span><span className="font-medium">{maskAccountNumber(profile?.bank_account_number || profile?.prequalification?.bank_account_number)}</span></div>
+                  <div className="flex justify-between"><span className="text-slate-500">SWIFT Code</span><span className="font-medium">{profile?.bank_swift_code || profile?.prequalification?.bank_swift_code || "N/A"}</span></div>
+                  <div className="flex justify-between"><span className="text-slate-500">Sort Code</span><span className="font-medium">{profile?.bank_sort_code || profile?.prequalification?.bank_sort_code || "N/A"}</span></div>
+                </div>
+              </div>
+            )}
+            <div className="card p-4">
+              <h4 className="font-bold text-slate-900 border-b pb-2 mb-3">Technical Capacity</h4>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+                <div className="flex justify-between"><span className="text-slate-500">Technology Types</span><span className="font-medium">{(profile?.technology_types || []).join(", ") || "N/A"}</span></div>
+                <div className="flex justify-between"><span className="text-slate-500">Technology Tier</span><span className="font-medium">{profile?.tier_assignment || profile?.prequalification?.tech_tier || "N/A"}</span></div>
+                <div className="flex justify-between"><span className="text-slate-500">Years of Experience</span><span className="font-medium">{profile?.prequalification?.years_experience || 0} years</span></div>
+                <div className="flex justify-between"><span className="text-slate-500">Prior Projects</span><span className="font-medium">{profile?.prequalification?.prior_projects || 0} completed</span></div>
+                <div className="flex justify-between"><span className="text-slate-500">Annual Revenue</span><span className="font-medium">LSL {profile?.prequalification?.annual_revenue?.toLocaleString() || "0"}</span></div>
+                <div className="flex justify-between"><span className="text-slate-500">Districts Covered</span><span className="font-medium">{profile?.prequalification?.districts_covered || 0} districts</span></div>
+              </div>
+            </div>
+            <div className="card p-4">
+              <h4 className="font-bold text-slate-900 border-b pb-2 mb-3">Inclusion Commitments</h4>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className={`p-4 rounded-lg text-center ${(profile?.prequalification?.female_beneficiary_target || 50) >= 50 ? 'bg-emerald-50' : 'bg-red-50'}`}>
+                  <p className="text-xs text-slate-600">Female HH Commitment</p>
+                  <p className={`text-2xl font-bold ${(profile?.prequalification?.female_beneficiary_target || 50) >= 50 ? 'text-emerald-600' : 'text-red-600'}`}>
+                    {profile?.prequalification?.female_beneficiary_target || 50}%
+                  </p>
+                  <p className="text-xs text-slate-500">min: 50%</p>
+                </div>
+                <div className={`p-4 rounded-lg text-center ${(profile?.prequalification?.vulnerable_group_target || 30) >= 30 ? 'bg-emerald-50' : 'bg-red-50'}`}>
+                  <p className="text-xs text-slate-600">Vulnerable Group</p>
+                  <p className={`text-2xl font-bold ${(profile?.prequalification?.vulnerable_group_target || 30) >= 30 ? 'text-emerald-600' : 'text-red-600'}`}>
+                    {profile?.prequalification?.vulnerable_group_target || 30}%
+                  </p>
+                  <p className="text-xs text-slate-500">min: 30%</p>
+                </div>
+                <div className={`p-4 rounded-lg text-center bg-emerald-50`}>
+                  <p className="text-xs text-slate-600">Low-income HH</p>
+                  <p className="text-2xl font-bold text-emerald-600">60%</p>
+                  <p className="text-xs text-slate-500">min: 60%</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+
+      case "documents":
+        if (!canViewDocuments) return <div className="p-8 text-center text-slate-500">Access denied</div>;
+        return (
+          <div className="space-y-6">
+            <div className="card p-4">
+              <h4 className="font-bold text-slate-900 border-b pb-2 mb-3">Pre-Qualification Documents</h4>
+              {(documents?.prequalification_documents ?? []).length === 0 ? (
+                <p className="text-slate-500 text-center py-4">No pre-qualification documents available.</p>
+              ) : (
+                <div className="space-y-2">
+                  {(documents?.prequalification_documents ?? []).map((doc) => (
+                    <div key={`${doc.label}-${doc.url}`} className="flex items-center justify-between rounded-lg bg-slate-50 p-3">
+                      <div>
+                        <p className="font-medium text-slate-900">{doc.label}</p>
+                        <p className="text-xs text-slate-500">{doc.uploaded_at ? new Date(doc.uploaded_at).toLocaleString() : "Uploaded"}</p>
+                      </div>
+                      <div className="flex gap-3">
+                        <a href={doc.url} target="_blank" rel="noreferrer" className="text-emerald-600 hover:underline text-sm">View</a>
+                        <a href={doc.url} download target="_blank" rel="noreferrer" className="text-slate-600 hover:underline text-sm">Download</a>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="card p-4">
+              <h4 className="font-bold text-slate-900 border-b pb-2 mb-3">Project Documents</h4>
+              {(documents?.project_documents ?? []).length === 0 ? (
+                <p className="text-slate-500 text-center py-4">No project documents uploaded yet.</p>
+              ) : (
+                <div className="space-y-2">
+                  {(documents?.project_documents ?? []).map((doc) => (
+                    <div key={doc.id} className="flex items-center justify-between rounded-lg bg-slate-50 p-3">
+                      <div>
+                        <p className="font-medium text-slate-900">{doc.title}</p>
+                        <p className="text-xs text-slate-500">{doc.project_reference || doc.project_id}{doc.uploaded_by ? ` | ${doc.uploaded_by}` : ""}</p>
+                      </div>
+                      <a href={doc.url} target="_blank" rel="noreferrer" className="text-emerald-600 hover:underline text-sm">Open</a>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="card p-4">
+              <h4 className="font-bold text-slate-900 border-b pb-2 mb-3">Contract Documents</h4>
+              {(documents?.contract_documents ?? []).length === 0 ? (
+                <p className="text-slate-500 text-center py-4">No contract files available yet.</p>
+              ) : (
+                <div className="space-y-2">
+                  {(documents?.contract_documents ?? []).map((doc) => (
+                    <div key={`${doc.contract_id}-${doc.title}`} className="flex items-center justify-between rounded-lg bg-slate-50 p-3">
+                      <div>
+                        <p className="font-medium text-slate-900">{doc.title}</p>
+                        <p className="text-xs text-slate-500">{doc.reference_number || doc.contract_id}</p>
+                      </div>
+                      <a href={doc.url} target="_blank" rel="noreferrer" className="text-emerald-600 hover:underline text-sm">Open</a>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        );
+
+      case "bids":
+        if (!canViewBids) return <div className="p-8 text-center text-slate-500">Access denied</div>;
+        return (
+          <div className="space-y-6">
+            <div className="grid grid-cols-2 gap-4 md:grid-cols-5">
+              <div className="card p-4 text-center"><p className="text-2xl font-bold">{bidsData?.summary.total_bids ?? 0}</p><p className="text-xs text-slate-500">Total Bids</p></div>
+              <div className="card p-4 text-center"><p className="text-2xl font-bold text-emerald-600">{(bidsData?.summary.awarded ?? 0) + (bidsData?.summary.accepted ?? 0)}</p><p className="text-xs text-slate-500">Awarded / Accepted</p></div>
+              <div className="card p-4 text-center"><p className="text-2xl font-bold text-rose-600">{bidsData?.summary.rejected ?? 0}</p><p className="text-xs text-slate-500">Rejected</p></div>
+              <div className="card p-4 text-center"><p className="text-2xl font-bold text-amber-600">{bidsData?.summary.pending ?? 0}</p><p className="text-xs text-slate-500">Pending</p></div>
+              <div className="card p-4 text-center"><p className="text-2xl font-bold text-slate-900">{bidsData?.summary.win_rate_pct ?? 0}%</p><p className="text-xs text-slate-500">Win Rate</p></div>
+            </div>
+            <div className="card p-4">
+              <h4 className="font-bold text-slate-900 border-b pb-2 mb-3">Bid History</h4>
+              {(bidsData?.bids ?? []).length === 0 ? (
+                <div className="text-sm text-slate-500 text-center py-8">No bids submitted yet.</div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="bg-slate-50">
+                      <tr>
+                        <th className="text-left p-3">Bid ID</th>
+                        <th className="text-left p-3">Tender</th>
+                        <th className="text-left p-3">Stage</th>
+                        <th className="text-left p-3">Amount</th>
+                        <th className="text-left p-3">Status</th>
+                        <th className="text-left p-3">Submitted</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(bidsData?.bids ?? []).map((bid) => (
+                        <tr key={bid.id} className="border-t">
+                          <td className="p-3">{bid.id}</td>
+                          <td className="p-3">{bid.tender_name || bid.tender_reference || bid.tender}</td>
+                          <td className="p-3">{bid.stage_badge || bid.stage || "N/A"}</td>
+                          <td className="p-3">{formatCurrency(bid.bid_amount || 0)}</td>
+                          <td className="p-3">{bid.status}</td>
+                          <td className="p-3">{bid.submitted_at ? new Date(bid.submitted_at).toLocaleDateString() : "N/A"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+            <div className="card p-4">
+              <h4 className="font-bold text-slate-900 border-b pb-2 mb-3">Evaluations & Scores</h4>
+              {evaluationGroups.length === 0 ? (
+                <div className="text-sm text-slate-500 text-center py-8">No evaluation records yet.</div>
+              ) : (
+                <div className="space-y-4">
+                  {evaluationGroups.map((group) => (
+                    <div key={group.key} className="rounded-xl border border-slate-200 bg-white p-4">
+                      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 pb-3">
+                        <div>
+                          <p className="font-semibold text-slate-900">{group.tenderLabel}</p>
+                          <p className="text-xs text-slate-500">
+                            {group.tenderReference || group.bidId ? [group.tenderReference, group.bidId ? `Bid ${group.bidId}` : null, group.stageLabel].filter(Boolean).join(" | ") : group.stageLabel}
+                          </p>
+                        </div>
+                        <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700">
+                          {group.evaluations.length} score{group.evaluations.length === 1 ? "" : "s"}
+                        </span>
+                      </div>
+                      <div className="mt-3 space-y-2">
+                        {group.evaluations.map((evaluation) => (
+                          <div key={evaluation.id} className="rounded-lg bg-slate-50 p-3">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <p className="font-medium text-slate-900">{evaluation.evaluatorRole || "Reviewer"} | Total {evaluation.totalScore}</p>
+                              <p className="text-xs text-slate-500">{evaluation.createdAt ? new Date(evaluation.createdAt).toLocaleString() : ""}</p>
+                            </div>
+                            <p className="mt-1 text-xs text-slate-600">
+                              Technical {evaluation.technicalScore} | Financial {evaluation.financialScore} | Feasibility {evaluation.feasibilityScore} | KPI {evaluation.kpiScore}
+                            </p>
+                            {evaluation.comments && <p className="mt-2 text-sm text-slate-600">{evaluation.comments}</p>}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        );
+
+      case "projects":
+        if (!canViewProjects) return <div className="p-8 text-center text-slate-500">Access denied</div>;
+        return (
+          <div className="space-y-6">
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+              <div className="card p-4"><p className="text-[10px] font-bold uppercase text-slate-400">Active Projects</p><p className="text-2xl font-bold">{activeProjects.length}</p></div>
+              <div className="card p-4"><p className="text-[10px] font-bold uppercase text-slate-400">Contract Value</p><p className="text-2xl font-bold">{formatVendorMoney(profile.total_contract_value)}</p></div>
+              <div className="card p-4"><p className="text-[10px] font-bold uppercase text-slate-400">Completed</p><p className="text-2xl font-bold text-emerald-600">{completedProjects.length}</p></div>
+            </div>
+            <div className="card p-4">
+              <h4 className="font-bold text-slate-900 border-b pb-2 mb-3">Project Portfolio</h4>
+              {projects.length === 0 ? (
+                <div className="text-sm text-slate-500 text-center py-8">No projects assigned yet.</div>
+              ) : (
+                <div className="space-y-3">
+                  {projects.map((project) => (
+                    <div key={project.id} className="rounded-lg border border-slate-100 p-4">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <p className="font-medium text-slate-900">{project.projectReference || project.projectTitle || project.tenderName || project.id}</p>
+                          <p className="text-xs text-slate-500">{project.techType} | {project.district || project.region} | Progress {project.progress}%</p>
+                        </div>
+                        <span className="badge bg-slate-100 text-slate-700">{project.status}</span>
+                      </div>
+                      <div className="mt-3 grid grid-cols-2 gap-3 text-xs text-slate-600 md:grid-cols-4">
+                        <div>Installations: {project.targetInstallations || 0}</div>
+                        <div>Claims: {project.claimCount || 0}</div>
+                        <div>Flags: {project.unresolvedFlagCount || 0}</div>
+                        <div>Contract: {formatVendorMoney(project.contractValue || project.budget || 0)}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+              <div className="card p-4">
+                <h4 className="font-bold text-slate-900 border-b pb-2 mb-3">Recent Updates</h4>
+                {(projectsData?.recent_updates ?? []).length === 0 ? (
+                  <p className="text-sm text-slate-500 text-center py-6">No project updates yet.</p>
+                ) : (
+                  <div className="space-y-3">
+                    {(projectsData?.recent_updates ?? []).map((update) => (
+                      <div key={update.id} className="rounded-lg bg-slate-50 p-3">
+                        <p className="font-medium text-slate-900">{update.title || update.project_reference || update.project_id}</p>
+                        <p className="mt-1 text-sm text-slate-600">{update.body}</p>
+                        <p className="mt-2 text-xs text-slate-500">{update.author_name || "System"} | {new Date(update.created_at).toLocaleString()}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div className="card p-4">
+                <h4 className="font-bold text-slate-900 border-b pb-2 mb-3">Recent Documents</h4>
+                {(projectsData?.recent_documents ?? []).length === 0 ? (
+                  <p className="text-sm text-slate-500 text-center py-6">No project documents yet.</p>
+                ) : (
+                  <div className="space-y-3">
+                    {(projectsData?.recent_documents ?? []).map((document) => (
+                      <div key={document.id} className="flex items-center justify-between rounded-lg bg-slate-50 p-3">
+                        <div>
+                          <p className="font-medium text-slate-900">{document.title}</p>
+                          <p className="text-xs text-slate-500">{document.project_reference || document.project_id}</p>
+                        </div>
+                        <a href={document.url} target="_blank" rel="noreferrer" className="text-emerald-600 hover:underline text-sm">Open</a>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+
+      case "performance":
+        if (!canViewPerformance) return <div className="p-8 text-center text-slate-500">Access denied</div>;
+        return (
+          <div className="space-y-6">
+            <div className="card p-4">
+              <h4 className="font-bold text-slate-900 border-b pb-2 mb-3">Overall KPI Record</h4>
+              {(performanceData?.kpi_rows ?? []).length === 0 ? (
+                <p className="text-sm text-slate-500 text-center py-6">No KPI records available yet.</p>
+              ) : (
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+                  {(performanceData?.kpi_rows ?? []).map((row) => (
+                    <div key={row.label} className="rounded-lg bg-slate-50 p-4">
+                      <p className="text-xs text-slate-500">{row.label}</p>
+                      <p className={`mt-1 text-2xl font-bold ${metricTone(row.status)}`}>{row.achieved}</p>
+                      <p className="text-xs text-slate-500">Target: {row.target}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="card p-4">
+              <h4 className="font-bold text-slate-900 border-b pb-2 mb-3">Installation Performance</h4>
+              <div className="grid grid-cols-1 gap-4 text-sm md:grid-cols-3">
+                <div className="flex justify-between"><span className="text-slate-500">Total Submitted</span><span className="font-medium">{performanceData?.installation_summary.submitted ?? 0}</span></div>
+                <div className="flex justify-between"><span className="text-slate-500">Total Verified</span><span className="font-medium">{performanceData?.installation_summary.verified ?? 0}</span></div>
+                <div className="flex justify-between"><span className="text-slate-500">Total Flagged</span><span className="font-medium">{performanceData?.installation_summary.flagged ?? 0}</span></div>
+                <div className="flex justify-between"><span className="text-slate-500">Paused</span><span className="font-medium">{performanceData?.installation_summary.paused ?? 0}</span></div>
+                <div className="flex justify-between"><span className="text-slate-500">Terminated</span><span className="font-medium">{performanceData?.installation_summary.terminated ?? 0}</span></div>
+                <div className="flex justify-between"><span className="text-slate-500">Verification Rate</span><span className="font-medium">{performanceData?.installation_summary.verification_rate_pct ?? 0}%</span></div>
+              </div>
+            </div>
+            <div className="card p-4">
+              <h4 className="font-bold text-slate-900 border-b pb-2 mb-3">Anomaly History</h4>
+              {(performanceData?.anomaly_summary.by_type ?? []).length === 0 ? (
+                <div className="text-sm text-slate-500 text-center py-4">No anomaly records found.</div>
+              ) : (
+                <div className="space-y-2">
+                  {(performanceData?.anomaly_summary.by_type ?? []).map((item) => (
+                    <div key={item.flag_type} className="flex items-center justify-between rounded-lg bg-slate-50 p-3 text-sm">
+                      <span className="font-medium text-slate-900">{item.flag_type}</span>
+                      <span className="text-slate-600">{item.count} total | {item.unresolved} open</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="card p-4">
+              <h4 className="font-bold text-slate-900 border-b pb-2 mb-3">Performance Notes</h4>
+              {(performanceData?.performance_notes ?? []).length === 0 ? (
+                <div className="text-sm text-slate-500 text-center py-4">No performance notes available yet.</div>
+              ) : (
+                <div className="space-y-3">
+                  {(performanceData?.performance_notes ?? []).map((note) => (
+                    <div key={note.id} className="rounded-lg bg-slate-50 p-3">
+                      <p className="font-medium text-slate-900">{note.title || "Performance Note"}</p>
+                      <p className="mt-1 text-sm text-slate-600">{note.body}</p>
+                      <p className="mt-2 text-xs text-slate-500">{note.author_name || "System"}{note.author_role ? ` (${note.author_role})` : ""} | {new Date(note.created_at).toLocaleString()}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        );
+
+      case "payments":
+        if (!canViewPayments) return <div className="p-8 text-center text-slate-500">Access denied</div>;
+        return (
+          <div className="space-y-6">
+            <div className="card p-4">
+              <h4 className="font-bold text-slate-900 border-b pb-2 mb-3">Financial Summary</h4>
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                <div className="text-center"><p className="text-[10px] text-slate-400">Total Contract Value</p><p className="text-xl font-bold">{formatVendorMoney(paymentsData?.summary.total_contracted_value ?? profile.total_contract_value)}</p></div>
+                <div className="text-center"><p className="text-[10px] text-slate-400">Total Disbursed</p><p className="text-xl font-bold text-emerald-600">{formatVendorMoney(paymentsData?.summary.total_disbursed ?? 0)}</p></div>
+                <div className="text-center"><p className="text-[10px] text-slate-400">Total Pending</p><p className="text-xl font-bold text-amber-600">{formatVendorMoney(paymentsData?.summary.total_pending ?? 0)}</p></div>
+              </div>
+            </div>
+            <div className="card p-4">
+              <h4 className="font-bold text-slate-900 border-b pb-2 mb-3">Payment History</h4>
+              {(paymentsData?.claims ?? []).length === 0 ? (
+                <div className="text-sm text-slate-500 text-center py-8">No payment claims yet.</div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="bg-slate-50">
+                      <tr>
+                        <th className="text-left p-3">Claim ID</th>
+                        <th className="text-left p-3">Project</th>
+                        <th className="text-left p-3">Milestone</th>
+                        <th className="text-left p-3">Amount</th>
+                        <th className="text-left p-3">Status</th>
+                        <th className="text-left p-3">Submitted</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(paymentsData?.claims ?? []).map((claim) => (
+                        <tr key={claim.id} className="border-t">
+                          <td className="p-3">{claim.id}</td>
+                          <td className="p-3">{claim.projectId}</td>
+                          <td className="p-3">{claim.milestone_details?.name || claim.milestoneId || "N/A"}</td>
+                          <td className="p-3">{formatCurrency(claim.claimAmount || 0)}</td>
+                          <td className="p-3">{claim.status}</td>
+                          <td className="p-3">{claim.submittedAt ? new Date(claim.submittedAt).toLocaleDateString() : "N/A"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </div>
+        );
+
+      case "audit":
+        if (!canViewAudit) return <div className="p-8 text-center text-slate-500">Access denied</div>;
+        return (
+          <div className="space-y-6">
+            <div className="card p-4">
+              <h4 className="font-bold text-slate-900 border-b pb-2 mb-3">Activity Log</h4>
+              {(auditTrail?.entries ?? []).length === 0 ? (
+                <div className="text-sm text-slate-500 text-center py-8">{auditTrail?.limited ? "No activity recorded yet." : "No audit events recorded for this vendor."}</div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="bg-slate-50">
+                      <tr>
+                        <th className="text-left p-3">Timestamp</th>
+                        <th className="text-left p-3">Actor</th>
+                        <th className="text-left p-3">Action</th>
+                        <th className="text-left p-3">Module</th>
+                        {!auditTrail?.limited && <th className="text-left p-3">IP</th>}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(auditTrail?.entries ?? []).map((log) => (
+                        <tr key={log.id} className="border-t">
+                          <td className="p-3">{log.createdAt ? new Date(log.createdAt).toLocaleString() : "N/A"}</td>
+                          <td className="p-3">{log.actor || log.actorUsername || "System"}</td>
+                          <td className="p-3">{log.action}</td>
+                          <td className="p-3">{log.module || log.recordType || log.entityType}</td>
+                          {!auditTrail?.limited && <td className="p-3">{(log.details as any)?.ip_address || "N/A"}</td>}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </div>
+        );
+
+      default:
+        return null;
+    }
+  };
+
+  const content = (
+    <div className={`${embedded ? "card" : "bg-white rounded-2xl shadow-2xl"} w-full ${embedded ? "" : "max-w-6xl max-h-[95vh]"} overflow-hidden flex flex-col`}>
+      <div className="p-6 border-b">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h2 className="text-xl font-bold text-slate-900">{profile?.organization_name || profile?.full_name || "Vendor Profile"}</h2>
+            <p className="text-sm text-slate-500">
+              Vendor ID: {profile?.id ? `VND-${String(profile.id).padStart(5, '0')}` : "N/A"} | Status: <span className={profile?.status === 'Active' ? 'text-emerald-600' : 'text-amber-600'}>{profile?.status || "Active"}</span>
+              {profile?.last_login ? ` | Last login: ${new Date(profile.last_login).toLocaleString()}` : ""}
+            </p>
+          </div>
+          {!embedded && onClose && <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-lg"><X size={20}/></button>}
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+          <div className="card p-3">
+            <p className="text-[10px] font-bold text-slate-400 uppercase">Pre-Qualification</p>
+            <p className={`text-sm font-bold ${profile?.prequalification?.status === 'Approved' ? 'text-emerald-600' : 'text-amber-600'}`}>
+              {profile?.prequalification?.status === 'Approved' ? 'Approved' : profile?.prequalification?.status || "Pending"}
+            </p>
+          </div>
+          <div className="card p-3">
+            <p className="text-[10px] font-bold text-slate-400 uppercase">Blacklist Status</p>
+            <p className={`text-sm font-bold ${profile?.blacklist_status?.status === 'Clear' ? 'text-emerald-600' : 'text-rose-600'}`}>
+              {profile?.blacklist_status?.status === 'Clear' ? 'Clear' : profile?.blacklist_status?.status || "Clear"}
+            </p>
+          </div>
+          <div className="card p-3">
+            <p className="text-[10px] font-bold text-slate-400 uppercase">Account Status</p>
+            <p className={`text-sm font-bold ${profile?.status === 'Active' ? 'text-emerald-600' : 'text-amber-600'}`}>
+              {profile?.status || "Active"}
+            </p>
+          </div>
+          <div className="card p-3">
+            <p className="text-[10px] font-bold text-slate-400 uppercase">Tech Tier</p>
+            <p className="text-sm font-bold text-slate-900">
+              {profile?.tier_assignment || profile?.prequalification?.tech_tier || "N/A"}
+            </p>
+          </div>
+        </div>
+        <div className="mb-4 flex flex-wrap gap-2">
+          {(profile?.technology_types || []).map((tech) => (
+            <span key={tech} className="badge bg-emerald-50 text-emerald-700">{tech}</span>
+          ))}
+          {profile?.region && <span className="badge bg-slate-100 text-slate-700">{profile.region}</span>}
+        </div>
+        <div className="flex gap-1 overflow-x-auto">
+          {visibleTabs.map((tab) => (
+            <button
+              key={tab.key}
+              onClick={() => setActiveTab(tab.key as VendorProfileTab)}
+              className={`px-4 py-2 text-sm font-medium flex items-center gap-2 border-b-2 whitespace-nowrap ${activeTab === tab.key ? "border-emerald-500 text-emerald-600" : "border-transparent text-slate-500 hover:text-slate-700"}`}
+            >
+              <tab.icon size={16}/>{tab.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="flex-1 overflow-y-auto p-6">
+        {renderTabContent()}
+      </div>
+      {!embedded && onClose && (
+        <div className="p-4 border-t flex justify-end gap-3">
+          {canEditProfile && <button className="btn-primary">Edit Profile</button>}
+          <button onClick={onClose} className="btn-secondary">Close</button>
+        </div>
+      )}
+    </div>
+  );
+
+  if (embedded) {
+    return content;
+  }
+
+  return <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4">{content}</div>;
+};
+
+const VendorDirectory = ({
+  viewerRole,
+  onOpenProfile,
+}: {
+  viewerRole: UserRole;
+  onOpenProfile: (vendorId: string) => void;
+}) => {
+  const [vendors, setVendors] = useState<VendorDirectoryEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+
+  React.useEffect(() => {
+    const loadVendors = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        setVendors(await fetchVendorDirectory());
+      } catch (err: any) {
+        setError(String(err?.message || "Unable to load vendors."));
+      } finally {
+        setLoading(false);
+      }
+    };
+    loadVendors();
+  }, []);
+
+  const filteredVendors = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    if (!query) return vendors;
+    return vendors.filter((vendor) =>
+      [
+        vendor.organizationName,
+        vendor.fullName,
+        vendor.email,
+        vendor.username,
+        vendor.region,
+        vendor.vendorTag,
+        vendor.prequalificationStatus,
+      ]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(query))
+    );
+  }, [search, vendors]);
+
+  const title = viewerRole === UserRole.DOE_OFFICER ? "Regional Vendors" : "All Vendors";
+  const description =
+    viewerRole === UserRole.DOE_OFFICER
+      ? "Browse vendors assigned to your region and open their full profile."
+      : "Browse vendor organizations and open each profile with your role-based access.";
+  const columnHelpText =
+    "Operational Standing only shows the vendor lifecycle states: Active, Suspended, Blacklisted, or Reinstated.";
+
+  return (
+    <div className="space-y-6">
+      <div className="card p-6">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <h2 className="text-2xl font-bold text-slate-900">{title}</h2>
+            <p className="text-sm text-slate-500">{description}</p>
+          </div>
+          <div className="relative w-full lg:w-80">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="input-field pl-9"
+              placeholder="Search vendor, district, tag..."
+            />
+          </div>
+        </div>
+      </div>
+
+      <div className="rounded-2xl border border-slate-200 bg-slate-50 px-5 py-4 text-sm text-slate-600">
+        <span className="font-semibold text-slate-800">Column guide:</span> Vendor = company name and tag. District = primary assigned district/region. Technology Types = approved technology categories. Pre-Qualification Status = latest pre-qualification decision. Operational Standing = vendor lifecycle state only: Active, Suspended, Blacklisted, or Reinstated.
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+        <div className="card p-4"><p className="text-[10px] font-bold uppercase text-slate-400">Visible Vendors</p><p className="mt-1 text-2xl font-bold text-slate-900">{filteredVendors.length}</p></div>
+        <div className="card p-4"><p className="text-[10px] font-bold uppercase text-slate-400">Approved</p><p className="mt-1 text-2xl font-bold text-emerald-600">{filteredVendors.filter((vendor) => vendor.prequalificationStatus === "Approved").length}</p></div>
+        <div className="card p-4"><p className="text-[10px] font-bold uppercase text-slate-400">Blacklisted / Review</p><p className="mt-1 text-2xl font-bold text-rose-600">{filteredVendors.filter((vendor) => vendor.blacklistStatus && vendor.blacklistStatus !== "Clear").length}</p></div>
+      </div>
+
+      <div className="card overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="min-w-full text-sm">
+            <thead className="bg-slate-50 text-slate-500">
+              <tr>
+                <th className="px-4 py-3 text-left font-bold">Vendor</th>
+                <th className="px-4 py-3 text-left font-bold">District</th>
+                <th className="px-4 py-3 text-left font-bold">Technology Types</th>
+                <th className="px-4 py-3 text-left font-bold">Pre-Qualification Status</th>
+                <th className="px-4 py-3 text-left font-bold" title={columnHelpText}>Operational Standing</th>
+                <th className="px-4 py-3 text-left font-bold">Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {loading && (
+                <tr>
+                  <td colSpan={6} className="px-4 py-8 text-center text-slate-500">Loading vendors...</td>
+                </tr>
+              )}
+              {!loading && error && (
+                <tr>
+                  <td colSpan={6} className="px-4 py-8 text-center text-rose-600">{error}</td>
+                </tr>
+              )}
+              {!loading && !error && filteredVendors.length === 0 && (
+                <tr>
+                  <td colSpan={6} className="px-4 py-8 text-center text-slate-500">No vendors matched the current filter.</td>
+                </tr>
+              )}
+              {!loading && !error && filteredVendors.map((vendor) => (
+                <tr key={vendor.id} className="border-t border-slate-100">
+                  <td className="px-4 py-3">
+                    <button onClick={() => onOpenProfile(vendor.id)} className="text-left hover:text-emerald-600">
+                      <p className="font-bold text-slate-900">{vendor.organizationName || vendor.fullName}</p>
+                      <p className="text-xs text-slate-500">{vendor.vendorTag || vendor.username}</p>
+                    </button>
+                  </td>
+                  <td className="px-4 py-3 text-slate-600">{vendor.region || "N/A"}</td>
+                  <td className="px-4 py-3 text-slate-600">{vendor.technologyTypes.join(", ") || "N/A"}</td>
+                  <td className="px-4 py-3">
+                    <span className={`badge ${vendor.prequalificationStatus === "Approved" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
+                      {vendor.prequalificationStatus || "Pending"}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3">
+                    <span
+                      className={`badge ${
+                        vendor.operationalStanding === "Blacklisted"
+                          ? "bg-rose-50 text-rose-700"
+                          : vendor.operationalStanding === "Suspended"
+                          ? "bg-amber-50 text-amber-700"
+                          : vendor.operationalStanding === "Reinstated"
+                          ? "bg-blue-50 text-blue-700"
+                          : "bg-emerald-50 text-emerald-700"
+                      }`}
+                    >
+                      {vendor.operationalStanding}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3">
+                    <button onClick={() => onOpenProfile(vendor.id)} className="btn-secondary py-1.5 px-3 text-xs">
+                      View Profile
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+type ProjectsHubMode = "vendor" | "rbf" | "tac" | "doe" | "psc" | "undp" | "auditor";
+
+const ProjectsHub = ({ mode = "vendor" }: { mode?: ProjectsHubMode }) => {
+  const currentUser = getStoredUser();
   const isRbfPortal = mode === "rbf";
+  const isVendorPortal = mode === "vendor";
+  const isTacPortal = mode === "tac";
+  const isDoePortal = mode === "doe";
+  const isPscPortal = mode === "psc";
+  const isUndpPortal = mode === "undp";
+  const isAuditorPortal = mode === "auditor";
+  const isOfficialPortal = !isVendorPortal;
   const projectTabs = isRbfPortal
     ? ["overview", "kpi", "map", "milestones", "payments", "documents", "updates"] as const
     : ["overview", "planning", "map", "milestones", "fieldwork", "payments", "documents", "updates"] as const;
@@ -11401,6 +12254,8 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
   const [projectAuditLogs, setProjectAuditLogs] = useState<AuditLog[]>([]);
   const [projectAnomalyFlags, setProjectAnomalyFlags] = useState<AnomalyFlag[]>([]);
   const [smartMeterReadings, setSmartMeterReadings] = useState<SmartMeterReading[]>([]);
+  const [verificationTasks, setVerificationTasks] = useState<VerificationTask[]>([]);
+  const [projectProspectLogs, setProjectProspectLogs] = useState<ProspectSyncLog[]>([]);
   const [selectedProjectKpi, setSelectedProjectKpi] = useState<ProjectKpiSummary | null>(null);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState("");
@@ -11410,7 +12265,7 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
   const [windowFilter, setWindowFilter] = useState("All");
   const [dateRangeFilter, setDateRangeFilter] = useState("All");
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
-  const [projectTab, setProjectTab] = useState<"overview" | "kpi" | "map" | "milestones" | "planning" | "payments" | "documents" | "updates" | "fieldwork">("overview");
+  const [projectTab, setProjectTab] = useState<"overview" | "kpi" | "map" | "milestones" | "planning" | "payments" | "documents" | "updates" | "fieldwork" | "installations" | "verifications" | "anomaly_flags" | "prospect_sync" | "audit_trail" | "summary" | "milestone_payments" | "compliance">("overview");
   const [projectSetupDraft, setProjectSetupDraft] = useState(createEmptyProjectSetupDraft);
   const [planSaving, setPlanSaving] = useState(false);
   const [planMessage, setPlanMessage] = useState<string | null>(null);
@@ -11488,6 +12343,8 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
     if (!selectedProject) {
       setProjectDocuments([]);
       setInstallationReports([]);
+      setVerificationTasks([]);
+      setProjectProspectLogs([]);
       return;
     }
     setProjectSetupDraft(setupDraftFromProject(selectedProject));
@@ -11513,6 +12370,8 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
     setClaimMessage(null);
     setProspectSyncSubmitting(null);
     setProspectSyncMessage(null);
+    setVerificationTasks([]);
+    setProjectProspectLogs([]);
   }, [selectedProject]);
 
   React.useEffect(() => {
@@ -11520,13 +12379,15 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
     let active = true;
     (async () => {
       try {
-        const [docs, updates, audits, flags, readings, kpi] = await Promise.all([
+        const [docs, updates, audits, flags, readings, kpi, tasks, syncLogs] = await Promise.all([
           fetchProjectDocuments(selectedProject.id),
           fetchProjectUpdates(selectedProject.id),
           fetchAuditLogs(selectedProject.id),
           fetchAnomalyFlags(selectedProject.id),
           fetchSmartMeterReadings(selectedProject.id),
           fetchProjectKpiSummary(selectedProject.id),
+          fetchVerificationTasks(selectedProject.id),
+          (isRbfPortal || isAuditorPortal) ? fetchProspectSyncLogs({ pageSize: 200 }) : Promise.resolve([] as ProspectSyncLog[]),
         ]);
         if (active) {
           setProjectDocuments(docs);
@@ -11537,6 +12398,8 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
           setProjectAuditLogs(audits);
           setProjectAnomalyFlags(flags);
           setSmartMeterReadings(readings);
+          setVerificationTasks(tasks);
+          setProjectProspectLogs(syncLogs.filter((log) => String(log.recordId || "") === selectedProject.id));
           setSelectedProjectKpi(kpi);
         }
       } catch {
@@ -11545,6 +12408,8 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
           setProjectAuditLogs([]);
           setProjectAnomalyFlags([]);
           setSmartMeterReadings([]);
+          setVerificationTasks([]);
+          setProjectProspectLogs([]);
           setSelectedProjectKpi(null);
         }
       }
@@ -11633,6 +12498,32 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
   const verifiedInstallationsPct = totalInstallations > 0
     ? Math.round((totalVerifiedInstallations / totalInstallations) * 100)
     : 0;
+  const getPortfolioProjectStatus = (project: Project) => {
+    const unresolvedFlags = project.unresolvedFlagCount ?? anomalyFlagsForProject(project.id).filter(flag => !flag.isResolved).length;
+    if ([ProjectStatus.COMPLETED, "Completed"].includes(project.status as ProjectStatus | "Completed")) {
+      return { label: "Completed", badgeClass: "bg-emerald-100 text-emerald-700", rowClass: "bg-emerald-50/60" };
+    }
+    if (!isProjectSetupComplete(project) || project.status === ProjectStatus.SETUP_PENDING) {
+      return { label: "Setup", badgeClass: "bg-slate-200 text-slate-700", rowClass: "bg-slate-50" };
+    }
+    if (unresolvedFlags > 0) {
+      return { label: "Flagged", badgeClass: "bg-rose-100 text-rose-700", rowClass: "bg-rose-50/70" };
+    }
+    const kpi = currentProjectKpiSummary(project.id);
+    const atRisk = Boolean(kpi && (!kpi.installation_progress.on_track || !kpi.energy_kpi.on_track || !kpi.uptime_kpi.met));
+    if (atRisk) {
+      return { label: "At Risk", badgeClass: "bg-amber-100 text-amber-700", rowClass: "bg-amber-50/70" };
+    }
+    return { label: "Active", badgeClass: "bg-emerald-100 text-emerald-700", rowClass: "bg-white" };
+  };
+  const atRiskProjects = useMemo(
+    () => projects.filter(project => getPortfolioProjectStatus(project).label === "At Risk"),
+    [projects, selectedProjectKpi, projectAnomalyFlags]
+  );
+  const flaggedProjects = useMemo(
+    () => projects.filter(project => getPortfolioProjectStatus(project).label === "Flagged"),
+    [projects, projectAnomalyFlags]
+  );
   const matchesDateRange = (project: Project) => {
     if (dateRangeFilter === "All") return true;
     const baseDate = startDateForProject(project) || project.tenderAwardedAt || project.tenderDeadline;
@@ -11649,18 +12540,21 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
   };
   const filteredProjects = useMemo(() => {
     return projects.filter(project => {
-      const matchesSearch = !search || `${project.projectReference || ""} ${project.id} ${project.techType} ${project.region} ${project.vendorName}`.toLowerCase().includes(search.toLowerCase());
+      const statusMeta = getPortfolioProjectStatus(project);
+      const searchableVendorName = isUndpPortal ? "" : project.vendorName;
+      const matchesSearch = !search || `${project.projectReference || ""} ${project.id} ${project.techType} ${project.region} ${searchableVendorName}`.toLowerCase().includes(search.toLowerCase());
       const matchesTech = techFilter === "All" || project.techType === techFilter;
       const matchesDistrict = districtFilter === "All" || (project.district || project.region) === districtFilter;
       const matchesWindow = windowFilter === "All" || projectWindowLabel(project) === windowFilter;
       const matchesStatus =
         statusFilter === "All" ||
+        statusMeta.label === statusFilter ||
         (statusFilter === "Active" && activeProjects.some(p => p.id === project.id)) ||
         (statusFilter === "Completed" && completedProjects.some(p => p.id === project.id)) ||
         (statusFilter === "Pending" && pendingProjects.some(p => p.id === project.id));
       return matchesSearch && matchesTech && matchesDistrict && matchesWindow && matchesStatus && matchesDateRange(project);
     });
-  }, [projects, search, techFilter, districtFilter, windowFilter, dateRangeFilter, statusFilter, activeProjects, completedProjects, pendingProjects, tenderById]);
+  }, [projects, search, techFilter, districtFilter, windowFilter, dateRangeFilter, statusFilter, activeProjects, completedProjects, pendingProjects, tenderById, isUndpPortal, selectedProjectKpi, projectAnomalyFlags]);
 
   const milestonesForProject = (projectId: string) => milestones.filter(m => m.projectId === projectId);
   const claimsForProject = (projectId: string) => claims.filter(c => c.projectId === projectId);
@@ -11683,6 +12577,16 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
     .filter(r => r.projectId === projectId)
     .slice()
     .sort((a, b) => (b.submittedAt || "").localeCompare(a.submittedAt || ""));
+  const verificationTasksForProject = (projectId: string) =>
+    verificationTasks
+      .filter(task => reportsForProject(projectId).some(report => report.id === task.report))
+      .slice()
+      .sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""));
+  const prospectLogsForProject = (projectId: string) =>
+    projectProspectLogs
+      .filter(log => String(log.recordId || "") === String(projectId))
+      .slice()
+      .sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""));
   const handleStartClaim = (milestone: Milestone & { projectName?: string }) => {
     const parentProject = projects.find((project) => project.id === milestone.projectId);
     if (parentProject) {
@@ -11923,8 +12827,9 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
     }
     return { label: "Active", className: "bg-emerald-100 text-emerald-700" };
   };
-  const currentProjectKpiSummary = (projectId: string) =>
-    selectedProjectKpi && selectedProjectKpi.project.id === projectId ? selectedProjectKpi : null;
+  function currentProjectKpiSummary(projectId: string) {
+    return selectedProjectKpi && selectedProjectKpi.project.id === projectId ? selectedProjectKpi : null;
+  }
   const currentMilestoneEligibility = (projectId: string) => {
     const summary = currentProjectKpiSummary(projectId);
     if (!summary) return {};
@@ -12455,6 +13360,41 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
     }
   };
 
+  const handleAddProjectNote = async (project: Project, title: string, promptText: string) => {
+    const body = window.prompt(promptText);
+    if (!body || !body.trim()) return;
+    try {
+      await createProjectUpdate({
+        projectId: project.id,
+        title,
+        body: body.trim(),
+      });
+      await refreshProjectUpdates(project.id);
+      alert("Project note added.");
+    } catch (err: any) {
+      const raw = String(err?.message || "");
+      alert(toFriendlyApiMessage(raw) || "Unable to save the note.");
+    }
+  };
+
+  const handleResolveProjectFlag = async (projectId: string, flagId: string) => {
+    try {
+      await resolveAnomalyFlag(flagId);
+      const [flags, audits, kpi] = await Promise.all([
+        fetchAnomalyFlags(projectId),
+        fetchAuditLogs(projectId),
+        fetchProjectKpiSummary(projectId),
+      ]);
+      setProjectAnomalyFlags(flags);
+      setProjectAuditLogs(audits);
+      setSelectedProjectKpi(kpi);
+      alert("Anomaly flag resolved.");
+    } catch (err: any) {
+      const raw = String(err?.message || "");
+      alert(toFriendlyApiMessage(raw) || "Unable to resolve anomaly flag.");
+    }
+  };
+
   const renderRmtProjectDetail = (project: Project) => {
     const projectMilestones = milestonesForProject(project.id)
       .slice()
@@ -12615,15 +13555,686 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
     );
   };
 
-  const renderProjectDetail = (project: Project) => {
-    if (isRbfPortal) return renderRmtProjectDetail(project);
-
+  const renderOfficialProjectDetail = (project: Project) => {
     const projectMilestones = milestonesForProject(project.id).slice().sort((a, b) => (a.milestoneNumber || 0) - (b.milestoneNumber || 0));
     const projectClaims = claimsForProject(project.id);
     const contract = contractForProject(project.id);
     const projectReports = reportsForProject(project.id);
+    const projectVerifications = verificationTasksForProject(project.id);
     const projectAuditTrail = auditLogsForProject(project.id);
     const projectDocumentsList = documentsForProject(project.id);
+    const projectFlags = anomalyFlagsForProject(project.id);
+    const projectProspectSyncLogs = prospectLogsForProject(project.id);
+    const statusTone = getProjectStatusTone(project);
+    const kpiSnapshot = getProjectKpiSnapshot(project);
+    const kpiDisplay = getProjectKpiDisplay(project);
+    const kpiSummary = currentProjectKpiSummary(project.id);
+    const contractValue = Number(project.contractValue ?? budgetForProject(project) ?? 0);
+    const paidAmount = projectClaims
+      .filter(claim => claim.status === "Completed" || claim.status === "Paid")
+      .reduce((sum, claim) => sum + Number(claim.claimAmount || 0), 0);
+    const pendingAmount = projectClaims
+      .filter(claim => !["Completed", "Paid", "Rejected"].includes(claim.status))
+      .reduce((sum, claim) => sum + Number(claim.claimAmount || 0), 0);
+    const nextMilestone = nextOpenMilestoneForProject(project.id);
+    const latestAudit = latestAuditForProject(project.id) || project.latestAuditEntry;
+    const canSeeFinancials = !(isTacPortal || isDoePortal || isUndpPortal);
+    const canResolveFlags = isRbfPortal;
+    const canAccessProspectSync = isRbfPortal || isAuditorPortal;
+    const canAccessAuditTrail = isRbfPortal || isAuditorPortal;
+    const canAccessPayments = isRbfPortal || isPscPortal || isAuditorPortal;
+    const canAccessVerifications = !isPscPortal && !isUndpPortal;
+    const canAccessInstallations = !isPscPortal && !isUndpPortal;
+    const canAccessAnomalyFlags = !isPscPortal && !isUndpPortal;
+    const canAccessDocuments = !isUndpPortal;
+    const canAddTechnicalComment = isTacPortal;
+    const canFlagConcern = isDoePortal;
+    const detailTabs = isPscPortal
+      ? ["summary", "milestone_payments", "kpi", "compliance"] as const
+      : isUndpPortal
+        ? ["summary", "kpi", "compliance"] as const
+        : [
+            "overview",
+            "milestones",
+            ...(canAccessInstallations ? ["installations"] as const : []),
+            ...(canAccessVerifications ? ["verifications"] as const : []),
+            "kpi",
+            ...(canAccessPayments ? ["payments"] as const : []),
+            ...(canAccessAnomalyFlags ? ["anomaly_flags"] as const : []),
+            ...(canAccessDocuments ? ["documents"] as const : []),
+            ...(canAccessProspectSync ? ["prospect_sync"] as const : []),
+            ...(canAccessAuditTrail ? ["audit_trail"] as const : []),
+          ];
+    const activeTab = detailTabs.includes(projectTab as any) ? projectTab : detailTabs[0];
+    const installationSummary = {
+      total: projectReports.length,
+      verified: projectReports.filter(report => String(report.status).toLowerCase() === "verified").length,
+      pending: projectReports.filter(report => String(report.status).toLowerCase() === "submitted").length,
+      flagged: projectReports.filter(report => String(report.status).toLowerCase() === "flagged").length,
+    };
+    const visibleDocuments = isDoePortal
+      ? projectDocumentsList.filter((doc) => {
+          const haystack = `${doc.title || ""} ${doc.file || ""}`.toLowerCase();
+          return !haystack.includes("financial") && !haystack.includes("payment");
+        })
+      : projectDocumentsList;
+
+    const tabLabel = (tab: typeof detailTabs[number] | typeof projectTab) => {
+      switch (tab) {
+        case "summary":
+          return "Summary";
+        case "milestone_payments":
+          return "Milestones & Payments";
+        case "compliance":
+          return "Compliance Record";
+        case "installations":
+          return "Installations";
+        case "verifications":
+          return "Verifications";
+        case "anomaly_flags":
+          return "Anomaly Flags";
+        case "prospect_sync":
+          return "Prospect Sync";
+        case "audit_trail":
+          return "Audit Trail";
+        default:
+          return tab.charAt(0).toUpperCase() + tab.slice(1).replace("_", " ");
+      }
+    };
+
+    const milestoneAmountLabel = (milestone: Milestone) =>
+      canSeeFinancials ? formatCurrency((milestone.amountLsl ?? milestone.amount) || 0) : "Restricted";
+
+    return (
+      <div className="mt-5 overflow-hidden rounded-3xl border border-slate-100 bg-white shadow-[0_30px_70px_-55px_rgba(15,23,42,0.7)]">
+        <div className="space-y-5 border-b border-slate-100 bg-[linear-gradient(120deg,#f8fafc_0%,#f1f5f9_45%,#ffffff_100%)] p-6">
+          <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
+            <div className="space-y-3">
+              <div>
+                <p className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Project ID</p>
+                <h3 className="mt-1 text-2xl font-semibold text-slate-900">{project.projectReference || `PRJ-${project.id}`}</h3>
+                <p className="mt-1 text-base text-slate-700">{project.tenderName || project.projectTitle || "Project"}</p>
+                <p className="mt-1 text-sm text-slate-500">
+                  {[!isUndpPortal ? project.vendorName : null, project.techType || "N/A", project.district || project.region || "N/A"].filter(Boolean).join("  |  ")}
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
+                <span className={`rounded-full px-3 py-1 text-xs font-semibold ${statusTone.className}`}>{statusTone.label}</span>
+                <div className="h-3 w-56 overflow-hidden rounded-full bg-slate-100">
+                  <div className="h-full rounded-full bg-gradient-to-r from-emerald-500 via-teal-400 to-sky-500" style={{ width: `${kpiSnapshot.progressPct}%` }} />
+                </div>
+                <span className="text-sm font-semibold text-slate-700">{Math.round(kpiSnapshot.progressPct)}%</span>
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {isRbfPortal && (
+                <>
+                  <button onClick={() => void handleAddProjectNote(project, "Project marked at risk", "Why should this project be marked at risk?")} className="btn-secondary text-xs">Mark At Risk</button>
+                  <button onClick={() => void handleFlagProjectForRmt(project)} className="btn-secondary text-xs">Flag for Audit</button>
+                  <button onClick={() => void handleAddProjectNote(project, "Message to vendor", "Enter the message to send to the vendor.")} className="btn-secondary text-xs">Send Message to Vendor</button>
+                  <button onClick={() => handleGenerateProjectReport(project)} className="btn-secondary text-xs">Export Project Report</button>
+                  <button onClick={() => void handleProjectProspectSync(project, "sync_all_available", "Force Prospect Sync")} className="btn-secondary text-xs">Force Prospect Sync</button>
+                </>
+              )}
+              {canAddTechnicalComment && (
+                <>
+                  <button onClick={() => void handleAddProjectNote(project, "Technical comment", "Add a technical comment for RMT.")} className="btn-secondary text-xs">Add Technical Comment</button>
+                  <button onClick={() => handleGenerateProjectReport(project)} className="btn-secondary text-xs">Download Project Report</button>
+                </>
+              )}
+              {canFlagConcern && (
+                <>
+                  <button onClick={() => void handleAddProjectNote(project, "DoE concern", "Describe the concern to send to RMT.")} className="btn-secondary text-xs">Flag Concern to RMT</button>
+                  <button onClick={() => handleGenerateProjectReport(project)} className="btn-secondary text-xs">Export Regional Report</button>
+                  <button onClick={() => setProjectTab("installations")} className="btn-secondary text-xs">View on Regional Map</button>
+                </>
+              )}
+              {isAuditorPortal && <button onClick={() => handleGenerateProjectReport(project)} className="btn-secondary text-xs">Export Audit Package</button>}
+              {isPscPortal && <button onClick={() => setProjectTab("milestone_payments")} className="btn-secondary text-xs">Review Claims</button>}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3 text-[11px] text-slate-500 sm:grid-cols-3 xl:grid-cols-6">
+            <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">Contract</p><p className="font-semibold text-slate-700">{project.contractReference || "N/A"}</p></div>
+            <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">Tender</p><p className="font-semibold text-slate-700">{project.tenderReferenceNumber || "N/A"}</p></div>
+            <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">District</p><p className="font-semibold text-slate-700">{project.district || project.region || "N/A"}</p></div>
+            <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">Start</p><p className="font-semibold text-slate-700">{formatDate(startDateForProject(project))}</p></div>
+            <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">End</p><p className="font-semibold text-slate-700">{formatDate(endDateForProject(project))}</p></div>
+            <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">Value</p><p className="font-semibold text-slate-700">{canSeeFinancials ? formatCurrency(contractValue) : "Restricted"}</p></div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+            <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-[11px] uppercase tracking-wide text-slate-500">Verified</p><p className="mt-1 text-lg font-semibold text-slate-900">{kpiDisplay.verifiedLabel}</p></div>
+            <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-[11px] uppercase tracking-wide text-slate-500">Female</p><p className="mt-1 text-lg font-semibold text-slate-900">{kpiSummary ? kpiDisplay.genderLabel : "—"}</p></div>
+            <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-[11px] uppercase tracking-wide text-slate-500">Uptime</p><p className="mt-1 text-lg font-semibold text-slate-900">{kpiSummary ? kpiDisplay.uptimeLabel : "—"}</p></div>
+            <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-[11px] uppercase tracking-wide text-slate-500">Next Milestone</p><p className="mt-1 text-lg font-semibold text-slate-900">{nextMilestone ? `M${nextMilestone.milestoneNumber || 1}` : "Complete"}</p></div>
+            <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-[11px] uppercase tracking-wide text-slate-500">Flags</p><p className="mt-1 text-lg font-semibold text-slate-900">{projectFlags.filter(flag => !flag.isResolved).length}</p></div>
+          </div>
+
+          <div className="flex items-center gap-2 overflow-x-auto pb-1">
+            {detailTabs.map(tab => (
+              <button
+                key={tab}
+                onClick={() => setProjectTab(tab)}
+                className={`whitespace-nowrap rounded-full border px-4 py-2 text-xs font-semibold transition ${
+                  activeTab === tab
+                    ? "border-emerald-600 bg-emerald-600 text-white shadow-sm"
+                    : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"
+                }`}
+              >
+                {tabLabel(tab)}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="space-y-6 p-6">
+          {activeTab === "overview" && (
+            <div className="space-y-6">
+              <div className="grid gap-4 lg:grid-cols-2">
+                <div className="rounded-2xl border border-emerald-100 bg-emerald-50 p-5">
+                  <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-emerald-700">Next Action Required</p>
+                  <div className="mt-3 space-y-3 text-sm text-slate-700">
+                    <div className="rounded-xl border border-emerald-100 bg-white/80 px-4 py-3">
+                      <p className="font-semibold">{projectClaims.filter(claim => !["Completed", "Paid", "Rejected"].includes(claim.status)).length} payment claims awaiting review</p>
+                    </div>
+                    <div className="rounded-xl border border-emerald-100 bg-white/80 px-4 py-3">
+                      <p className="font-semibold">{projectFlags.filter(flag => !flag.isResolved).length} anomaly flags unresolved</p>
+                    </div>
+                  </div>
+                </div>
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
+                  <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-slate-500">Project Configuration</p>
+                  <div className="mt-3 space-y-2 text-sm text-slate-700">
+                    <p>Installation Target: {formatMetricValue(project.targetInstallations)}</p>
+                    <p>Technology Type: {project.techType || "N/A"}</p>
+                    <p>Verification Method: {project.verificationMethod || "Manual"}</p>
+                    <p>Female Target: {project.targetFemalePct != null ? `>=${project.targetFemalePct}%` : "Configured in KPI"}</p>
+                    <p>Assigned On: {formatDate(project.startDate)}</p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid gap-4 lg:grid-cols-2">
+                <div className="rounded-2xl border border-slate-200 bg-white p-5">
+                  <p className="text-sm font-semibold text-slate-900">Milestone Summary</p>
+                  <div className="mt-3 space-y-3">
+                    {projectMilestones.map((milestone, index) => {
+                      const label = getMilestoneStateLabel(milestone, project.id);
+                      return (
+                        <div key={milestone.id} className="flex items-center justify-between rounded-xl border border-slate-100 bg-slate-50 px-4 py-3 text-sm">
+                          <div>
+                            <p className="font-semibold text-slate-900">{getMilestoneDisplayName(milestone, index)}</p>
+                            <p className="text-slate-500">{milestoneAmountLabel(milestone)}</p>
+                          </div>
+                          <span className={`rounded-full px-3 py-1 text-xs font-semibold ${getMilestoneStateBadgeClass(label)}`}>{label}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+                <div className="rounded-2xl border border-slate-200 bg-white p-5">
+                  <p className="text-sm font-semibold text-slate-900">Recent Activity</p>
+                  <div className="mt-3 space-y-3">
+                    {projectAuditTrail.slice(0, 5).map(log => (
+                      <div key={log.id} className="rounded-xl border border-slate-100 bg-slate-50 px-4 py-3 text-sm">
+                        <div className="flex items-center justify-between gap-3">
+                          <p className="font-semibold text-slate-900">{log.action}</p>
+                          <span className="text-xs text-slate-400">{log.createdAt ? new Date(log.createdAt).toLocaleString() : "N/A"}</span>
+                        </div>
+                        <p className="mt-1 text-slate-600">{log.notes || log.details?.message || "No additional notes."}</p>
+                      </div>
+                    ))}
+                    {projectAuditTrail.length === 0 && <p className="text-sm text-slate-500">No audit activity recorded yet.</p>}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeTab === "summary" && (
+            <div className="grid gap-6 lg:grid-cols-2">
+              <div className="rounded-2xl border border-slate-200 bg-white p-5">
+                <p className="text-sm font-semibold text-slate-900">Project Overview</p>
+                <div className="mt-3 space-y-2 text-sm text-slate-700">
+                  <p>Contract Value: {canSeeFinancials ? formatCurrency(contractValue) : "Restricted"}</p>
+                  <p>Progress: {Math.round(kpiSnapshot.progressPct)}% verified</p>
+                  <p>Status: {statusTone.label}</p>
+                  {!isUndpPortal && <p>Vendor: {project.vendorName || "N/A"}</p>}
+                </div>
+              </div>
+              <div className="rounded-2xl border border-slate-200 bg-white p-5">
+                <p className="text-sm font-semibold text-slate-900">{isUndpPortal ? "Impact Snapshot" : "Financial Summary"}</p>
+                <div className="mt-3 space-y-2 text-sm text-slate-700">
+                  {isUndpPortal ? (
+                    <>
+                      <p>Verified Installations: {kpiDisplay.verifiedLabel}</p>
+                      <p>Female Coverage: {kpiSummary ? kpiDisplay.genderLabel : "—"}</p>
+                      <p>Energy Output: {kpiSummary ? kpiDisplay.energyLabel : "—"}</p>
+                    </>
+                  ) : (
+                    <>
+                      <p>Total Paid: {formatCurrency(paidAmount)}</p>
+                      <p>Pending: {formatCurrency(pendingAmount)}</p>
+                      <p>Next Payment: {nextMilestone ? milestoneAmountLabel(nextMilestone) : "None"}</p>
+                    </>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeTab === "milestones" && (
+            <div className="space-y-4">
+              {projectMilestones.map((milestone, index) => {
+                const stateLabel = getMilestoneStateLabel(milestone, project.id);
+                const relatedClaims = projectClaims.filter(claim => claim.milestoneId === milestone.id);
+                return (
+                  <div key={milestone.id} className="rounded-2xl border border-slate-200 bg-white p-5 space-y-4 shadow-sm">
+                    <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                      <div>
+                        <p className="text-lg font-semibold text-slate-900">{getMilestoneDisplayName(milestone, index)}</p>
+                        <p className="mt-1 text-sm text-slate-500">{milestone.description?.trim() || "Milestone progress unlocks based on project KPIs and verification conditions."}</p>
+                      </div>
+                      <div className="text-right">
+                        <span className={`rounded-full px-3 py-1 text-xs font-semibold ${getMilestoneStateBadgeClass(stateLabel)}`}>{stateLabel}</span>
+                        <p className="mt-2 text-sm font-semibold text-slate-900">{milestoneAmountLabel(milestone)}</p>
+                      </div>
+                    </div>
+                    <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
+                      <p className="text-sm font-semibold text-slate-800">Conditions</p>
+                      <div className="mt-2 space-y-1 text-sm text-slate-600">
+                        {getMilestoneConditionText(project.id, milestone.milestoneNumber).map(line => <p key={line}>{line}</p>)}
+                      </div>
+                    </div>
+                    {relatedClaims.length > 0 && (
+                      <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
+                        <p className="text-sm font-semibold text-slate-800">Claim history</p>
+                        <div className="mt-3 space-y-2">
+                          {relatedClaims.map(claim => (
+                            <div key={claim.id} className="flex flex-col gap-1 rounded-xl border border-slate-100 bg-white px-3 py-2 text-sm text-slate-600 md:flex-row md:items-center md:justify-between">
+                              <span>{claim.submittedAt ? new Date(claim.submittedAt).toLocaleString() : "N/A"}</span>
+                              <span>{canSeeFinancials ? formatCurrency(claim.claimAmount || 0) : "Restricted"}</span>
+                              <span className="font-semibold text-slate-900">{displayClaimStatus(claim)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+              {projectMilestones.length === 0 && <p className="text-sm text-slate-500">No milestones added yet.</p>}
+            </div>
+          )}
+
+          {activeTab === "installations" && (
+            <div className="space-y-6">
+              <div className="grid gap-3 md:grid-cols-4">
+                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-xs text-slate-500">Total submitted</p><p className="mt-1 text-lg font-semibold text-slate-900">{installationSummary.total}</p></div>
+                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-xs text-slate-500">Verified</p><p className="mt-1 text-lg font-semibold text-slate-900">{installationSummary.verified}</p></div>
+                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-xs text-slate-500">Pending</p><p className="mt-1 text-lg font-semibold text-slate-900">{installationSummary.pending}</p></div>
+                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-xs text-slate-500">Flagged</p><p className="mt-1 text-lg font-semibold text-slate-900">{installationSummary.flagged}</p></div>
+              </div>
+              <div className="overflow-x-auto rounded-2xl border border-slate-200">
+                <table className="min-w-full divide-y divide-slate-200 text-sm">
+                  <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
+                    <tr>
+                      <th className="px-4 py-3">INS ID</th>
+                      <th className="px-4 py-3">Beneficiary</th>
+                      <th className="px-4 py-3">Household</th>
+                      <th className="px-4 py-3">GPS</th>
+                      <th className="px-4 py-3">Submitted</th>
+                      <th className="px-4 py-3">FO Verified</th>
+                      <th className="px-4 py-3">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 bg-white">
+                    {projectReports.map(report => (
+                      <tr key={report.id}>
+                        <td className="px-4 py-3 text-slate-700">{report.id}</td>
+                        <td className="px-4 py-3 text-slate-700">{report.beneficiaryName || report.beneficiaryId || "Restricted"}</td>
+                        <td className="px-4 py-3 text-slate-700">{report.householdType || "—"}</td>
+                        <td className="px-4 py-3"><a href={`https://www.google.com/maps?q=${report.gpsLat},${report.gpsLng}`} target="_blank" rel="noreferrer" className="text-emerald-700 underline">Map</a></td>
+                        <td className="px-4 py-3 text-slate-700">{report.submittedAt ? new Date(report.submittedAt).toLocaleDateString() : "N/A"}</td>
+                        <td className="px-4 py-3 text-slate-700">{report.verifiedBy || "Pending"}</td>
+                        <td className="px-4 py-3 text-slate-700">{report.verificationStatus || report.status || "Pending"}</td>
+                      </tr>
+                    ))}
+                    {projectReports.length === 0 && <tr><td colSpan={7} className="px-4 py-6 text-center text-sm text-slate-500">No installation records yet.</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {activeTab === "verifications" && (
+            <div className="space-y-6">
+              <div className="grid gap-3 md:grid-cols-3">
+                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-xs text-slate-500">Total verifications</p><p className="mt-1 text-lg font-semibold text-slate-900">{projectVerifications.length}</p></div>
+                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-xs text-slate-500">GPS match</p><p className="mt-1 text-lg font-semibold text-slate-900">{projectVerifications.filter(task => Number(task.gpsDistanceMeters || 0) <= 50).length}</p></div>
+                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-xs text-slate-500">GPS mismatch</p><p className="mt-1 text-lg font-semibold text-slate-900">{projectVerifications.filter(task => Number(task.gpsDistanceMeters || 0) > 50).length}</p></div>
+              </div>
+              <div className="overflow-x-auto rounded-2xl border border-slate-200">
+                <table className="min-w-full divide-y divide-slate-200 text-sm">
+                  <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
+                    <tr>
+                      <th className="px-4 py-3">Survey ID</th>
+                      <th className="px-4 py-3">Installation</th>
+                      <th className="px-4 py-3">Field Officer</th>
+                      <th className="px-4 py-3">Outcome</th>
+                      <th className="px-4 py-3">GPS Match</th>
+                      <th className="px-4 py-3">Date</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 bg-white">
+                    {projectVerifications.map(task => {
+                      const gpsDistance = Number(task.gpsDistanceMeters || 0);
+                      const mismatch = gpsDistance > 50;
+                      return (
+                        <tr key={task.id} className={mismatch ? "bg-rose-50" : ""}>
+                          <td className="px-4 py-3 text-slate-700">{task.id}</td>
+                          <td className="px-4 py-3 text-slate-700">{task.installationReportId || "N/A"}</td>
+                          <td className="px-4 py-3 text-slate-700">{task.assignedToUsername || task.reviewerUsername || "N/A"}</td>
+                          <td className="px-4 py-3 text-slate-700">{task.status || "Pending"}</td>
+                          <td className="px-4 py-3 text-slate-700">{gpsDistance ? `${gpsDistance}m` : "N/A"} {mismatch ? "Mismatch" : "OK"}</td>
+                          <td className="px-4 py-3 text-slate-700">{task.completedAt ? new Date(task.completedAt).toLocaleDateString() : "N/A"}</td>
+                        </tr>
+                      );
+                    })}
+                    {projectVerifications.length === 0 && <tr><td colSpan={6} className="px-4 py-6 text-center text-sm text-slate-500">No verification records yet.</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {activeTab === "kpi" && (
+            <div className="space-y-4">
+              <KpiDashboard projectId={project.id} />
+              {isRbfPortal && (
+                <div className="flex flex-wrap gap-2">
+                  <button onClick={() => void handleAddProjectNote(project, "Performance note", "Add a performance note for this project.")} className="btn-secondary text-xs">Add Performance Note</button>
+                  <button onClick={() => void handleAddProjectNote(project, "Project set at risk", "Why is this project at risk?")} className="btn-secondary text-xs">Set Project At Risk</button>
+                  <button onClick={() => handleGenerateProjectReport(project)} className="btn-secondary text-xs">Download KPI Report</button>
+                  <button onClick={() => setProjectTab("prospect_sync")} className="btn-secondary text-xs">View Prospect Sync</button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeTab === "payments" && (
+            <div className="space-y-6">
+              <div className="grid gap-3 md:grid-cols-3">
+                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-xs text-slate-500">Contract Value</p><p className="mt-1 text-lg font-semibold text-slate-900">{formatCurrency(contractValue)}</p></div>
+                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-xs text-slate-500">Total Paid</p><p className="mt-1 text-lg font-semibold text-slate-900">{formatCurrency(paidAmount)}</p></div>
+                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-xs text-slate-500">Pending</p><p className="mt-1 text-lg font-semibold text-slate-900">{formatCurrency(pendingAmount)}</p></div>
+              </div>
+              <div className="overflow-x-auto rounded-2xl border border-slate-200">
+                <table className="min-w-full divide-y divide-slate-200 text-sm">
+                  <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
+                    <tr>
+                      <th className="px-4 py-3">Claim ID</th>
+                      <th className="px-4 py-3">Milestone</th>
+                      <th className="px-4 py-3">Amount</th>
+                      <th className="px-4 py-3">Submitted</th>
+                      <th className="px-4 py-3">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 bg-white">
+                    {projectClaims.map(claim => (
+                      <tr key={claim.id}>
+                        <td className="px-4 py-3 text-slate-700">CLM-{String(claim.id).padStart(3, "0")}</td>
+                        <td className="px-4 py-3 text-slate-700">{projectMilestones.find(milestone => milestone.id === claim.milestoneId)?.name || claim.milestoneId || "Milestone"}</td>
+                        <td className="px-4 py-3 text-slate-700">{formatCurrency(claim.claimAmount || 0)}</td>
+                        <td className="px-4 py-3 text-slate-700">{claim.submittedAt ? new Date(claim.submittedAt).toLocaleDateString() : "N/A"}</td>
+                        <td className="px-4 py-3 text-slate-700">{displayClaimStatus(claim)}</td>
+                      </tr>
+                    ))}
+                    {projectClaims.length === 0 && <tr><td colSpan={5} className="px-4 py-6 text-center text-sm text-slate-500">No payment claims submitted yet.</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {activeTab === "milestone_payments" && (
+            <div className="space-y-6">
+              <div className="rounded-2xl border border-slate-200 bg-white p-5">
+                <p className="text-sm font-semibold text-slate-900">Milestones & Payments</p>
+                <div className="mt-4 space-y-4">
+                  {projectMilestones.map((milestone, index) => {
+                    const relatedClaim = projectClaims.find(claim => claim.milestoneId === milestone.id);
+                    return (
+                      <div key={milestone.id} className="rounded-xl border border-slate-100 bg-slate-50 p-4">
+                        <div className="flex items-center justify-between gap-3">
+                          <p className="font-semibold text-slate-900">{getMilestoneDisplayName(milestone, index)}</p>
+                          <span className="text-sm font-semibold text-slate-700">{milestoneAmountLabel(milestone)}</span>
+                        </div>
+                        <div className="mt-2 space-y-1 text-sm text-slate-600">
+                          <p>Status: {getMilestoneStateLabel(milestone, project.id)}</p>
+                          <p>Claim: {relatedClaim ? displayClaimStatus(relatedClaim) : "No claim submitted"}</p>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeTab === "anomaly_flags" && (
+            <div className="space-y-6">
+              <div className="grid gap-3 md:grid-cols-3">
+                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-xs text-slate-500">Total raised</p><p className="mt-1 text-lg font-semibold text-slate-900">{projectFlags.length}</p></div>
+                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-xs text-slate-500">Resolved</p><p className="mt-1 text-lg font-semibold text-slate-900">{projectFlags.filter(flag => flag.isResolved).length}</p></div>
+                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-xs text-slate-500">Unresolved</p><p className="mt-1 text-lg font-semibold text-slate-900">{projectFlags.filter(flag => !flag.isResolved).length}</p></div>
+              </div>
+              <div className="overflow-x-auto rounded-2xl border border-slate-200">
+                <table className="min-w-full divide-y divide-slate-200 text-sm">
+                  <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
+                    <tr>
+                      <th className="px-4 py-3">ID</th>
+                      <th className="px-4 py-3">Install</th>
+                      <th className="px-4 py-3">Type</th>
+                      <th className="px-4 py-3">Description</th>
+                      <th className="px-4 py-3">Raised</th>
+                      <th className="px-4 py-3">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 bg-white">
+                    {projectFlags.map(flag => (
+                      <tr key={flag.id}>
+                        <td className="px-4 py-3 text-slate-700">{flag.id}</td>
+                        <td className="px-4 py-3 text-slate-700">{flag.installationReportId || "N/A"}</td>
+                        <td className="px-4 py-3 text-slate-700">{flag.flagType || "Flag"}</td>
+                        <td className="px-4 py-3 text-slate-700">{flag.description || flag.notes || "No description"}</td>
+                        <td className="px-4 py-3 text-slate-700">{flag.createdAt ? new Date(flag.createdAt).toLocaleDateString() : "N/A"}</td>
+                        <td className="px-4 py-3 text-slate-700">
+                          {canResolveFlags && !flag.isResolved ? (
+                            <button onClick={() => void handleResolveProjectFlag(project.id, flag.id)} className="font-medium text-emerald-600 hover:text-emerald-700">Resolve</button>
+                          ) : (
+                            <span>{flag.isResolved ? "Resolved" : "Read only"}</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                    {projectFlags.length === 0 && <tr><td colSpan={6} className="px-4 py-6 text-center text-sm text-slate-500">No anomaly flags for this project.</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {activeTab === "documents" && (
+            <div className="space-y-6">
+              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <h4 className="text-sm font-semibold text-slate-800">Documents</h4>
+                  <p className="text-xs text-slate-500">Download project, contract, and implementation records.</p>
+                </div>
+                {isRbfPortal && <button onClick={() => setDocumentTitle("")} className="btn-secondary text-xs">Upload Document</button>}
+              </div>
+
+              {isRbfPortal && <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4 space-y-3">
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                  <select className="input-field" value={documentType} onChange={(e) => setDocumentType(e.target.value)}>
+                    {["Signed Contract", "Permit", "Insurance", "Team Roster", "Equipment Plan", "Other"].map(option => (
+                      <option key={option} value={option}>{option}</option>
+                    ))}
+                  </select>
+                  <input className="input-field" placeholder="Document title (optional)" value={documentTitle} onChange={(e) => setDocumentTitle(e.target.value)} />
+                  <input className="input-field" type="file" onChange={(e) => setDocumentFile(e.target.files?.[0] || null)} />
+                </div>
+                <div className="flex items-center gap-3">
+                  <button onClick={handleUploadDocument} className="btn-primary text-xs" disabled={documentUploading}>
+                    {documentUploading ? "Uploading..." : "Upload Document"}
+                  </button>
+                  {documentMessage && <span className="text-xs text-slate-500">{documentMessage}</span>}
+                </div>
+              </div>}
+
+              <div className="overflow-x-auto rounded-2xl border border-slate-200">
+                <table className="min-w-full divide-y divide-slate-200 text-sm">
+                  <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
+                    <tr>
+                      <th className="px-4 py-3">File name</th>
+                      <th className="px-4 py-3">Type</th>
+                      <th className="px-4 py-3">Uploaded</th>
+                      <th className="px-4 py-3">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 bg-white">
+                    {contract?.signedFile && (
+                      <tr>
+                        <td className="px-4 py-3 text-slate-700">Signed Performance-Based Agreement</td>
+                        <td className="px-4 py-3 text-slate-700">Contract</td>
+                        <td className="px-4 py-3 text-slate-700">{formatDate(contract.approvedAt || contract.signedAt)}</td>
+                        <td className="px-4 py-3"><a href={toFileUrl(contract.signedFile) || "#"} target="_blank" rel="noreferrer" className="text-emerald-700 underline">Download</a></td>
+                      </tr>
+                    )}
+                    {visibleDocuments.map(doc => (
+                      <tr key={doc.id}>
+                        <td className="px-4 py-3 text-slate-700">{doc.title || doc.file.split("/").pop() || "Project Document"}</td>
+                        <td className="px-4 py-3 text-slate-700">{doc.title?.split("—")[0]?.trim() || doc.title?.split("-")[0]?.trim() || "Other"}</td>
+                        <td className="px-4 py-3 text-slate-700">{doc.uploadedAt ? new Date(doc.uploadedAt).toLocaleString() : "N/A"}</td>
+                        <td className="px-4 py-3"><a href={toFileUrl(doc.file) || "#"} target="_blank" rel="noreferrer" className="text-emerald-700 underline">Download</a></td>
+                      </tr>
+                    ))}
+                    {visibleDocuments.length === 0 && !contract?.signedFile && <tr><td colSpan={4} className="px-4 py-6 text-center text-sm text-slate-500">No documents available for this project.</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {activeTab === "prospect_sync" && (
+            <div className="space-y-6">
+              {isRbfPortal && (
+                <div className="flex flex-wrap gap-2">
+                  {[
+                    ["push_target", "Sync Targets"],
+                    ["push_agent", "Sync Vendor Setup"],
+                    ["push_installations", "Sync Installations"],
+                    ["push_report", "Sync Monthly Report"],
+                    ["push_installation_updates", "Sync Verification Updates"],
+                    ["push_installation_timeseries", "Sync Meter Data"],
+                    ["refresh_status", "Refresh Status"],
+                    ["sync_all_available", "Force Full Resync"],
+                  ].map(([action, label]) => (
+                    <button
+                      key={action}
+                      onClick={() => void handleProjectProspectSync(project, action as any, label)}
+                      disabled={prospectSyncSubmitting !== null}
+                      className="btn-secondary text-xs"
+                    >
+                      {prospectSyncSubmitting === action ? "Queuing..." : label}
+                    </button>
+                  ))}
+                </div>
+              )}
+              <div className="overflow-x-auto rounded-2xl border border-slate-200">
+                <table className="min-w-full divide-y divide-slate-200 text-sm">
+                  <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
+                    <tr>
+                      <th className="px-4 py-3">Data Type</th>
+                      <th className="px-4 py-3">Status</th>
+                      <th className="px-4 py-3">Message</th>
+                      <th className="px-4 py-3">Last Sync</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 bg-white">
+                    {projectProspectSyncLogs.map(log => (
+                      <tr key={log.id}>
+                        <td className="px-4 py-3 text-slate-700">{log.dataType || log.syncType || "Sync job"}</td>
+                        <td className="px-4 py-3 text-slate-700">{log.status || "Pending"}</td>
+                        <td className="px-4 py-3 text-slate-700">{log.message || log.details || "—"}</td>
+                        <td className="px-4 py-3 text-slate-700">{log.createdAt ? new Date(log.createdAt).toLocaleString() : "N/A"}</td>
+                      </tr>
+                    ))}
+                    {projectProspectSyncLogs.length === 0 && <tr><td colSpan={4} className="px-4 py-6 text-center text-sm text-slate-500">No Prospect sync activity for this project yet.</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+              {prospectSyncMessage && <p className="text-sm text-slate-500">{prospectSyncMessage}</p>}
+            </div>
+          )}
+
+          {activeTab === "audit_trail" && (
+            <div className="space-y-3">
+              {projectAuditTrail.map(log => (
+                <div key={log.id} className="rounded-xl border border-slate-100 p-4">
+                  <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                    <p className="font-semibold text-slate-900">{log.action}</p>
+                    <span className="text-xs text-slate-400">{log.createdAt ? new Date(log.createdAt).toLocaleString() : "N/A"}</span>
+                  </div>
+                  <p className="mt-2 text-sm text-slate-600">{log.notes || log.details?.message || "No additional notes."}</p>
+                  <p className="mt-2 text-xs text-slate-400">{log.actorUsername || log.actor || "System"}{log.actorRole ? ` • ${log.actorRole}` : ""}</p>
+                </div>
+              ))}
+              {projectAuditTrail.length === 0 && <p className="text-sm text-slate-500">No recent audit activity yet.</p>}
+            </div>
+          )}
+
+          {activeTab === "compliance" && (
+            <div className="grid gap-6 lg:grid-cols-2">
+              <div className="rounded-2xl border border-slate-200 bg-white p-5">
+                <p className="text-sm font-semibold text-slate-900">KPI Compliance</p>
+                <div className="mt-3 space-y-2 text-sm text-slate-700">
+                  <p>Female: {kpiSummary ? kpiDisplay.genderLabel : "—"}</p>
+                  <p>Progress: {kpiDisplay.verifiedLabel}</p>
+                  <p>Uptime: {kpiSummary ? kpiDisplay.uptimeLabel : "—"}</p>
+                  <p>Energy: {kpiSummary ? kpiDisplay.energyLabel : "—"}</p>
+                </div>
+              </div>
+              <div className="rounded-2xl border border-slate-200 bg-white p-5">
+                <p className="text-sm font-semibold text-slate-900">{isUndpPortal ? "Portfolio Context" : "Compliance Record"}</p>
+                <div className="mt-3 space-y-2 text-sm text-slate-700">
+                  <p>Unresolved Flags: {projectFlags.filter(flag => !flag.isResolved).length}</p>
+                  <p>Latest Audit: {latestAudit ? latestAudit.action : "No audit activity"}</p>
+                  <p>{isUndpPortal ? "Operational detail remains hidden in this donor view." : "No blacklist or compliance actions recorded in this summary."}</p>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  const renderProjectDetail = (project: Project) => {
+    if (isOfficialPortal) {
+      return renderOfficialProjectDetail(project);
+    }
+    const projectMilestones = milestonesForProject(project.id).slice().sort((a, b) => (a.milestoneNumber || 0) - (b.milestoneNumber || 0));
+    const projectClaims = claimsForProject(project.id);
+    const contract = contractForProject(project.id);
+    const projectReports = reportsForProject(project.id);
+    const projectVerifications = verificationTasksForProject(project.id);
+    const projectAuditTrail = auditLogsForProject(project.id);
+    const projectDocumentsList = documentsForProject(project.id);
+    const projectFlags = anomalyFlagsForProject(project.id);
+    const projectProspectSyncLogs = prospectLogsForProject(project.id);
     const verifiedCount = projectReports.filter(report => report.status === "Verified").length;
     const flaggedCount = projectReports.filter(report => report.status === "Flagged").length;
     const pendingCount = projectReports.filter(report => report.status === "Submitted").length;
@@ -12655,6 +14266,37 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
     const totalPages = Math.max(1, Math.ceil(projectReports.length / installationPageSize));
     const safePage = Math.min(fieldworkPage, totalPages);
     const paginatedReports = projectReports.slice((safePage - 1) * installationPageSize, safePage * installationPageSize);
+    const canVendorManage = isVendorPortal;
+    const visibleProjectTabs = projectTabs;
+    const canUploadDocs = isVendorPortal || isRbfPortal;
+    const canSeeFinancials = !(isTacPortal || isDoePortal || isUndpPortal);
+    const canSeeVendorName = !isUndpPortal;
+    const canResolveFlags = isRbfPortal;
+    const canAccessProspectSync = isRbfPortal || isAuditorPortal;
+    const canAccessAuditTrail = isRbfPortal || isAuditorPortal;
+    const canAccessPayments = isVendorPortal || isRbfPortal || isPscPortal || isAuditorPortal;
+    const canAccessVerifications = !isPscPortal && !isUndpPortal;
+    const canAccessInstallations = !isPscPortal && !isUndpPortal;
+    const canAccessAnomalyFlags = !isPscPortal && !isUndpPortal;
+    const canAccessDocuments = !isUndpPortal;
+    const canAddTechnicalComment = isTacPortal;
+    const canFlagConcern = isDoePortal;
+    const detailTabs = isVendorPortal
+      ? projectTabs
+      : isPscPortal
+        ? ["summary", "milestone_payments", "kpi", "compliance"] as const
+        : [
+            "overview",
+            "milestones",
+            ...(canAccessInstallations ? ["installations"] as const : []),
+            ...(canAccessVerifications ? ["verifications"] as const : []),
+            "kpi",
+            ...(canAccessPayments ? ["payments"] as const : []),
+            ...(canAccessAnomalyFlags ? ["anomaly_flags"] as const : []),
+            ...(canAccessDocuments ? ["documents"] as const : []),
+            ...(canAccessProspectSync ? ["prospect_sync"] as const : []),
+            ...(canAccessAuditTrail ? ["audit_trail"] as const : []),
+          ];
 
     const installationBadge = (report: InstallationReport) => {
       const raw = String(report.verificationStatus || report.status || "").toLowerCase();
@@ -12692,16 +14334,18 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
               >
                 View Contract
               </a>
-              <button onClick={() => setProjectTab("documents")} className="btn-secondary text-xs">Upload Document</button>
-              <button onClick={() => setProjectTab("planning")} className="btn-secondary text-xs">Complete Setup</button>
-              <button
-                onClick={() => setProjectTab("fieldwork")}
-                disabled={!setupComplete}
-                title={!setupComplete ? "Complete project setup before submitting installations." : ""}
-                className={`rounded-xl px-4 py-2 text-xs font-semibold ${setupComplete ? "bg-blue-600 text-white" : "cursor-not-allowed bg-slate-100 text-slate-400"}`}
-              >
-                Submit Installation
-              </button>
+              {canUploadDocs && <button onClick={() => setProjectTab("documents")} className="btn-secondary text-xs">Upload Document</button>}
+              {canVendorManage && <button onClick={() => setProjectTab("planning")} className="btn-secondary text-xs">Complete Setup</button>}
+              {canVendorManage && (
+                <button
+                  onClick={() => setProjectTab("fieldwork")}
+                  disabled={!setupComplete}
+                  title={!setupComplete ? "Complete project setup before submitting installations." : ""}
+                  className={`rounded-xl px-4 py-2 text-xs font-semibold ${setupComplete ? "bg-blue-600 text-white" : "cursor-not-allowed bg-slate-100 text-slate-400"}`}
+                >
+                  Submit Installation
+                </button>
+              )}
             </div>
           </div>
 
@@ -12709,9 +14353,9 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
             <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">Start</p><p className="font-semibold text-slate-700">{formatDate(startDateForProject(project))}</p></div>
             <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">End</p><p className="font-semibold text-slate-700">{formatDate(endDateForProject(project))}</p></div>
             <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">District</p><p className="font-semibold text-slate-700">{project.district || project.region || "N/A"}</p></div>
-            <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">Budget</p><p className="font-semibold text-slate-700">{formatCurrency(project.budget ?? null)}</p></div>
+            <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">Budget</p><p className="font-semibold text-slate-700">{canSeeFinancials ? formatCurrency(project.budget ?? null) : "Restricted"}</p></div>
             <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">Tender</p><p className="font-semibold text-slate-700">{project.tenderReferenceNumber || "N/A"}</p></div>
-            <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">Value</p><p className="font-semibold text-slate-700">{formatCurrency(contractValue || null)}</p></div>
+            <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">Value</p><p className="font-semibold text-slate-700">{canSeeFinancials ? formatCurrency(contractValue || null) : "Restricted"}</p></div>
           </div>
 
           <div className="grid grid-cols-3 gap-3 text-[11px] text-slate-500">
@@ -12728,7 +14372,7 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
           </div>
 
           <div className="flex items-center gap-2 overflow-x-auto pb-1">
-            {projectTabs.map(tab => (
+            {visibleProjectTabs.map(tab => (
               <button
                 key={tab}
                 onClick={() => setProjectTab(tab as typeof projectTab)}
@@ -12747,7 +14391,7 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
         <div className="p-6">
           {projectTab === "overview" && (
             <div className="space-y-4">
-              {!setupComplete && (
+              {canVendorManage && !setupComplete && (
                 <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-rose-700">
                   <p className="font-semibold">Project Setup Required</p>
                   <p className="mt-1 text-sm">Complete your project setup before submitting installations or claiming payments.</p>
@@ -13192,7 +14836,7 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
                 </div>
               )}
 
-              <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4 space-y-3">
+              {canVendorManage && <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4 space-y-3">
                 <div className="flex items-center justify-between">
                   <p className="text-sm font-semibold text-slate-700">New Installation Report</p>
                   <span className="text-[11px] text-slate-400">GPS + Photo + Receipt</span>
@@ -13220,9 +14864,9 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
                   <span className="text-xs text-slate-500">Provide the installation evidence above, then submit.</span>
                 </div>
                 {reportMessage && <p className="text-xs text-slate-500">{reportMessage}</p>}
-              </div>
+              </div>}
 
-              <div id="meter-csv-upload-section" className="rounded-2xl border border-slate-100 bg-slate-50 p-4 space-y-3">
+              {canVendorManage && <div id="meter-csv-upload-section" className="rounded-2xl border border-slate-100 bg-slate-50 p-4 space-y-3">
                 <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                   <div>
                     <p className="text-sm font-semibold text-slate-700">CSV upload section</p>
@@ -13238,7 +14882,7 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
                 </div>
                 <p className="text-xs text-slate-500">Last upload: {latestCsvAudit?.createdAt ? `${new Date(latestCsvAudit.createdAt).toLocaleString()} — ${latestCsvAudit.details?.rows_ingested || 0} rows ingested` : "No CSV uploads yet"}</p>
                 {meterCsvMessage && <p className="text-xs text-slate-500">{meterCsvMessage}</p>}
-              </div>
+              </div>}
             </div>
           )}
 
@@ -13258,11 +14902,11 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
                 </div>
               )}
               <div className="grid gap-3 md:grid-cols-3">
-                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-xs text-slate-500">Total Contract Value</p><p className="mt-1 text-lg font-semibold text-slate-900">{formatCurrency(contractValue)}</p></div>
-                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-xs text-slate-500">Total Paid</p><p className="mt-1 text-lg font-semibold text-slate-900">{formatCurrency(paidAmount)}</p></div>
-                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-xs text-slate-500">Total Pending</p><p className="mt-1 text-lg font-semibold text-slate-900">{formatCurrency(pendingAmount)}</p></div>
+                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-xs text-slate-500">Total Contract Value</p><p className="mt-1 text-lg font-semibold text-slate-900">{canSeeFinancials ? formatCurrency(contractValue) : "Restricted"}</p></div>
+                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-xs text-slate-500">Total Paid</p><p className="mt-1 text-lg font-semibold text-slate-900">{canSeeFinancials ? formatCurrency(paidAmount) : "Restricted"}</p></div>
+                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-xs text-slate-500">Total Pending</p><p className="mt-1 text-lg font-semibold text-slate-900">{canSeeFinancials ? formatCurrency(pendingAmount) : "Restricted"}</p></div>
               </div>
-              <div className="grid gap-6 lg:grid-cols-[0.95fr_1.05fr]">
+              {canVendorManage && <div className="grid gap-6 lg:grid-cols-[0.95fr_1.05fr]">
                 <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 space-y-4">
                   <div>
                     <p className="text-sm font-semibold text-slate-800">Claimable Milestones</p>
@@ -13367,7 +15011,7 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
                     </div>
                   )}
                 </div>
-              </div>
+              </div>}
               <div className="overflow-x-auto rounded-2xl border border-slate-200">
                 <table className="min-w-full divide-y divide-slate-200 text-sm">
                   <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
@@ -13538,10 +15182,10 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
                   <h4 className="text-sm font-semibold text-slate-800">Documents</h4>
                   <p className="text-xs text-slate-500">Upload project support files and download the latest records.</p>
                 </div>
-                <button onClick={() => setDocumentTitle("")} className="btn-secondary text-xs">Upload Document</button>
+                {canUploadDocs && <button onClick={() => setDocumentTitle("")} className="btn-secondary text-xs">Upload Document</button>}
               </div>
 
-              <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4 space-y-3">
+              {canUploadDocs && <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4 space-y-3">
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
                   <select className="input-field" value={documentType} onChange={(e) => setDocumentType(e.target.value)}>
                     {["Signed Contract", "Permit", "Insurance", "Team Roster", "Equipment Plan", "Other"].map(option => (
@@ -13557,7 +15201,7 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
                   </button>
                   {documentMessage && <span className="text-xs text-slate-500">{documentMessage}</span>}
                 </div>
-              </div>
+              </div>}
 
               <div className="overflow-x-auto rounded-2xl border border-slate-200">
                 <table className="min-w-full divide-y divide-slate-200 text-sm">
@@ -13627,6 +15271,71 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
     );
   };
 
+  const hubTitle = isRbfPortal
+    ? "Projects Hub"
+    : isTacPortal
+      ? "Projects - Technical Review"
+      : isDoePortal
+        ? `Regional Projects${currentUser?.region ? ` - ${currentUser.region}` : ""}`
+        : isPscPortal
+          ? "Portfolio Overview"
+          : isUndpPortal
+            ? "National Portfolio - UNDP View"
+            : isAuditorPortal
+              ? "All Projects - Audit View"
+              : "Projects Hub";
+  const hubDescription = isRbfPortal
+    ? "A dedicated workspace for the RBF Management Team to monitor project health, claims, flags, and delivery progress."
+    : isTacPortal
+      ? "Read-only access to all projects. Your primary function is claim endorsement."
+      : isDoePortal
+        ? `Regional oversight for ${currentUser?.region || "the assigned region"} with read-only project and KPI visibility.`
+        : isPscPortal
+          ? "Portfolio-level summaries with milestone and payment approval context."
+          : isUndpPortal
+            ? "National aggregate, donor-facing portfolio performance with vendor identities and financial detail hidden."
+            : isAuditorPortal
+              ? "Read-only audit access across projects, claims, flags, evidence, and sync history."
+              : "A unified command center for implementation health, contract readiness, and disbursement momentum.";
+  const summaryTiles = isRbfPortal
+    ? [
+        ["Total Projects", String(projects.length)],
+        ["Active", String(activeProjects.length)],
+        ["At Risk", String(atRiskProjects.length)],
+        ["Completed", String(completedProjects.length)],
+        ["Total Installs", Number(totalInstallations).toLocaleString()],
+        ["Verified", Number(totalVerifiedInstallations).toLocaleString()],
+        ["Pending Claims", String(claimsPendingCount)],
+        ["Unresolved Flags", String(projectAnomalyFlags.filter(flag => !flag.isResolved).length)],
+      ]
+    : isDoePortal
+      ? [
+          ["Projects in Region", String(projects.length)],
+          ["Installs in Region", Number(totalInstallations).toLocaleString()],
+          ["Female %", `${Math.round(projects.reduce((sum, project) => sum + getProjectKpiSnapshot(project).femalePct, 0) / Math.max(projects.length, 1))}%`],
+          ["Verified %", `${verifiedInstallationsPct}%`],
+        ]
+      : isPscPortal
+        ? [
+            ["Total Projects", String(projects.length)],
+            ["Total Paid Out", formatCurrency(claims.filter(claim => ["Completed", "Paid"].includes(claim.status)).reduce((sum, claim) => sum + Number(claim.claimAmount || 0), 0))],
+            ["Overall Progress", `${verifiedInstallationsPct}%`],
+            ["Pending Approvals", String(claims.filter(claim => claim.status === "TAC Endorsed").length)],
+          ]
+        : isUndpPortal
+          ? [
+              ["Active Projects", String(activeProjects.length)],
+              ["Beneficiaries Reached", Number(totalVerifiedInstallations).toLocaleString()],
+              ["Female Coverage", `${Math.round(projects.reduce((sum, project) => sum + getProjectKpiSnapshot(project).femalePct, 0) / Math.max(projects.length, 1))}%`],
+              ["Energy Generated", `${Math.round(projects.reduce((sum, project) => sum + Number(project.energyOutput || 0), 0)).toLocaleString()} kWh/mo`],
+            ]
+          : [
+              ["Total Projects", String(projects.length)],
+              ["Active", String(activeProjects.length)],
+              ["At Risk", String(atRiskProjects.length)],
+              ["Flagged", String(flaggedProjects.length)],
+            ];
+
   return (
     <div className="space-y-8">
       <div className="rounded-[32px] border border-slate-200/80 bg-[radial-gradient(circle_at_top_left,#16a34a22,transparent_45%),radial-gradient(circle_at_top_right,#0ea5e922,transparent_40%),linear-gradient(125deg,#0f172a_0%,#0b1530_45%,#111827_100%)] text-white shadow-[0_35px_80px_-40px_rgba(15,23,42,0.95)]">
@@ -13634,58 +15343,24 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
           <div className="flex flex-col gap-8 lg:flex-row lg:items-start lg:justify-between">
             <div className="max-w-2xl">
               <div className="inline-flex items-center gap-2 rounded-full border border-emerald-400/30 bg-emerald-500/10 px-3 py-1 text-[11px] uppercase tracking-[0.35em] text-emerald-200/80">
-                {isRbfPortal ? "RMT Project Oversight" : "Project Intelligence Hub"}
+                {isRbfPortal ? "RMT Project Oversight" : isTacPortal ? "Technical Review" : isDoePortal ? "Regional Oversight" : isPscPortal ? "Approval Portfolio" : isUndpPortal ? "Donor Aggregate View" : isAuditorPortal ? "Audit Oversight" : "Project Intelligence Hub"}
               </div>
-              <h1 className="text-3xl font-semibold mt-4">{isRbfPortal ? "RBF Project" : "Projects Hub"}</h1>
-              <p className="text-sm text-slate-200/90 mt-2">
-                {isRbfPortal
-                  ? "A dedicated project workspace for the RBF Management Team to review assigned project details, implementation status, and supporting records."
-                  : "A unified command center for implementation health, contract readiness, and disbursement momentum."}
-              </p>
+              <h1 className="text-3xl font-semibold mt-4">{hubTitle}</h1>
+              <p className="text-sm text-slate-200/90 mt-2">{hubDescription}</p>
               <div className="mt-5 flex flex-wrap gap-2 text-[11px] text-slate-200/80">
                 <span className="rounded-full border border-white/15 bg-white/10 px-3 py-1">Realtime Milestone Visibility</span>
-                <span className="rounded-full border border-white/15 bg-white/10 px-3 py-1">Claims & Payments Tracker</span>
-                <span className="rounded-full border border-white/15 bg-white/10 px-3 py-1">Project Documents Vault</span>
+                <span className="rounded-full border border-white/15 bg-white/10 px-3 py-1">{isUndpPortal ? "National KPI Signals" : "Claims & Payments Tracker"}</span>
+                <span className="rounded-full border border-white/15 bg-white/10 px-3 py-1">{isDoePortal ? "Regional Evidence View" : "Project Documents Vault"}</span>
               </div>
             </div>
-            {isRbfPortal ? (
-              <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-                {[
-                  ["Total Projects", String(projects.length)],
-                  ["Active", String(activeProjects.length)],
-                  ["Pending Setup", String(pendingProjects.length)],
-                  ["Completed", String(completedProjects.length)],
-                  ["Total Install.", Number(totalInstallations).toLocaleString()],
-                  ["Verified", `${Number(totalVerifiedInstallations).toLocaleString()} (${verifiedInstallationsPct}%)`],
-                  ["Flagged", String(totalFlaggedInstallations)],
-                  ["Claims Pending", String(claimsPendingCount)],
-                ].map(([label, value]) => (
-                  <div key={label} className="rounded-2xl border border-white/10 bg-white/10 px-4 py-3">
-                    <p className="text-[10px] uppercase tracking-wider text-white/60 font-semibold">{label}</p>
-                    <p className="text-xl font-semibold">{value}</p>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                <div className="rounded-2xl border border-white/10 bg-white/10 px-4 py-3">
-                  <p className="text-[10px] uppercase tracking-wider text-white/60 font-semibold">Total Projects</p>
-                  <p className="text-xl font-semibold">{projects.length}</p>
+            <div className={`grid gap-3 ${summaryTiles.length > 4 ? "grid-cols-2 lg:grid-cols-4" : "grid-cols-2 sm:grid-cols-4"}`}>
+              {summaryTiles.map(([label, value]) => (
+                <div key={label} className="rounded-2xl border border-white/10 bg-white/10 px-4 py-3">
+                  <p className="text-[10px] uppercase tracking-wider text-white/60 font-semibold">{label}</p>
+                  <p className="text-xl font-semibold">{value}</p>
                 </div>
-                <div className="rounded-2xl border border-white/10 bg-white/10 px-4 py-3">
-                  <p className="text-[10px] uppercase tracking-wider text-white/60 font-semibold">Active</p>
-                  <p className="text-xl font-semibold">{activeProjects.length}</p>
-                </div>
-                <div className="rounded-2xl border border-white/10 bg-white/10 px-4 py-3">
-                  <p className="text-[10px] uppercase tracking-wider text-white/60 font-semibold">Completed</p>
-                  <p className="text-xl font-semibold">{completedProjects.length}</p>
-                </div>
-                <div className="rounded-2xl border border-white/10 bg-white/10 px-4 py-3">
-                  <p className="text-[10px] uppercase tracking-wider text-white/60 font-semibold">Contract Value</p>
-                  <p className="text-xl font-semibold">M {totalContractValue.toLocaleString()}</p>
-                </div>
-              </div>
-            )}
+              ))}
+            </div>
           </div>
         </div>
       </div>
@@ -13693,11 +15368,15 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
       <div className="card">
         <div className="p-6 border-b border-slate-100 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <div>
-            <h3 className="text-lg font-bold">{isRbfPortal ? "Assigned Projects" : "Project Portfolio"}</h3>
+            <h3 className="text-lg font-bold">{isRbfPortal ? "All Projects" : isDoePortal ? "Regional Projects" : isPscPortal ? "Portfolio Overview" : isUndpPortal ? "Projects Summary" : "Project Portfolio"}</h3>
             <p className="text-sm text-slate-500">
               {isRbfPortal
                 ? "Review all available project details for the RMT oversight portfolio."
-                : "Curated overview with smart filters and at-a-glance health"}
+                : isTacPortal
+                  ? "You have read-only access to all projects. Your primary function is claim endorsement."
+                  : isUndpPortal
+                    ? "Vendor identity and financial values are hidden in this donor-facing aggregate view."
+                    : "Curated overview with smart filters and at-a-glance health"}
             </p>
           </div>
           <div className="flex flex-wrap gap-3">
@@ -13705,7 +15384,7 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
               <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
               <input
                 className="input-field pl-9"
-                placeholder={isRbfPortal ? "Search by vendor name / project ID" : "Search by ID, technology, region"}
+                placeholder={isUndpPortal ? "Search by project ID, technology, district" : isRbfPortal ? "Search project ID or vendor name" : "Search by project ID, vendor, technology, district"}
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
               />
@@ -13716,10 +15395,12 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
             <select className="input-field" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
               <option value="All">All Status</option>
               <option value="Active">Active</option>
+              <option value="At Risk">At Risk</option>
+              <option value="Flagged">Flagged</option>
               <option value="Completed">Completed</option>
               <option value="Pending">Pending</option>
             </select>
-            {isRbfPortal && (
+            {isOfficialPortal && (
               <>
                 <select className="input-field" value={districtFilter} onChange={(e) => setDistrictFilter(e.target.value)}>
                   {districtOptions.map(opt => <option key={opt} value={opt}>{opt === "All" ? "District: All" : opt}</option>)}
@@ -13757,12 +15438,24 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
               {isRbfPortal ? "No assigned projects found for the selected filters." : "No projects found for the selected filters."}
             </div>
           )}
-          {!loading && isRbfPortal && (
+          {!loading && isOfficialPortal && (
             <div className="overflow-x-auto rounded-3xl border border-slate-100">
               <table className="min-w-full text-sm">
                 <thead className="bg-slate-50 text-slate-500">
                   <tr>
-                    {["Project ID", "Vendor", "Technology", "District", "Target", "Verified", "Gender", "%Uptime", "%Milestone", "Status", "Action"].map(label => (
+                    {[
+                      "Project ID",
+                      ...(isUndpPortal ? [] : ["Vendor"]),
+                      "Technology",
+                      "District",
+                      "Target",
+                      "Verified",
+                      "Female %",
+                      ...(isPscPortal ? ["Paid"] : []),
+                      ...(isRbfPortal || isTacPortal || isDoePortal || isAuditorPortal ? ["Milestone"] : []),
+                      "Status",
+                      "Action",
+                    ].map(label => (
                       <th key={label} className="px-4 py-3 text-left font-semibold">{label}</th>
                     ))}
                   </tr>
@@ -13777,22 +15470,32 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
                     const milestoneLabel = nextMilestone
                       ? `M${Math.max(1, nextMilestoneIndex)} - ${getMilestoneStateLabel(nextMilestone, project.id)}`
                       : "Completed";
+                    const statusMeta = getPortfolioProjectStatus(project);
+                    const projectPaid = claimsForProject(project.id)
+                      .filter(claim => ["Completed", "Paid"].includes(claim.status))
+                      .reduce((sum, claim) => sum + Number(claim.claimAmount || 0), 0);
                     return (
                       <React.Fragment key={project.id}>
-                        <tr className="border-t border-slate-100">
+                        <tr className={`border-t border-slate-100 ${statusMeta.rowClass}`}>
                           <td className="px-4 py-3 font-semibold text-slate-900">{project.projectReference || `PRJ-${project.id}`}</td>
-                          <td className="px-4 py-3">{project.vendorName || "N/A"}</td>
+                          {!isUndpPortal && <td className="px-4 py-3">{project.vendorName || "N/A"}</td>}
                           <td className="px-4 py-3">{project.techType || "N/A"}</td>
                           <td className="px-4 py-3">{project.district || project.region || "N/A"}</td>
                           <td className="px-4 py-3">{formatMetricValue(kpiSnapshot.target)}</td>
                           <td className="px-4 py-3">{kpiDisplay.verifiedLabel}</td>
                           <td className="px-4 py-3">{kpiDisplay.genderLabel}</td>
-                          <td className="px-4 py-3">{kpiDisplay.uptimeLabel}</td>
-                          <td className="px-4 py-3">{milestoneLabel}</td>
-                          <td className="px-4 py-3"><span className="rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-700">{project.status}</span></td>
+                          {isPscPortal && <td className="px-4 py-3">{formatCurrency(projectPaid)}</td>}
+                          {(isRbfPortal || isTacPortal || isDoePortal || isAuditorPortal) && <td className="px-4 py-3">{milestoneLabel}</td>}
+                          <td className="px-4 py-3"><span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${statusMeta.badgeClass}`}>{statusMeta.label}</span></td>
                           <td className="px-4 py-3">
                             <button
-                              onClick={() => setSelectedProject(prev => (prev?.id === project.id ? null : project))}
+                              onClick={() => {
+                                const nextProject = selectedProject?.id === project.id ? null : project;
+                                setSelectedProject(nextProject);
+                                if (nextProject) {
+                                  setProjectTab(isPscPortal || isUndpPortal ? "summary" : "overview");
+                                }
+                              }}
                               className="btn-primary text-xs"
                             >
                               {selectedProject?.id === project.id ? "Close" : "View"}
@@ -13801,7 +15504,7 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
                         </tr>
                         {selectedProject?.id === project.id && (
                           <tr className="border-t border-slate-100 bg-white">
-                            <td colSpan={11} className="px-4 py-4">
+                            <td colSpan={isUndpPortal ? 8 : isPscPortal ? 10 : 10} className="px-4 py-4">
                               {renderProjectDetail(project)}
                             </td>
                           </tr>
@@ -13813,7 +15516,7 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: "vendor" | "rbf" }) => {
               </table>
             </div>
           )}
-          {!loading && !isRbfPortal && filteredProjects.map(project => (
+          {!loading && isVendorPortal && filteredProjects.map(project => (
             <div key={project.id} className="rounded-3xl border border-slate-100 bg-white p-5 shadow-[0_24px_60px_-46px_rgba(15,23,42,0.55)] space-y-4 relative overflow-hidden">
               <div className="absolute left-0 top-0 h-full w-1.5 bg-[linear-gradient(180deg,#22c55e_0%,#0ea5e9_60%,#1e293b_100%)]" />
               <div className={`rounded-2xl border px-4 py-3 text-sm font-semibold ${getSetupBannerClass(project)}`}>
@@ -17152,6 +18855,7 @@ export default function App() {
   const [notifications, setNotifications] = useState<Notification[]>(MOCK_NOTIFICATIONS);
   const [authMessage, setAuthMessage] = useState<string | null>(null);
   const [fieldVerifierInspectionBadge, setFieldVerifierInspectionBadge] = useState<string | undefined>(undefined);
+  const [viewingVendorProfile, setViewingVendorProfile] = useState<string | null>(null);
   const isApplyingBrowserStateRef = React.useRef(false);
   const lastBrowserStateKeyRef = React.useRef("");
 
@@ -17469,16 +19173,22 @@ export default function App() {
         );
         case "projects_hub": return <ProjectsHub mode="vendor" />;
         case "claims": return <Disbursements />;
+        case "my_profile":
+          return <VendorProfileView viewerRole={currentUser.role} useOwnProfile embedded />;
         default: return <VendorDashboard />;
       }
     }
     if (role === UserRole.TAC) {
       switch (activeTab) {
+        case "projects":
+          return <ProjectsHub mode="tac" />;
         case "dashboard":
         case "payments":
         case "evaluations":
         case "scoring":
         case "blacklisting":
+        case "all_vendors":
+          if (activeTab === "all_vendors") return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={setViewingVendorProfile} />;
           if (activeTab === "blacklisting") return <Blacklisting currentUser={currentUser} />;
           if (activeTab === "payments") return <Disbursements />;
           return <TACView mode="technical" />;
@@ -17513,6 +19223,8 @@ export default function App() {
         case "audit_logs":
         case "notifications":
         case "system_health":
+        case "all_vendors":
+          if (activeTab === "all_vendors") return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={setViewingVendorProfile} />;
           return <SuperAdminPortal section={activeTab as any} notifications={notifications} onNotificationSelect={handleNotificationSelect} />;
         default:
           return <SuperAdminPortal section="dashboard" notifications={notifications} onNotificationSelect={handleNotificationSelect} />;
@@ -17520,11 +19232,17 @@ export default function App() {
     }
     if (role === UserRole.DOE_OFFICER) {
       switch (activeTab) {
+        case "projects":
+          return <ProjectsHub mode="doe" />;
         case "dashboard":
         case "regional":
         case "endorsements":
         case "kpis":
         case "blacklisting":
+        case "all_vendors":
+          if (activeTab === "all_vendors") {
+            return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={setViewingVendorProfile} />;
+          }
           return activeTab === "blacklisting" ? (
             <Blacklisting currentUser={currentUser} />
           ) : (
@@ -17546,10 +19264,18 @@ export default function App() {
     }
     if (role === UserRole.UNDP_DONOR) {
       switch (activeTab) {
+        case "projects":
+          return <ProjectsHub mode="undp" />;
+        case "portfolio":
+          return <ProjectsHub mode="psc" />;
         case "dashboard":
         case "impact":
         case "funding":
         case "compliance":
+        case "all_vendors":
+          if (activeTab === "all_vendors") {
+            return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={setViewingVendorProfile} />;
+          }
           return (
             <MacroKpiPortal
               title="Project Steering Committee"
@@ -17569,11 +19295,17 @@ export default function App() {
     }
     if (role === UserRole.AUDITOR) {
       switch (activeTab) {
+        case "projects":
+          return <ProjectsHub mode="auditor" />;
         case "dashboard":
         case "audit_trail":
         case "verification":
         case "compliance":
         case "blacklisting":
+        case "all_vendors":
+          if (activeTab === "all_vendors") {
+            return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={setViewingVendorProfile} />;
+          }
           return activeTab === "blacklisting" ? (
             <Blacklisting currentUser={currentUser} />
           ) : (
@@ -17613,6 +19345,7 @@ export default function App() {
       case "rbf_projects": return <ProjectsHub mode="rbf" />;
       case "blacklisting": return <Blacklisting currentUser={currentUser} />;
       case "payments": return <Disbursements />;
+      case "all_vendors": return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={setViewingVendorProfile} />;
       default:
         return (
           <MacroKpiPortal
@@ -17631,6 +19364,7 @@ export default function App() {
     if (role === UserRole.VENDOR) {
       return [
         ...common,
+        { id: "my_profile", icon: UserCircle, label: "My Profile" },
         { id: "prequal", icon: ClipboardCheck, label: "Pre-Qualification", badge: "Required" },
         { id: "tenders", icon: FileText, label: "Published Tenders" },
         { id: "my_bids", icon: FileSearch, label: "My Bids" },
@@ -17645,6 +19379,8 @@ export default function App() {
     if (role === UserRole.TAC) {
       return [
         ...common,
+        { id: "all_vendors", icon: Users, label: "All Vendors" },
+        { id: "projects", icon: FolderKanban, label: "Projects" },
         { id: "payments", icon: CreditCard, label: "Claim Reviews" },
         { id: "evaluations", icon: ClipboardCheck, label: "Evaluations", badge: "4" },
         { id: "scoring", icon: BarChart3, label: "Scoring Matrix" },
@@ -17665,6 +19401,7 @@ export default function App() {
     if (role === UserRole.ADMIN) {
       return [
         ...common,
+        { id: "all_vendors", icon: Users, label: "All Vendors" },
         { id: "users", icon: Users, label: "User Management" },
         { id: "organizations", icon: Globe, label: "Organizations" },
         { id: "system_configuration", icon: Settings, label: "System Configuration" },
@@ -17678,6 +19415,8 @@ export default function App() {
     if (role === UserRole.DOE_OFFICER) {
       return [
         ...common,
+        { id: "all_vendors", icon: Users, label: "All Vendors" },
+        { id: "projects", icon: FolderKanban, label: "Regional Projects" },
         { id: "regional", icon: MapIcon, label: "Regional Monitoring" },
         { id: "endorsements", icon: CheckCircle2, label: "Endorsements" },
         { id: "kpis", icon: BarChart3, label: "KPI Review" },
@@ -17688,6 +19427,9 @@ export default function App() {
     if (role === UserRole.UNDP_DONOR) {
       return [
         ...common,
+        { id: "all_vendors", icon: Users, label: "All Vendors" },
+        { id: "portfolio", icon: FolderKanban, label: "Portfolio Overview" },
+        { id: "projects", icon: Activity, label: "National Dashboard" },
         { id: "impact", icon: Activity, label: "Portfolio Dashboard" },
         { id: "payments", icon: CreditCard, label: "Disbursements" },
         { id: "compliance", icon: CheckCircle2, label: "Compliance Logs" },
@@ -17699,6 +19441,8 @@ export default function App() {
     if (role === UserRole.AUDITOR) {
       return [
         ...common,
+        { id: "all_vendors", icon: Users, label: "All Vendors" },
+        { id: "projects", icon: FolderKanban, label: "All Projects" },
         { id: "audit_trail", icon: FileText, label: "Audit Trail" },
         { id: "verification", icon: ClipboardCheck, label: "Verification Docs" },
         { id: "compliance", icon: CheckCircle2, label: "Compliance Reports" },
@@ -17709,10 +19453,11 @@ export default function App() {
     // RBF Official
     return [
       ...common,
+      { id: "all_vendors", icon: Users, label: "All Vendors" },
       { id: "tenders", icon: FileText, label: "Tender Management" },
       { id: "evaluations", icon: ClipboardCheck, label: "Financial Evaluation" },
       { id: "prequal", icon: ClipboardCheck, label: "Pre-Qualification" },
-      { id: "rbf_projects", icon: BarChart3, label: "RBF Project" },
+      { id: "rbf_projects", icon: FolderKanban, label: "Projects Hub" },
       { id: "blacklisting", icon: FileWarning, label: "Blacklisting" },
       { id: "monitoring", icon: Activity, label: "Monitoring" },
       { id: "gis", icon: MapIcon, label: "GIS Mapping" },
@@ -17856,6 +19601,14 @@ export default function App() {
           </AnimatePresence>
         </div>
       </main>
+
+      {viewingVendorProfile && (
+        <VendorProfileView
+          vendorId={viewingVendorProfile}
+          viewerRole={currentUser?.role || ""}
+          onClose={() => setViewingVendorProfile(null)}
+        />
+      )}
     </div>
   );
 }

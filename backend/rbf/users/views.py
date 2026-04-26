@@ -61,6 +61,8 @@ from .serializers import (
     UserSerializer,
     VendorBlacklistCaseSerializer,
     VendorPrequalificationSerializer,
+    VendorProfileSerializer,
+    VendorDirectorySerializer,
 )
 from rbf.projects.audit import log_audit, AuditLogger
 from rbf.projects.integrations import SyncToProspectJob, normalize_prospect_gender
@@ -361,6 +363,44 @@ class UserViewSet(viewsets.ModelViewSet):
             return queryset
         return User.objects.filter(id=getattr(user, 'id', None)).order_by('-id')
 
+    def _can_view_vendor_directory(self, user):
+        return bool(
+            user
+            and user.is_authenticated
+            and user.role in {
+                UserRole.RBF_OFFICIAL,
+                UserRole.TAC,
+                UserRole.DOE_OFFICER,
+                UserRole.UNDP_DONOR,
+                UserRole.AUDITOR,
+                UserRole.ADMIN,
+            }
+        )
+
+    def _can_view_vendor_profile(self, viewer, vendor):
+        if not (viewer and viewer.is_authenticated and vendor and vendor.role == UserRole.VENDOR):
+            return False
+        if viewer.role == UserRole.VENDOR:
+            return viewer.id == vendor.id
+        if viewer.role in {UserRole.RBF_OFFICIAL, UserRole.TAC, UserRole.UNDP_DONOR, UserRole.AUDITOR, UserRole.ADMIN}:
+            return True
+        if viewer.role == UserRole.DOE_OFFICER:
+            viewer_region = (viewer.region or '').strip().lower()
+            vendor_region = (vendor.region or '').strip().lower()
+            return bool(viewer_region and vendor_region and viewer_region == vendor_region)
+        return False
+
+    def _vendor_directory_queryset(self, viewer):
+        queryset = (
+            User.objects.filter(role=UserRole.VENDOR)
+            .prefetch_related('prequalifications', 'blacklist_cases')
+            .order_by('organization_name', 'full_name', 'username')
+        )
+        if viewer.role == UserRole.DOE_OFFICER:
+            region = (viewer.region or '').strip()
+            queryset = queryset.filter(region__iexact=region) if region else queryset.none()
+        return queryset
+
     def update(self, request, *args, **kwargs):
         target_user = self.get_object()
         if request.user.role == UserRole.ADMIN and target_user.role != UserRole.VENDOR:
@@ -481,6 +521,54 @@ class UserViewSet(viewsets.ModelViewSet):
         log_audit(request.user, 'vendor_account_approved', user, {'username': user.username})
         return Response(UserSerializer(user).data, status=status.HTTP_200_OK)
 
+    @action(detail=False, methods=['get'])
+    def my_profile(self, request):
+        """Get current vendor's own profile"""
+        if not request.user.is_authenticated:
+            raise AuthenticationFailed('Not authenticated')
+        if request.user.role != UserRole.VENDOR:
+            raise PermissionDenied('Only vendors can access this endpoint')
+        serializer = VendorProfileSerializer(request.user, context={'request': request})
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated], url_path='vendor_directory')
+    def vendor_directory(self, request):
+        if not self._can_view_vendor_directory(request.user):
+            raise PermissionDenied('You do not have permission to view the vendor directory.')
+        queryset = self._vendor_directory_queryset(request.user)
+        vendor_ids = [item.id for item in queryset]
+        latest_prequals = {}
+        if vendor_ids:
+            prequals = VendorPrequalification.objects.filter(vendor_id__in=vendor_ids).order_by('vendor_id', '-submitted_at')
+            for prequal in prequals:
+                latest_prequals.setdefault(prequal.vendor_id, prequal)
+        for vendor in queryset:
+            vendor._latest_prequalification = latest_prequals.get(vendor.id)
+        page = self.paginate_queryset(queryset)
+        serializer = VendorDirectorySerializer(page if page is not None else queryset, many=True)
+        if page is not None:
+            return self.get_paginated_response(serializer.data)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['get'])
+    def profile(self, request, pk=None):
+        """Get vendor profile by ID - for RMT, TAC, etc."""
+        if not request.user.is_authenticated:
+            raise AuthenticationFailed('Not authenticated')
+        user = User.objects.filter(pk=pk, role=UserRole.VENDOR).first()
+        if user is None:
+            return Response({'detail': 'Not a vendor'}, status=status.HTTP_400_BAD_REQUEST)
+        if user.role != UserRole.VENDOR:
+            return Response({'detail': 'Not a vendor'}, status=status.HTTP_400_BAD_REQUEST)
+        if not self._can_view_vendor_profile(request.user, user):
+            raise PermissionDenied('You do not have permission to view this vendor profile.')
+        
+        user.last_viewed_at = timezone.now()
+        user.save(update_fields=['last_viewed_at'])
+        
+        serializer = VendorProfileSerializer(user, context={'request': request})
+        return Response(serializer.data)
+
 
 class OrganizationViewSet(viewsets.ModelViewSet):
     queryset = Organization.objects.all()
@@ -547,7 +635,14 @@ class PlatformConfigurationView(APIView):
         serializer.is_valid(raise_exception=True)
         serializer.save()
         AuditLogger.log('platform_configuration_updated', 'configuration', serializer.instance.id, 'platform_configuration', notes='Platform configuration updated by Super Admin.')
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        boundary_path = Path(settings.BASE_DIR) / 'public' / 'geojson' / 'lesotho.geojson'
+        payload = dict(serializer.data)
+        payload['lesotho_boundary'] = {
+            'path': str(boundary_path),
+            'exists': boundary_path.exists(),
+            'last_modified': datetime.utcfromtimestamp(boundary_path.stat().st_mtime).isoformat() + "+00:00" if boundary_path.exists() else None,
+        }
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 class PlatformConfigurationBoundaryRefreshView(APIView):
@@ -578,11 +673,23 @@ class PlatformConfigurationBoundaryUploadView(APIView):
             payload = json.loads(file.read().decode('utf-8'))
         except Exception:
             return Response({'error': 'Invalid JSON file.'}, status=status.HTTP_400_BAD_REQUEST)
-        geometry = payload.get('geometry') or {}
-        if geometry.get('type') not in {'Polygon', 'MultiPolygon'} or not geometry.get('coordinates'):
+        if payload.get('type') == 'FeatureCollection':
+            features = payload.get('features') or []
+            has_valid_geometry = any(
+                isinstance(feature, dict)
+                and (feature.get('geometry') or {}).get('type') in {'Polygon', 'MultiPolygon'}
+                and (feature.get('geometry') or {}).get('coordinates')
+                for feature in features
+            )
+        else:
+            geometry = payload.get('geometry') or {}
+            has_valid_geometry = geometry.get('type') in {'Polygon', 'MultiPolygon'} and bool(geometry.get('coordinates'))
+        if not has_valid_geometry:
             return Response({'error': 'Invalid GeoJSON: must contain a Polygon or MultiPolygon.'}, status=status.HTTP_400_BAD_REQUEST)
         with boundary_path.open('w', encoding='utf-8') as handle:
             json.dump(payload, handle)
+        from rbf.projects.gis import GpsValidator
+        GpsValidator._feature_cache = None
         AuditLogger.log('lesotho_boundary_uploaded', 'configuration', None, 'boundary', notes='Boundary file uploaded by Super Admin.')
         return Response({'status': 'ok'}, status=status.HTTP_200_OK)
 

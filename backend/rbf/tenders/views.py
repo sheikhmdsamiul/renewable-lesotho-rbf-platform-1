@@ -40,6 +40,7 @@ from .pba_pdf import generate_contract_pdf
 from rbf.users.models import UserRole, VendorPrequalification, PrequalificationStatus
 from rbf.users.models import User
 from rbf.users.blacklisting import is_vendor_restricted
+from rbf.common.urls import build_frontend_url
 from rbf.projects.models import Project, Milestone, MilestoneStatus, ProjectStatus, VerificationMethod
 from rbf.projects.audit import log_audit, AuditLogger
 from rbf.projects.integrations import SyncToProspectJob, queue_project_targets_sync
@@ -167,13 +168,17 @@ def _assignment_defaults(contract: TenderContract):
         for value in (contract.tender.target_districts if isinstance(contract.tender.target_districts, list) else [])
         if str(value or '').strip()
     ]
-    bid_districts = []
+    bid_preferred_district = ''
     if bid:
+        bid_preferred_district = str(getattr(bid, 'preferred_district', '') or '').strip()
+    assignment_districts = tender_target_districts
+    if not assignment_districts and bid_preferred_district:
+        assignment_districts = [bid_preferred_district]
+    if not assignment_districts:
         for site in bid.sites.all():
             district = str(getattr(site, 'district', '') or '').strip()
-            if district and district not in bid_districts:
-                bid_districts.append(district)
-    assignment_districts = tender_target_districts or bid_districts
+            if district and district not in assignment_districts:
+                assignment_districts.append(district)
     if not assignment_districts:
         fallback_district = (
             (vendor.verification_zone if vendor and vendor.verification_zone else '')
@@ -909,6 +914,9 @@ class TenderViewSet(viewsets.ModelViewSet):
 
     def create(self, request, *args, **kwargs):
         self._assert_write_permission()
+        data = request.data
+        if not data.get('stage_type'):
+            data = {**data, 'stage_type': 'Pre-Qualification'}
         return super().create(request, *args, **kwargs)
 
     def update(self, request, *args, **kwargs):
@@ -992,7 +1000,7 @@ class TenderViewSet(viewsets.ModelViewSet):
             f"Name: {tender.name}\n"
             f"Category: {tender.category}\n"
             f"Deadline: {tender.deadline}\n"
-            f"View details: {settings.FRONTEND_URL}/tenders/{tender.id}\n"
+            f"View details: {build_frontend_url(f'/rbf-official/tenders?view=details&tenderId={tender.id}', request=request)}\n"
         )
 
         email_enabled = send_email and bool(

@@ -22,6 +22,21 @@ class BidStatus(models.TextChoices):
     WITHDRAWN = 'Withdrawn'
 
 
+class BidStage1Status(models.TextChoices):
+    DRAFT = 'Draft'
+    SUBMITTED = 'Submitted'
+    SHORTLISTED = 'Shortlisted'
+    REJECTED = 'Rejected'
+
+
+class BidStage2Status(models.TextChoices):
+    DRAFT = 'Draft'
+    SUBMITTED = 'Submitted'
+    EVALUATED = 'Evaluated'
+    AWARDED = 'Awarded'
+    NOT_AWARDED = 'Not Awarded'
+
+
 class Tender(models.Model):
     reference_number = models.CharField(max_length=64, unique=True)
     name = models.CharField(max_length=255)
@@ -141,6 +156,8 @@ class TenderBid(models.Model):
     paygo_platform = models.CharField(max_length=255, blank=True)
     daily_payment_amount_lsl = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     collection_method = models.CharField(max_length=64, blank=True)
+    preferred_district = models.CharField(max_length=128, blank=True)
+    technology_types = models.JSONField(default=list, blank=True)
     
     # Metadata
     version_number = models.PositiveIntegerField(default=1)

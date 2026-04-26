@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
-import { fetchMapInstallations } from "../api";
+import { fetchMapBoundaryGeoJson, fetchMapInstallations } from "../api";
 import { MapInstallationsResponse } from "../types";
 
 declare global {
@@ -160,11 +160,7 @@ export function GisInstallationsMap({
   useEffect(() => {
     if (!leafletReady || !mapRef.current || boundaryLayerRef.current) return;
     let cancelled = false;
-    fetch("/public/geojson/lesotho.geojson")
-      .then((response) => {
-        if (!response.ok) throw new Error("Boundary file not found.");
-        return response.json();
-      })
+    fetchMapBoundaryGeoJson()
       .then((feature) => {
         if (cancelled || !mapRef.current) return;
         boundaryLayerRef.current = window.L.geoJSON(feature, {

@@ -1,4 +1,7 @@
 from datetime import timedelta
+from pathlib import Path
+import shutil
+import uuid
 from types import SimpleNamespace
 
 from rest_framework import status
@@ -42,9 +45,12 @@ class ProjectApiTests(APITestCase):
             role="Platform Administrator (Super Admin)",
             status="Active",
         )
-        self.geojson_dir = settings.BASE_DIR / "public" / "geojson"
+        self.test_geojson_root = settings.BASE_DIR / "tmp_test_geojson" / str(uuid.uuid4())
+        self.geojson_dir = self.test_geojson_root / "geojson"
         self.geojson_dir.mkdir(parents=True, exist_ok=True)
         self.geojson_path = self.geojson_dir / "lesotho.geojson"
+        self.settings_override = override_settings(LESOTHO_BOUNDARY_PATH=str(self.geojson_path.relative_to(settings.BASE_DIR)))
+        self.settings_override.enable()
         self.geojson_path.write_text(
             """
             {
@@ -59,6 +65,12 @@ class ProjectApiTests(APITestCase):
             encoding="utf-8",
         )
         GpsValidator._feature_cache = None
+
+    def tearDown(self):
+        GpsValidator._feature_cache = None
+        self.settings_override.disable()
+        shutil.rmtree(self.test_geojson_root, ignore_errors=True)
+        super().tearDown()
 
     def _project_payload(self):
         return {
@@ -97,6 +109,35 @@ class ProjectApiTests(APITestCase):
                 "setup_completed_at": timezone.now(),
             },
         )[0]
+
+    def _write_district_geojson(self):
+        self.geojson_path.write_text(
+            """
+            {
+              "type": "FeatureCollection",
+              "features": [
+                {
+                  "type": "Feature",
+                  "properties": {"district": "Maseru"},
+                  "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[[27.0, -30.5], [28.0, -30.5], [28.0, -29.5], [27.0, -29.5], [27.0, -30.5]]]
+                  }
+                },
+                {
+                  "type": "Feature",
+                  "properties": {"district": "Berea"},
+                  "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[[28.0, -30.5], [29.0, -30.5], [29.0, -29.5], [28.0, -29.5], [28.0, -30.5]]]
+                  }
+                }
+              ]
+            }
+            """.strip(),
+            encoding="utf-8",
+        )
+        GpsValidator._feature_cache = None
 
     def test_projects_list_endpoint(self):
         Project.objects.create(**self._project_payload())
@@ -990,6 +1031,89 @@ class ProjectApiTests(APITestCase):
         self.assertIn("warning", response.data)
         created_id = response.data["data"]["id"]
         self.assertTrue(AnomalyFlag.objects.filter(installation_id=created_id, flag_type="duplicate_gps").exists())
+
+    def test_installation_report_rejects_coordinates_outside_project_district(self):
+        self._write_district_geojson()
+        User = get_user_model()
+        vendor = User.objects.create_user(
+            username="district_locked_vendor",
+            password="securePass123",
+            role="Vendor",
+            status="Active",
+            region="Maseru",
+            gender="Male",
+            mobile_number="26650000008",
+        )
+        project = Project.objects.create(
+            vendor_id=str(vendor.id),
+            vendor_name=vendor.username,
+            tech_type="SHS",
+            region="Maseru",
+            district="Maseru",
+            status=ProjectStatus.INSTALLATION,
+            progress=0,
+            energy_output=0,
+            uptime=0,
+            gender_impact=0,
+        )
+        self._create_completed_setup(project, vendor)
+        self.client.force_authenticate(vendor)
+
+        response = self.client.post(
+            "/api/projects/installations/",
+            {
+                "project": project.id,
+                "gps_lat": -30.0,
+                "gps_lng": 28.5,
+                "serial_number": "SERIAL-DISTRICT-OUT-1",
+                "beneficiary_id": "BEN-DISTRICT-OUT-1",
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_422_UNPROCESSABLE_ENTITY)
+        self.assertIn("assigned project district", str(response.data["errors"]["gps_lat"][0]))
+        self.assertFalse(InstallationReport.objects.filter(project=project).exists())
+
+    def test_installation_report_accepts_coordinates_inside_project_district(self):
+        self._write_district_geojson()
+        User = get_user_model()
+        vendor = User.objects.create_user(
+            username="district_ok_vendor",
+            password="securePass123",
+            role="Vendor",
+            status="Active",
+            region="Maseru",
+            gender="Male",
+            mobile_number="26650000009",
+        )
+        project = Project.objects.create(
+            vendor_id=str(vendor.id),
+            vendor_name=vendor.username,
+            tech_type="SHS",
+            region="Maseru",
+            district="Maseru",
+            status=ProjectStatus.INSTALLATION,
+            progress=0,
+            energy_output=0,
+            uptime=0,
+            gender_impact=0,
+        )
+        self._create_completed_setup(project, vendor)
+        self.client.force_authenticate(vendor)
+
+        response = self.client.post(
+            "/api/projects/installations/",
+            {
+                "project": project.id,
+                "gps_lat": -30.0,
+                "gps_lng": 27.5,
+                "serial_number": "SERIAL-DISTRICT-IN-1",
+                "beneficiary_id": "BEN-DISTRICT-IN-1",
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(InstallationReport.objects.filter(project=project, serial_number="SERIAL-DISTRICT-IN-1").exists())
 
     def test_map_installations_endpoint_returns_summary_and_vendor_scope(self):
         User = get_user_model()

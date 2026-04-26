@@ -25,12 +25,29 @@ export enum TenderStatus {
 export enum BidStatus {
   DRAFT = "Draft",
   SUBMITTED = "Submitted",
+  SHORTLISTED = "Shortlisted",
   UNDER_REVIEW = "Under Review",
   REVISION_REQUIRED = "Revision Required",
   AWARDED = "Awarded",
+  NOT_AWARDED = "Not Awarded",
   ACCEPTED = "Accepted",
   REJECTED = "Rejected",
   WITHDRAWN = "Withdrawn",
+}
+
+export enum BidStage1Status {
+  DRAFT = "Draft",
+  SUBMITTED = "Submitted",
+  SHORTLISTED = "Shortlisted",
+  REJECTED = "Rejected",
+}
+
+export enum BidStage2Status {
+  DRAFT = "Draft",
+  SUBMITTED = "Submitted",
+  EVALUATED = "Evaluated",
+  AWARDED = "Awarded",
+  NOT_AWARDED = "Not Awarded",
 }
 
 export enum ProjectStatus {
@@ -46,7 +63,22 @@ export enum ProjectStatus {
   COMPLETED = "Completed",
 }
 
-export type UserStatus = "Active" | "Pending" | "Inactive" | "Registered" | "Suspended" | "Blacklisted";
+export type UserStatus = 
+  | "Active" 
+  | "Pending" 
+  | "Inactive" 
+  | "Registered" 
+  | "Suspended" 
+  | "Blacklisted"
+  | "Reinstated" 
+  | "Requalified"
+  // Pre-qualification statuses
+  | "Prequalification Rejected"
+  | "Prequalification Under Review"
+  // Blacklist statuses (mapped from backend)
+  | "Initiated"
+  | "Under Review"
+  | "Expired";
 
 export interface BlacklistSummary {
   case_id: string;
@@ -185,12 +217,15 @@ export interface TenderBid {
   vendor_id: string;
   vendor_name: string;
   vendor_email?: string;
+  preferred_district?: string;
+  technology_types?: string[];
   bid_amount?: number;
   subsidy_requested?: number;
   stage?: string;
   stage_key?: string;
   stage_badge?: string;
   technology_type?: string;
+  tender_technology_types?: string[];
   device_brand?: string;
   device_model?: string;
   co_financing_amount?: number;
@@ -919,10 +954,6 @@ export interface VendorPrequalificationSubmission {
   technologyTypes: string[];
   registrationCertificateName?: string;
   tradingLicense?: File;
-  registrationCertificate?: File;
-  taxComplianceCertificate?: File;
-  authorizedSignatoryId?: File;
-  experienceFinancialProof?: File;
   techTier?: string;
   yearsExperience?: number;
   priorProjects?: number;
@@ -940,6 +971,215 @@ export interface VendorPrequalificationSubmission {
   email?: string;
   genderOfFocalPerson?: string;
   declarationAccepted: boolean;
+  registrationCertificate?: File;
+  taxComplianceCertificate?: File;
+  authorizedSignatoryId?: File;
+  experienceFinancialProof?: File;
+}
+
+export interface VendorProfile {
+  id: string;
+  username: string;
+  email: string;
+  full_name: string;
+  gender: string;
+  role: string;
+  mobile_number: string;
+  national_id?: string;
+  address?: string;
+  organization_name?: string;
+  organization_type?: string;
+  technology_types: string[];
+  registration_certificate_name?: string;
+  tax_id?: string;
+  bank_name?: string;
+  bank_branch?: string;
+  bank_swift_code?: string;
+  bank_sort_code?: string;
+  bank_account_name?: string;
+  bank_account_number?: string;
+  tier_assignment?: string;
+  verification_zone?: string;
+  region?: string;
+  status: string;
+  date_joined: string;
+  last_login?: string;
+  prequalification?: {
+    status: string;
+    approved_at?: string;
+    submitted_at?: string;
+    company_name?: string;
+    organization_type?: string;
+    tax_id?: string;
+    hq_address?: string;
+    tech_tier?: string;
+    technology_types: string[];
+    female_beneficiary_target: number;
+    vulnerable_group_target: number;
+    years_experience: number;
+    prior_projects: number;
+    annual_revenue?: number;
+    districts_covered: number;
+    contact_number?: string;
+    email?: string;
+    gender_of_focal_person?: string;
+    bank_name?: string;
+    bank_branch?: string;
+    bank_swift_code?: string;
+    bank_sort_code?: string;
+    bank_account_name?: string;
+    bank_account_number?: string;
+    trading_license?: string;
+    registration_certificate?: string;
+    tax_compliance_certificate?: string;
+    authorized_signatory_id?: string;
+    experience_financial_proof?: string;
+  };
+  blacklist_status: {
+    status: string;
+    reason?: string;
+    description?: string;
+    expiry_date?: string;
+    is_permanent?: boolean;
+    initiated_at?: string;
+    reviewed_at?: string;
+    confirmed_at?: string;
+    reinstated_at?: string;
+  };
+  bid_count: number;
+  project_count: number;
+  total_contract_value: number;
+  documents?: {
+    prequalification_documents: Array<{
+      label: string;
+      category: string;
+      url: string;
+      uploaded_at?: string;
+    }>;
+    project_documents: Array<{
+      id: string;
+      project_id: string;
+      project_reference?: string;
+      title: string;
+      url: string;
+      uploaded_at?: string;
+      uploaded_by?: string;
+    }>;
+    contract_documents: Array<{
+      contract_id: string;
+      reference_number?: string;
+      title: string;
+      url: string;
+      uploaded_at?: string;
+    }>;
+  };
+  bids_data?: {
+    summary: {
+      total_bids: number;
+      awarded: number;
+      accepted: number;
+      rejected: number;
+      pending: number;
+      win_rate_pct: number;
+    };
+    bids: TenderBid[];
+    evaluations: TenderBidEvaluation[];
+    contracts: TenderContract[];
+  } | null;
+  projects_data?: {
+    projects: Project[];
+    recent_updates: Array<{
+      id: string;
+      project_id: string;
+      project_reference?: string;
+      title?: string;
+      body: string;
+      created_at: string;
+      author_name?: string;
+    }>;
+    recent_documents: Array<{
+      id: string;
+      project_id: string;
+      project_reference?: string;
+      title: string;
+      url: string;
+      uploaded_at?: string;
+    }>;
+  };
+  performance_data?: {
+    kpi_rows: Array<{
+      label: string;
+      target: string;
+      achieved: string;
+      status: string;
+    }>;
+    installation_summary: {
+      submitted: number;
+      verified: number;
+      flagged: number;
+      paused: number;
+      terminated: number;
+      verification_rate_pct: number;
+    };
+    anomaly_summary: {
+      total: number;
+      resolved: number;
+      unresolved: number;
+      by_type: Array<{
+        flag_type: string;
+        count: number;
+        resolved: number;
+        unresolved: number;
+      }>;
+    };
+    meter_summary: {
+      average_uptime_pct: number;
+      total_energy_kwh: number;
+      target_energy_kwh: number;
+      reading_count: number;
+    };
+    performance_notes: Array<{
+      id: string;
+      created_at: string;
+      author_name?: string;
+      author_role?: string;
+      title?: string;
+      body: string;
+    }>;
+  };
+  payments_data?: {
+    summary: {
+      total_contracted_value: number;
+      total_disbursed: number;
+      total_pending: number;
+    };
+    claims: PaymentClaim[];
+  } | null;
+  audit_trail?: {
+    limited: boolean;
+    entries: AuditLog[];
+  } | null;
+  prospect_sync_logs?: ProspectSyncLog[];
+}
+
+export interface VendorDirectoryEntry {
+  id: string;
+  username: string;
+  fullName: string;
+  email: string;
+  organizationName?: string;
+  organizationType?: string;
+  technologyTypes: string[];
+  region?: string;
+  status: string;
+  vendorTag?: string;
+  lastLogin?: string;
+  prequalificationStatus?: string;
+  prequalificationApprovedAt?: string;
+  blacklistStatus?: string;
+  operationalStanding: "Active" | "Suspended" | "Blacklisted" | "Reinstated";
+  projectCount: number;
+  bidCount: number;
 }
 
 export type PaymentClaimStatus =

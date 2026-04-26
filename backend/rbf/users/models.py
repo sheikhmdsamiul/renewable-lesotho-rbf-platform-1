@@ -20,6 +20,8 @@ class UserStatus(models.TextChoices):
     REGISTERED = 'Registered'
     SUSPENDED = 'Suspended'
     BLACKLISTED = 'Blacklisted'
+    REINSTATED = 'Reinstated'
+    REQUALIFIED = 'Requalified'
 
 
 class User(AbstractUser):
@@ -37,13 +39,65 @@ class User(AbstractUser):
     registration_certificate_name = models.CharField(max_length=255, blank=True)
     tax_id = models.CharField(max_length=64, blank=True)
     device_id = models.CharField(max_length=64, blank=True)
+    bank_name = models.CharField(max_length=255, blank=True)
+    bank_branch = models.CharField(max_length=255, blank=True)
+    bank_swift_code = models.CharField(max_length=64, blank=True)
+    bank_sort_code = models.CharField(max_length=64, blank=True)
     tier_assignment = models.CharField(max_length=64, blank=True)
     verification_zone = models.CharField(max_length=128, blank=True)
     status = models.CharField(max_length=16, choices=UserStatus.choices, default=UserStatus.ACTIVE)
     must_change_password = models.BooleanField(default=False)
+    last_viewed_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
         return self.username or self.email or str(self.pk)
+
+    @property
+    def computed_status(self) -> str:
+        """Compute status based on prequalification and blacklist status."""
+        # Check blacklist status first (takes priority over prequalification)
+        active_blacklist = VendorBlacklistCase.objects.filter(
+            vendor=self,
+            status__in=[
+                BlacklistCaseStatus.INITIATED,
+                BlacklistCaseStatus.UNDER_REVIEW,
+                BlacklistCaseStatus.BLACKLISTED
+            ]
+        ).first()
+        
+        if active_blacklist:
+            return active_blacklist.status
+        
+        # Check if reinstated (after active blacklist)
+        reinstated = VendorBlacklistCase.objects.filter(
+            vendor=self,
+            status=BlacklistCaseStatus.REINSTATED
+        ).order_by('-reinstated_at').first()
+        
+        if reinstated:
+            return UserStatus.REINSTATED
+        
+        # Check if requalified
+        requalified = VendorBlacklistCase.objects.filter(
+            vendor=self,
+            status=BlacklistCaseStatus.REQUALIFIED
+        ).order_by('-reinstated_at').first()
+        
+        if requalified:
+            return UserStatus.REQUALIFIED
+        
+        # Then check prequalification status
+        prequal = VendorPrequalification.objects.filter(vendor=self).order_by('-submitted_at').first()
+        if prequal:
+            if prequal.status == PrequalificationStatus.APPROVED:
+                return UserStatus.ACTIVE
+            elif prequal.status == PrequalificationStatus.REJECTED:
+                return "Prequalification Rejected"
+            elif prequal.status in [PrequalificationStatus.PENDING, PrequalificationStatus.UNDER_REVIEW, PrequalificationStatus.CLARIFICATION_REQUESTED]:
+                return "Prequalification Under Review"
+        
+        # Default to pending if no prequal
+        return UserStatus.PENDING
 
 
 class PrequalificationStatus(models.TextChoices):
@@ -142,6 +196,7 @@ class BlacklistCaseStatus(models.TextChoices):
     REJECTED = 'Rejected'
     EXPIRED = 'Expired'
     REINSTATED = 'Reinstated'
+    REQUALIFIED = 'Requalified'
 
 
 class BlacklistAppealStatus(models.TextChoices):

@@ -38,7 +38,6 @@ import {
   fetchSystemAuditLogs,
   fetchSystemHealth,
   fetchUserManagementMeta,
-  refreshBoundaryFile,
   refreshProspectSyncPanel,
   resetAdminManagedUserPassword,
   retryAllFailedProspectSyncJobs,
@@ -47,7 +46,6 @@ import {
   updateAdminManagedUser,
   updateOrganization,
   updatePlatformConfiguration,
-  uploadBoundaryFile,
 } from "../api";
 import {
   AuditLog,
@@ -504,34 +502,6 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
       setBanner("System configuration updated.");
     } catch (err: any) {
       setError(String(err?.message || "Unable to update configuration."));
-    } finally {
-      setConfigurationSubmitting(false);
-    }
-  };
-
-  const redownloadBoundary = async () => {
-    setConfigurationSubmitting(true);
-    try {
-      await refreshBoundaryFile();
-      setBanner("Lesotho boundary file re-downloaded.");
-      setConfiguration(await fetchPlatformConfiguration());
-    } catch (err: any) {
-      setError(String(err?.message || "Unable to refresh boundary file."));
-    } finally {
-      setConfigurationSubmitting(false);
-    }
-  };
-
-  const uploadBoundary = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setConfigurationSubmitting(true);
-    try {
-      await uploadBoundaryFile(file);
-      setBanner("Lesotho boundary file uploaded.");
-      setConfiguration(await fetchPlatformConfiguration());
-    } catch (err: any) {
-      setError(String(err?.message || "Unable to upload boundary file."));
     } finally {
       setConfigurationSubmitting(false);
     }
@@ -1069,25 +1039,6 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
                     <label className="block text-sm font-medium text-slate-700 mb-1">Allowed File Types</label>
                     <input className="input-field" value={configuration.allowedFileTypes.join(", ")} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, allowedFileTypes: e.target.value.split(",").map((item) => item.trim().toUpperCase()).filter(Boolean) } : prev)} placeholder="PDF, DOCX, JPG, PNG" />
                     <p className="text-xs text-slate-500 mt-1">Separate with commas</p>
-                  </div>
-                </div>
-              </div>
-              <div className="rounded-xl border border-slate-100 p-4">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <Map size={16} className="text-emerald-600" />
-                      <p className="font-semibold text-slate-900">Lesotho Boundary</p>
-                    </div>
-                    <p className="text-xs text-slate-500 mt-1">{configuration.lesothoBoundary?.exists ? "GeoJSON file available" : "GeoJSON file missing"}</p>
-                    <p className="text-xs text-slate-400">{configuration.lesothoBoundary?.lastModified ? formatDateTime(configuration.lesothoBoundary.lastModified) : "No timestamp"}</p>
-                  </div>
-                  <div className="flex flex-col gap-2">
-                    <label className="btn-secondary text-xs cursor-pointer">
-                      Upload File
-                      <input type="file" accept=".geojson" className="hidden" onChange={uploadBoundary} disabled={configurationSubmitting} />
-                    </label>
-                    <button type="button" onClick={() => void redownloadBoundary()} className="btn-secondary text-xs" disabled={configurationSubmitting}>Re-download</button>
                   </div>
                 </div>
               </div>

@@ -14,6 +14,8 @@ import {
   VendorPrequalification,
   VendorPrequalificationSubmission,
   VendorBankDetails,
+  VendorProfile,
+  VendorDirectoryEntry,
   DisbursementSheet,
   PaymentClaim,
   PaymentClaimSubmission,
@@ -80,6 +82,16 @@ function stripApiSuffix(base: string): string {
   return base.replace(/\/$/, "").replace(/\/api$/i, "");
 }
 
+function getBrowserOrigin(): string {
+  if (typeof window === "undefined") return "";
+  return window.location.origin.replace(/\/$/, "");
+}
+
+function getConfiguredApiOrigin(): string {
+  if (!configuredApiBase || !/^https?:\/\//i.test(configuredApiBase)) return "";
+  return stripApiSuffix(configuredApiBase);
+}
+
 function joinApiUrl(base: string, url: string): string {
   if (!base) return url;
   const normalizedBase = base.replace(/\/$/, "");
@@ -96,9 +108,9 @@ function normalizeFileUrl(raw?: string): string | undefined {
   try {
     const url = new URL(raw);
     if (url.hostname === "127.0.0.1" || url.hostname === "localhost") {
-      url.hostname = window.location.hostname;
-      url.port = "8000";
-      return url.toString();
+      const preferredOrigin = getConfiguredApiOrigin() || getBrowserOrigin();
+      if (!preferredOrigin) return raw;
+      return `${preferredOrigin}${url.pathname}${url.search}${url.hash}`;
     }
   } catch {
     return raw;
@@ -187,41 +199,33 @@ function getHeaderValue(headers: Record<string, string>, name: string): string |
 }
 
 function getApiBaseCandidates(): string[] {
-  const normalizedConfigured = configuredApiBase ? stripApiSuffix(configuredApiBase) : "";
-  const browserBackends: string[] = [];
+  const normalizedConfigured = getConfiguredApiOrigin();
+  const bases: string[] = [""];
 
   if (typeof window !== "undefined") {
     const { protocol, hostname } = window.location;
-    if (hostname === "127.0.0.1" || hostname === "localhost") {
-      // Prefer direct backend in local development to avoid proxy-only failure modes.
-      browserBackends.push("http://127.0.0.1:8000", "http://localhost:8000");
-    } else if (hostname) {
-      browserBackends.push(`${protocol}//${hostname}:8000`, `http://${hostname}:8000`);
+    if (normalizedConfigured) bases.push(normalizedConfigured);
+    if (isDevMode && hostname) {
+      if (hostname === "127.0.0.1" || hostname === "localhost") {
+        bases.push(`${protocol}//${hostname}:8000`);
+      } else {
+        bases.push(`${protocol}//${hostname}:8000`, `http://${hostname}:8000`);
+      }
+      bases.push("http://127.0.0.1:8000", "http://localhost:8000");
     }
-  }
-
-  const bases: string[] = [];
-
-  if (isDevMode) {
-    // In local development, prefer Vite proxy (/api) first.
-    bases.push("");
-    if (normalizedConfigured) bases.push(normalizedConfigured);
-    bases.push(...browserBackends);
   } else {
-    bases.push(""); // same-origin first for production deployments
     if (normalizedConfigured) bases.push(normalizedConfigured);
-    bases.push(...browserBackends);
+    if (isDevMode) bases.push("http://127.0.0.1:8000", "http://localhost:8000");
   }
-
-  bases.push("http://127.0.0.1:8000", "http://localhost:8000");
   return uniq(bases);
 }
 
 const API_BASE_CANDIDATES = getApiBaseCandidates();
 export const API_BASE: string =
-  (configuredApiBase ? stripApiSuffix(configuredApiBase) : "") ||
+  getConfiguredApiOrigin() ||
+  getBrowserOrigin() ||
   API_BASE_CANDIDATES.find((base) => Boolean(base)) ||
-  "http://127.0.0.1:8000";
+  "";
 
 // ============ Mapping helpers ============
 
@@ -322,6 +326,212 @@ function mapUserFromApi(api: any): User {
       : undefined,
     vendorTag: api.vendor_tag ?? undefined,
     blacklistSummary: api.blacklist_summary ?? undefined,
+  };
+}
+
+function mapVendorProfileFromApi(api: any): VendorProfile {
+  return {
+    id: String(api.id ?? ""),
+    username: api.username ?? "",
+    email: api.email ?? "",
+    full_name: api.full_name ?? "",
+    gender: api.gender ?? "",
+    role: api.role ?? "",
+    mobile_number: api.mobile_number ?? "",
+    national_id: api.national_id ?? undefined,
+    address: api.address ?? undefined,
+    organization_name: api.organization_name ?? undefined,
+    organization_type: api.organization_type ?? undefined,
+    technology_types: Array.isArray(api.technology_types) ? api.technology_types : [],
+    registration_certificate_name: api.registration_certificate_name ?? undefined,
+    tax_id: api.tax_id ?? undefined,
+    bank_name: api.bank_name ?? undefined,
+    bank_branch: api.bank_branch ?? undefined,
+    bank_swift_code: api.bank_swift_code ?? undefined,
+    bank_sort_code: api.bank_sort_code ?? undefined,
+    bank_account_name: api.bank_account_name ?? undefined,
+    bank_account_number: api.bank_account_number ?? undefined,
+    tier_assignment: api.tier_assignment ?? undefined,
+    verification_zone: api.verification_zone ?? undefined,
+    region: api.region ?? undefined,
+    status: api.status ?? "",
+    date_joined: api.date_joined ?? "",
+    last_login: api.last_login ?? undefined,
+    prequalification: api.prequalification
+      ? {
+          status: api.prequalification.status ?? "",
+          approved_at: api.prequalification.approved_at ?? undefined,
+          submitted_at: api.prequalification.submitted_at ?? undefined,
+          company_name: api.prequalification.company_name ?? undefined,
+          organization_type: api.prequalification.organization_type ?? undefined,
+          tax_id: api.prequalification.tax_id ?? undefined,
+          hq_address: api.prequalification.hq_address ?? undefined,
+          tech_tier: api.prequalification.tech_tier ?? undefined,
+          technology_types: Array.isArray(api.prequalification.technology_types) ? api.prequalification.technology_types : [],
+          female_beneficiary_target: Number(api.prequalification.female_beneficiary_target ?? 0),
+          vulnerable_group_target: Number(api.prequalification.vulnerable_group_target ?? 0),
+          years_experience: Number(api.prequalification.years_experience ?? 0),
+          prior_projects: Number(api.prequalification.prior_projects ?? 0),
+          annual_revenue: api.prequalification.annual_revenue != null ? Number(api.prequalification.annual_revenue) : undefined,
+          districts_covered: Number(api.prequalification.districts_covered ?? 0),
+          contact_number: api.prequalification.contact_number ?? undefined,
+          email: api.prequalification.email ?? undefined,
+          gender_of_focal_person: api.prequalification.gender_of_focal_person ?? undefined,
+          bank_name: api.prequalification.bank_name ?? undefined,
+          bank_branch: api.prequalification.bank_branch ?? undefined,
+          bank_swift_code: api.prequalification.bank_swift_code ?? undefined,
+          bank_sort_code: api.prequalification.bank_sort_code ?? undefined,
+          bank_account_name: api.prequalification.bank_account_name ?? undefined,
+          bank_account_number: api.prequalification.bank_account_number ?? undefined,
+          trading_license: normalizeFileUrl(api.prequalification.trading_license ?? undefined),
+          registration_certificate: normalizeFileUrl(api.prequalification.registration_certificate ?? undefined),
+          tax_compliance_certificate: normalizeFileUrl(api.prequalification.tax_compliance_certificate ?? undefined),
+          authorized_signatory_id: normalizeFileUrl(api.prequalification.authorized_signatory_id ?? undefined),
+          experience_financial_proof: normalizeFileUrl(api.prequalification.experience_financial_proof ?? undefined),
+        }
+      : undefined,
+    blacklist_status: {
+      status: api.blacklist_status?.status ?? "Clear",
+      reason: api.blacklist_status?.reason ?? undefined,
+      description: api.blacklist_status?.description ?? undefined,
+      expiry_date: api.blacklist_status?.expiry_date ?? undefined,
+      is_permanent: api.blacklist_status?.is_permanent ?? undefined,
+      initiated_at: api.blacklist_status?.initiated_at ?? undefined,
+      reviewed_at: api.blacklist_status?.reviewed_at ?? undefined,
+      confirmed_at: api.blacklist_status?.confirmed_at ?? undefined,
+      reinstated_at: api.blacklist_status?.reinstated_at ?? undefined,
+    },
+    bid_count: Number(api.bid_count ?? 0),
+    project_count: Number(api.project_count ?? 0),
+    total_contract_value: Number(api.total_contract_value ?? 0),
+    documents: api.documents
+      ? {
+          prequalification_documents: Array.isArray(api.documents.prequalification_documents)
+            ? api.documents.prequalification_documents.map((doc: any) => ({
+                label: doc.label ?? "",
+                category: doc.category ?? "",
+                url: normalizeFileUrl(doc.url ?? "") ?? "",
+                uploaded_at: doc.uploaded_at ?? undefined,
+              }))
+            : [],
+          project_documents: Array.isArray(api.documents.project_documents)
+            ? api.documents.project_documents.map((doc: any) => ({
+                id: String(doc.id ?? ""),
+                project_id: String(doc.project_id ?? ""),
+                project_reference: doc.project_reference ?? undefined,
+                title: doc.title ?? "",
+                url: normalizeFileUrl(doc.url ?? "") ?? "",
+                uploaded_at: doc.uploaded_at ?? undefined,
+                uploaded_by: doc.uploaded_by ?? undefined,
+              }))
+            : [],
+          contract_documents: Array.isArray(api.documents.contract_documents)
+            ? api.documents.contract_documents.map((doc: any) => ({
+                contract_id: String(doc.contract_id ?? ""),
+                reference_number: doc.reference_number ?? undefined,
+                title: doc.title ?? "",
+                url: normalizeFileUrl(doc.url ?? "") ?? "",
+                uploaded_at: doc.uploaded_at ?? undefined,
+              }))
+            : [],
+        }
+      : undefined,
+    bids_data: api.bids_data
+      ? {
+          summary: {
+            total_bids: Number(api.bids_data.summary?.total_bids ?? 0),
+            awarded: Number(api.bids_data.summary?.awarded ?? 0),
+            accepted: Number(api.bids_data.summary?.accepted ?? 0),
+            rejected: Number(api.bids_data.summary?.rejected ?? 0),
+            pending: Number(api.bids_data.summary?.pending ?? 0),
+            win_rate_pct: Number(api.bids_data.summary?.win_rate_pct ?? 0),
+          },
+          bids: Array.isArray(api.bids_data.bids) ? api.bids_data.bids.map(mapTenderBidFromApi) : [],
+          evaluations: Array.isArray(api.bids_data.evaluations) ? api.bids_data.evaluations.map(mapBidEvaluationFromApi) : [],
+          contracts: Array.isArray(api.bids_data.contracts) ? api.bids_data.contracts.map(mapTenderContractFromApi) : [],
+        }
+      : null,
+    projects_data: api.projects_data
+      ? {
+          projects: Array.isArray(api.projects_data.projects) ? api.projects_data.projects.map(mapProjectFromApi) : [],
+          recent_updates: Array.isArray(api.projects_data.recent_updates) ? api.projects_data.recent_updates : [],
+          recent_documents: Array.isArray(api.projects_data.recent_documents)
+            ? api.projects_data.recent_documents.map((doc: any) => ({
+                id: String(doc.id ?? ""),
+                project_id: String(doc.project_id ?? ""),
+                project_reference: doc.project_reference ?? undefined,
+                title: doc.title ?? "",
+                url: normalizeFileUrl(doc.url ?? "") ?? "",
+                uploaded_at: doc.uploaded_at ?? undefined,
+              }))
+            : [],
+        }
+      : undefined,
+    performance_data: api.performance_data
+      ? {
+          kpi_rows: Array.isArray(api.performance_data.kpi_rows) ? api.performance_data.kpi_rows : [],
+          installation_summary: {
+            submitted: Number(api.performance_data.installation_summary?.submitted ?? 0),
+            verified: Number(api.performance_data.installation_summary?.verified ?? 0),
+            flagged: Number(api.performance_data.installation_summary?.flagged ?? 0),
+            paused: Number(api.performance_data.installation_summary?.paused ?? 0),
+            terminated: Number(api.performance_data.installation_summary?.terminated ?? 0),
+            verification_rate_pct: Number(api.performance_data.installation_summary?.verification_rate_pct ?? 0),
+          },
+          anomaly_summary: {
+            total: Number(api.performance_data.anomaly_summary?.total ?? 0),
+            resolved: Number(api.performance_data.anomaly_summary?.resolved ?? 0),
+            unresolved: Number(api.performance_data.anomaly_summary?.unresolved ?? 0),
+            by_type: Array.isArray(api.performance_data.anomaly_summary?.by_type) ? api.performance_data.anomaly_summary.by_type : [],
+          },
+          meter_summary: {
+            average_uptime_pct: Number(api.performance_data.meter_summary?.average_uptime_pct ?? 0),
+            total_energy_kwh: Number(api.performance_data.meter_summary?.total_energy_kwh ?? 0),
+            target_energy_kwh: Number(api.performance_data.meter_summary?.target_energy_kwh ?? 0),
+            reading_count: Number(api.performance_data.meter_summary?.reading_count ?? 0),
+          },
+          performance_notes: Array.isArray(api.performance_data.performance_notes) ? api.performance_data.performance_notes : [],
+        }
+      : undefined,
+    payments_data: api.payments_data
+      ? {
+          summary: {
+            total_contracted_value: Number(api.payments_data.summary?.total_contracted_value ?? 0),
+            total_disbursed: Number(api.payments_data.summary?.total_disbursed ?? 0),
+            total_pending: Number(api.payments_data.summary?.total_pending ?? 0),
+          },
+          claims: Array.isArray(api.payments_data.claims) ? api.payments_data.claims.map(mapPaymentClaimFromApi) : [],
+        }
+      : null,
+    audit_trail: api.audit_trail
+      ? {
+          limited: Boolean(api.audit_trail.limited),
+          entries: Array.isArray(api.audit_trail.entries) ? api.audit_trail.entries.map(mapAuditLogFromApi) : [],
+        }
+      : null,
+    prospect_sync_logs: Array.isArray(api.prospect_sync_logs) ? api.prospect_sync_logs.map(mapProspectSyncLogFromApi) : [],
+  };
+}
+
+function mapVendorDirectoryEntryFromApi(api: any): VendorDirectoryEntry {
+  return {
+    id: String(api.id ?? ""),
+    username: api.username ?? "",
+    fullName: api.full_name ?? api.username ?? "",
+    email: api.email ?? "",
+    organizationName: api.organization_name ?? undefined,
+    organizationType: api.organization_type ?? undefined,
+    technologyTypes: Array.isArray(api.technology_types) ? api.technology_types : [],
+    region: api.region ?? undefined,
+    status: api.status ?? "",
+    vendorTag: api.vendor_tag ?? undefined,
+    lastLogin: api.last_login ?? undefined,
+    prequalificationStatus: api.prequalification_status ?? undefined,
+    prequalificationApprovedAt: api.prequalification_approved_at ?? undefined,
+    blacklistStatus: api.blacklist_status ?? undefined,
+    operationalStanding: api.operational_standing ?? "Active",
+    projectCount: Number(api.project_count ?? 0),
+    bidCount: Number(api.bid_count ?? 0),
   };
 }
 
@@ -883,6 +1093,7 @@ function mapTenderBidFromApi(api: any): TenderBid {
     stage_key: api.stage_key ?? undefined,
     stage_badge: api.stage_badge ?? undefined,
     technology_type: api.technology_type ?? undefined,
+    tender_technology_types: Array.isArray(api.tender_technology_types) ? api.tender_technology_types : undefined,
     device_brand: api.device_brand ?? undefined,
     device_model: api.device_model ?? undefined,
     co_financing_amount: api.co_financing_amount != null ? Number(api.co_financing_amount) : undefined,
@@ -1810,6 +2021,10 @@ export async function fetchPortfolioKpiSummary(): Promise<PortfolioKpiSummary> {
   return await http<PortfolioKpiSummary>(`/api/kpi/portfolio`);
 }
 
+export async function fetchMapBoundaryGeoJson(): Promise<any> {
+  return await http<any>(`/api/map/boundary`);
+}
+
 export async function downloadProjectKpiPdf(projectId: string): Promise<void> {
   const token = typeof window !== "undefined" ? localStorage.getItem(ACCESS_TOKEN_KEY) : null;
   const requestUrls = API_BASE_CANDIDATES.map((base) => joinApiUrl(base, `/api/kpi/project/${projectId}/export-pdf`));
@@ -2062,7 +2277,8 @@ export async function createInstallationReport(payload: {
   photoFiles?: File[];
   meterId?: string;
   kwhReading?: number;
-}): Promise<{ report: InstallationReport; warning?: string }> {
+  confirmOutsideDistrict?: boolean;
+}): Promise<{ report: InstallationReport; warning?: string; requiresConfirmation?: string }> {
   const form = new FormData();
   form.append("project", payload.projectId);
   if (payload.milestoneId) form.append("milestone", payload.milestoneId);
@@ -2072,6 +2288,7 @@ export async function createInstallationReport(payload: {
   form.append("beneficiary_id", payload.beneficiaryId);
   if (payload.meterId) form.append("meter_id", payload.meterId);
   if (payload.kwhReading != null) form.append("kwh_reading", String(payload.kwhReading));
+  if (payload.confirmOutsideDistrict) form.append("confirm_outside_district", "true");
   if (payload.receiptFile instanceof File) {
     form.append("receipt_file", payload.receiptFile);
   }
@@ -2087,6 +2304,10 @@ export async function createInstallationReport(payload: {
       report: mapInstallationReportFromApi(data.data),
       warning: typeof data.warning === "string" ? data.warning : undefined,
     };
+  }
+  if (data?.errors) {
+    const errorMessages = Object.values(data.errors).flat().join(" ");
+    throw new Error(errorMessages || "Unable to submit installation report.");
   }
   return {
     report: mapInstallationReportFromApi(data),
@@ -2147,6 +2368,21 @@ export async function fetchNotifications(): Promise<Notification[]> {
 export async function fetchVendorPrequalifications(): Promise<VendorPrequalification[]> {
   const data = await http<any>(`/api/users/prequalifications/`);
   return unwrapListResponse<any>(data).map(mapVendorPrequalificationFromApi);
+}
+
+export async function fetchMyProfile(): Promise<VendorProfile> {
+  const data = await http<any>(`/api/users/my_profile/`);
+  return mapVendorProfileFromApi(data);
+}
+
+export async function fetchVendorProfile(vendorId: string): Promise<VendorProfile> {
+  const data = await http<any>(`/api/users/${vendorId}/profile/`);
+  return mapVendorProfileFromApi(data);
+}
+
+export async function fetchVendorDirectory(): Promise<VendorDirectoryEntry[]> {
+  const data = await http<any>(`/api/users/vendor_directory/`);
+  return unwrapListResponse<any>(data).map(mapVendorDirectoryEntryFromApi);
 }
 
 export async function fetchBlacklistCases(): Promise<VendorBlacklistCase[]> {
@@ -2535,6 +2771,14 @@ export async function fetchAnomalyFlags(projectId?: string): Promise<AnomalyFlag
   const query = projectId ? `?project=${encodeURIComponent(projectId)}` : "";
   const data = await http<any>(`/api/projects/anomaly-flags/${query}`);
   return unwrapListResponse<any>(data).map(mapAnomalyFlagFromApi);
+}
+
+export async function resolveAnomalyFlag(id: string): Promise<AnomalyFlag> {
+  const data = await http<any>(`/api/projects/anomaly-flags/${id}/resolve/`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  return mapAnomalyFlagFromApi(data);
 }
 
 export async function fetchProspectSyncLogs(params?: {
@@ -2951,18 +3195,10 @@ export async function refreshBoundaryFile(): Promise<void> {
 export async function uploadBoundaryFile(file: File): Promise<void> {
   const formData = new FormData();
   formData.append("file", file);
-  const token = localStorage.getItem("access_token");
-  const response = await fetch(`${API_BASE_URL}/api/users/platform-configuration/upload-boundary/`, {
+  await http<any>(`/api/users/platform-configuration/upload-boundary/`, {
     method: "POST",
-    headers: {
-      "Authorization": `Bearer ${token}`,
-    },
     body: formData,
   });
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ error: "Upload failed" }));
-    throw new Error(error.error || "Failed to upload boundary file");
-  }
 }
 
 export async function fetchSystemHealth(): Promise<SystemHealthPayload> {

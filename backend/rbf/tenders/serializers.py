@@ -110,20 +110,30 @@ def _load_lesotho_boundary_coordinates():
     with geojson_path.open('r', encoding='utf-8') as geojson_file:
         payload = json.load(geojson_file)
 
-    geometry = payload
+    polygons = []
     if payload.get('type') == 'FeatureCollection':
         features = payload.get('features') or []
-        geometry = features[0].get('geometry') if features else {}
+        for feature in features:
+            geometry = feature.get('geometry') or {}
+            geo_type = geometry.get('type')
+            coordinates = geometry.get('coordinates') or []
+            if geo_type == 'Polygon':
+                polygons.append(coordinates)
+            elif geo_type == 'MultiPolygon':
+                polygons.extend(coordinates)
+    elif payload.get('type') == 'Polygon':
+        polygons.append(payload.get('coordinates') or [])
+    elif payload.get('type') == 'MultiPolygon':
+        polygons.extend(payload.get('coordinates') or [])
     elif payload.get('type') == 'Feature':
         geometry = payload.get('geometry') or {}
-
-    geo_type = geometry.get('type')
-    coordinates = geometry.get('coordinates') or []
-    if geo_type == 'Polygon':
-        return [coordinates]
-    if geo_type == 'MultiPolygon':
-        return coordinates
-    return []
+        geo_type = geometry.get('type')
+        coordinates = geometry.get('coordinates') or []
+        if geo_type == 'Polygon':
+            polygons.append(coordinates)
+        elif geo_type == 'MultiPolygon':
+            polygons.extend(coordinates)
+    return polygons
 
 
 def _point_in_ring(longitude: Decimal, latitude: Decimal, ring) -> bool:
@@ -268,6 +278,7 @@ class TenderBidSerializer(serializers.ModelSerializer):
     stage_key = serializers.SerializerMethodField()
     stage_badge = serializers.SerializerMethodField()
     technology_type = serializers.SerializerMethodField()
+    tender_technology_types = serializers.SerializerMethodField()
     document_requirements = serializers.SerializerMethodField()
     document_counts = serializers.SerializerMethodField()
     stage_two_ready = serializers.SerializerMethodField()
@@ -287,7 +298,7 @@ class TenderBidSerializer(serializers.ModelSerializer):
             'tender_reference', 'tender_name', 'tender_status',
             'tender_intent_to_award_at', 'tender_intent_to_award_bid_id',
             'tender_awarded_at', 'tender_awarded_vendor_id', 'tender_awarded_vendor_name',
-            'bid_amount', 'subsidy_requested', 'proposal_file', 'stage', 'stage_key', 'stage_badge', 'technology_type', 'concept_note',
+            'bid_amount', 'subsidy_requested', 'proposal_file', 'stage', 'stage_key', 'stage_badge', 'technology_type', 'tender_technology_types', 'technology_types', 'concept_note',
             'technical_proposal', 'financial_proposal',
             'system_configuration', 'boq_items', 'boq_details', 'device_brand_model', 'tech_tier', 'energy_target_kwh_month',
             'technical_proposal_file', 'financial_proposal_file', 'boq_file',
@@ -295,7 +306,7 @@ class TenderBidSerializer(serializers.ModelSerializer):
             'female_target_pct', 'vulnerable_target_pct', 'low_income_target_pct',
             'inclusion_commitment_confirmed',
             'om_strategy_summary', 'local_technicians_to_be_trained', 'warranty_period_months',
-            'offer_paygo', 'paygo_platform', 'daily_payment_amount_lsl', 'collection_method',
+            'offer_paygo', 'paygo_platform', 'daily_payment_amount_lsl', 'collection_method', 'preferred_district',
             'stage_two_unlocked', 'stage_two_unlocked_at', 'stage_two_source_bid', 'stage_two_ready',
             'document_requirements', 'document_counts',
             'deadline', 'deadline_passed', 'deadline_countdown_seconds', 'is_locked', 'version_history',
@@ -321,17 +332,7 @@ class TenderBidSerializer(serializers.ModelSerializer):
             'om_plan_document': 'om_plan_file',
             'warranty_period': 'warranty_period_months',
             'warranty_months': 'warranty_period_months',
-            'gender_inclusion_target': 'female_target_pct',
-            'vulnerable_group_target': 'vulnerable_target_pct',
-            'low_income_target': 'low_income_target_pct',
-            'energy_target': 'energy_target_kwh_month',
-            'boq_details': 'boq_items',
-            'technical_summary': 'technical_proposal',
-            'financial_summary': 'financial_proposal',
-            'service_tier': 'tech_tier',
-            'paygo_offered': 'offer_paygo',
-            'min_daily_payment_lsl': 'daily_payment_amount_lsl',
-            'local_technicians_count': 'local_technicians_to_be_trained',
+            'technology_type_list': 'technology_types',
         }
         for alias, canonical in alias_map.items():
             if alias in payload and canonical not in payload:
@@ -373,9 +374,9 @@ class TenderBidSerializer(serializers.ModelSerializer):
             ):
                 if input_key in payload and target_key not in system_configuration:
                     system_configuration[target_key] = payload.get(input_key)
-        if 'aftersales_description' in payload and isinstance(system_configuration, dict):
-            system_configuration['aftersales_description'] = payload.get('aftersales_description')
-        return super().to_internal_value(payload)
+            if 'aftersales_description' in payload and isinstance(system_configuration, dict):
+                system_configuration['aftersales_description'] = payload.get('aftersales_description')
+            return super().to_internal_value(payload)
 
     def _required_document_fields(self):
         return [
@@ -739,10 +740,14 @@ class TenderBidSerializer(serializers.ModelSerializer):
     def get_stage_key(self, obj):
         if has_stage_two_shortlist_access(obj):
             return 'site_specific'
-        return normalize_tender_stage(obj.tender.stage_type if obj.tender_id else obj.stage)
+        stage_source = obj.stage or (obj.tender.stage_type if obj.tender_id else '')
+        return normalize_tender_stage(stage_source)
 
     def get_stage_badge(self, obj):
-        return tender_stage_label('site_specific' if has_stage_two_shortlist_access(obj) else (obj.tender.stage_type if obj.tender_id else obj.stage))
+        if has_stage_two_shortlist_access(obj):
+            return tender_stage_label('site_specific')
+        stage_source = obj.stage or (obj.tender.stage_type if obj.tender_id else '')
+        return tender_stage_label(stage_source)
 
     def get_stage_two_ready(self, obj):
         if has_stage_two_shortlist_access(obj):
@@ -762,6 +767,9 @@ class TenderBidSerializer(serializers.ModelSerializer):
         if not technology_types:
             return None
         return normalize_technology_type(technology_types[0]) or technology_types[0]
+
+    def get_tender_technology_types(self, obj):
+        return obj.tender.technology_types if obj.tender_id else []
 
     def get_document_requirements(self, obj):
         required = self._required_document_fields()
@@ -1144,7 +1152,8 @@ class TenderListSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'reference_number', 'name', 'department', 'category',
             'status', 'deadline', 'budget', 'published_at', 'is_verified',
-            'awarded_vendor_name', 'bid_count', 'created_at'
+            'awarded_vendor_name', 'bid_count', 'created_at',
+            'technology_types', 'target_districts'
         ]
 
 
@@ -1157,7 +1166,6 @@ class TenderSerializer(serializers.ModelSerializer):
     
     OPTIONAL_TEXT_FIELDS = (
         'application_type',
-        'stage_type',
         'procurement_method',
         'address_for_document',
         'address_for_security',
@@ -1196,7 +1204,6 @@ class TenderSerializer(serializers.ModelSerializer):
         'department',
         'category',
         'application_type',
-        'stage_type',
         'procurement_method',
         'address_for_document',
         'address_for_security',
@@ -1247,7 +1254,7 @@ class TenderSerializer(serializers.ModelSerializer):
                 errors[field] = 'This field is required.'
 
         technology_types = attrs.get('technology_types', instance.technology_types if instance else [])
-        if not technology_types:
+        if not technology_types and not instance:
             errors['technology_types'] = 'Select at least one technology type.'
         target_districts = attrs.get('target_districts', instance.target_districts if instance else [])
         if not target_districts:

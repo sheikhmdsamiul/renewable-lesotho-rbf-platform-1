@@ -12,6 +12,16 @@ from .models import InstallationReport
 
 class GpsValidator:
     _feature_cache: dict[str, Any] | None = None
+    DISTRICT_PROPERTY_KEYS = (
+        'district',
+        'district_name',
+        'name',
+        'adm2_en',
+        'adm2_name',
+        'admin2name',
+        'shapeName',
+        'adm1_name',
+    )
 
     @classmethod
     def _geojson_path(cls) -> Path:
@@ -25,6 +35,49 @@ class GpsValidator:
             with cls._geojson_path().open('r', encoding='utf-8') as handle:
                 cls._feature_cache = json.load(handle)
         return cls._feature_cache
+
+    @classmethod
+    def _iter_features(cls) -> list[dict[str, Any]]:
+        payload = cls._load_feature()
+        if payload.get('type') == 'FeatureCollection':
+            features = payload.get('features') or []
+            return [feature for feature in features if isinstance(feature, dict)]
+        return [payload]
+
+    @classmethod
+    def _geometry_contains(cls, latitude: float, longitude: float, geometry: dict[str, Any]) -> bool:
+        try:
+            from shapely.geometry import Point, shape
+
+            return bool(shape(geometry).contains(Point(float(longitude), float(latitude))))
+        except Exception:
+            coordinates = geometry.get('coordinates') or []
+            geometry_type = geometry.get('type')
+            polygons = coordinates if geometry_type == 'MultiPolygon' else [coordinates]
+            for polygon in polygons:
+                if not polygon:
+                    continue
+                exterior_ring = polygon[0]
+                if not cls._point_in_ring(latitude, longitude, exterior_ring):
+                    continue
+                if any(cls._point_in_ring(latitude, longitude, hole) for hole in polygon[1:]):
+                    return False
+                return True
+            return False
+
+    @classmethod
+    def _normalize_district_name(cls, value: str | None) -> str:
+        return ' '.join(str(value or '').strip().lower().replace('_', ' ').split())
+
+    @classmethod
+    def _extract_district_name(cls, feature: dict[str, Any]) -> str | None:
+        properties = feature.get('properties') or {}
+        for key in cls.DISTRICT_PROPERTY_KEYS:
+            value = properties.get(key)
+            normalized = str(value or '').strip()
+            if normalized:
+                return normalized
+        return None
 
     @classmethod
     def _point_in_ring(cls, latitude: float, longitude: float, ring: list[list[float]]) -> bool:
@@ -48,26 +101,39 @@ class GpsValidator:
 
     @classmethod
     def isInsideLesotho(cls, latitude: float, longitude: float) -> bool:
-        feature = cls._load_feature()
-        geometry = feature.get('geometry') or {}
-        try:
-            from shapely.geometry import Point, shape
-
-            return bool(shape(geometry).contains(Point(float(longitude), float(latitude))))
-        except Exception:
-            coordinates = geometry.get('coordinates') or []
-            geometry_type = geometry.get('type')
-            polygons = coordinates if geometry_type == 'MultiPolygon' else [coordinates]
-            for polygon in polygons:
-                if not polygon:
-                    continue
-                exterior_ring = polygon[0]
-                if not cls._point_in_ring(latitude, longitude, exterior_ring):
-                    continue
-                if any(cls._point_in_ring(latitude, longitude, hole) for hole in polygon[1:]):
-                    return False
+        for feature in cls._iter_features():
+            geometry = feature.get('geometry') or {}
+            if cls._geometry_contains(latitude, longitude, geometry):
                 return True
+        return False
+
+    @classmethod
+    def resolveDistrictName(cls, latitude: float, longitude: float) -> str | None:
+        matches: list[str] = []
+        for feature in cls._iter_features():
+            geometry = feature.get('geometry') or {}
+            if not cls._geometry_contains(latitude, longitude, geometry):
+                continue
+            district_name = cls._extract_district_name(feature)
+            if district_name:
+                matches.append(district_name)
+        return matches[0] if matches else None
+
+    @classmethod
+    def districtBoundaryConfigured(cls) -> bool:
+        return any(cls._extract_district_name(feature) for feature in cls._iter_features())
+
+    @classmethod
+    def isInsideProjectDistrict(cls, latitude: float, longitude: float, district_label: str | None) -> bool:
+        matched_district = cls.resolveDistrictName(latitude, longitude)
+        if not matched_district:
             return False
+        allowed = [
+            cls._normalize_district_name(part)
+            for part in str(district_label or '').split(',')
+            if cls._normalize_district_name(part)
+        ]
+        return cls._normalize_district_name(matched_district) in allowed
 
     @staticmethod
     def _haversine_distance_meters(lat1: float, lng1: float, lat2: float, lng2: float) -> float:

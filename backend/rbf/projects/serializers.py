@@ -207,6 +207,24 @@ class ProjectSerializer(serializers.ModelSerializer):
             return obj.tender.budget
         return None
 
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        role = getattr(user, 'role', None)
+
+        if role == UserRole.UNDP_DONOR:
+            for field_name in ('vendor_name', 'vendor_id'):
+                data.pop(field_name, None)
+            for field_name in ('budget', 'contract_value', 'tender_budget', 'milestone_total_amount'):
+                data[field_name] = None
+
+        if role in {UserRole.TAC, UserRole.DOE_OFFICER, UserRole.UNDP_DONOR}:
+            for field_name in ('budget', 'contract_value', 'tender_budget', 'milestone_total_amount'):
+                data[field_name] = None
+
+        return data
+
     class Meta:
         model = Project
         fields = '__all__'
@@ -533,6 +551,22 @@ class InstallationReportSerializer(serializers.ModelSerializer):
         if obj.receipt_file:
             return obj.receipt_file.url
         return None
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        role = getattr(user, 'role', None)
+
+        if role in {UserRole.TAC, UserRole.AUDITOR}:
+            beneficiary_id = str(data.get('beneficiary_id') or '')
+            if beneficiary_id:
+                data['beneficiary_id'] = f"{'*' * max(0, len(beneficiary_id) - 4)}{beneficiary_id[-4:]}"
+        elif role in {UserRole.DOE_OFFICER, UserRole.UNDP_DONOR}:
+            data['beneficiary_id'] = ''
+            data['beneficiary_name'] = None
+
+        return data
 
     class Meta:
         model = InstallationReport

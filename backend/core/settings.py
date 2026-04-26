@@ -144,8 +144,8 @@ if not CORS_ALLOW_ALL_ORIGINS:
 
 CSRF_TRUSTED_ORIGINS = env.list('CSRF_TRUSTED_ORIGINS', default=[])
 
-# Frontend URL for email notifications
-FRONTEND_URL = env('FRONTEND_URL', default='http://localhost:5173')
+# Frontend URL for email notifications and deep links. Leave blank to derive from request origin.
+FRONTEND_URL = env('FRONTEND_URL', default='')
 PBA_RENDER_SCRIPT = env('PBA_RENDER_SCRIPT', default=str(BASE_DIR / 'scripts' / 'render_pdf.mjs'))
 PBA_CHROME_PATH = env('PBA_CHROME_PATH', default='')
 

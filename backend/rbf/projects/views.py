@@ -326,7 +326,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
     search_fields = ['vendor_name', 'vendor_id']
     ordering_fields = ['progress', 'energy_output', 'uptime', 'gender_impact']
 
-    WRITE_ROLES = {UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.DOE_OFFICER, UserRole.VENDOR}
+    WRITE_ROLES = {UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.DOE_OFFICER, UserRole.TAC, UserRole.VENDOR}
 
     def get_queryset(self):
         qs = Project.objects.select_related('tender', 'project_setup').prefetch_related('milestones').all().order_by('id')
@@ -1740,6 +1740,7 @@ class InstallationReportViewSet(viewsets.ModelViewSet):
         data = request.data.copy()
         project_id = str(data.get('project') or '')
         self._assert_project_access(project_id)
+        project = Project.objects.filter(id=project_id).only('id', 'district', 'district_zone', 'region').first()
 
         errors: dict[str, list[str]] = {}
         lat_raw = data.get('gps_lat')
@@ -1788,6 +1789,31 @@ class InstallationReportViewSet(viewsets.ModelViewSet):
                 },
                 status=status.HTTP_422_UNPROCESSABLE_ENTITY,
             )
+
+        import logging
+        logger = logging.getLogger(__name__)
+
+        project_district_label = (
+            getattr(project, 'district_zone', '')
+            or getattr(project, 'district', '')
+            or getattr(project, 'region', '')
+            or ''
+        ).strip()
+        outside_district_warning = None
+        if project_district_label and GpsValidator.districtBoundaryConfigured():
+            is_inside = GpsValidator.isInsideProjectDistrict(latitude, longitude, project_district_label)
+            if not is_inside:
+                return Response(
+                    {
+                        'success': False,
+                        'errors': {
+                            'gps_lat': [
+                                f'The captured GPS coordinates (Lat: {latitude}, Long: {longitude}) fall outside the assigned district: {project_district_label}. This installation cannot be saved.',
+                            ],
+                        },
+                    },
+                    status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                )
 
         duplicate_info = GpsValidator.hasDuplicateCoordinate(latitude, longitude, project_id)
 
@@ -2229,7 +2255,7 @@ class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        if user.role in {UserRole.ADMIN, UserRole.RBF_OFFICIAL, UserRole.AUDITOR, UserRole.UNDP_DONOR}:
+        if user.role in {UserRole.ADMIN, UserRole.RBF_OFFICIAL, UserRole.AUDITOR}:
             queryset = self.queryset
         elif user.role == UserRole.VENDOR:
             project_ids = [int(pid) for pid in Project.objects.filter(vendor_query_filter(user)).values_list('id', flat=True)]
@@ -2355,13 +2381,13 @@ class ProspectSyncLogViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        if user.role in {UserRole.ADMIN, UserRole.RBF_OFFICIAL, UserRole.AUDITOR, UserRole.UNDP_DONOR}:
+        if user.role in {UserRole.ADMIN, UserRole.RBF_OFFICIAL, UserRole.AUDITOR}:
             return self.queryset.order_by('-created_at')
         return self.queryset.none()
 
     @action(detail=False, methods=['post'], url_path='refresh-panel')
     def refresh_panel(self, request):
-        if request.user.role not in {UserRole.ADMIN, UserRole.RBF_OFFICIAL, UserRole.AUDITOR, UserRole.UNDP_DONOR}:
+        if request.user.role not in {UserRole.ADMIN, UserRole.RBF_OFFICIAL, UserRole.AUDITOR}:
             raise PermissionDenied('You do not have permission to refresh the Prospect sync panel.')
 
         filters_payload: dict[str, str | int] = {}
