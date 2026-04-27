@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useMemo } from "react";
+import { useNavigate } from "react-router-dom";
 import { 
   LayoutDashboard, 
   FileText, 
@@ -149,6 +150,7 @@ import {
   submitPaymentClaim,
   verifyPaymentClaim,
   approvePaymentClaim,
+  rejectPaymentClaim,
   confirmPaymentClaim,
   flagProjectIssue,
   fetchProjects,
@@ -5040,8 +5042,13 @@ const Blacklisting = ({ currentUser }: { currentUser: User | null }) => {
   );
 };
 
-const Disbursements = () => {
+const Disbursements = ({ onOpenProjectKpi }: { onOpenProjectKpi?: (projectId: string) => void } = {}) => {
+  const navigate = useNavigate();
   const [claims, setClaims] = useState<PaymentClaim[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [installationReports, setInstallationReports] = useState<InstallationReport[]>([]);
+  const [verificationTasks, setVerificationTasks] = useState<VerificationTask[]>([]);
+  const [projectKpis, setProjectKpis] = useState<Record<string, ProjectKpiSummary>>({});
   const [notification, setNotification] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [processingClaimId, setProcessingClaimId] = useState<string | null>(null);
@@ -5068,6 +5075,35 @@ const Disbursements = () => {
   const canFlagIssues =
     currentUser?.role === UserRole.UNDP_DONOR || currentUser?.role === UserRole.ADMIN || currentUser?.role === UserRole.RBF_OFFICIAL;
   const isVendorView = currentUser?.role === UserRole.VENDOR;
+  const isTacView = currentUser?.role === UserRole.TAC;
+  const isPscView = currentUser?.role === UserRole.UNDP_DONOR;
+
+  const getRoleKeyForUser = (role?: UserRole) => {
+    switch (role) {
+      case UserRole.VENDOR: return "vendor";
+      case UserRole.TAC: return "tac";
+      case UserRole.FIELD_VERIFIER: return "field-verifier";
+      case UserRole.ADMIN: return "admin";
+      case UserRole.DOE_OFFICER: return "doe-officer";
+      case UserRole.UNDP_DONOR: return "undp-donor";
+      case UserRole.AUDITOR: return "auditor";
+      case UserRole.RBF_OFFICIAL: return "rbf-official";
+      default: return "";
+    }
+  };
+
+  const getProjectSectionForUser = (role?: UserRole) => {
+    switch (role) {
+      case UserRole.VENDOR: return "projects_hub";
+      case UserRole.RBF_OFFICIAL: return "rbf_projects";
+      case UserRole.UNDP_DONOR: return "portfolio";
+      case UserRole.TAC:
+      case UserRole.DOE_OFFICER:
+      case UserRole.AUDITOR:
+        return "projects";
+      default: return "";
+    }
+  };
 
   const showNotification = (msg: string) => {
     setNotification(msg);
@@ -5077,8 +5113,34 @@ const Disbursements = () => {
   const loadClaims = React.useCallback(async () => {
     setLoading(true);
     try {
-      const data = await fetchPaymentClaims();
-      setClaims(data);
+      const [claimData, projectData, reportData, taskData] = await Promise.all([
+        fetchPaymentClaims(),
+        fetchProjects(),
+        fetchInstallationReports(),
+        fetchVerificationTasks(),
+      ]);
+      setClaims(claimData);
+      setProjects(projectData);
+      setInstallationReports(reportData);
+      setVerificationTasks(taskData);
+
+      const projectIds = Array.from(new Set(claimData.map((claim) => claim.projectId).filter(Boolean)));
+      const summaries = await Promise.all(
+        projectIds.map(async (projectId) => {
+          try {
+            const summary = await fetchProjectKpiSummary(projectId);
+            return [projectId, summary] as const;
+          } catch {
+            return null;
+          }
+        })
+      );
+      setProjectKpis(
+        summaries.reduce<Record<string, ProjectKpiSummary>>((acc, entry) => {
+          if (entry) acc[entry[0]] = entry[1];
+          return acc;
+        }, {})
+      );
     } catch (err: any) {
       const raw = String(err?.message || "");
       if (isConnectivityError(raw)) {
@@ -5188,8 +5250,21 @@ const Disbursements = () => {
       let updated = selectedClaimForReview;
       const remarks = reviewNotes || "";
 
+      if (action === "approve" && isPscView && selectedClaimEligibility && !selectedClaimEligibility.eligible) {
+        showNotification("This claim does not meet mandatory KPI requirements and cannot be approved by PSC.");
+        return;
+      }
+
       if (action === "reject") {
-        showNotification(`Claim ${selectedClaimForReview.id} rejected with notes.`);
+        updated = await rejectPaymentClaim(
+          selectedClaimForReview.id,
+          remarks || (canTacEndorse ? "Returned by TAC for further technical clarification." : "Returned for further review.")
+        );
+        showNotification(
+          canTacEndorse
+            ? `Claim ${selectedClaimForReview.id} pushed back to RMT with TAC technical comments.`
+            : `Claim ${selectedClaimForReview.id} rejected with notes.`
+        );
       } else if (canRmtApprove && (selectedClaimForReview.status === "Submitted" || selectedClaimForReview.status === "Pending")) {
         // RMT Managerial Review: Contractual & Compliance Check
         updated = await verifyPaymentClaim(selectedClaimForReview.id, remarks || "Approved by RMT - Contractual and compliance check complete.");
@@ -5326,6 +5401,50 @@ const Disbursements = () => {
   const pendingApproval = claims
     .filter(claim => !["Completed", "Paid", "Rejected"].includes(claim.status))
     .reduce((sum, claim) => sum + claim.claimAmount, 0);
+  const projectsById = useMemo(() => new Map(projects.map((project) => [project.id, project])), [projects]);
+  const reportsByProjectId = useMemo(() => {
+    const map = new Map<string, InstallationReport[]>();
+    installationReports.forEach((report) => {
+      const list = map.get(report.projectId) || [];
+      list.push(report);
+      map.set(report.projectId, list);
+    });
+    return map;
+  }, [installationReports]);
+  const tasksByReportId = useMemo(() => {
+    const map = new Map<string, VerificationTask[]>();
+    verificationTasks.forEach((task) => {
+      const list = map.get(task.report) || [];
+      list.push(task);
+      map.set(task.report, list);
+    });
+    return map;
+  }, [verificationTasks]);
+  const getProjectTechnicalReview = React.useCallback((projectId: string) => {
+    const project = projectsById.get(projectId);
+    const summary = projectKpis[projectId];
+    const reports = reportsByProjectId.get(projectId) || [];
+    const verifiedReports = reports.filter((report) => report.verificationStatus === "verified" || report.status === "Verified");
+    const projectTasks = reports.flatMap((report) => tasksByReportId.get(report.id) || []);
+    const gpsMatchedCount = projectTasks.filter((task) => typeof task.distanceMeters === "number" && task.distanceMeters <= 50).length;
+    const verifiedTaskCount = projectTasks.filter((task) => task.status === "Verified").length;
+    const flaggedTaskCount = projectTasks.filter((task) => task.status === "Flagged" || task.status === "Partial").length;
+    const offlineDevices = summary?.uptime_kpi.devices_offline ?? 0;
+    const energyAchievement = summary?.energy_kpi.current_month_pct ?? 0;
+    const techTier = project?.verificationMethod || project?.techType || summary?.project.technology_type || "Not recorded";
+    return {
+      project,
+      summary,
+      verifiedReports,
+      projectTasks,
+      gpsMatchedCount,
+      verifiedTaskCount,
+      flaggedTaskCount,
+      offlineDevices,
+      energyAchievement,
+      techTier,
+    };
+  }, [projectKpis, projectsById, reportsByProjectId, tasksByReportId]);
   const getClaimWorkflowLabel = (claim: PaymentClaim) => {
     if (claim.status === "Completed" || claim.status === "Paid") return "Paid";
     return claim.status;
@@ -5379,7 +5498,81 @@ const Disbursements = () => {
     return "No Action Required";
   };
 
+  const openClaimProjectKpi = (claim: PaymentClaim) => {
+    if (onOpenProjectKpi) {
+      onOpenProjectKpi(claim.projectId);
+      return;
+    }
+    const roleKey = getRoleKeyForUser(currentUser?.role);
+    const projectSection = getProjectSectionForUser(currentUser?.role);
+    if (!roleKey || !projectSection) return;
+    navigate(`/${roleKey}/${projectSection}/${claim.projectId}/kpi`, { replace: true });
+  };
+
+  const getClaimEligibilityEntry = React.useCallback((claim: PaymentClaim) => {
+    const summary = projectKpis[claim.projectId];
+    if (!summary) return null;
+    const milestoneNumber = claim.milestone_details?.milestoneNumber || 2;
+    return (
+      summary.milestone_eligibility?.[`milestone_${milestoneNumber}`] ||
+      summary.milestone_eligibility?.milestone_2 ||
+      null
+    );
+  }, [projectKpis]);
+
+  const getClaimComplianceChecklist = React.useCallback((claim: PaymentClaim) => {
+    const eligibility = getClaimEligibilityEntry(claim);
+    const conditions = eligibility?.conditions || {};
+    const summary = projectKpis[claim.projectId];
+    return [
+      {
+        label: summary
+          ? `${conditions.installations_80_pct ?? conditions.installations_100_pct ? "Installation target milestone reached" : "Installation target below threshold"} (${summary.installation_progress.verified}/${summary.installation_progress.target})`
+          : "Installation progress not available",
+        met: Boolean(conditions.installations_80_pct ?? conditions.installations_100_pct),
+      },
+      {
+        label: summary
+          ? `Female KPI met (${summary.gender_kpi.female_headed.percentage}% >= ${summary.gender_kpi.female_headed.target}%)`
+          : "Female KPI not available",
+        met: Boolean(conditions.female_pct_50),
+      },
+      {
+        label: summary
+          ? `Vulnerable KPI checked (${summary.gender_kpi.vulnerable.percentage}% >= ${summary.gender_kpi.vulnerable.target}%)`
+          : "Vulnerable KPI not available",
+        met: Boolean(conditions.vulnerable_pct_30 ?? true),
+      },
+      {
+        label: summary
+          ? `Low-income KPI checked (${summary.gender_kpi.low_income.percentage}% >= ${summary.gender_kpi.low_income.target}%)`
+          : "Low-income KPI not available",
+        met: Boolean(conditions.low_income_pct_60 ?? true),
+      },
+      {
+        label: "No unresolved blocking flags",
+        met: Boolean(conditions.no_blocking_anomaly_flags ?? conditions.all_anomaly_flags_resolved),
+      },
+      {
+        label: "Meter data present (30+ days)",
+        met: Boolean(conditions.meter_data_present ?? summary?.uptime_kpi.total_devices_monitored),
+      },
+      {
+        label: "RMT approved with workflow handoff",
+        met: ["RMT Approved", "Verified", "TAC Endorsed", "PSC Approved", "Approved", "Completed", "Paid"].includes(claim.status),
+      },
+      {
+        label: "TAC endorsed with technical review",
+        met: ["TAC Endorsed", "PSC Approved", "Approved", "Completed", "Paid"].includes(claim.status),
+      },
+    ];
+  }, [getClaimEligibilityEntry, projectKpis]);
+
   const budgetRemaining = Math.max(0, 35800000 - totalDisbursed);
+  const selectedClaimTechnical = selectedClaimForReview ? getProjectTechnicalReview(selectedClaimForReview.projectId) : null;
+  const selectedClaimEligibility = selectedClaimForReview ? getClaimEligibilityEntry(selectedClaimForReview) : null;
+  const selectedClaimChecklist = selectedClaimForReview ? getClaimComplianceChecklist(selectedClaimForReview) : [];
+  const selectedClaimBlockedForPsc = Boolean(isPscView && selectedClaimEligibility && !selectedClaimEligibility.eligible);
 
   return (
     <div className="space-y-6">
@@ -5396,7 +5589,14 @@ const Disbursements = () => {
         )}
       </AnimatePresence>
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold text-slate-900">Disbursement Management</h1>
+        <div>
+          <h1 className="text-2xl font-bold text-slate-900">{isTacView ? "TAC Claim Reviews" : "Disbursement Management"}</h1>
+          <p className="text-sm text-slate-500 mt-1">
+            {isTacView
+              ? "Review technical KPI evidence, field verification quality, and endorse or push back claims without approving payment amounts."
+              : "Process payment claims through the approval and disbursement workflow."}
+          </p>
+        </div>
         <div className="flex gap-2">
           <button onClick={exportPaymentSchedule} className="btn-secondary flex items-center gap-2">
             <Download size={18} /> Export Payment Schedule
@@ -5404,20 +5604,82 @@ const Disbursements = () => {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <div className="card p-6 bg-emerald-50 border-emerald-100">
-          <p className="text-xs font-bold text-emerald-600 uppercase mb-1">Total Disbursed</p>
-          <h3 className="text-2xl font-bold text-slate-900">M {totalDisbursed.toLocaleString()}</h3>
+      {isTacView ? (
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+          <div className="card p-6 bg-emerald-50 border-emerald-100">
+            <p className="text-xs font-bold text-emerald-600 uppercase mb-1">Awaiting TAC Endorsement</p>
+            <h3 className="text-2xl font-bold text-slate-900">
+              {claims.filter((claim) => claim.status === "RMT Approved" || claim.status === "Verified").length}
+            </h3>
+          </div>
+          <div className="card p-6 bg-amber-50 border-amber-100">
+            <p className="text-xs font-bold text-amber-600 uppercase mb-1">Uptime Below 99%</p>
+            <h3 className="text-2xl font-bold text-slate-900">
+              {claims.filter((claim) => {
+                const summary = projectKpis[claim.projectId];
+                return summary && summary.uptime_kpi.total_devices_monitored > 0 && summary.uptime_kpi.average_uptime_pct < 99;
+              }).length}
+            </h3>
+          </div>
+          <div className="card p-6 bg-blue-50 border-blue-100">
+            <p className="text-xs font-bold text-blue-600 uppercase mb-1">Energy Below 95%</p>
+            <h3 className="text-2xl font-bold text-slate-900">
+              {claims.filter((claim) => {
+                const summary = projectKpis[claim.projectId];
+                return summary && summary.energy_kpi.monthly_data.length > 0 && summary.energy_kpi.current_month_pct < 95;
+              }).length}
+            </h3>
+          </div>
+          <div className="card p-6 bg-rose-50 border-rose-100">
+            <p className="text-xs font-bold text-rose-600 uppercase mb-1">Verification Issues</p>
+            <h3 className="text-2xl font-bold text-slate-900">
+              {claims.filter((claim) => getProjectTechnicalReview(claim.projectId).flaggedTaskCount > 0).length}
+            </h3>
+          </div>
         </div>
-        <div className="card p-6 bg-amber-50 border-amber-100">
-          <p className="text-xs font-bold text-amber-600 uppercase mb-1">Pending Approval</p>
-          <h3 className="text-2xl font-bold text-slate-900">M {pendingApproval.toLocaleString()}</h3>
+      ) : isPscView ? (
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+          <div className="card p-6 bg-violet-50 border-violet-100">
+            <p className="text-xs font-bold text-violet-600 uppercase mb-1">Pending PSC Approval</p>
+            <h3 className="text-2xl font-bold text-slate-900">
+              {claims.filter((claim) => claim.status === "TAC Endorsed").length}
+            </h3>
+          </div>
+          <div className="card p-6 bg-emerald-50 border-emerald-100">
+            <p className="text-xs font-bold text-emerald-600 uppercase mb-1">Claims Passing KPI Gate</p>
+            <h3 className="text-2xl font-bold text-slate-900">
+              {claims.filter((claim) => claim.status === "TAC Endorsed" && getClaimEligibilityEntry(claim)?.eligible).length}
+            </h3>
+          </div>
+          <div className="card p-6 bg-amber-50 border-amber-100">
+            <p className="text-xs font-bold text-amber-600 uppercase mb-1">Claims Blocked by KPI Rules</p>
+            <h3 className="text-2xl font-bold text-slate-900">
+              {claims.filter((claim) => claim.status === "TAC Endorsed" && getClaimEligibilityEntry(claim) && !getClaimEligibilityEntry(claim)?.eligible).length}
+            </h3>
+          </div>
+          <div className="card p-6 bg-blue-50 border-blue-100">
+            <p className="text-xs font-bold text-blue-600 uppercase mb-1">Approved For Disbursement</p>
+            <h3 className="text-2xl font-bold text-slate-900">
+              {claims.filter((claim) => claim.status === "PSC Approved" || claim.status === "Approved").length}
+            </h3>
+          </div>
         </div>
-        <div className="card p-6 bg-blue-50 border-blue-100">
-          <p className="text-xs font-bold text-blue-600 uppercase mb-1">Budget Remaining</p>
-          <h3 className="text-2xl font-bold text-slate-900">M {budgetRemaining.toLocaleString()}</h3>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div className="card p-6 bg-emerald-50 border-emerald-100">
+            <p className="text-xs font-bold text-emerald-600 uppercase mb-1">Total Disbursed</p>
+            <h3 className="text-2xl font-bold text-slate-900">M {totalDisbursed.toLocaleString()}</h3>
+          </div>
+          <div className="card p-6 bg-amber-50 border-amber-100">
+            <p className="text-xs font-bold text-amber-600 uppercase mb-1">Pending Approval</p>
+            <h3 className="text-2xl font-bold text-slate-900">M {pendingApproval.toLocaleString()}</h3>
+          </div>
+          <div className="card p-6 bg-blue-50 border-blue-100">
+            <p className="text-xs font-bold text-blue-600 uppercase mb-1">Budget Remaining</p>
+            <h3 className="text-2xl font-bold text-slate-900">M {budgetRemaining.toLocaleString()}</h3>
+          </div>
         </div>
-      </div>
+      )}
 
       <div className="card overflow-x-auto">
         <table className="w-full text-left">
@@ -5427,7 +5689,7 @@ const Disbursements = () => {
               <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Claim ID</th>
               <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Vendor & Project</th>
               <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Milestone</th>
-              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Amount</th>
+              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">{isTacView ? "Technical Snapshot" : "Amount"}</th>
               <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Status</th>
               <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Actions</th>
             </tr>
@@ -5442,7 +5704,20 @@ const Disbursements = () => {
                   <div className="text-xs text-slate-500">PRJ-{claim.projectId}</div>
                 </td>
                 <td className="px-6 py-4 text-sm text-slate-600">{claim.milestone_details ? `Milestone ${claim.milestone_details.milestoneNumber || claim.milestoneId}` : "N/A"}</td>
-                <td className="px-6 py-4 font-bold text-slate-900">M {claim.claimAmount.toLocaleString()}</td>
+                <td className="px-6 py-4">
+                  {isTacView ? (
+                    <div className="text-sm">
+                      <div className="font-semibold text-slate-900">
+                        Uptime {projectKpis[claim.projectId]?.uptime_kpi.total_devices_monitored ? `${projectKpis[claim.projectId]?.uptime_kpi.average_uptime_pct}%` : "No data"}
+                      </div>
+                      <div className="text-xs text-slate-500">
+                        Energy {projectKpis[claim.projectId]?.energy_kpi.monthly_data.length ? `${projectKpis[claim.projectId]?.energy_kpi.current_month_pct}% of target` : "No data"}
+                      </div>
+                    </div>
+                  ) : (
+                    <span className="font-bold text-slate-900">M {claim.claimAmount.toLocaleString()}</span>
+                  )}
+                </td>
                 <td className="px-6 py-4">
                   <span className={`badge ${getClaimWorkflowTone(claim)}`}>
                     {getClaimWorkflowLabel(claim)}
@@ -5458,14 +5733,24 @@ const Disbursements = () => {
                         View Details
                       </button>
                     ) : (
-                      <button
-                        onClick={() => processPayment(claim)}
-                        className="text-emerald-600 hover:text-emerald-700 font-medium text-sm disabled:text-slate-400 disabled:cursor-not-allowed text-left"
-                        disabled={!canActOnClaim(claim)}
-                        title={claim.paymentLocked ? (claim.paymentLockReason || "Payment locked for audit.") : undefined}
-                      >
-                        {getClaimActionLabel(claim)}
-                      </button>
+                      <>
+                        <button
+                          onClick={() => processPayment(claim)}
+                          className="text-emerald-600 hover:text-emerald-700 font-medium text-sm disabled:text-slate-400 disabled:cursor-not-allowed text-left"
+                          disabled={!canActOnClaim(claim)}
+                          title={claim.paymentLocked ? (claim.paymentLockReason || "Payment locked for audit.") : undefined}
+                        >
+                          {getClaimActionLabel(claim)}
+                        </button>
+                        {(isTacView || isPscView) && (
+                          <button
+                            onClick={() => openClaimProjectKpi(claim)}
+                            className="text-blue-600 hover:text-blue-700 font-medium text-sm text-left"
+                          >
+                            Check KPI
+                          </button>
+                        )}
+                      </>
                     )}
                     {canOpenStandaloneBankDetails(claim) && (
                       <button
@@ -5742,8 +6027,11 @@ const Disbursements = () => {
             >
               <div className="sticky top-0 bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 text-white px-8 py-6 flex items-center justify-between">
                 <div>
-                  <h2 className="text-2xl font-bold">Payment Claim Review</h2>
-                  <p className="text-sm text-blue-200 mt-1">CLM-{String(selectedClaimForReview.id).padStart(3, "0")}</p>
+                  <h2 className="text-2xl font-bold">{isTacView ? "TAC Technical Claim Review" : "Payment Claim Review"}</h2>
+                  <p className="text-sm text-blue-200 mt-1">
+                    CLM-{String(selectedClaimForReview.id).padStart(3, "0")}
+                    {isTacView ? " • Technical endorsement only" : ""}
+                  </p>
                 </div>
                 <button
                   onClick={() => setSelectedClaimForReview(null)}
@@ -5754,6 +6042,30 @@ const Disbursements = () => {
               </div>
 
               <div className="p-8 space-y-6">
+                {isTacView && (
+                  <div className="rounded-2xl border border-blue-200 bg-blue-50 px-4 py-4 text-sm text-blue-900">
+                    TAC can review technical KPIs, field verification quality, and technology compliance here, but cannot approve payment amounts or vendor financial history.
+                    <button
+                      type="button"
+                      onClick={() => openClaimProjectKpi(selectedClaimForReview)}
+                      className="ml-3 inline-flex rounded-full border border-blue-300 bg-white px-3 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-100"
+                    >
+                      Check KPI
+                    </button>
+                  </div>
+                )}
+                {isPscView && (
+                  <div className="rounded-2xl border border-violet-200 bg-violet-50 px-4 py-4 text-sm text-violet-900">
+                    PSC sees project-level KPI scorecards and workflow approvals only. Installation-level operations, anomaly handling, and field verification records are intentionally hidden here.
+                    <button
+                      type="button"
+                      onClick={() => openClaimProjectKpi(selectedClaimForReview)}
+                      className="ml-3 inline-flex rounded-full border border-violet-300 bg-white px-3 py-1 text-xs font-semibold text-violet-700 hover:bg-violet-100"
+                    >
+                      Check KPI
+                    </button>
+                  </div>
+                )}
                 {/* Claim Header Info */}
                 <div className="grid grid-cols-2 gap-4 mb-6 pb-6 border-b border-slate-200">
                   <div>
@@ -5772,9 +6084,143 @@ const Disbursements = () => {
                   </div>
                   <div>
                     <p className="text-xs font-bold text-slate-400 uppercase mb-1">Claim Amount</p>
-                    <p className="text-lg font-bold text-emerald-600">M {selectedClaimForReview.claimAmount.toLocaleString()}</p>
+                    <p className={`text-lg font-bold ${isTacView ? "text-slate-500" : "text-emerald-600"}`}>
+                      {isTacView ? "Not part of TAC decision" : `M ${selectedClaimForReview.claimAmount.toLocaleString()}`}
+                    </p>
                   </div>
                 </div>
+
+                {isTacView && (
+                  <div className="space-y-3 pb-6 border-b border-slate-200">
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-sm font-bold text-slate-900 uppercase">Technical KPI Scorecard</h3>
+                      <span className="text-xs text-slate-500">Read-only</span>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div className={`rounded-2xl border p-4 ${selectedClaimTechnical?.summary?.uptime_kpi.met ? "border-emerald-200 bg-emerald-50" : "border-amber-200 bg-amber-50"}`}>
+                        <p className="text-[11px] uppercase tracking-wide text-slate-500">System Uptime</p>
+                        <p className="mt-2 text-2xl font-semibold text-slate-900">
+                          {selectedClaimTechnical?.summary?.uptime_kpi.total_devices_monitored
+                            ? `${selectedClaimTechnical.summary.uptime_kpi.average_uptime_pct}%`
+                            : "No data"}
+                        </p>
+                        <p className="mt-1 text-xs text-slate-600">Target: 99% • Offline devices: {selectedClaimTechnical?.offlineDevices ?? 0}</p>
+                      </div>
+                      <div className={`rounded-2xl border p-4 ${selectedClaimTechnical?.summary?.energy_kpi.on_track ? "border-emerald-200 bg-emerald-50" : "border-amber-200 bg-amber-50"}`}>
+                        <p className="text-[11px] uppercase tracking-wide text-slate-500">Energy Output vs Target</p>
+                        <p className="mt-2 text-2xl font-semibold text-slate-900">
+                          {selectedClaimTechnical?.summary?.energy_kpi.monthly_data.length
+                            ? `${selectedClaimTechnical.summary.energy_kpi.current_month_pct}%`
+                            : "No data"}
+                        </p>
+                        <p className="mt-1 text-xs text-slate-600">
+                          {selectedClaimTechnical?.summary
+                            ? `${selectedClaimTechnical.summary.energy_kpi.current_month_kwh.toLocaleString()} / ${selectedClaimTechnical.summary.energy_kpi.current_month_target.toLocaleString()} kWh`
+                            : "Awaiting meter data"}
+                        </p>
+                      </div>
+                      <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                        <p className="text-[11px] uppercase tracking-wide text-slate-500">Technology Tier Compliance</p>
+                        <p className="mt-2 text-2xl font-semibold text-slate-900">{selectedClaimTechnical?.techTier || "Not recorded"}</p>
+                        <p className="mt-1 text-xs text-slate-600">
+                          Technology: {selectedClaimTechnical?.summary?.project.technology_type || selectedClaimTechnical?.project?.techType || "Not recorded"}
+                        </p>
+                      </div>
+                      <div className={`rounded-2xl border p-4 ${selectedClaimTechnical?.summary?.installation_progress.on_track ? "border-emerald-200 bg-emerald-50" : "border-amber-200 bg-amber-50"}`}>
+                        <p className="text-[11px] uppercase tracking-wide text-slate-500">Installation Progress</p>
+                        <p className="mt-2 text-2xl font-semibold text-slate-900">
+                          {selectedClaimTechnical?.summary
+                            ? `${selectedClaimTechnical.summary.installation_progress.verified}/${selectedClaimTechnical.summary.installation_progress.target}`
+                            : "No data"}
+                        </p>
+                        <p className="mt-1 text-xs text-slate-600">
+                          Progress: {selectedClaimTechnical?.summary?.installation_progress.progress_pct ?? 0}% • {selectedClaimTechnical?.summary?.installation_progress.on_track ? "On track" : "Behind target"}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+                {isPscView && (
+                  <div className="space-y-4 pb-6 border-b border-slate-200">
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-sm font-bold text-slate-900 uppercase">Claim KPI Scorecard</h3>
+                      <span className={`rounded-full border px-3 py-1 text-xs font-semibold ${selectedClaimBlockedForPsc ? "border-rose-200 bg-rose-50 text-rose-700" : "border-emerald-200 bg-emerald-50 text-emerald-700"}`}>
+                        {selectedClaimBlockedForPsc ? "Mandatory KPI conditions failed" : "Mandatory KPI conditions satisfied"}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                      <div className={`rounded-2xl border p-4 ${selectedClaimTechnical?.summary?.gender_kpi.female_headed.met ? "border-emerald-200 bg-emerald-50" : "border-rose-200 bg-rose-50"}`}>
+                        <p className="text-[11px] uppercase tracking-wide text-slate-500">Female-headed HH</p>
+                        <p className="mt-2 text-2xl font-semibold text-slate-900">{selectedClaimTechnical?.summary ? `${selectedClaimTechnical.summary.gender_kpi.female_headed.percentage}%` : "No data"}</p>
+                        <p className="mt-1 text-xs text-slate-600">Target: {selectedClaimTechnical?.summary?.gender_kpi.female_headed.target ?? 50}%</p>
+                      </div>
+                      <div className={`rounded-2xl border p-4 ${selectedClaimTechnical?.summary?.gender_kpi.vulnerable.met ? "border-emerald-200 bg-emerald-50" : "border-rose-200 bg-rose-50"}`}>
+                        <p className="text-[11px] uppercase tracking-wide text-slate-500">Vulnerable Groups</p>
+                        <p className="mt-2 text-2xl font-semibold text-slate-900">{selectedClaimTechnical?.summary ? `${selectedClaimTechnical.summary.gender_kpi.vulnerable.percentage}%` : "No data"}</p>
+                        <p className="mt-1 text-xs text-slate-600">Target: {selectedClaimTechnical?.summary?.gender_kpi.vulnerable.target ?? 30}%</p>
+                      </div>
+                      <div className={`rounded-2xl border p-4 ${selectedClaimTechnical?.summary?.gender_kpi.low_income.met ? "border-emerald-200 bg-emerald-50" : "border-rose-200 bg-rose-50"}`}>
+                        <p className="text-[11px] uppercase tracking-wide text-slate-500">Low-income HH</p>
+                        <p className="mt-2 text-2xl font-semibold text-slate-900">{selectedClaimTechnical?.summary ? `${selectedClaimTechnical.summary.gender_kpi.low_income.percentage}%` : "No data"}</p>
+                        <p className="mt-1 text-xs text-slate-600">Target: {selectedClaimTechnical?.summary?.gender_kpi.low_income.target ?? 60}%</p>
+                      </div>
+                      <div className={`rounded-2xl border p-4 ${selectedClaimTechnical?.summary?.installation_progress.on_track ? "border-emerald-200 bg-emerald-50" : "border-amber-200 bg-amber-50"}`}>
+                        <p className="text-[11px] uppercase tracking-wide text-slate-500">Installation Progress</p>
+                        <p className="mt-2 text-2xl font-semibold text-slate-900">
+                          {selectedClaimTechnical?.summary ? `${selectedClaimTechnical.summary.installation_progress.verified}/${selectedClaimTechnical.summary.installation_progress.target}` : "No data"}
+                        </p>
+                        <p className="mt-1 text-xs text-slate-600">{selectedClaimTechnical?.summary ? `${selectedClaimTechnical.summary.installation_progress.progress_pct}% complete` : "Awaiting data"}</p>
+                      </div>
+                      <div className={`rounded-2xl border p-4 ${selectedClaimTechnical?.summary?.uptime_kpi.met ? "border-emerald-200 bg-emerald-50" : "border-amber-200 bg-amber-50"}`}>
+                        <p className="text-[11px] uppercase tracking-wide text-slate-500">System Uptime</p>
+                        <p className="mt-2 text-2xl font-semibold text-slate-900">{selectedClaimTechnical?.summary?.uptime_kpi.total_devices_monitored ? `${selectedClaimTechnical.summary.uptime_kpi.average_uptime_pct}%` : "No data"}</p>
+                        <p className="mt-1 text-xs text-slate-600">Target: {selectedClaimTechnical?.summary?.uptime_kpi.target_uptime_pct ?? 99}%</p>
+                      </div>
+                      <div className={`rounded-2xl border p-4 ${selectedClaimTechnical?.summary?.energy_kpi.on_track ? "border-emerald-200 bg-emerald-50" : "border-amber-200 bg-amber-50"}`}>
+                        <p className="text-[11px] uppercase tracking-wide text-slate-500">Energy Output</p>
+                        <p className="mt-2 text-2xl font-semibold text-slate-900">{selectedClaimTechnical?.summary?.energy_kpi.monthly_data.length ? `${selectedClaimTechnical.summary.energy_kpi.current_month_pct}%` : "No data"}</p>
+                        <p className="mt-1 text-xs text-slate-600">
+                          {selectedClaimTechnical?.summary ? `${selectedClaimTechnical.summary.energy_kpi.current_month_kwh.toLocaleString()} / ${selectedClaimTechnical.summary.energy_kpi.current_month_target.toLocaleString()} kWh` : "Awaiting data"}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <h4 className="text-sm font-semibold text-slate-900">Auto-checked Compliance Checklist</h4>
+                        <span className="text-xs text-slate-500">Generated from live KPI rules</span>
+                      </div>
+                      <div className="mt-4 grid gap-3 md:grid-cols-2">
+                        {selectedClaimChecklist.map((item) => (
+                          <div key={item.label} className={`flex items-center gap-2 rounded-xl border px-3 py-3 text-sm ${item.met ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-rose-200 bg-rose-50 text-rose-700"}`}>
+                            {item.met ? <CheckCircle2 size={16} /> : <XCircle size={16} />}
+                            <span className="font-medium">{item.label}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                        <p className="text-[11px] uppercase tracking-wide text-slate-500">RMT Approval Note</p>
+                        <p className="mt-2 text-sm text-slate-700">
+                          {selectedClaimForReview.verifiedAt
+                            ? `RMT approval recorded on ${new Date(selectedClaimForReview.verifiedAt).toLocaleString()}.`
+                            : "RMT approval note not separately retained in this view."}
+                        </p>
+                      </div>
+                      <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                        <p className="text-[11px] uppercase tracking-wide text-slate-500">TAC Endorsement Note</p>
+                        <p className="mt-2 text-sm text-slate-700">
+                          {selectedClaimForReview.remarks || "No TAC endorsement note was captured for this claim."}
+                        </p>
+                      </div>
+                    </div>
+                    {selectedClaimBlockedForPsc && (
+                      <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-4 text-sm text-rose-800">
+                        This claim does not meet mandatory KPI requirements. PSC approval is blocked until the failed KPI conditions are corrected.
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {/* Implementation Details */}
                 <div className="space-y-3 pb-6 border-b border-slate-200">
@@ -5796,6 +6242,32 @@ const Disbursements = () => {
                     </div>
                   </div>
                 </div>
+
+                {isTacView && (
+                  <div className="space-y-3 pb-6 border-b border-slate-200">
+                    <h3 className="text-sm font-bold text-slate-900 uppercase">Field Verification Quality Summary</h3>
+                    <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                      <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                        <p className="text-[11px] uppercase tracking-wide text-slate-500">Verified Installations</p>
+                        <p className="mt-2 text-xl font-semibold text-slate-900">{selectedClaimTechnical?.verifiedReports.length ?? 0}</p>
+                      </div>
+                      <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                        <p className="text-[11px] uppercase tracking-wide text-slate-500">GPS Matched</p>
+                        <p className="mt-2 text-xl font-semibold text-slate-900">
+                          {selectedClaimTechnical?.gpsMatchedCount ?? 0}/{selectedClaimTechnical?.projectTasks.length ?? 0}
+                        </p>
+                      </div>
+                      <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                        <p className="text-[11px] uppercase tracking-wide text-slate-500">Verified Tasks</p>
+                        <p className="mt-2 text-xl font-semibold text-slate-900">{selectedClaimTechnical?.verifiedTaskCount ?? 0}</p>
+                      </div>
+                      <div className={`rounded-2xl border p-4 ${(selectedClaimTechnical?.flaggedTaskCount ?? 0) > 0 ? "border-amber-200 bg-amber-50" : "border-emerald-200 bg-emerald-50"}`}>
+                        <p className="text-[11px] uppercase tracking-wide text-slate-500">Flagged / Partial</p>
+                        <p className="mt-2 text-xl font-semibold text-slate-900">{selectedClaimTechnical?.flaggedTaskCount ?? 0}</p>
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 {/* Evidence Files */}
                 <div className="space-y-3 pb-6 border-b border-slate-200">
@@ -5891,14 +6363,39 @@ const Disbursements = () => {
 
                 {/* Review Notes Input */}
                 <div className="space-y-3">
-                  <label className="text-sm font-bold text-slate-900 uppercase">Review & Approval Notes</label>
+                  <label className="text-sm font-bold text-slate-900 uppercase">{isTacView ? "Technical Endorsement Notes" : isPscView ? "PSC Approval Notes" : "Review & Approval Notes"}</label>
                   <textarea
                     value={reviewNotes}
                     onChange={(e) => setReviewNotes(e.target.value)}
-                    placeholder="Document your review findings, ensure contractual/compliance/technical checks are complete..."
+                    placeholder={isTacView ? "Document technical findings on uptime, energy output, technology tier, and verification quality..." : isPscView ? "Document the PSC approval or rejection rationale based on the project KPI scorecard..." : "Document your review findings, ensure contractual/compliance/technical checks are complete..."}
                     className="w-full p-4 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                     rows={4}
                   />
+                  {isTacView && (
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setReviewNotes("Technical performance is satisfactory. Uptime meets target. Energy output is within acceptable variance. Technology tier compliance and field verification evidence are acceptable for TAC endorsement.")}
+                        className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700"
+                      >
+                        Endorse template
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setReviewNotes("Average uptime is below the required target and requires technical investigation before TAC can endorse this claim. Review prolonged device outages and corrective actions.")}
+                        className="rounded-full border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-700"
+                      >
+                        Uptime concern
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setReviewNotes("Energy output is materially below the contracted target. Please submit a technical explanation, recent trend evidence, and a corrective action plan before TAC endorsement.")}
+                        className="rounded-full border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700"
+                      >
+                        Energy concern
+                      </button>
+                    </div>
+                  )}
                 </div>
 
                 {/* Action Buttons */}
@@ -5924,10 +6421,28 @@ const Disbursements = () => {
                     ) : (
                       <>
                         <Check size={18} />
-                        {getClaimActionLabel(selectedClaimForReview) === "No Action" ? "Approve" : getClaimActionLabel(selectedClaimForReview)}
+                        {isTacView ? "Endorse Claim" : isPscView ? "Approve Payment" : getClaimActionLabel(selectedClaimForReview) === "No Action" ? "Approve" : getClaimActionLabel(selectedClaimForReview)}
                       </>
                     )}
                   </button>
+                  {isPscView && (
+                    <button
+                      onClick={() => submitApproval("reject")}
+                      disabled={processingClaimId === selectedClaimForReview.id}
+                      className="flex-1 px-4 py-3 bg-rose-600 hover:bg-rose-700 disabled:bg-slate-300 text-white font-semibold rounded-lg transition-colors"
+                    >
+                      Reject Claim
+                    </button>
+                  )}
+                  {isTacView && (
+                    <button
+                      onClick={() => submitApproval("reject")}
+                      disabled={processingClaimId === selectedClaimForReview.id}
+                      className="flex-1 px-4 py-3 bg-amber-600 hover:bg-amber-700 disabled:bg-slate-300 text-white font-semibold rounded-lg transition-colors"
+                    >
+                      Push Back to RMT
+                    </button>
+                  )}
                 </div>
               </div>
             </motion.div>
@@ -12222,7 +12737,17 @@ const VendorDirectory = ({
 
 type ProjectsHubMode = "vendor" | "rbf" | "tac" | "doe" | "psc" | "undp" | "auditor";
 
-const ProjectsHub = ({ mode = "vendor" }: { mode?: ProjectsHubMode }) => {
+const ProjectsHub = ({
+  mode = "vendor",
+  onNavigate,
+  externalProjectId,
+  externalProjectTab,
+}: {
+  mode?: ProjectsHubMode;
+  onNavigate?: (url: string) => void;
+  externalProjectId?: string | null;
+  externalProjectTab?: string;
+}) => {
   const currentUser = getStoredUser();
   const isRbfPortal = mode === "rbf";
   const isVendorPortal = mode === "vendor";
@@ -12234,7 +12759,7 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: ProjectsHubMode }) => {
   const isOfficialPortal = !isVendorPortal;
   const projectTabs = isRbfPortal
     ? ["overview", "kpi", "map", "milestones", "payments", "documents", "updates"] as const
-    : ["overview", "planning", "map", "milestones", "fieldwork", "payments", "documents", "updates"] as const;
+    : ["overview", "planning", "kpi", "map", "milestones", "fieldwork", "payments", "documents", "updates"] as const;
   const createEmptyMilestoneDraft = () => ({
     name: "",
     description: "",
@@ -12265,7 +12790,29 @@ const ProjectsHub = ({ mode = "vendor" }: { mode?: ProjectsHubMode }) => {
   const [windowFilter, setWindowFilter] = useState("All");
   const [dateRangeFilter, setDateRangeFilter] = useState("All");
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
-  const [projectTab, setProjectTab] = useState<"overview" | "kpi" | "map" | "milestones" | "planning" | "payments" | "documents" | "updates" | "fieldwork" | "installations" | "verifications" | "anomaly_flags" | "prospect_sync" | "audit_trail" | "summary" | "milestone_payments" | "compliance">("overview");
+  const [projectTab, setProjectTab] = useState<"overview" | "kpi" | "map" | "milestones" | "planning" | "payments" | "documents" | "updates" | "fieldwork" | "installations" | "verifications" | "anomaly_flags" | "prospect_sync" | "audit_trail" | "summary" | "milestone_payments" | "compliance">(() => {
+    const validTabs = ["overview", "kpi", "map", "milestones", "planning", "payments", "documents", "updates", "fieldwork", "installations", "verifications", "anomaly_flags", "prospect_sync", "audit_trail", "summary", "milestone_payments", "compliance"];
+    if (externalProjectTab && validTabs.includes(externalProjectTab)) {
+      return externalProjectTab as "overview" | "kpi" | "map" | "milestones" | "planning" | "payments" | "documents" | "updates" | "fieldwork" | "installations" | "verifications" | "anomaly_flags" | "prospect_sync" | "audit_trail" | "summary" | "milestone_payments" | "compliance";
+    }
+    return "overview";
+  });
+  React.useEffect(() => {
+    const validTabs = ["overview", "kpi", "map", "milestones", "planning", "payments", "documents", "updates", "fieldwork", "installations", "verifications", "anomaly_flags", "prospect_sync", "audit_trail", "summary", "milestone_payments", "compliance"];
+    if (externalProjectTab && validTabs.includes(externalProjectTab)) {
+      setProjectTab(externalProjectTab as "overview" | "kpi" | "map" | "milestones" | "planning" | "payments" | "documents" | "updates" | "fieldwork" | "installations" | "verifications" | "anomaly_flags" | "prospect_sync" | "audit_trail" | "summary" | "milestone_payments" | "compliance");
+    }
+  }, [externalProjectTab]);
+  React.useEffect(() => {
+    if (externalProjectId && projects.length > 0) {
+      const matchedProject = projects.find((project) => project.id === externalProjectId);
+      if (matchedProject) {
+        setSelectedProject(matchedProject);
+      }
+    } else if (!externalProjectId) {
+      setSelectedProject(null);
+    }
+  }, [externalProjectId, projects]);
   const [projectSetupDraft, setProjectSetupDraft] = useState(createEmptyProjectSetupDraft);
   const [planSaving, setPlanSaving] = useState(false);
   const [planMessage, setPlanMessage] = useState<string | null>(null);
@@ -15879,6 +16426,14 @@ const TACView = ({ mode }: { mode: "technical" | "financial" }) => {
       { label: "O&M Plan", url: selectedEval.bid.om_plan_file },
     ].filter(doc => Boolean(doc.url));
     const financialDocumentLinks = technicalDocumentLinks;
+    const proposedTechTier = selectedEval.bid.tech_tier || selectedEval.bid.service_tier || "Not provided";
+    const projectedEnergyTarget = selectedEval.bid.energy_target || selectedEval.bid.energy_target_kwh_month;
+    const techTierNumber = Number(String(proposedTechTier).match(/\d+/)?.[0] || 0);
+    const techTierCompliant = techTierNumber >= 3;
+    const technicalDecisionGuidance =
+      techTierCompliant && allSitesHaveGps
+        ? "Technology tier and field-readiness evidence support a positive TAC technical review."
+        : "Review the proposed tier or field-readiness evidence before endorsing the technical score.";
 
     if (isFinancialEvaluationMode && isStageOneBid) {
       const proposedBudget = Number(selectedEval.bid.bid_amount || 0);
@@ -16029,6 +16584,35 @@ const TACView = ({ mode }: { mode: "technical" | "financial" }) => {
               </button>
             </div>
           </div>
+
+          {!isFinancialEvaluationMode && (
+            <>
+              <div className="rounded-2xl border border-blue-200 bg-blue-50 px-5 py-4 text-sm text-blue-900">
+                TAC reviews technical feasibility and readiness only. Financial details do not drive the technical endorsement decision on this screen.
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+                <div className={`rounded-2xl border p-4 ${techTierCompliant ? "border-emerald-200 bg-emerald-50" : "border-amber-200 bg-amber-50"}`}>
+                  <p className="text-[11px] uppercase tracking-wide text-slate-500">Technology Tier</p>
+                  <p className="mt-2 text-xl font-semibold text-slate-900">{proposedTechTier}</p>
+                  <p className="mt-1 text-xs text-slate-600">{techTierCompliant ? "Level 3 or higher confirmed" : "Below preferred technical tier"}</p>
+                </div>
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                  <p className="text-[11px] uppercase tracking-wide text-slate-500">Energy Target</p>
+                  <p className="mt-2 text-xl font-semibold text-slate-900">{projectedEnergyTarget ? `${projectedEnergyTarget} kWh/month` : "Not provided"}</p>
+                  <p className="mt-1 text-xs text-slate-600">Compare this with the system sizing and O&M plan.</p>
+                </div>
+                <div className={`rounded-2xl border p-4 ${allSitesHaveGps ? "border-emerald-200 bg-emerald-50" : "border-amber-200 bg-amber-50"}`}>
+                  <p className="text-[11px] uppercase tracking-wide text-slate-500">Field Verification Readiness</p>
+                  <p className="mt-2 text-xl font-semibold text-slate-900">{gpsValidatedSiteCount}/{(selectedEval.bid.sites || []).length}</p>
+                  <p className="mt-1 text-xs text-slate-600">Sites with GPS coordinates ready for verification.</p>
+                </div>
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                  <p className="text-[11px] uppercase tracking-wide text-slate-500">TAC Guidance</p>
+                  <p className="mt-2 text-sm font-semibold text-slate-900">{technicalDecisionGuidance}</p>
+                </div>
+              </div>
+            </>
+          )}
 
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             <div className="lg:col-span-2 space-y-6">
@@ -16502,9 +17086,40 @@ const TACView = ({ mode }: { mode: "technical" | "financial" }) => {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-slate-900">{isFinancialEvaluationMode ? "RMT Evaluation Screens" : "TAC Stage 2 Technical Evaluation"}</h1>
-          <p className="text-slate-500">{isFinancialEvaluationMode ? "Review Stage 1 submissions, then score Stage 2 financial proposals after technical clearance." : "Assess Stage 2 technical submissions and score the detailed proposal."}</p>
+          <p className="text-slate-500">{isFinancialEvaluationMode ? "Review Stage 1 submissions, then score Stage 2 financial proposals after technical clearance." : "Assess Stage 2 technical submissions with emphasis on technology tier, GPS readiness, implementation feasibility, and technical KPI commitments."}</p>
         </div>
       </div>
+
+      {!isFinancialEvaluationMode && (
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+          <div className="card p-5 bg-emerald-50 border-emerald-100">
+            <p className="text-xs font-bold uppercase text-emerald-700">Pending TAC Reviews</p>
+            <p className="mt-2 text-2xl font-bold text-slate-900">{filteredBidQueue.filter((item) => !roleScopedEvaluationsByBid.get(item.id)).length}</p>
+          </div>
+          <div className="card p-5 bg-blue-50 border-blue-100">
+            <p className="text-xs font-bold uppercase text-blue-700">Tier 3+ Proposals</p>
+            <p className="mt-2 text-2xl font-bold text-slate-900">
+              {filteredBidQueue.filter((item) => Number(String(item.tech_tier || item.service_tier || "").match(/\d+/)?.[0] || 0) >= 3).length}
+            </p>
+          </div>
+          <div className="card p-5 bg-amber-50 border-amber-100">
+            <p className="text-xs font-bold uppercase text-amber-700">Missing GPS Readiness</p>
+            <p className="mt-2 text-2xl font-bold text-slate-900">
+              {filteredBidQueue.filter((item) => {
+                const sites = item.sites || [];
+                if (sites.length === 0) return true;
+                return sites.some((site) => site.latitude == null || site.longitude == null);
+              }).length}
+            </p>
+          </div>
+          <div className="card p-5 bg-slate-50 border-slate-200">
+            <p className="text-xs font-bold uppercase text-slate-600">Energy Targets Defined</p>
+            <p className="mt-2 text-2xl font-bold text-slate-900">
+              {filteredBidQueue.filter((item) => Boolean(item.energy_target || item.energy_target_kwh_month)).length}
+            </p>
+          </div>
+        </div>
+      )}
 
       {isFinancialEvaluationMode && (
         <div className="card">
@@ -16569,6 +17184,11 @@ const TACView = ({ mode }: { mode: "technical" | "financial" }) => {
                 <div>
                   <p className="font-bold text-slate-900">{item.vendor_name}</p>
                   <p className="text-xs text-slate-500">Tender: {item.tender_reference || item.tender}</p>
+                  {!isFinancialEvaluationMode && (
+                    <p className="text-xs text-slate-500">
+                      Tier {item.tech_tier || item.service_tier || "N/A"} • GPS {(item.sites || []).filter((site) => site.latitude != null && site.longitude != null).length}/{(item.sites || []).length} • Energy {item.energy_target || item.energy_target_kwh_month ? `${item.energy_target || item.energy_target_kwh_month} kWh/mo` : "N/A"}
+                    </p>
+                  )}
                   {isFinancialEvaluationMode && (
                     <p className="text-xs text-emerald-700">Technical gate: {technicalScore}/{Math.round((threshold / 100) * 70)}</p>
                   )}
@@ -18846,6 +19466,8 @@ export default function App() {
   const [showPublicPortal, setShowPublicPortal] = useState(false);
   const [authView, setAuthView] = useState<"login" | "register">("login");
   const [activeTab, setActiveTab] = useState("dashboard");
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [selectedProjectTab, setSelectedProjectTab] = useState<string | undefined>(undefined);
   const [tenderView, setTenderView] = useState<"list" | "create" | "details">("list");
   const [pendingTenderId, setPendingTenderId] = useState<string | null>(null);
   const [pendingBidTenderId, setPendingBidTenderId] = useState<string | null>(null);
@@ -19005,6 +19627,26 @@ export default function App() {
     setAuthView("login");
     setAuthMessage(`Account created for "${username}". Log in now; complete pre-qualification before submitting applications.`);
   };
+
+  const openProjectKpiView = React.useCallback((projectId: string) => {
+    setSelectedProjectId(projectId);
+    setSelectedProjectTab("kpi");
+    if (role === UserRole.VENDOR) {
+      setActiveTab("projects_hub");
+      return;
+    }
+    if (role === UserRole.RBF_OFFICIAL) {
+      setActiveTab("rbf_projects");
+      return;
+    }
+    if (role === UserRole.UNDP_DONOR) {
+      setActiveTab("portfolio");
+      return;
+    }
+    if (role === UserRole.TAC || role === UserRole.DOE_OFFICER || role === UserRole.AUDITOR) {
+      setActiveTab("projects");
+    }
+  }, [role]);
 
   const resolveNotificationTarget = (note: Notification) => {
     const event = (note.event || "").toLowerCase();
@@ -19171,8 +19813,8 @@ export default function App() {
             }}
           />
         );
-        case "projects_hub": return <ProjectsHub mode="vendor" />;
-        case "claims": return <Disbursements />;
+        case "projects_hub": return <ProjectsHub mode="vendor" externalProjectId={selectedProjectId} externalProjectTab={selectedProjectTab} />;
+        case "claims": return <Disbursements onOpenProjectKpi={openProjectKpiView} />;
         case "my_profile":
           return <VendorProfileView viewerRole={currentUser.role} useOwnProfile embedded />;
         default: return <VendorDashboard />;
@@ -19181,7 +19823,7 @@ export default function App() {
     if (role === UserRole.TAC) {
       switch (activeTab) {
         case "projects":
-          return <ProjectsHub mode="tac" />;
+          return <ProjectsHub mode="tac" externalProjectId={selectedProjectId} externalProjectTab={selectedProjectTab} />;
         case "dashboard":
         case "payments":
         case "evaluations":
@@ -19190,7 +19832,7 @@ export default function App() {
         case "all_vendors":
           if (activeTab === "all_vendors") return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={setViewingVendorProfile} />;
           if (activeTab === "blacklisting") return <Blacklisting currentUser={currentUser} />;
-          if (activeTab === "payments") return <Disbursements />;
+          if (activeTab === "payments") return <Disbursements onOpenProjectKpi={openProjectKpiView} />;
           return <TACView mode="technical" />;
         default:
           return <TACView mode="technical" />;
@@ -19233,7 +19875,7 @@ export default function App() {
     if (role === UserRole.DOE_OFFICER) {
       switch (activeTab) {
         case "projects":
-          return <ProjectsHub mode="doe" />;
+          return <ProjectsHub mode="doe" externalProjectId={selectedProjectId} externalProjectTab={selectedProjectTab} />;
         case "dashboard":
         case "regional":
         case "endorsements":
@@ -19265,9 +19907,9 @@ export default function App() {
     if (role === UserRole.UNDP_DONOR) {
       switch (activeTab) {
         case "projects":
-          return <ProjectsHub mode="undp" />;
+          return <ProjectsHub mode="undp" externalProjectId={selectedProjectId} externalProjectTab={selectedProjectTab} />;
         case "portfolio":
-          return <ProjectsHub mode="psc" />;
+          return <ProjectsHub mode="psc" externalProjectId={selectedProjectId} externalProjectTab={selectedProjectTab} />;
         case "dashboard":
         case "impact":
         case "funding":
@@ -19283,7 +19925,7 @@ export default function App() {
             />
           );
         case "payments":
-          return <Disbursements />;
+          return <Disbursements onOpenProjectKpi={openProjectKpiView} />;
         default:
           return (
             <MacroKpiPortal
@@ -19296,24 +19938,62 @@ export default function App() {
     if (role === UserRole.AUDITOR) {
       switch (activeTab) {
         case "projects":
-          return <ProjectsHub mode="auditor" />;
+          return <ProjectsHub mode="auditor" externalProjectId={selectedProjectId} externalProjectTab={selectedProjectTab} />;
         case "dashboard":
-        case "audit_trail":
-        case "verification":
-        case "compliance":
-        case "blacklisting":
-        case "all_vendors":
-          if (activeTab === "all_vendors") {
-            return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={setViewingVendorProfile} />;
-          }
-          return activeTab === "blacklisting" ? (
-            <Blacklisting currentUser={currentUser} />
-          ) : (
+          return (
             <PortfolioMonitoringView
               title="Auditor Portal"
               description="Read-only GIS, KPI, and project evidence monitoring for compliance and anomaly review."
             />
           );
+        case "gis":
+          return (
+            <PortfolioMonitoringView
+              title="Auditor Portal"
+              description="Read-only GIS, KPI, and project evidence monitoring for compliance and anomaly review."
+            />
+          );
+        case "kpi_dashboard":
+          return (
+            <PortfolioMonitoringView
+              title="Auditor Portal"
+              description="Read-only GIS, KPI, and project evidence monitoring for compliance and anomaly review."
+            />
+          );
+        case "audit_logs":
+          return (
+            <PortfolioMonitoringView
+              title="Auditor Portal"
+              description="Read-only GIS, KPI, and project evidence monitoring for compliance and anomaly review."
+            />
+          );
+        case "anomaly_report":
+          return (
+            <PortfolioMonitoringView
+              title="Auditor Portal"
+              description="Read-only GIS, KPI, and project evidence monitoring for compliance and anomaly review."
+            />
+          );
+        case "claims_audit":
+          return (
+            <PortfolioMonitoringView
+              title="Auditor Portal"
+              description="Read-only GIS, KPI, and project evidence monitoring for compliance and anomaly review."
+            />
+          );
+        case "prospect_sync":
+          return (
+            <PortfolioMonitoringView
+              title="Auditor Portal"
+              description="Read-only GIS, KPI, and project evidence monitoring for compliance and anomaly review."
+            />
+          );
+        case "reports":
+          return <Reports />;
+        case "notifications":
+          return <NotificationLogs logs={notifications} onSelect={handleNotificationSelect} />;
+        case "all_vendors":
+          return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={setViewingVendorProfile} />;
         default:
           return (
             <PortfolioMonitoringView
@@ -19342,9 +20022,9 @@ export default function App() {
         />
       );
       case "prequal": return <PreQualification />;
-      case "rbf_projects": return <ProjectsHub mode="rbf" />;
+      case "rbf_projects": return <ProjectsHub mode="rbf" externalProjectId={selectedProjectId} externalProjectTab={selectedProjectTab} />;
       case "blacklisting": return <Blacklisting currentUser={currentUser} />;
-      case "payments": return <Disbursements />;
+      case "payments": return <Disbursements onOpenProjectKpi={openProjectKpiView} />;
       case "all_vendors": return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={setViewingVendorProfile} />;
       default:
         return (
@@ -19424,29 +20104,29 @@ export default function App() {
       ];
     }
 
-    if (role === UserRole.UNDP_DONOR) {
-      return [
-        ...common,
-        { id: "all_vendors", icon: Users, label: "All Vendors" },
-        { id: "portfolio", icon: FolderKanban, label: "Portfolio Overview" },
-        { id: "projects", icon: Activity, label: "National Dashboard" },
-        { id: "impact", icon: Activity, label: "Portfolio Dashboard" },
-        { id: "payments", icon: CreditCard, label: "Disbursements" },
-        { id: "compliance", icon: CheckCircle2, label: "Compliance Logs" },
-        { id: "reports", icon: BarChart3, label: "Briefings & Reports" },
-        { id: "notifications", icon: Bell, label: "Briefings" },
-      ];
-    }
+     if (role === UserRole.UNDP_DONOR) {
+       return [
+         ...common,
+         { id: "all_vendors", icon: Users, label: "All Vendors" },
+         { id: "portfolio", icon: FolderKanban, label: "Portfolio Overview" },
+         { id: "payments", icon: CreditCard, label: "Disbursements" },
+         { id: "reports", icon: BarChart3, label: "Briefings & Reports" },
+         { id: "notifications", icon: Bell, label: "Briefings" },
+       ];
+     }
 
     if (role === UserRole.AUDITOR) {
       return [
         ...common,
-        { id: "all_vendors", icon: Users, label: "All Vendors" },
         { id: "projects", icon: FolderKanban, label: "All Projects" },
-        { id: "audit_trail", icon: FileText, label: "Audit Trail" },
-        { id: "verification", icon: ClipboardCheck, label: "Verification Docs" },
-        { id: "compliance", icon: CheckCircle2, label: "Compliance Reports" },
-        { id: "blacklisting", icon: FileWarning, label: "Blacklisting" },
+        { id: "gis", icon: MapIcon, label: "GIS Map" },
+        { id: "kpi_dashboard", icon: BarChart3, label: "KPI Dashboard" },
+        { id: "audit_logs", icon: FileText, label: "Audit Logs" },
+        { id: "anomaly_report", icon: AlertTriangle, label: "Anomaly Report" },
+        { id: "claims_audit", icon: ClipboardCheck, label: "Claims Audit" },
+        { id: "prospect_sync", icon: History, label: "Prospect Sync Log" },
+        { id: "reports", icon: BarChart3, label: "Reports" },
+        { id: "notifications", icon: Bell, label: "Notifications" },
       ];
     }
 
