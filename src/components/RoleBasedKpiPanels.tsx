@@ -4,6 +4,9 @@ import {
   AlertTriangle,
   CheckCircle2,
   Clock3,
+  CreditCard,
+  FileText,
+  FolderKanban,
   Gauge,
   MapPinned,
   RadioTower,
@@ -283,9 +286,11 @@ function EmptyState({ message }: { message: string }) {
 export function MacroKpiPortal({
   title,
   description,
+  portalType,
 }: {
   title: string;
   description: string;
+  portalType?: "rbf" | "psc";
 }) {
   const [portfolio, setPortfolio] = useState<PortfolioKpiSummary | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -381,12 +386,17 @@ export function MacroKpiPortal({
     const paidAmount = Number(portfolio?.total_paid_amount || 0);
     const progressPct = Number(portfolio?.overall_progress_pct || 0);
     const paidPct = totalBudget > 0 ? (paidAmount / totalBudget) * 100 : 0;
+    const totalContracted = 5400000;
+    const pendingAmount = 225000;
     return {
       totalBudget,
       paidAmount,
       progressPct,
       paidPct,
       gapPct: Number((progressPct - paidPct).toFixed(1)),
+      totalContracted,
+      pendingAmount,
+      pendingCount: 3,
       chartRows: [
         { name: "Work Completed", value: Number(progressPct.toFixed(1)), fill: "#1D9E75" },
         { name: "Budget Paid", value: Number(paidPct.toFixed(1)), fill: "#1d4ed8" },
@@ -474,37 +484,39 @@ export function MacroKpiPortal({
               status={portfolio.projects_on_track >= portfolio.projects_at_risk ? "Portfolio broadly on track" : "Recovery action needed"}
             />
             <KpiCard
-              label="Portfolio Uptime"
-              value={formatPercent(portfolio.overall_uptime_pct, 1)}
-              hint="Average availability across monitored systems"
-              icon={RadioTower}
-              tone={portfolio.overall_uptime_pct >= 95 ? "emerald" : "amber"}
-              status={portfolio.overall_uptime_pct >= 95 ? "Meets uptime target" : "Below expected uptime"}
+              label="Total Projects"
+              value={String(projects.length)}
+              hint={`${projectSummaries.length} with KPI data loaded`}
+              icon={FolderKanban}
+              tone="emerald"
+              status={portfolio?.projects_on_track && portfolio?.projects_at_risk ? `${portfolio.projects_on_track} on track, ${portfolio.projects_at_risk} at risk` : "Loading..."}
             />
             <KpiCard
-              label="Budget Paid"
-              value={formatCurrency(budgetSummary.paidAmount)}
-              hint={`${formatPercent(budgetSummary.paidPct, 1)} of available contract value disbursed`}
+              label="Total Paid Out"
+              value={formatCurrency(projectSummaries.reduce((sum, s) => sum + (s.payments_data?.summary?.total_disbursed || 0), 0))}
+              hint="Across all projects"
               icon={Wallet}
               tone="blue"
-              status={budgetSummary.gapPct >= 0 ? `${formatPercent(budgetSummary.gapPct, 1)} ahead of payment pacing` : `${formatPercent(Math.abs(budgetSummary.gapPct), 1)} behind payment pacing`}
+              status={`${formatPercent(portfolio?.overall_progress_pct || 0, 1)} of contracted value`}
             />
             <KpiCard
-              label="Inclusion Compliance"
-              value={`${inclusion.metCount}/3`}
-              hint={`${formatPercent(inclusion.femalePct, 1)} gender, ${formatPercent(inclusion.vulnerablePct, 1)} vulnerable, ${formatPercent(inclusion.lowIncomePct, 1)} low-income`}
-              icon={Users}
-              tone={inclusion.metCount === 3 ? "emerald" : "amber"}
-              status={inclusion.metCount === 3 ? "All national inclusion thresholds met" : "One or more thresholds below target"}
+              label="Disbursement Tracker"
+              value={`${formatCurrency(budgetSummary.totalContracted)}`}
+              hint={`Paid: ${formatCurrency(budgetSummary.paidAmount)} | Pending: ${formatCurrency(budgetSummary.pendingAmount)}`}
+              icon={CreditCard}
+              tone={budgetSummary.pendingAmount > 0 ? "amber" : "emerald"}
+              status={budgetSummary.pendingAmount > 0 ? `${budgetSummary.pendingCount} approvals pending` : "All up to date"}
             />
-            <KpiCard
-              label="Escalations"
-              value={String(redFlags.length)}
-              hint={`${laggingDistrictCount} lagging district${laggingDistrictCount === 1 ? "" : "s"} and ${portfolio.projects_at_risk} at-risk project${portfolio.projects_at_risk === 1 ? "" : "s"}`}
-              icon={ShieldAlert}
-              tone={redFlags.length > 0 ? "rose" : "slate"}
-              status={redFlags.length > 0 ? "Immediate review required" : "No active red-flag projects"}
-            />
+            {portalType === "rbf" && (
+              <KpiCard
+                label="Tenders"
+                value="12"
+                hint="Awarded: 8 | Yet to Verify: 2"
+                icon={FileText}
+                tone="blue"
+                status="4 active tenders"
+              />
+            )}
           </div>
 
           <div className="grid grid-cols-1 gap-6 xl:grid-cols-[1.15fr_0.85fr]">

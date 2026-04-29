@@ -1,3 +1,4 @@
+from django.urls import path
 from rest_framework.routers import DefaultRouter
 from .views import (
     ProjectViewSet,
@@ -12,6 +13,10 @@ from .views import (
     AuditLogViewSet,
     ProspectSyncLogViewSet,
     AnomalyFlagViewSet,
+    ProjectReportTemplatesView,
+    ProjectReportGenerateView,
+    ProjectReportHistoryView,
+    ProjectReportDownloadView,
 )
 
 router = DefaultRouter()
@@ -28,4 +33,12 @@ router.register(r'smart-meter-readings', SmartMeterReadingViewSet, basename='sma
 router.register(r'milestones', MilestoneViewSet, basename='milestone')
 router.register(r'', ProjectViewSet, basename='project')
 
-urlpatterns = router.urls
+urlpatterns = router.urls + [
+    # Backwards-compatible path (older frontend)
+    path('report-templates/', ProjectReportTemplatesView.as_view(), name='report-templates-legacy'),
+    # Current frontend path
+    path('reports/templates/', ProjectReportTemplatesView.as_view(), name='report-templates'),
+    path('reports/generate/', ProjectReportGenerateView.as_view(), name='report-generate'),
+    path('reports/history/', ProjectReportHistoryView.as_view(), name='report-history'),
+    path('reports/<uuid:report_id>/download/', ProjectReportDownloadView.as_view(), name='report-download'),
+]

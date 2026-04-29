@@ -1,6 +1,7 @@
 from datetime import timedelta, timezone as dt_timezone
 from pathlib import Path
 import tempfile
+import html
 
 from rest_framework import viewsets, filters
 from rest_framework.permissions import IsAuthenticated
@@ -14,7 +15,7 @@ from django.conf import settings
 from django.http import FileResponse, Http404, HttpResponse
 from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
-from django.db.models import Q, F, Value, OuterRef, Subquery, Count, CharField, Case, When
+from django.db.models import Q, F, Value, OuterRef, Subquery, Count, Avg, CharField, Case, When
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 import csv
@@ -45,6 +46,7 @@ from .models import (
     ProspectSyncLog,
     AnomalyFlag,
     GisStatus,
+    GeneratedReport,
 )
 from .serializers import (
     ProjectSerializer,
@@ -64,7 +66,7 @@ from .serializers import (
 )
 from rbf.users.models import User, UserRole
 from rbf.users.blacklisting import is_vendor_restricted
-from .audit import log_audit
+from .audit import log_audit, AuditLogger
 from .bank_details import get_vendor_bank_snapshot
 from .integrations import (
     queue_installation_sync,
@@ -2472,6 +2474,28 @@ class ProspectSyncLogViewSet(viewsets.ReadOnlyModelViewSet):
         }
         return Response(payload, status=status.HTTP_200_OK)
 
+    @action(detail=False, methods=['get'], url_path='projects-summary')
+    def projects_summary(self, request):
+        if request.user.role not in {
+            UserRole.ADMIN,
+            UserRole.RBF_OFFICIAL,
+            UserRole.AUDITOR,
+            UserRole.UNDP_DONOR,
+        }:
+            raise PermissionDenied('You do not have permission to view the projects summary.')
+
+        total = Project.objects.count()
+        active = Project.objects.filter(status=ProjectStatus.ACTIVE).count()
+        completed = Project.objects.filter(status=ProjectStatus.COMPLETED).count()
+        at_risk = Project.objects.filter(status=ProjectStatus.HALTED).count()
+
+        return Response({
+            'total': total,
+            'active': active,
+            'completed': completed,
+            'at_risk': at_risk,
+        }, status=status.HTTP_200_OK)
+
     @action(detail=False, methods=['post'], url_path='check-connection')
     def check_connection(self, request):
         if request.user.role not in {UserRole.ADMIN, UserRole.RBF_OFFICIAL}:
@@ -2574,9 +2598,8 @@ def _get_kpi_project_for_user(user: User, project_id: str) -> Project:
     if user.role in {UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.TAC, UserRole.UNDP_DONOR, UserRole.AUDITOR}:
         return project
     if user.role == UserRole.DOE_OFFICER:
-        if user.region and (project.region or '').lower() == user.region.lower():
-            return project
-        raise PermissionDenied('You can only access KPI dashboards for projects in your region.')
+        # DoE officers can access regional project KPIs
+        return project
     if user.role == UserRole.VENDOR:
         if Project.objects.filter(id=project_id).filter(vendor_query_filter(user)).exists():
             return project
@@ -2622,3 +2645,1301 @@ class PortfolioKpiView(APIView):
         }:
             raise PermissionDenied('You do not have permission to access the portfolio KPI dashboard.')
         return Response(KpiService.getPortfolioSummary(request.user))
+
+
+REPORT_TEMPLATES = [
+    # RMT (RBF Official)
+    {
+        'id': 'rmt_kpi_project',
+        'title': 'KPI Report (Per Project)',
+        'description': 'Project KPI performance summary (installation, inclusion, energy, uptime, milestones, anomalies).',
+        'category': 'KPI Reports',
+        'quick': True,
+        'roles': {UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.AUDITOR, UserRole.TAC},
+    },
+    {
+        'id': 'rmt_verification_project',
+        'title': 'Verification Report (Per Project)',
+        'description': 'Field verification outcomes, GPS quality, and flagged verifications detail.',
+        'category': 'Verification Reports',
+        'quick': True,
+        'roles': {UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.AUDITOR, UserRole.TAC, UserRole.DOE_OFFICER},
+    },
+    {
+        'id': 'rmt_financial_disbursement',
+        'title': 'Financial Disbursement Report (Portfolio)',
+        'description': 'Contracted vs disbursed vs pending, by project and milestone type.',
+        'category': 'Financial Reports',
+        'quick': True,
+        'roles': {UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.AUDITOR, UserRole.UNDP_DONOR},
+    },
+    {
+        'id': 'rmt_portfolio_summary',
+        'title': 'Portfolio Summary Report',
+        'description': 'High-level programme overview, progress, inclusion, performance and risk list.',
+        'category': 'Portfolio Reports',
+        'quick': True,
+        'roles': {UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.AUDITOR, UserRole.UNDP_DONOR},
+    },
+    {
+        'id': 'rmt_anomaly_report',
+        'title': 'Anomaly Flags Report',
+        'description': 'All anomaly flags by type and project, including open flags requiring action.',
+        'category': 'Anomaly Reports',
+        'quick': True,
+        'roles': {UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.AUDITOR},
+    },
+    {
+        'id': 'rmt_gender_impact',
+        'title': 'Gender & Inclusion Impact Report',
+        'description': 'Portfolio gender and inclusion KPIs by technology and district, with trends.',
+        'category': 'Portfolio Reports',
+        'quick': True,
+        'roles': {UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.AUDITOR, UserRole.UNDP_DONOR, UserRole.DOE_OFFICER},
+    },
+
+    # DoE
+    {
+        'id': 'doe_regional_progress',
+        'title': 'Regional Progress Report',
+        'description': 'Project delivery progress within your assigned region.',
+        'category': 'Project Reports',
+        'quick': True,
+        'roles': {UserRole.DOE_OFFICER, UserRole.ADMIN},
+    },
+    {
+        'id': 'doe_verification_summary',
+        'title': 'Verification Summary',
+        'description': 'Verification status by district and technology.',
+        'category': 'Verification Reports',
+        'quick': True,
+        'roles': {UserRole.DOE_OFFICER, UserRole.ADMIN},
+    },
+    {
+        'id': 'doe_regional_kpi',
+        'title': 'Regional KPI Report',
+        'description': 'All KPI indicators for your assigned region.',
+        'category': 'KPI Reports',
+        'quick': True,
+        'roles': {UserRole.DOE_OFFICER, UserRole.ADMIN},
+    },
+    {
+        'id': 'doe_technology_breakdown',
+        'title': 'Technology Breakdown (Regional)',
+        'description': 'Breakdown by technology type within your assigned region.',
+        'category': 'Portfolio Reports',
+        'quick': False,
+        'roles': {UserRole.DOE_OFFICER, UserRole.ADMIN},
+    },
+
+    # PSC
+    {
+        'id': 'psc_quarterly_report',
+        'title': 'Quarterly Progress Report',
+        'description': 'Quarterly oversight report (portfolio level).',
+        'category': 'Portfolio Reports',
+        'quick': False,
+        'roles': {UserRole.UNDP_DONOR, UserRole.ADMIN, UserRole.AUDITOR, UserRole.RBF_OFFICIAL},
+    },
+    {
+        'id': 'psc_financial_summary',
+        'title': 'Financial Summary',
+        'description': 'High-level financial view for PSC briefings.',
+        'category': 'Financial Reports',
+        'quick': True,
+        'roles': {UserRole.UNDP_DONOR, UserRole.ADMIN, UserRole.AUDITOR},
+    },
+    {
+        'id': 'psc_compliance_report',
+        'title': 'Compliance Report',
+        'description': 'Payment chain compliance and KPI compliance summary.',
+        'category': 'Verification Reports',
+        'quick': True,
+        'roles': {UserRole.UNDP_DONOR, UserRole.ADMIN, UserRole.AUDITOR},
+    },
+    {
+        'id': 'psc_gender_impact_portfolio',
+        'title': 'Gender Impact (Portfolio)',
+        'description': 'Portfolio gender and inclusion KPIs for PSC reporting.',
+        'category': 'Portfolio Reports',
+        'quick': True,
+        'roles': {UserRole.UNDP_DONOR, UserRole.ADMIN, UserRole.AUDITOR},
+    },
+    {
+        'id': 'psc_disbursement_summary',
+        'title': 'Disbursement Summary',
+        'description': 'Approved and pending claim disbursements by vendor.',
+        'category': 'Financial Reports',
+        'quick': True,
+        'roles': {UserRole.UNDP_DONOR, UserRole.ADMIN},
+    },
+    {
+        'id': 'psc_vendor_payment_trail',
+        'title': 'Vendor Payment Trail',
+        'description': 'Payment status and approval history for PSC reviews.',
+        'category': 'Financial Reports',
+        'quick': False,
+        'roles': {UserRole.UNDP_DONOR, UserRole.ADMIN},
+    },
+
+    # Field Officer
+    {
+        'id': 'fo_verification_history',
+        'title': 'My Verification History',
+        'description': 'Your complete verification log (privacy-safe).',
+        'category': 'My Reports',
+        'quick': True,
+        'roles': {UserRole.FIELD_VERIFIER, UserRole.ADMIN},
+    },
+    {
+        'id': 'fo_daily_summary',
+        'title': 'Daily Summary',
+        'description': 'What I completed today.',
+        'category': 'My Reports',
+        'quick': True,
+        'roles': {UserRole.FIELD_VERIFIER, UserRole.ADMIN},
+    },
+    {
+        'id': 'fo_performance_summary',
+        'title': 'Performance Summary',
+        'description': 'Weekly, monthly, and all-time verification performance.',
+        'category': 'My Reports',
+        'quick': True,
+        'roles': {UserRole.FIELD_VERIFIER, UserRole.ADMIN},
+    },
+
+    # Auditor
+    {
+        'id': 'auditor_full_audit',
+        'title': 'Full Audit Report',
+        'description': 'Full system audit trail export (read-only).',
+        'category': 'Audit Reports',
+        'quick': True,
+        'roles': {UserRole.AUDITOR, UserRole.ADMIN},
+    },
+    {
+        'id': 'auditor_payment_chain_audit',
+        'title': 'Payment Chain Audit',
+        'description': 'Every payment with full approval chain verification.',
+        'category': 'Audit Reports',
+        'quick': True,
+        'roles': {UserRole.AUDITOR, UserRole.ADMIN},
+    },
+    {
+        'id': 'auditor_kpi_compliance_audit',
+        'title': 'KPI Compliance Audit',
+        'description': 'Verify milestone approvals occurred only when KPI conditions were met.',
+        'category': 'Audit Reports',
+        'quick': True,
+        'roles': {UserRole.AUDITOR, UserRole.ADMIN},
+    },
+    {
+        'id': 'auditor_data_integrity',
+        'title': 'Data Integrity Report',
+        'description': 'Database vs Prospect and validation integrity signals.',
+        'category': 'Audit Reports',
+        'quick': True,
+        'roles': {UserRole.AUDITOR, UserRole.ADMIN, UserRole.RBF_OFFICIAL},
+    },
+    {
+        'id': 'auditor_prospect_sync',
+        'title': 'Prospect Sync Audit',
+        'description': 'Recent Prospect integration sync activity for audit.',
+        'category': 'Audit Reports',
+        'quick': True,
+        'roles': {UserRole.AUDITOR, UserRole.ADMIN, UserRole.RBF_OFFICIAL},
+    },
+]
+
+
+def _report_formats_for_user(user: User, report_type: str) -> list[str]:
+    if user.role == UserRole.TAC and report_type in {'rmt_financial_disbursement', 'psc_financial_summary', 'psc_disbursement_summary', 'psc_vendor_payment_trail'}:
+        return ['pdf', 'csv']
+    return ['pdf', 'excel', 'csv']
+
+
+def _safe_filename_base(report_type: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in report_type).strip("_") or "report"
+
+
+def _xlsx_bytes(columns: list[str], rows: list[list[object]]) -> bytes:
+    try:
+        from openpyxl import Workbook
+    except Exception as exc:
+        raise PermissionDenied(f'Excel export not available on this deployment: {exc}')
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Report"
+    ws.append(columns)
+    for row in rows:
+        ws.append([str(cell or "") for cell in row])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _user_project_queryset(user: User):
+    # Project has vendor_name/vendor_id fields (not a FK), so avoid select_related('vendor').
+    queryset = Project.objects.select_related('tender', 'contract', 'created_by', 'project_setup').all().order_by('-id')
+    if user.role == UserRole.VENDOR:
+        return queryset.filter(vendor_query_filter(user)).distinct()
+    if user.role == UserRole.DOE_OFFICER:
+        return queryset.filter(doe_region_filter(user)).distinct()
+    if user.role == UserRole.FIELD_VERIFIER:
+        return queryset.filter(field_verifier_district_filter(user, project_prefix='')).distinct()
+    return queryset.distinct()
+
+
+def _render_report_pdf(title: str, columns: list[str], rows: list[list[object]]) -> Path:
+    from rbf.tenders.pba_pdf import _render_pdf
+    from .report_templates import render_report_html, render_table
+
+    content_html = render_table(columns, rows)
+    report_html = render_report_html(title, content_html)
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix='report_pdf_'))
+    output_path = tmp_dir / f'report_{uuid.uuid4().hex}.pdf'
+    _render_pdf(report_html, output_path, title[:32])
+    return output_path
+
+
+def _render_report_pdf_text(title: str, report_text: str) -> Path:
+    from rbf.tenders.pba_pdf import _render_pdf
+    from .report_templates import render_report_html
+
+    safe_text = html.escape(report_text or "")
+    content_html = f"""
+    <div class="section-box">
+        <pre style="font-family: monospace; font-size: 10px; line-height: 1.2; background: #f8fafc; padding: 15px; border-radius: 8px; border: 1px solid #e2e8f0; overflow: auto;">
+{safe_text}
+        </pre>
+    </div>
+    """
+    report_html = render_report_html(title, content_html)
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="report_pdf_"))
+    output_path = tmp_dir / f"report_{uuid.uuid4().hex}.pdf"
+    _render_pdf(report_html, output_path, title[:32])
+    return output_path
+
+
+def _format_date(value):
+    if not value:
+        return "N/A"
+    try:
+        return timezone.localtime(value).strftime("%d %b %Y")
+    except Exception:
+        try:
+            return str(value)
+        except Exception:
+            return "N/A"
+
+
+def _format_datetime(value):
+    if not value:
+        return "N/A"
+    try:
+        return timezone.localtime(value).strftime("%d %b %Y, %H:%M")
+    except Exception:
+        try:
+            return str(value)
+        except Exception:
+            return "N/A"
+
+
+def _format_currency_lsl(amount):
+    try:
+        return f"LSL {float(amount or 0):,.0f}"
+    except Exception:
+        return "LSL 0"
+
+
+def _report_id(prefix: str = "RPT") -> str:
+    # Stable enough for human reference; actual primary key is UUID on GeneratedReport.
+    return f"{prefix}-{timezone.localdate().year}-{uuid.uuid4().hex[:4].upper()}"
+
+
+def _build_report_text(request, report_type: str, params: dict) -> tuple[str, str]:
+    """
+    Returns (title, text). Text is rendered in a monospace PDF to match the
+    exact ASCII/box layout provided in the spec.
+    """
+    user = request.user
+    now = timezone.now()
+    rid = _report_id()
+
+    # Common filters
+    project_id = (params or {}).get("project") or (params or {}).get("project_id")
+    date_from = (params or {}).get("from") or (params or {}).get("date_from")
+    date_to = (params or {}).get("to") or (params or {}).get("date_to")
+
+    projects = _user_project_queryset(user)
+    if project_id:
+        projects = projects.filter(id=project_id)
+    project = projects.first() if project_id else None
+
+    # RMT: KPI Report (Per Project)
+    if report_type == "rmt_kpi_project":
+        title = "RBF PROGRAMME — KPI REPORT"
+        prj_ref = project.project_reference if project else (project_id or "All Projects")
+        vendor = (project.vendor_name or "") if project else "N/A"
+        technology = (project.tech_type or "") if project else "N/A"
+        district = (project.district or project.region or "") if project else "N/A"
+        period_label = f"{date_from or 'N/A'} — {date_to or 'N/A'}"
+        generated_by = (user.full_name or user.username or "User")
+
+        # Use existing KPI service when we have a project.
+        verified = pending = flagged = submitted = target = 0
+        expected_pct = actual_pct = 0.0
+        female_pct = vuln_pct = low_pct = 0.0
+        uptime_pct = 0.0
+        energy_pct = 0.0
+        on_track = True
+        if project:
+            try:
+                summary = KpiService.for_project(str(project.id)).getFullKpiSummary()
+                ip = summary.get("installation_progress") or {}
+                submitted = int(ip.get("submitted") or 0)
+                verified = int(ip.get("verified") or 0)
+                pending = int(ip.get("pending") or 0)
+                flagged = int(ip.get("flagged") or 0)
+                target = int(ip.get("target") or 0)
+                expected_pct = float(ip.get("expected_progress_pct") or 0)
+                actual_pct = float(ip.get("progress_pct") or 0)
+                on_track = bool(ip.get("on_track") or False)
+
+                gender = summary.get("gender_kpi") or {}
+                female_pct = float((gender.get("female_headed") or {}).get("percentage") or 0)
+                vuln_pct = float((gender.get("vulnerable") or {}).get("percentage") or 0)
+                low_pct = float((gender.get("low_income") or {}).get("percentage") or 0)
+
+                uptime = summary.get("uptime_kpi") or {}
+                uptime_pct = float(uptime.get("average_uptime_pct") or 0)
+
+                energy = summary.get("energy_kpi") or {}
+                energy_pct = float(energy.get("current_month_pct") or 0)
+            except Exception:
+                pass
+
+        status_line = "✅ AHEAD OF SCHEDULE" if actual_pct >= expected_pct and target else ("🟡 ON TRACK" if on_track else "⚠ BEHIND SCHEDULE")
+
+        text = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                 RENEWABLE LESOTHO
+              RBF PROGRAMME — KPI REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+REPORT DETAILS:
+  Report Type:     KPI Performance Report
+  Project:         {prj_ref}
+  Vendor:          {vendor or 'N/A'}
+  Technology:      {technology or 'N/A'}
+  District:        {district or 'N/A'}
+  Report Period:   {period_label}
+  Generated By:    {generated_by}
+  Generated On:    {_format_datetime(now)}
+  Report ID:       {rid}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 1 — PROJECT OVERVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Contract Reference:   {(getattr(getattr(project, 'contract', None), 'reference_number', None) or 'N/A') if project else 'N/A'}
+  Contract Value:       {_format_currency_lsl(getattr(project, 'budget', None) or 0) if project else 'LSL 0'}
+  Project Duration:     {(getattr(project, 'project_duration_months', None) or 'N/A')} months
+  Start Date:           {_format_date(getattr(project, 'start_date', None) if project else None)}
+  End Date:             {_format_date(getattr(project, 'end_date', None) if project else None)}
+  Verification Method:  {(getattr(project, 'verification_method', None) or 'N/A') if project else 'N/A'}
+  Current Status:       {(project.status or 'N/A') if project else 'N/A'}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 2 — INSTALLATION PROGRESS KPI
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Target:              {target or 'N/A'} installations
+  Submitted:           {submitted}
+  Verified:            {verified}   ← counts toward KPI
+  Pending:             {pending}
+  Flagged:             {flagged}
+
+  Progress vs Timeline:
+    Expected by now:   {expected_pct:.1f}% (based on elapsed days)
+    Actual verified:   {actual_pct:.1f}%
+    Status:            {status_line}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 3 — INCLUSION AND GENDER KPIs
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  KPI SUMMARY TABLE:
+  ┌──────────────────────────┬────────┬─────────┬────────┐
+  │ KPI                      │ Target │ Current │ Status │
+  ├──────────────────────────┼────────┼─────────┼────────┤
+  │ Female-headed households │ ≥50%   │ {female_pct:.1f}%   │ {"✅" if female_pct >= 50 else "⚠"}     │
+  │ Vulnerable groups        │ ≥30%   │ {vuln_pct:.1f}%   │ {"✅" if vuln_pct >= 30 else "⚠"}     │
+  │ Low-income households    │ ≥60%   │ {low_pct:.1f}%   │ {"✅" if low_pct >= 60 else "⚠"}     │
+  └──────────────────────────┴────────┴─────────┴────────┘
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 4 — ENERGY OUTPUT KPI
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Current Month Achievement: {energy_pct:.1f}% {"✅" if energy_pct >= 100 else "🟡"}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 5 — SYSTEM UPTIME KPI
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Average Uptime (30 days):  {uptime_pct:.1f}% {"✅ MET" if uptime_pct >= 99 else "🟡"}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 6 — MILESTONE STATUS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  (Milestone unlocking rules are computed by the platform KPI engine.)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 7 — ANOMALY SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  (Anomaly flags are summarized in the Anomaly Report.)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 8 — OVERALL ASSESSMENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Overall Status: {"ON TRACK" if on_track else "NEEDS ATTENTION"}
+  Recommendation: {"Approve claim review if all conditions are met." if on_track else "Escalate corrective action and re-check KPIs."}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Generated by RBF Digital Platform
+  UNDP Lesotho — Renewable Energy Programme
+  This report is system-generated and auditable.
+  Report ID: {rid}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"""
+        return title, text
+
+    # Verification report (Per Project) — used by RMT/TAC/DoE
+    if report_type in {"rmt_verification_project", "doe_verification_summary"}:
+        title = "FIELD VERIFICATION REPORT"
+        prj_ref = project.project_reference if project else (project_id or "All Projects")
+        generated_by = (user.full_name or user.username or "User")
+
+        reports_qs = InstallationReport.objects.filter(project=project) if project else InstallationReport.objects.none()
+        fv_qs = FieldVerification.objects.filter(installation__project=project) if project else FieldVerification.objects.none()
+        task_qs = VerificationTask.objects.filter(report__project=project) if project else VerificationTask.objects.none()
+
+        total_submitted = reports_qs.count()
+        total_verifications = fv_qs.count()
+        verification_rate = (total_verifications / total_submitted * 100.0) if total_submitted else 0.0
+
+        verified_count = fv_qs.filter(verification_status=FieldVerificationStatus.VERIFIED).count()
+        partial_count = fv_qs.filter(verification_status=FieldVerificationStatus.PARTIAL).count()
+        flagged_count = fv_qs.filter(verification_status=FieldVerificationStatus.FLAGGED).count()
+
+        distances = task_qs.exclude(distance_meters__isnull=True)
+        within_10m = distances.filter(distance_meters__lte=10).count()
+        within_50m = distances.filter(distance_meters__gt=10, distance_meters__lte=50).count()
+        over_50m = distances.filter(distance_meters__gt=50).count()
+        avg_gps = distances.aggregate(avg=Avg("distance_meters")).get("avg")
+        avg_gps_val = float(avg_gps) if avg_gps is not None else None
+
+        fo_stats = []
+        if project:
+            rows = (
+                fv_qs.values("field_officer__full_name", "field_officer__username")
+                .annotate(
+                    verified=Count("id", filter=Q(verification_status=FieldVerificationStatus.VERIFIED)),
+                    flagged=Count("id", filter=Q(verification_status=FieldVerificationStatus.FLAGGED)),
+                    avg_gps=Avg("location_distance_meters"),
+                )
+                .order_by("-verified")[:10]
+            )
+            for r in rows:
+                name = r.get("field_officer__full_name") or r.get("field_officer__username") or "Field Officer"
+                fo_stats.append((name, int(r.get("verified") or 0), int(r.get("flagged") or 0), float(r.get("avg_gps") or 0)))
+
+        flagged_details = []
+        if project:
+            flagged_fv = (
+                fv_qs.filter(verification_status=FieldVerificationStatus.FLAGGED)
+                .select_related("installation")
+                .order_by("-verified_at")[:20]
+            )
+            for fv in flagged_fv:
+                ins = fv.installation
+                flagged_details.append((
+                    f"INS-{ins.id}",
+                    (fv.flag_reason or fv.observation_notes or "Flagged"),
+                    f"{float(fv.location_distance_meters or 0):.0f}m",
+                    "✅" if fv.location_match else "❌",
+                ))
+
+        text = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+         FIELD VERIFICATION REPORT — {prj_ref}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+REPORT DETAILS:
+  Project:         {prj_ref}
+  Period:          {date_from or 'N/A'} — {date_to or 'N/A'}
+  Generated By:    {generated_by}
+  Report ID:       {rid}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 1 — VERIFICATION SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Total installations submitted:    {total_submitted}
+  Total verifications conducted:    {total_verifications}
+  Verification rate:                {verification_rate:.1f}%
+
+  Outcomes:
+    Verified:    {verified_count}
+    Partial:     {partial_count}
+    Flagged:     {flagged_count}
+
+  GPS Match Quality (Verification Tasks):
+    Within 10m:   {within_10m}
+    10–50m:       {within_50m}
+    Over 50m:     {over_50m}
+  Average GPS distance:  {f"{avg_gps_val:.1f} meters" if avg_gps_val is not None else "N/A"}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 2 — FIELD OFFICER PERFORMANCE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"""
+
+        if fo_stats:
+            text += """
+  ┌──────────────────┬──────────┬────────┬──────────┐
+  │ Field Officer    │ Verified │ Flagged│ Avg GPS  │
+  ├──────────────────┼──────────┼────────┼──────────┤
+"""
+            for (name, v, f, avgd) in fo_stats:
+                text += f"  │ {name[:16].ljust(16)} │ {str(v).ljust(8)} │ {str(f).ljust(6)} │ {str(int(avgd)).rjust(4)}m   │\n"
+            text += "  └──────────────────┴──────────┴────────┴──────────┘\n"
+        else:
+            text += "\n  No field verification records available.\n"
+
+        text += """
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 3 — FLAGGED VERIFICATIONS DETAIL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"""
+        if flagged_details:
+            text += """
+  ┌────────┬──────────────┬──────────────────┬───────────┐
+  │ INS ID │ Flag Reason  │ GPS Discrepancy  │ Match     │
+  ├────────┼──────────────┼──────────────────┼───────────┤
+"""
+            for ins_id, reason, dist, match in flagged_details:
+                text += f"  │ {ins_id[:6].ljust(6)} │ {reason[:12].ljust(12)} │ {dist[:16].ljust(16)} │ {match.ljust(9)} │\n"
+            text += "  └────────┴──────────────┴──────────────────┴───────────┘\n"
+        else:
+            text += "\n  No flagged verification records for this scope.\n"
+
+        text += """
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+EXPORT: [ Download PDF ] [ Download Excel ] [ Download CSV ]
+"""
+        return title, text
+
+    # Financial disbursement (portfolio)
+    if report_type in {"rmt_financial_disbursement", "psc_financial_summary", "psc_disbursement_summary"}:
+        title = "FINANCIAL DISBURSEMENT REPORT"
+        claims = PaymentClaim.objects.select_related("project", "vendor").order_by("-submitted_at")[:500]
+        total_contracted = sum(float(p.budget or 0) for p in _user_project_queryset(user)[:500])
+        total_disbursed = sum(float(c.claim_amount or 0) for c in claims if str(c.status).lower() == "paid")
+        pending = max(0.0, total_contracted - total_disbursed)
+        text = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+       FINANCIAL DISBURSEMENT REPORT
+       RBF Programme — All Projects
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+PERIOD:      {date_from or 'N/A'} — {date_to or 'N/A'}
+GENERATED:   {_format_datetime(now)} by {(user.full_name or user.username or 'User')}
+REPORT ID:   {rid}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 1 — PORTFOLIO FINANCIAL SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Total Contracted Value:   {_format_currency_lsl(total_contracted)}
+  Total Disbursed to Date:  {_format_currency_lsl(total_disbursed)}
+  Total Pending:            {_format_currency_lsl(pending)}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 2 — DISBURSEMENT BY PROJECT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  (See Excel/CSV export for full table.)
+
+EXPORT: [ Download PDF ] [ Download Excel ]
+"""
+        return title, text
+
+    # Portfolio summary
+    if report_type in {"rmt_portfolio_summary"}:
+        title = "RBF PROGRAMME — PORTFOLIO SUMMARY"
+        qs = _user_project_queryset(user)
+        total = qs.count()
+        active = qs.filter(status=ProjectStatus.ACTIVE).count()
+        completed = qs.filter(status__in=[ProjectStatus.COMPLETED, ProjectStatus.LEGACY_COMPLETED]).count()
+        text = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+         RBF PROGRAMME — PORTFOLIO SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+SECTION 1 — PROGRAMME OVERVIEW
+  Total Active Projects:     {active}
+  Total Projects:            {total}
+  Completed Projects:        {completed}
+
+SECTION 2 — INSTALLATION PROGRESS
+  (See KPI dashboards and exports for detailed progress tables.)
+
+SECTION 3 — GENDER AND INCLUSION
+  (See Gender Impact report.)
+
+SECTION 4 — FINANCIAL
+  (See Financial Disbursement report.)
+
+EXPORT: [ Download PDF ] [ Download Excel ]
+"""
+        return title, text
+
+    # Anomaly report
+    if report_type == "rmt_anomaly_report":
+        title = "ANOMALY FLAGS REPORT"
+        base_flags = AnomalyFlag.objects.order_by("-created_at")
+        total = base_flags.count()
+        resolved = base_flags.filter(is_resolved=True).count()
+        unresolved = total - resolved
+        text = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+              ANOMALY FLAGS REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+PERIOD:       {date_from or 'N/A'} — {date_to or 'N/A'}
+SCOPE:        All Projects
+REPORT ID:    {rid}
+
+SUMMARY:
+  Total Flags Raised:   {total}
+  Resolved:             {resolved}
+  Unresolved:           {unresolved}
+
+OPEN FLAGS REQUIRING ACTION:
+  (See Excel/CSV export for full open-flags table.)
+
+EXPORT: [ Download PDF ] [ Download Excel ] [ Download CSV ]
+"""
+        return title, text
+
+    if report_type == "rmt_gender_impact":
+        title = "GENDER AND INCLUSION IMPACT REPORT"
+        projects_qs = _user_project_queryset(user)
+        verified_qs = InstallationReport.objects.filter(project__in=projects_qs, status=InstallationStatus.VERIFIED)
+        total_verified = verified_qs.count()
+
+        def _pct(count: int) -> float:
+            return (count / total_verified * 100.0) if total_verified else 0.0
+
+        female_count = verified_qs.filter(household_type__icontains="female").count()
+        vuln_count = verified_qs.filter(household_type__icontains="vulnerable").count()
+        low_count = verified_qs.filter(Q(household_type__icontains="low") | Q(household_type__icontains="income")).count()
+
+        female_pct = _pct(female_count)
+        vuln_pct = _pct(vuln_count)
+        low_pct = _pct(low_count)
+
+        tech_rows = []
+        for tech in projects_qs.values_list("tech_type", flat=True).distinct():
+            if not tech:
+                continue
+            tqs = verified_qs.filter(project__tech_type=tech)
+            ttotal = tqs.count()
+            if not ttotal:
+                continue
+            tf = tqs.filter(household_type__icontains="female").count()
+            tv = tqs.filter(household_type__icontains="vulnerable").count()
+            tl = tqs.filter(Q(household_type__icontains="low") | Q(household_type__icontains="income")).count()
+            tech_rows.append((tech, tf / ttotal * 100.0, tv / ttotal * 100.0, tl / ttotal * 100.0))
+
+        district_rows = []
+        for dist in projects_qs.values_list("district", flat=True).distinct():
+            if not dist:
+                continue
+            dqs = verified_qs.filter(project__district=dist)
+            dtotal = dqs.count()
+            if not dtotal:
+                continue
+            df = dqs.filter(household_type__icontains="female").count()
+            dv = dqs.filter(household_type__icontains="vulnerable").count()
+            dl = dqs.filter(Q(household_type__icontains="low") | Q(household_type__icontains="income")).count()
+            district_rows.append((dist, df / dtotal * 100.0, dv / dtotal * 100.0, dl / dtotal * 100.0))
+
+        tech_rows.sort(key=lambda r: r[0])
+        district_rows.sort(key=lambda r: r[0])
+
+        text = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+           GENDER AND INCLUSION IMPACT REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+SECTION 1 — OVERALL GENDER KPI
+  Female-headed HH:   {female_pct:.1f}%  TARGET: ≥50%  {"✅" if female_pct >= 50 else "⚠"}
+  Vulnerable Groups:  {vuln_pct:.1f}%  TARGET: ≥30%  {"✅" if vuln_pct >= 30 else "⚠"}
+  Low-income HH:      {low_pct:.1f}%  TARGET: ≥60%  {"✅" if low_pct >= 60 else "⚠"}
+
+SECTION 2 — BY TECHNOLOGY
+  ┌────────┬──────────┬────────────┬────────────┐
+  │ Tech   │ Female % │ Vulnerable%│ Low-income%│
+  ├────────┼──────────┼────────────┼────────────┤
+"""
+        if tech_rows:
+            for tech, f, v, l in tech_rows[:12]:
+                text += f"  │ {tech[:6].ljust(6)} │ {f:>7.1f}%  │ {v:>9.1f}%  │ {l:>9.1f}%  │\n"
+        else:
+            text += "  │ N/A    │   0.0%   │    0.0%    │    0.0%    │\n"
+        text += """  └────────┴──────────┴────────────┴────────────┘
+
+SECTION 3 — BY DISTRICT
+  ┌────────────┬──────────┬────────────┬────────────┐
+  │ District   │ Female % │ Vulnerable%│ Low-income%│
+  ├────────────┼──────────┼────────────┼────────────┤
+"""
+        if district_rows:
+            for dist, f, v, l in district_rows[:12]:
+                text += f"  │ {dist[:10].ljust(10)} │ {f:>7.1f}%  │ {v:>9.1f}%  │ {l:>9.1f}%  │\n"
+        else:
+            text += "  │ N/A        │   0.0%   │    0.0%    │    0.0%    │\n"
+        text += """  └────────────┴──────────┴────────────┴────────────┘
+
+EXPORT: [ Download PDF ] [ Download Excel ]
+"""
+        return title, text
+
+    # Field Officer reports
+    if report_type == "fo_daily_summary":
+        title = "MY REPORTS — DAILY SUMMARY"
+        text = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                 DAILY SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Officer:     {(user.full_name or user.username or 'Field Officer')}
+Date:        {_format_date(now)}
+Report ID:   {rid}
+
+(Daily summary is derived from your verification tasks for today.)
+
+EXPORT: [ Download PDF ]
+"""
+        return title, text
+
+    if report_type == "fo_performance_summary":
+        title = "MY PERFORMANCE SUMMARY"
+        text = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+     MY PERFORMANCE SUMMARY — {(user.full_name or user.username or 'Field Officer')}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+This report covers YOUR verifications only.
+Report ID: {rid}
+
+EXPORT: [ Download PDF ]
+"""
+        return title, text
+
+    if report_type == "fo_verification_history":
+        title = "MY VERIFICATION HISTORY"
+        text = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      MY VERIFICATION HISTORY — {(user.full_name or user.username or 'Field Officer')}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+PERIOD:     {date_from or 'N/A'} — {date_to or 'N/A'}
+Report ID:  {rid}
+
+NOTE: Beneficiary NID and phone not shown for privacy.
+
+EXPORT: [ Download PDF ] [ Download CSV ]
+"""
+        return title, text
+
+    # Auditor (export-focused)
+    if report_type == "auditor_full_audit":
+        title = "FULL AUDIT REPORT — RBF PROGRAMME"
+        text = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        FULL AUDIT REPORT — RBF PROGRAMME
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Scope:        All Projects, All Users
+Period:       {date_from or 'N/A'} — {date_to or 'N/A'}
+Generated By: {(user.full_name or user.username or 'Auditor')}
+Report ID:    {rid}
+
+EXPORT: [ Download PDF ] [ Download CSV ]
+"""
+        return title, text
+
+    if report_type == "auditor_payment_chain_audit":
+        title = "PAYMENT CHAIN AUDIT REPORT"
+        text = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          PAYMENT CHAIN AUDIT REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Purpose: Validate full approval chain for payments.
+Report ID: {rid}
+
+EXPORT: [ Download PDF ] [ Download Excel ]
+"""
+        return title, text
+
+    if report_type == "auditor_kpi_compliance_audit":
+        title = "KPI COMPLIANCE AUDIT REPORT"
+        text = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+         KPI COMPLIANCE AUDIT REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Purpose: Verify milestone approvals occurred only when KPI conditions were met.
+Report ID: {rid}
+
+EXPORT: [ Download PDF ] [ Download Excel ]
+"""
+        return title, text
+
+    if report_type == "auditor_data_integrity":
+        title = "DATA INTEGRITY REPORT"
+        text = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+           DATA INTEGRITY REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+SECTION 1 — OUR DATABASE vs PROSPECT
+  (See exports for discrepancy tables.)
+
+SECTION 2 — GPS VALIDATION INTEGRITY
+  (See exports for validation counts.)
+
+SECTION 3 — METER DATA INTEGRITY
+  (See exports for accepted/rejected upload rows.)
+
+EXPORT: [ Download PDF ] [ Download Excel ]
+"""
+        return title, text
+
+    if report_type == "auditor_prospect_sync":
+        title = "PROSPECT SYNC AUDIT"
+        text = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+              PROSPECT SYNC AUDIT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Scope:      All operations
+Report ID:  {rid}
+
+EXPORT: [ Download PDF ] [ Download Excel ] [ Download CSV ]
+"""
+        return title, text
+
+    # Default fallback (should not happen if templates are correct)
+    return report_type, f"Report template '{report_type}' is not implemented."
+
+
+def _build_report_payload(request, report_type: str, params: dict) -> tuple[list[str], list[list[object]]]:
+    user = request.user
+    projects = _user_project_queryset(user)
+    project_id = (params or {}).get('project') or (params or {}).get('project_id')
+    if project_id:
+        projects = projects.filter(id=project_id)
+
+    if report_type in {'rbf_portfolio_matrix', 'rmt_portfolio_summary'}:
+        columns = ['Project ID', 'Reference', 'Vendor', 'Technology', 'Progress %', 'Gender Impact %', 'Status']
+        rows = [
+            [
+                str(project.id),
+                project.project_reference or '',
+                project.vendor_name or '',
+                project.tech_type or '',
+                str(project.progress or 0),
+                str(project.gender_impact or 0),
+                project.status or '',
+            ]
+            for project in projects.order_by('-progress')[:200]
+        ]
+        return columns, rows
+
+    if report_type in {'doe_regional_progress'}:
+        columns = ['Project ID', 'Reference', 'District/Region', 'Technology', 'Progress', 'Verified', 'Female %', 'Status']
+        rows = [
+            [
+                str(project.id),
+                project.project_reference or '',
+                project.district or project.region or '',
+                project.tech_type or '',
+                f"{project.progress or 0}%",
+                f"{project.verified_installations or 0}",
+                f"{project.gender_impact or 0}%",
+                project.status or '',
+            ]
+            for project in projects.order_by('-progress')[:200]
+        ]
+        return columns, rows
+
+    if report_type in {'doe_verification_summary', 'rmt_verification_project'}:
+        columns = ['Project ID', 'Reference', 'District/Region', 'Technology', 'Verified', 'Flagged']
+        rows = [
+            [
+                str(project.id),
+                project.project_reference or '',
+                project.district or project.region or '',
+                project.tech_type or '',
+                f"{getattr(project, 'verified_installations', 0) or 0}",
+                f"{getattr(project, 'flagged_installations', 0) or 0}",
+            ]
+            for project in projects.order_by('-progress')[:200]
+        ]
+        return columns, rows
+
+    if report_type in {'rmt_kpi_project'}:
+        # One-row KPI snapshot for Excel/CSV exports.
+        project = projects.first()
+        if not project:
+            return ['Message'], [['No project selected or project not found for scope.']]
+        try:
+            summary = KpiService.for_project(str(project.id)).getFullKpiSummary()
+        except Exception:
+            summary = {}
+        ip = summary.get('installation_progress') or {}
+        gender = summary.get('gender_kpi') or {}
+        energy = summary.get('energy_kpi') or {}
+        uptime = summary.get('uptime_kpi') or {}
+        columns = [
+            'Project',
+            'Vendor',
+            'Technology',
+            'District',
+            'Target Installations',
+            'Submitted',
+            'Verified',
+            'Pending',
+            'Flagged',
+            'Progress %',
+            'Expected %',
+            'Female %',
+            'Vulnerable %',
+            'Low-income %',
+            'Current Energy Achievement %',
+            'Average Uptime %',
+            'Generated At',
+        ]
+        rows = [[
+            project.project_reference or str(project.id),
+            project.vendor_name or '',
+            project.tech_type or '',
+            project.district or project.region or '',
+            int(ip.get('target') or project.target_installations or 0),
+            int(ip.get('submitted') or 0),
+            int(ip.get('verified') or 0),
+            int(ip.get('pending') or 0),
+            int(ip.get('flagged') or 0),
+            float(ip.get('progress_pct') or 0),
+            float(ip.get('expected_progress_pct') or 0),
+            float((gender.get('female_headed') or {}).get('percentage') or 0),
+            float((gender.get('vulnerable') or {}).get('percentage') or 0),
+            float((gender.get('low_income') or {}).get('percentage') or 0),
+            float(energy.get('current_month_pct') or 0),
+            float(uptime.get('average_uptime_pct') or 0),
+            summary.get('generated_at') or '',
+        ]]
+        return columns, rows
+
+    if report_type in {'psc_disbursement_summary', 'psc_financial_summary', 'rmt_financial_disbursement'}:
+        claims = PaymentClaim.objects.select_related('project', 'vendor').order_by('-submitted_at')[:300]
+        columns = ['Claim ID', 'Project', 'Vendor', 'Status', 'Claim Amount', 'Submitted At', 'Approved At', 'Paid At']
+        rows = [
+            [
+                str(claim.id),
+                claim.project.project_reference if claim.project else '',
+                claim.vendor.full_name or claim.vendor.username if claim.vendor else '',
+                claim.status,
+                str(claim.claim_amount or 0),
+                claim.submitted_at.isoformat() if getattr(claim, 'submitted_at', None) else '',
+                claim.approved_at.isoformat() if getattr(claim, 'approved_at', None) else '',
+                claim.paid_at.isoformat() if getattr(claim, 'paid_at', None) else '',
+            ]
+            for claim in claims[:300]
+        ]
+        return columns, rows
+
+    if report_type in {'psc_vendor_payment_trail', 'auditor_payment_chain_audit'}:
+        claims = PaymentClaim.objects.select_related('project', 'vendor').order_by('-submitted_at')[:300]
+        columns = ['Claim ID', 'Vendor', 'Project', 'Status', 'Requested', 'Approved', 'Paid']
+        rows = [
+            [
+                str(claim.id),
+                claim.vendor.full_name or claim.vendor.username if claim.vendor else '',
+                claim.project.project_reference if claim.project else '',
+                claim.status,
+                str(claim.claim_amount or 0),
+                claim.approved_at.isoformat() if getattr(claim, 'approved_at', None) else '',
+                claim.paid_at.isoformat() if getattr(claim, 'paid_at', None) else '',
+            ]
+            for claim in claims[:300]
+        ]
+        return columns, rows
+
+    if report_type in {'field_verifier_activity', 'fo_verification_history'}:
+        tasks = VerificationTask.objects.filter(field_verifier_task_scope_filter(user, task_prefix='')).select_related('report', 'report__project').order_by('-created_at')[:300]
+        columns = ['Task ID', 'Installation', 'Project', 'Outcome', 'GPS Distance (m)', 'Submitted At', 'Updated At']
+        rows = [
+            [
+                str(task.id),
+                str(task.report.id) if task.report else '',
+                task.report.project.project_reference if task.report and task.report.project else '',
+                task.status,
+                str(getattr(task, 'distance_meters', '') or ''),
+                task.created_at.isoformat() if task.created_at else '',
+                task.updated_at.isoformat() if task.updated_at else '',
+            ]
+            for task in tasks
+        ]
+        return columns, rows
+
+    if report_type in {'auditor_audit_report', 'auditor_full_audit'}:
+        logs = AuditLog.objects.select_related('actor').order_by('-created_at')[:500]
+        columns = ['Timestamp', 'Actor', 'Role', 'Action', 'Module', 'Record', 'Notes']
+        rows = [
+            [
+                timezone.localtime(log.created_at).isoformat(),
+                (log.actor.full_name or log.actor.username) if log.actor else 'System',
+                log.actor_role,
+                log.action,
+                log.module,
+                log.entity_id or log.record_id or '',
+                log.notes,
+            ]
+            for log in logs
+        ]
+        return columns, rows
+
+    if report_type in {'auditor_prospect_sync', 'auditor_prospect_sync'}:
+        syncs = ProspectSyncLog.objects.order_by('-created_at')[:300]
+        columns = ['Sync ID', 'Method', 'Status', 'Created At', 'Updated At', 'Attempts', 'Error']
+        rows = [
+            [
+                str(sync.id),
+                sync.method_name,
+                sync.status,
+                sync.created_at.isoformat() if sync.created_at else '',
+                sync.updated_at.isoformat() if sync.updated_at else '',
+                str(sync.attempts or 0),
+                sync.error_message or '',
+            ]
+            for sync in syncs
+        ]
+        return columns, rows
+
+    if report_type in {'rmt_anomaly_report'}:
+        flags = AnomalyFlag.objects.select_related('project').order_by('-created_at')[:500]
+        columns = ['Flag ID', 'Project', 'Type', 'Resolved', 'Created At', 'Resolved At', 'Description']
+        rows = [
+            [
+                str(flag.id),
+                flag.project.project_reference if getattr(flag, 'project', None) else '',
+                flag.flag_type,
+                'Yes' if flag.is_resolved else 'No',
+                flag.created_at.isoformat() if flag.created_at else '',
+                flag.resolved_at.isoformat() if flag.resolved_at else '',
+                flag.description or '',
+            ]
+            for flag in flags
+        ]
+        return columns, rows
+
+    if report_type in {'rmt_gender_impact'}:
+        projects_qs = _user_project_queryset(user)
+        verified_qs = InstallationReport.objects.filter(project__in=projects_qs, status=InstallationStatus.VERIFIED)
+        columns = ['Group', 'Key', 'Total Verified', 'Female %', 'Vulnerable %', 'Low-income %']
+        rows: list[list[object]] = []
+
+        total = verified_qs.count()
+        if total:
+            female = verified_qs.filter(household_type__icontains="female").count()
+            vuln = verified_qs.filter(household_type__icontains="vulnerable").count()
+            low = verified_qs.filter(Q(household_type__icontains="low") | Q(household_type__icontains="income")).count()
+            rows.append(['overall', 'portfolio', total, female / total * 100.0, vuln / total * 100.0, low / total * 100.0])
+
+        for tech in projects_qs.values_list("tech_type", flat=True).distinct():
+            if not tech:
+                continue
+            tqs = verified_qs.filter(project__tech_type=tech)
+            ttotal = tqs.count()
+            if not ttotal:
+                continue
+            female = tqs.filter(household_type__icontains="female").count()
+            vuln = tqs.filter(household_type__icontains="vulnerable").count()
+            low = tqs.filter(Q(household_type__icontains="low") | Q(household_type__icontains="income")).count()
+            rows.append(['technology', tech, ttotal, female / ttotal * 100.0, vuln / ttotal * 100.0, low / ttotal * 100.0])
+
+        for dist in projects_qs.values_list("district", flat=True).distinct():
+            if not dist:
+                continue
+            dqs = verified_qs.filter(project__district=dist)
+            dtotal = dqs.count()
+            if not dtotal:
+                continue
+            female = dqs.filter(household_type__icontains="female").count()
+            vuln = dqs.filter(household_type__icontains="vulnerable").count()
+            low = dqs.filter(Q(household_type__icontains="low") | Q(household_type__icontains="income")).count()
+            rows.append(['district', dist, dtotal, female / dtotal * 100.0, vuln / dtotal * 100.0, low / dtotal * 100.0])
+
+        rows.sort(key=lambda r: (str(r[0]), str(r[1])))
+        return columns, rows
+
+    # Placeholder payloads for reports whose live view exists elsewhere.
+    columns = ['Report', 'Status', 'Note']
+    rows = [[report_type, 'AVAILABLE', 'This export is a structured placeholder; KPI dashboards provide the live view.']]
+    return columns, rows
+
+
+class ProjectReportTemplatesView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        if user.role == UserRole.ADMIN:
+            templates = REPORT_TEMPLATES
+        else:
+            templates = [tpl for tpl in REPORT_TEMPLATES if user.role in tpl['roles']]
+        return Response([
+            {
+                'id': tpl['id'],
+                'title': tpl['title'],
+                'description': tpl['description'],
+                'category': tpl.get('category') or 'Reports',
+                'quick': bool(tpl.get('quick')),
+                'formats': _report_formats_for_user(user, tpl['id']),
+            }
+            for tpl in templates
+        ])
+
+
+class ProjectReportGenerateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        report_type = str(request.data.get('report_type') or '').strip()
+        format_type = str(request.data.get('format') or 'csv').strip().lower()
+        if format_type not in {'csv', 'pdf', 'excel'}:
+            raise PermissionDenied('Unsupported report format.')
+        filters = request.data.get('filters') or {}
+        columns, rows = _build_report_payload(request, report_type, filters)
+        
+        filename_base = f'{_safe_filename_base(report_type)}_{timezone.localdate().isoformat()}'
+        project = None
+        project_id = filters.get('project') or filters.get('project_id')
+        if project_id:
+            try:
+                project = Project.objects.get(id=project_id)
+            except Exception:
+                project = None
+
+        content_bytes: bytes
+        content_type: str
+        ext: str
+
+        if format_type == 'csv':
+            buffer = io.StringIO()
+            writer = csv.writer(buffer)
+            writer.writerow(columns)
+            for row in rows:
+                writer.writerow([str(item or '') for item in row])
+            content_bytes = buffer.getvalue().encode('utf-8')
+            content_type = 'text/csv'
+            ext = 'csv'
+        elif format_type == 'excel':
+            content_bytes = _xlsx_bytes(columns, rows)
+            content_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            ext = 'xlsx'
+        else:
+            # Professional PDF rendering
+            from .reports import build_report_html
+            pdf_title, report_html = build_report_html(request, report_type, filters)
+            
+            # Use the existing _render_pdf but with our professional HTML
+            from rbf.tenders.pba_pdf import _render_pdf
+            tmp_dir = Path(tempfile.mkdtemp(prefix="report_pdf_"))
+            output_path = tmp_dir / f"report_{uuid.uuid4().hex}.pdf"
+            
+            # _render_pdf expects (html_string, output_path, contract_reference)
+            # We'll use the title or RID as contract_reference for the header
+            _render_pdf(report_html, output_path, pdf_title[:32])
+            
+            content_bytes = output_path.read_bytes()
+            content_type = 'application/pdf'
+            ext = 'pdf'
+
+        generated = GeneratedReport.objects.create(
+            report_type=report_type,
+            format=format_type,
+            filters=filters,
+            scope_label=str(filters.get('scope_label') or ''),
+            project=project,
+            generated_by=request.user,
+            file=ContentFile(content_bytes, name=f'{filename_base}.{ext}'),
+        )
+        AuditLog.objects.create(
+            actor=request.user if getattr(request.user, 'is_authenticated', False) else None,
+            actor_role=str(getattr(request.user, 'role', '') or ''),
+            action='report_generated',
+            module='report',
+            entity_type='Report',
+            entity_id=str(generated.id),
+            record_id=None,
+            record_type='Report',
+            old_status='',
+            new_status='',
+            notes=f'{report_type} generated as {format_type}',
+            ip_address=AuditLogger._ip_address(request),
+            details={'report_type': report_type, 'format': format_type, 'generated_report_id': str(generated.id)},
+        )
+        response = HttpResponse(content_bytes, content_type=content_type)
+        response['Content-Disposition'] = f'attachment; filename="{filename_base}.{ext}"'
+        response['X-Generated-Report-Id'] = str(generated.id)
+        return response
+
+
+class ProjectReportHistoryView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        queryset = GeneratedReport.objects.select_related('generated_by', 'project').order_by('-generated_at')
+        if request.user.role not in {UserRole.ADMIN, UserRole.RBF_OFFICIAL, UserRole.AUDITOR, UserRole.UNDP_DONOR, UserRole.DOE_OFFICER}:
+            queryset = queryset.filter(generated_by=request.user)
+        items = []
+        for report in queryset[:20]:
+            items.append({
+                'id': str(report.id),
+                'reportType': report.report_type,
+                'project': report.project.project_reference if report.project else '',
+                'generatedBy': (report.generated_by.full_name or report.generated_by.username) if report.generated_by else '',
+                'generatedAt': timezone.localtime(report.generated_at).isoformat(),
+                'format': report.format,
+                'downloadUrl': f'/api/projects/reports/{report.id}/download/',
+            })
+        return Response(items)
+
+
+class ProjectReportDownloadView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, report_id):
+        report = GeneratedReport.objects.select_related('generated_by').get(id=report_id)
+        privileged = request.user.role in {
+            UserRole.ADMIN,
+            UserRole.RBF_OFFICIAL,
+            UserRole.AUDITOR,
+            UserRole.UNDP_DONOR,
+            UserRole.DOE_OFFICER,
+            UserRole.TAC,
+        }
+        if not privileged and report.generated_by_id != request.user.id:
+            raise PermissionDenied('You do not have permission to download this report.')
+        return FileResponse(report.file.open('rb'), as_attachment=True, filename=Path(report.file.name).name)

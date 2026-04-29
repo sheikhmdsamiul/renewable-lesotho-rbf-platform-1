@@ -444,153 +444,9 @@ class TenderBidSerializer(serializers.ModelSerializer):
                 if value not in (None, '') and Decimal(str(value)) <= Decimal('0'):
                     errors.setdefault('system_configuration', {})[field_name] = 'Value must be greater than 0.'
 
-        boq_items = attrs.get('boq_items', instance.boq_items if instance else [])
-        if boq_items and not isinstance(boq_items, list):
-            errors['boq_items'] = 'BOQ items must be an array.'
-        elif isinstance(boq_items, list):
-            for idx, item in enumerate(boq_items):
-                if not isinstance(item, dict):
-                    errors.setdefault('boq_items', {})[idx] = 'Each BOQ item must be an object.'
-                    continue
-                qty = item.get('qty')
-                unit_price = item.get('unit_price')
-                if not str(item.get('description', '')).strip():
-                    errors.setdefault('boq_items', {})[idx] = 'Description is required.'
-                if qty in (None, '') or Decimal(str(qty)) <= Decimal('0'):
-                    errors.setdefault('boq_items', {})[f'{idx}_qty'] = 'Quantity must be greater than 0.'
-                if unit_price in (None, '') or Decimal(str(unit_price)) < Decimal('0'):
-                    errors.setdefault('boq_items', {})[f'{idx}_unit_price'] = 'Unit price must be zero or greater.'
-
-        status_value = attrs.get('status', instance.status if instance else BidStatus.DRAFT)
-        sites = attrs.get('sites') if 'sites' in attrs else (list(instance.sites.all()) if instance else [])
-
-        if status_value == BidStatus.SUBMITTED:
-            if stage_key == 'site_specific' and instance is not None and not has_stage_two_shortlist_access(instance):
-                errors['detail'] = 'Only shortlisted vendors can submit Stage 2 proposals.'
-            if tender is not None and request and getattr(request, 'user', None):
-                duplicate_bid_qs = TenderBid.objects.filter(
-                    tender=tender,
-                    vendor_id=str(request.user.id),
-                ).exclude(status__in={BidStatus.DRAFT, BidStatus.REVISION_REQUIRED, BidStatus.WITHDRAWN})
-                if instance is not None:
-                    duplicate_bid_qs = duplicate_bid_qs.exclude(id=instance.id)
-                    if getattr(instance, 'stage_two_source_bid_id', None):
-                        duplicate_bid_qs = duplicate_bid_qs.exclude(id=instance.stage_two_source_bid_id)
-                if duplicate_bid_qs.exists():
-                    errors['tender'] = 'You have already submitted a bid for this tender.'
-            if bid_amount in (None, ''):
-                errors['bid_amount'] = 'This field is required before submitting.'
-            elif Decimal(str(bid_amount)) <= Decimal('0'):
-                errors['bid_amount'] = 'Bid amount must be greater than 0.'
-
-            if subsidy_requested in (None, ''):
-                errors['subsidy_requested'] = 'This field is required before submitting.'
-            else:
-                subsidy_decimal = Decimal(str(subsidy_requested))
-                if subsidy_decimal <= Decimal('0'):
-                    errors['subsidy_requested'] = 'Subsidy requested must be greater than 0.'
-                elif bid_amount not in (None, '') and subsidy_decimal > Decimal(str(bid_amount)):
-                    errors['subsidy_requested'] = 'Subsidy requested must be less than or equal to the bid amount.'
-
-            inclusion_targets = {
-                'female_target_pct': (50, attrs.get('female_target_pct', instance.female_target_pct if instance else 50)),
-                'vulnerable_target_pct': (30, attrs.get('vulnerable_target_pct', instance.vulnerable_target_pct if instance else 30)),
-                'low_income_target_pct': (60, attrs.get('low_income_target_pct', instance.low_income_target_pct if instance else 60)),
-            }
-            for field_name, (minimum, value) in inclusion_targets.items():
-                if value is None or int(value) < minimum:
-                    errors[field_name] = f'Value must be at least {minimum}.'
-
-            if tender is not None:
-                deadline = tender.last_date_submission or tender.deadline
-                if deadline and timezone.now() > deadline:
-                    errors['tender'] = 'Bidding deadline has passed.'
-
-            required_submit_fields = {
-                'bid_amount': bid_amount,
-                'subsidy_requested': subsidy_requested,
-            }
-            for field_name, value in required_submit_fields.items():
-                if value in (None, ''):
-                    errors[field_name] = 'This field is required before submitting.'
-            if stage_key == 'pre_qualification':
-                concept_note = attrs.get('concept_note', instance.concept_note if instance else '')
-                concept_note_text = str(concept_note or '').strip()
-                if not concept_note_text:
-                    errors['concept_note'] = 'Concept note is required for Stage 1 submissions.'
-                elif len(concept_note_text) < 200:
-                    errors['concept_note'] = 'Concept note must contain at least 200 characters.'
-                if not sites:
-                    errors['sites'] = 'At least 1 project site is required.'
-                else:
-                    site_errors = {}
-                    for idx, site in enumerate(sites):
-                        site_name = getattr(site, 'site_name', None) if not isinstance(site, dict) else site.get('site_name')
-                        district = getattr(site, 'district', None) if not isinstance(site, dict) else site.get('district')
-                        beneficiary_type = getattr(site, 'target_beneficiary_type', None) if not isinstance(site, dict) else site.get('target_beneficiary_type')
-                        households = getattr(site, 'number_of_households', None) if not isinstance(site, dict) else site.get('number_of_households')
-                        if (
-                            not str(site_name or '').strip()
-                            or not str(district or '').strip()
-                            or not str(beneficiary_type or '').strip()
-                            or households in (None, '', 0)
-                        ):
-                            site_errors[idx] = 'Site name, district, primary beneficiary type, and estimated households are required for Stage 1.'
-                            continue
-                        latitude = getattr(site, 'latitude', None) if not isinstance(site, dict) else site.get('latitude')
-                        longitude = getattr(site, 'longitude', None) if not isinstance(site, dict) else site.get('longitude')
-                        if latitude not in (None, '') and longitude not in (None, ''):
-                            if not point_in_lesotho(Decimal(str(longitude)), Decimal(str(latitude))):
-                                site_errors[idx] = 'Site coordinates must fall within Lesotho.'
-                    if site_errors:
-                        errors['sites'] = site_errors
-            else:
-                technology_type = ''
-                if tender is not None and isinstance(tender.technology_types, list) and tender.technology_types:
-                    technology_type = normalize_technology_type(tender.technology_types[0]) or str(tender.technology_types[0])
-                if isinstance(system_configuration, dict):
-                    system_configuration['technology_type'] = technology_type or system_configuration.get('technology_type', '')
-
-                device_brand = (system_configuration or {}).get('device_brand') if isinstance(system_configuration, dict) else ''
-                device_model = (system_configuration or {}).get('device_model') if isinstance(system_configuration, dict) else ''
-                for field_name, value in {
-                    'device_brand': device_brand,
-                    'device_model': device_model,
-                    'tech_tier': attrs.get('tech_tier', instance.tech_tier if instance else ''),
-                }.items():
-                    if value in (None, ''):
-                        errors[field_name] = 'This field is required before submitting.'
-
-                tech_tier = normalize_tech_tier(attrs.get('tech_tier', instance.tech_tier if instance else ''))
-                if tech_tier and tech_tier not in TECH_TIER_CHOICES:
-                    errors['tech_tier'] = 'Service tier must be one of Tier 1, Tier 2, Tier 3, Tier 4, or Tier 5.'
-                else:
-                    attrs['tech_tier'] = tech_tier
-                    vendor = None
-                    if request and getattr(request, 'user', None) and getattr(request.user, 'is_authenticated', False):
-                        vendor = request.user
-                    approved_preq = (
-                        VendorPrequalification.objects
-                        .filter(vendor=vendor, status=PrequalificationStatus.APPROVED)
-                        .order_by('-reviewed_at', '-submitted_at', '-id')
-                        .first()
-                        if vendor is not None else None
-                    )
-                    approved_tier = normalize_tech_tier(approved_preq.tech_tier if approved_preq else '')
-                    if approved_tier and tech_tier:
-                        approved_tier_value = int(approved_tier.split()[-1])
-                        requested_tier_value = int(tech_tier.split()[-1])
-                        if requested_tier_value > approved_tier_value:
-                            errors['tech_tier'] = f'Service tier cannot exceed your approved pre-qualification tier ({approved_tier}).'
-                for field_name in self._required_document_fields():
-                    if not attrs.get(field_name, getattr(instance, field_name, None) if instance else None):
-                        errors[field_name] = 'This document is required for site-specific submissions.'
-
-                if isinstance(system_configuration, dict):
-                    co_financing_amount = system_configuration.get('co_financing_amount_lsl')
-                    if co_financing_amount not in (None, '') and Decimal(str(co_financing_amount)) < Decimal('0'):
-                        errors.setdefault('system_configuration', {})['co_financing_amount_lsl'] = 'Co-financing must be zero or greater.'
-
+                boq_items = attrs.get('boq_items', instance.boq_items if instance else [])
+                if not boq_items:
+                    boq_items = attrs.get('boq_details', [])
                 boq_total = Decimal('0')
                 if not boq_items:
                     errors['boq_items'] = 'Bill of Quantities is required for site-specific submissions.'
@@ -608,6 +464,9 @@ class TenderBidSerializer(serializers.ModelSerializer):
                     errors['om_strategy_summary'] = 'O&M strategy summary is required for site-specific submissions.'
 
                 offer_paygo = attrs.get('offer_paygo', instance.offer_paygo if instance else False)
+                technology_type = system_configuration.get('technology_type') if isinstance(system_configuration, dict) else None
+                if not technology_type and tender:
+                    technology_type = getattr(tender, 'category', None)
                 normalized_tender_tech = normalize_technology_type(technology_type)
                 if normalized_tender_tech == TechnologyType.SHS or str(technology_type).upper() == 'SHS':
                     paygo_platform = attrs.get('paygo_platform', instance.paygo_platform if instance else '')
@@ -623,6 +482,7 @@ class TenderBidSerializer(serializers.ModelSerializer):
 
             if not attrs.get('inclusion_commitment_confirmed', instance.inclusion_commitment_confirmed if instance else False):
                 errors['inclusion_commitment_confirmed'] = 'You must confirm the inclusion commitment before submitting.'
+            sites = attrs.get('sites', instance.sites.all() if instance and hasattr(instance, 'sites') else [])
             if stage_key == 'site_specific':
                 if not sites:
                     errors['sites'] = 'At least 1 project site is required.'

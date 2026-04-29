@@ -14,6 +14,28 @@ export enum UserRole {
   AUDITOR = "Auditor",
 }
 
+export type ReportFormat = "csv" | "pdf" | "excel";
+
+export interface ReportTemplate {
+  id: string;
+  title: string;
+  description: string;
+  formats: ReportFormat[];
+  category?: string;
+  quick?: boolean;
+}
+
+export interface ReportHistoryItem {
+  id: string;
+  reportType: string;
+  format: ReportFormat;
+  generatedAt: string;
+  notes?: string;
+  project?: string;
+  generatedBy?: string;
+  downloadUrl?: string;
+}
+
 export enum TenderStatus {
   DRAFT = "Draft",
   PUBLISHED = "Published",

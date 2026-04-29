@@ -2,6 +2,7 @@ from django.conf import settings
 from django.core import signing
 from django.db import models
 from django.utils import timezone
+import uuid
 
 
 class ProspectSyncStatus(models.TextChoices):
@@ -586,6 +587,46 @@ class AuditLog(models.Model):
 
     def __str__(self):
         return f"{self.action} {self.entity_type}#{self.entity_id}"
+
+
+class GeneratedReport(models.Model):
+    class Format(models.TextChoices):
+        CSV = "csv", "CSV"
+        PDF = "pdf", "PDF"
+        EXCEL = "excel", "Excel"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    report_type = models.CharField(max_length=128)
+    format = models.CharField(max_length=16, choices=Format.choices)
+    filters = models.JSONField(default=dict, blank=True)
+    scope_label = models.CharField(max_length=255, blank=True)
+
+    project = models.ForeignKey(
+        "Project",
+        related_name="generated_reports",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    generated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        related_name="generated_reports",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    generated_at = models.DateTimeField(auto_now_add=True)
+    file = models.FileField(upload_to="generated-reports/%Y/%m/%d/")
+
+    class Meta:
+        ordering = ["-generated_at"]
+        indexes = [
+            models.Index(fields=["report_type", "generated_at"]),
+            models.Index(fields=["generated_by", "generated_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.report_type} ({self.format}) {self.id}"
 
 
 class ProspectSyncLog(models.Model):

@@ -3277,6 +3277,14 @@ const Tenders = ({
                               <p><span className="font-semibold text-slate-700">Signed Date:</span> {assignmentMeta.contract_details.signed_date ? new Date(assignmentMeta.contract_details.signed_date).toLocaleString() : "N/A"}</p>
                             </div>
                           )}
+                          {assignmentMeta?.assignment_defaults?.district_zones && (
+                            <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-800">
+                              <p className="font-semibold text-emerald-900 mb-1">District Source</p>
+                              {assignmentMeta.contract_details?.bid_preferred_district
+                                ? `Vendor's preferred district: ${assignmentMeta.contract_details.bid_preferred_district}`
+                                : `Tender target districts: ${assignmentMeta.assignment_defaults.district_zones.join(", ")}`}
+                            </div>
+                          )}
                           <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                             <div>
                               <label className="text-xs font-semibold text-slate-600">Project duration (months)</label>
@@ -3321,19 +3329,35 @@ const Tenders = ({
                               />
                             </div>
                             <div className="md:col-span-2">
-                              <label className="text-xs font-semibold text-slate-600">Districts</label>
+                              <label className="text-xs font-semibold text-slate-600">
+                                District
+                                {assignmentMeta?.contract_details?.bid_preferred_district && (
+                                  <span className="ml-1 font-normal text-emerald-600">(Vendor's preferred - locked)</span>
+                                )}
+                              </label>
                               <div className="relative mt-1">
-                                <button
-                                  type="button"
-                                  disabled={Boolean(activeContract.projectId)}
-                                  onClick={() => setDistrictDropdownOpen((prev) => !prev)}
-                                  className="input-field flex min-h-[46px] w-full items-center justify-between text-left disabled:cursor-not-allowed disabled:bg-slate-50"
-                                >
-                                  <span className="truncate pr-3 text-sm text-slate-700">
-                                    {contractAssignmentDraft.districts.length > 0
-                                      ? contractAssignmentDraft.districts.join(", ")
-                                      : "Select one or more districts"}
-                                  </span>
+                                {assignmentMeta?.contract_details?.bid_preferred_district ? (
+                                  <div className="input-field flex min-h-[46px] w-full items-center justify-between bg-emerald-50 border-emerald-200 cursor-not-allowed">
+                                    <span className="truncate pr-3 text-sm font-semibold text-emerald-700">
+                                      {contractAssignmentDraft.districts.join(", ")}
+                                    </span>
+                                    <span className="shrink-0 text-xs font-semibold text-emerald-600">
+                                      {contractAssignmentDraft.districts.length}
+                                    </span>
+                                  </div>
+                                ) : (
+                                  <>
+                                    <button
+                                      type="button"
+                                      disabled={Boolean(activeContract.projectId)}
+                                      onClick={() => setDistrictDropdownOpen((prev) => !prev)}
+                                      className="input-field flex min-h-[46px] w-full items-center justify-between text-left disabled:cursor-not-allowed disabled:bg-slate-50"
+                                    >
+                                      <span className="truncate pr-3 text-sm text-slate-700">
+                                        {contractAssignmentDraft.districts.length > 0
+                                          ? contractAssignmentDraft.districts.join(", ")
+                                          : "Select one or more districts"}
+                                      </span>
                                   <span className="shrink-0 text-xs font-semibold text-slate-500">
                                     {contractAssignmentDraft.districts.length}
                                   </span>
@@ -3370,7 +3394,9 @@ const Tenders = ({
                                     </div>
                                   </div>
                                 )}
-                              </div>
+                              </>
+                            )}
+                            </div>
                             </div>
                             <div>
                               <label className="text-xs font-semibold text-slate-600">Verification method</label>
@@ -13928,7 +13954,7 @@ const ProjectsHub = ({
     try {
       await resolveAnomalyFlag(flagId);
       const [flags, audits, kpi] = await Promise.all([
-        fetchAnomalyFlags(projectId),
+        fetchAnomalyFlags({ projectId }),
         fetchAuditLogs(projectId),
         fetchProjectKpiSummary(projectId),
       ]);
@@ -15163,10 +15189,10 @@ const ProjectsHub = ({
                           <option value="">Select tier</option>
                           {[1, 2, 3, 4, 5].map(tier => <option key={tier} value={tier}>{tier}</option>)}
                         </select>
-                      )}
-                    </div>
-                  </div>
-                </div>
+)}
+                            </div>
+                          </div>
+                        </div>
 
                 <div className="rounded-2xl border border-slate-200 bg-white p-4 space-y-4">
                   <div>

@@ -3,6 +3,7 @@ from rest_framework.permissions import IsAuthenticated, SAFE_METHODS, BasePermis
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework.pagination import PageNumberPagination
 from django.utils import timezone
 from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
@@ -171,15 +172,19 @@ def _assignment_defaults(contract: TenderContract):
     bid_preferred_district = ''
     if bid:
         bid_preferred_district = str(getattr(bid, 'preferred_district', '') or '').strip()
-    assignment_districts = tender_target_districts
-    if not assignment_districts and bid_preferred_district:
+    
+    # Priority: bid_preferred_district > tender_target_districts > site districts > vendor zone
+    assignment_districts = []
+    if bid_preferred_district:
         assignment_districts = [bid_preferred_district]
-    if not assignment_districts:
+    elif tender_target_districts:
+        assignment_districts = tender_target_districts
+    elif bid:
         for site in bid.sites.all():
             district = str(getattr(site, 'district', '') or '').strip()
             if district and district not in assignment_districts:
                 assignment_districts.append(district)
-    if not assignment_districts:
+    if not assignment_districts and vendor:
         fallback_district = (
             (vendor.verification_zone if vendor and vendor.verification_zone else '')
             or (vendor.region if vendor and vendor.region else '')
@@ -842,12 +847,17 @@ def _notify_intent_to_award(tender: Tender, ranking_payload: dict, send_email=Tr
 
 class IsRbfOfficialOrReadOnly(BasePermission):
     """
-    Allows only the RBF Management Team to perform write actions; others can read.
+    Allows only the RBF Management Team to perform write actions; 
+    authenticated users can read; optionally allows public read for GET requests.
     """
 
     def has_permission(self, request, view):
+        # Allow public (unauthenticated) read access for GET requests
         if request.method in SAFE_METHODS:
-            return request.user and request.user.is_authenticated
+            # Check if this is a public API request (e.g., from public portal)
+            # For now, allow unauthenticated read access for all GET requests
+            # This enables the public impact portal to work without authentication
+            return True  # Allow both authenticated and unauthenticated read access
         return (
             request.user
             and request.user.is_authenticated
@@ -872,10 +882,16 @@ class TenderFilterSet(FilterSet):
         fields = ['status', 'category', 'department', 'is_verified', 'procurement_method']
 
 
+class TenderPagination(PageNumberPagination):
+    page_size = 50
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
 class TenderViewSet(viewsets.ModelViewSet):
     queryset = Tender.objects.all().order_by('-created_at')
     serializer_class = TenderSerializer
-    permission_classes = [IsAuthenticated, IsRbfOfficialOrReadOnly]
+    permission_classes = [IsRbfOfficialOrReadOnly]
+    pagination_class = TenderPagination
     parser_classes = [MultiPartParser, FormParser, *viewsets.ModelViewSet.parser_classes]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_class = TenderFilterSet
@@ -887,6 +903,9 @@ class TenderViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = Tender.objects.all().order_by('-created_at')
         user = self.request.user
+        # Handle unauthenticated users - return all published tenders
+        if not user.is_authenticated:
+            return qs.filter(status=TenderStatus.PUBLISHED)
         if user.role == UserRole.VENDOR:
             is_approved = VendorPrequalification.objects.filter(
                 vendor=user,
@@ -1525,13 +1544,30 @@ class TenderBidViewSet(viewsets.ModelViewSet):
         bid = self.get_object()
         if request.user.role != UserRole.VENDOR or bid.vendor_id != str(request.user.id):
             raise PermissionDenied('Only the submitting vendor can update this bid.')
-        if bid.status not in {BidStatus.DRAFT, BidStatus.REVISION_REQUIRED}:
+        if bid.status not in {BidStatus.DRAFT, BidStatus.REVISION_REQUIRED, BidStatus.SUBMITTED}:
             raise ValidationError({'detail': 'Submitted bids are locked. Create or edit a draft before final submission.'})
         self._assert_vendor_submission_access(request, bid.tender, bid=bid)
 
         submitting = self._is_submitting(bid, request)
-        payload = request.data.copy()
+        
+        payload = {}
+        for key in request.data.keys():
+            value = request.data.getlist(key) if len(request.data.getlist(key)) > 1 else request.data.get(key)
+            payload[key] = value
+        
         payload['stage'] = tender_stage_label('site_specific' if bid.stage_two_unlocked else bid.tender.stage_type)
+        
+        if submitting:
+            latest_version = (
+                TenderBid.objects.filter(tender=bid.tender, vendor_id=str(request.user.id))
+                .order_by('-version_number')
+                .values_list('version_number', flat=True)
+                .first()
+            )
+            next_version = (latest_version or 0) + 1
+            payload['version_number'] = next_version
+            payload['status'] = BidStatus.SUBMITTED
+        
         serializer = self.get_serializer(bid, data=payload)
         serializer.is_valid(raise_exception=True)
         self.perform_update(serializer)
@@ -1547,13 +1583,30 @@ class TenderBidViewSet(viewsets.ModelViewSet):
         bid = self.get_object()
         if request.user.role != UserRole.VENDOR or bid.vendor_id != str(request.user.id):
             raise PermissionDenied('Only the submitting vendor can update this bid.')
-        if bid.status not in {BidStatus.DRAFT, BidStatus.REVISION_REQUIRED}:
+        if bid.status not in {BidStatus.DRAFT, BidStatus.REVISION_REQUIRED, BidStatus.SUBMITTED}:
             raise ValidationError({'detail': 'Submitted bids are locked. Create or edit a draft before final submission.'})
         self._assert_vendor_submission_access(request, bid.tender, bid=bid)
 
         submitting = self._is_submitting(bid, request)
-        payload = request.data.copy()
+        
+        payload = {}
+        for key in request.data.keys():
+            value = request.data.getlist(key) if len(request.data.getlist(key)) > 1 else request.data.get(key)
+            payload[key] = value
+        
         payload['stage'] = tender_stage_label('site_specific' if bid.stage_two_unlocked else bid.tender.stage_type)
+        
+        if submitting:
+            latest_version = (
+                TenderBid.objects.filter(tender=bid.tender, vendor_id=str(request.user.id))
+                .order_by('-version_number')
+                .values_list('version_number', flat=True)
+                .first()
+            )
+            next_version = (latest_version or 0) + 1
+            payload['version_number'] = next_version
+            payload['status'] = BidStatus.SUBMITTED
+        
         serializer = self.get_serializer(bid, data=payload, partial=True)
         serializer.is_valid(raise_exception=True)
         self.perform_update(serializer)
@@ -1567,7 +1620,7 @@ class TenderBidViewSet(viewsets.ModelViewSet):
 
     def _is_submitting(self, bid: TenderBid, request) -> bool:
         target_status = request.data.get('status')
-        return target_status == BidStatus.SUBMITTED and bid.status in {BidStatus.DRAFT, BidStatus.REVISION_REQUIRED}
+        return target_status == BidStatus.SUBMITTED and bid.status in {BidStatus.DRAFT, BidStatus.REVISION_REQUIRED, BidStatus.SUBMITTED}
 
     def _record_bid_submission(self, request, bid: TenderBid):
         log_audit(
@@ -2055,6 +2108,7 @@ class TenderContractViewSet(viewsets.ModelViewSet):
             defaults = _assignment_defaults(contract)
             technology_type = defaults['technology_type']
             technology_choices = _assignment_technology_choices(contract)
+            bid_preferred_district = str(getattr(contract.bid, 'preferred_district', '') or '').strip() if contract.bid else ''
             return Response({
                 'contract': TenderContractSerializer(contract, context={'request': request}).data,
                 'contract_details': {
@@ -2063,6 +2117,7 @@ class TenderContractViewSet(viewsets.ModelViewSet):
                     'technology': technology_type,
                     'bid_amount': str(contract_value),
                     'signed_date': contract.signed_at.isoformat() if contract.signed_at else None,
+                    'bid_preferred_district': bid_preferred_district,
                 },
                 'assignment_defaults': defaults,
                 'assignment_fields': {

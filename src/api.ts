@@ -39,6 +39,9 @@ import {
   PlatformConfiguration,
   SystemHealthPayload,
   SuperAdminDashboardSummary,
+  ReportTemplate,
+  ReportHistoryItem,
+  ReportFormat,
 } from "./types";
 
 const env = (import.meta as any)?.env ?? {};
@@ -1679,6 +1682,7 @@ export async function submitTenderBid(payload: Partial<TenderBid>): Promise<Tend
   form.append('collection_method', payload.collection_method ?? "");
   if (payload.sites) form.append('sites', JSON.stringify(payload.sites.map(mapTenderBidSiteToApi)));
   form.append('status', payload.status ?? BidStatus.DRAFT);
+  if (payload.preferred_district) form.append('preferred_district', payload.preferred_district);
 
   const technicalProposalFile = (payload as any).technical_proposal_file;
   if (technicalProposalFile instanceof File) {
@@ -1756,6 +1760,7 @@ export async function updateTenderBid(bidId: string, payload: Partial<TenderBid>
   if (payload.collection_method != null) form.append('collection_method', payload.collection_method);
   if (payload.sites != null) form.append('sites', JSON.stringify(payload.sites.map(mapTenderBidSiteToApi)));
   if (payload.status != null) form.append('status', payload.status);
+  if (payload.preferred_district != null) form.append('preferred_district', payload.preferred_district);
 
   const technicalProposalFile = (payload as any).technical_proposal_file;
   if (technicalProposalFile instanceof File) {
@@ -1993,6 +1998,21 @@ export async function rejectTenderContract(contractId: string, reason: string): 
 export async function fetchProjects(): Promise<Project[]> {
   const data = await http<any>(`/api/projects/`);
   return unwrapListResponse<any>(data).map(mapProjectFromApi);
+}
+
+export async function fetchProjectsSummary(): Promise<{
+  total: number;
+  active: number;
+  completed: number;
+  atRisk: number;
+}> {
+  const data = await http<any>(`/api/projects/projects-summary/`);
+  return {
+    total: data.total || 0,
+    active: data.active || 0,
+    completed: data.completed || 0,
+    atRisk: data.at_risk || 0,
+  };
 }
 
 export async function triggerProjectProspectSync(
@@ -2577,8 +2597,15 @@ export async function rejectVendorPrequalification(
   return reviewVendorPrequalification(id, "reject", reviewerComments);
 }
 
-export async function fetchPaymentClaims(): Promise<PaymentClaim[]> {
-  const data = await http<any>(`/api/projects/claims/`);
+export async function fetchPaymentClaims(params?: {
+  projectId?: string;
+  pageSize?: number;
+}): Promise<PaymentClaim[]> {
+  const query = new URLSearchParams();
+  if (params?.projectId) query.set("project", params.projectId);
+  if (params?.pageSize) query.set("page_size", String(params.pageSize));
+  const url = query.toString() ? `/api/projects/claims/?${query.toString()}` : `/api/projects/claims/`;
+  const data = await http<any>(url);
   return unwrapListResponse<any>(data).map(mapPaymentClaimFromApi);
 }
 
@@ -2714,6 +2741,52 @@ export async function fetchAuditLogs(projectId?: string): Promise<AuditLog[]> {
   return unwrapListResponse<any>(data).map(mapAuditLogFromApi);
 }
 
+export async function fetchReportTemplates(): Promise<ReportTemplate[]> {
+  const data = await http<any>(`/api/projects/reports/templates/`);
+  return unwrapListResponse<any>(data).map((item) => ({
+    id: String(item.id || ""),
+    title: String(item.title || ""),
+    description: String(item.description || ""),
+    category: item.category != null ? String(item.category) : undefined,
+    quick: item.quick != null ? Boolean(item.quick) : undefined,
+    formats: Array.isArray(item.formats)
+      ? item.formats
+          .map((format: any) => String(format).toLowerCase())
+          .filter((format: any) => format === "csv" || format === "pdf" || format === "excel") as ReportFormat[]
+      : [],
+  }));
+}
+
+export async function fetchReportHistory(): Promise<ReportHistoryItem[]> {
+  const data = await http<any>(`/api/projects/reports/history/`);
+  return unwrapListResponse<any>(data).map((item) => ({
+    id: String(item.id || ""),
+    reportType: String(item.report_type || item.reportType || ""),
+    format: String(item.format || "").toLowerCase() as ReportFormat,
+    generatedAt: String(item.generated_at || item.generatedAt || ""),
+    notes: String(item.notes || ""),
+    project: item.project != null ? String(item.project) : undefined,
+    generatedBy: item.generatedBy != null ? String(item.generatedBy) : undefined,
+    downloadUrl: item.downloadUrl != null ? String(item.downloadUrl) : undefined,
+  }));
+}
+
+export async function generateReport(
+  reportType: string,
+  format: ReportFormat,
+  filters?: Record<string, any>,
+): Promise<Blob> {
+  return await httpBlob(`/api/projects/reports/generate/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ report_type: reportType, format, filters: filters || {} }),
+  });
+}
+
+export async function downloadGeneratedReport(downloadUrl: string): Promise<Blob> {
+  return await httpBlob(downloadUrl);
+}
+
 export async function fetchSystemAuditLogs(params?: {
   actor?: string;
   actorRole?: string;
@@ -2767,9 +2840,15 @@ export async function fetchSmartMeterReadings(projectId?: string): Promise<Smart
   return unwrapListResponse<any>(data).map(mapSmartMeterReadingFromApi);
 }
 
-export async function fetchAnomalyFlags(projectId?: string): Promise<AnomalyFlag[]> {
-  const query = projectId ? `?project=${encodeURIComponent(projectId)}` : "";
-  const data = await http<any>(`/api/projects/anomaly-flags/${query}`);
+export async function fetchAnomalyFlags(params?: {
+  projectId?: string;
+  isResolved?: boolean;
+}): Promise<AnomalyFlag[]> {
+  const query = new URLSearchParams();
+  if (params?.projectId) query.set("project", params.projectId);
+  if (params?.isResolved !== undefined) query.set("is_resolved", String(params.isResolved));
+  const q = query.toString() ? `?${query.toString()}` : "";
+  const data = await http<any>(`/api/projects/anomaly-flags/${q}`);
   return unwrapListResponse<any>(data).map(mapAnomalyFlagFromApi);
 }
 

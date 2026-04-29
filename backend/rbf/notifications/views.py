@@ -1,5 +1,5 @@
 from rest_framework import viewsets, filters
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, BasePermission, SAFE_METHODS
 from rest_framework.exceptions import PermissionDenied
 from django_filters.rest_framework import DjangoFilterBackend
 from .models import Notification
@@ -7,10 +7,26 @@ from .serializers import NotificationSerializer
 from rbf.users.models import UserRole
 
 
+class IsAdminOrReadOnly(BasePermission):
+    """
+    Allows only Admin to perform write actions; allows read for all (including public).
+    """
+
+    def has_permission(self, request, view):
+        # Allow public (unauthenticated) read access for GET requests
+        if request.method in SAFE_METHODS:
+            return True  # Allow both authenticated and unauthenticated read access
+        return (
+            request.user
+            and request.user.is_authenticated
+            and getattr(request.user, 'role', None) in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}
+        )
+
+
 class NotificationViewSet(viewsets.ModelViewSet):
     queryset = Notification.objects.all().order_by('-timestamp')
     serializer_class = NotificationSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAdminOrReadOnly]  # Removed IsAuthenticated to allow public read access
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['type', 'status', 'recipient_id']
     search_fields = ['title', 'body', 'event']
@@ -21,6 +37,9 @@ class NotificationViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = Notification.objects.all().order_by('-timestamp')
         user = self.request.user
+        # Allow unauthenticated users to see notifications (frontend will filter for public relevant ones)
+        if not user.is_authenticated:
+            return qs
         if user.role == UserRole.VENDOR:
             return qs.filter(recipient_id=str(user.id))
         return qs
