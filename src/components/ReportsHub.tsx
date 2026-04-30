@@ -42,7 +42,7 @@ const roleLabel = (role: UserRole) => {
   return role;
 };
 
-export function ReportsHub({ currentUser }: { currentUser: User }) {
+export function ReportsHub({ currentUser }: { currentUser: User | { role: UserRole } }) {
   const [templates, setTemplates] = useState<ReportTemplate[]>([]);
   const [history, setHistory] = useState<ReportHistoryItem[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);

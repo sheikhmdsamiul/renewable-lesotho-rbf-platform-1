@@ -444,6 +444,433 @@ def build_report_html(request, report_type: str, params: dict) -> tuple[str, str
             {"label": "Low-income HH", "value": f"{low_pct:.1f}%"},
         ]
         content = [render_section("Overall Programme Impact", render_stats_grid(stats))]
+        
+        tech_breakdown = []
+        for tech in projects.values_list('tech_type', flat=True).distinct()[:10]:
+            tech_projects = projects.filter(tech_type=tech)
+            tech_reports = verified_qs.filter(project__in=tech_projects)
+            tech_total = tech_reports.count()
+            if tech_total:
+                tech_female = _pct(tech_reports.filter(household_type__icontains="female").count())
+                tech_breakdown.append([tech or "Unknown", str(tech_total), f"{tech_female:.1f}%"])
+        
+        if tech_breakdown:
+            content.append(render_section("By Technology", render_table(["Technology", "Verified", "Female %"], tech_breakdown)))
+        
+        html_body = "".join(content)
+        return title, render_report_html(title, html_body, meta_items)
+
+    elif report_type == "doe_regional_progress":
+        title = "Regional Progress Report"
+        region = getattr(user, 'region', '') or getattr(user, 'district', '') or "Unknown"
+        meta_items["Region"] = region
+        
+        region_projects = projects.filter(Q(region__iexact=region) | Q(district__iexact=region))
+        total = region_projects.count()
+        active = region_projects.filter(status=ProjectStatus.ACTIVE).count()
+        completed = region_projects.filter(status__in=[ProjectStatus.COMPLETED, ProjectStatus.LEGACY_COMPLETED]).count()
+        
+        content = []
+        stats = [
+            {"label": "Total Projects", "value": str(total)},
+            {"label": "Active", "value": str(active)},
+            {"label": "Completed", "value": str(completed)},
+            {"label": "Region", "value": region},
+        ]
+        content.append(render_section("Regional Overview", render_stats_grid(stats)))
+        
+        district_stats = region_projects.values('district').annotate(
+            total=Count('id'),
+            active=Count('id', filter=Q(status=ProjectStatus.ACTIVE)),
+            completed=Count('id', filter=Q(status__in=[ProjectStatus.COMPLETED, ProjectStatus.LEGACY_COMPLETED]))
+        ).order_by('-total')[:15]
+        
+        district_rows = []
+        for ds in district_stats:
+            district_rows.append([ds['district'] or "Unknown", ds['total'], ds['active'], ds['completed']])
+        
+        if district_rows:
+            content.append(render_section("By District", render_table(["District", "Total", "Active", "Completed"], district_rows)))
+        
+        project_rows = []
+        for p in region_projects.order_by('-progress')[:30]:
+            project_rows.append([
+                p.project_reference or "N/A",
+                p.tech_type or "N/A",
+                f"{p.progress or 0}%",
+                p.status.upper()
+            ])
+        content.append(render_section("Project Detail", render_table(["Reference", "Tech", "Progress", "Status"], project_rows)))
+        
+        html_body = "".join(content)
+        return title, render_report_html(title, html_body, meta_items)
+
+    elif report_type == "doe_regional_kpi":
+        title = "Regional KPI Report"
+        region = getattr(user, 'region', '') or getattr(user, 'district', '') or "Unknown"
+        meta_items["Region"] = region
+        
+        region_projects = projects.filter(Q(region__iexact=region) | Q(district__iexact=region))
+        
+        total_installations = 0
+        verified_count = 0
+        pending_count = 0
+        female_pct = 0.0
+        
+        for proj in region_projects[:50]:
+            try:
+                summary = KpiService.for_project(str(proj.id)).getFullKpiSummary()
+                ip = summary.get("installation_progress") or {}
+                total_installations += int(ip.get("submitted") or 0)
+                verified_count += int(ip.get("verified") or 0)
+                pending_count += int(ip.get("pending") or 0)
+                
+                gender = summary.get("gender_kpi") or {}
+                female_pct = float((gender.get("female_headed") or {}).get("percentage") or 0)
+            except Exception:
+                pass
+        
+        total_verified = InstallationReport.objects.filter(project__in=region_projects, status=InstallationStatus.VERIFIED).count()
+        if total_verified:
+            female_pct = (InstallationReport.objects.filter(project__in=region_projects, status=InstallationStatus.VERIFIED, household_type__icontains="female").count() / total_verified * 100.0)
+        
+        content = []
+        stats = [
+            {"label": "Total Submitted", "value": str(total_installations)},
+            {"label": "Verified", "value": str(verified_count)},
+            {"label": "Pending", "value": str(pending_count)},
+            {"label": "Female-headed HH", "value": f"{female_pct:.1f}%"},
+        ]
+        content.append(render_section("KPI Summary", render_stats_grid(stats)))
+        
+        html_body = "".join(content)
+        return title, render_report_html(title, html_body, meta_items)
+
+    elif report_type == "doe_technology_breakdown":
+        title = "Technology Breakdown Report"
+        region = getattr(user, 'region', '') or getattr(user, 'district', '') or "Unknown"
+        meta_items["Region"] = region
+        
+        region_projects = projects.filter(Q(region__iexact=region) | Q(district__iexact=region))
+        
+        content = []
+        
+        tech_summary = region_projects.values('tech_type').annotate(
+            total=Count('id'),
+            active=Count('id', filter=Q(status=ProjectStatus.ACTIVE)),
+            completed=Count('id', filter=Q(status__in=[ProjectStatus.COMPLETED, ProjectStatus.LEGACY_COMPLETED])),
+            avg_progress=Avg('progress')
+        ).order_by('-total')
+        
+        tech_rows = []
+        for t in tech_summary:
+            tech_rows.append([
+                t['tech_type'] or "Unknown",
+                t['total'],
+                t['active'],
+                t['completed'],
+                f"{t['avg_progress'] or 0:.0f}%"
+            ])
+        
+        content.append(render_section("By Technology Type", render_table(["Technology", "Total", "Active", "Completed", "Avg Progress"], tech_rows)))
+        
+        html_body = "".join(content)
+        return title, render_report_html(title, html_body, meta_items)
+
+    elif report_type == "psc_quarterly_report":
+        title = "Quarterly Progress Report"
+        qs = projects
+        total = qs.count()
+        
+        completed = qs.filter(status__in=[ProjectStatus.COMPLETED, ProjectStatus.LEGACY_COMPLETED]).count()
+        active = qs.filter(status=ProjectStatus.ACTIVE).count()
+        
+        total_budget = sum(float(p.budget or 0) for p in qs)
+        
+        claims = PaymentClaim.objects.all()[:500]
+        total_claimed = sum(float(c.claim_amount or 0) for c in claims)
+        total_paid = sum(float(c.claim_amount or 0) for c in claims if str(c.status).lower() == "paid")
+        
+        content = []
+        stats = [
+            {"label": "Total Projects", "value": str(total)},
+            {"label": "Active", "value": str(active)},
+            {"label": "Completed", "value": str(completed)},
+            {"label": "Total Budget", "value": _format_currency_lsl(total_budget)},
+            {"label": "Total Claimed", "value": _format_currency_lsl(total_claimed)},
+            {"label": "Total Paid", "value": _format_currency_lsl(total_paid)},
+        ]
+        content.append(render_section("Quarterly Overview", render_stats_grid(stats)))
+        
+        quarterly_rows = []
+        for p in qs.order_by('-created_at')[:50]:
+            progress = p.progress or 0
+            status = "On Track" if progress >= 50 else ("Behind" if progress < 25 else "Moderate")
+            quarterly_rows.append([
+                p.project_reference or "N/A",
+                p.tech_type or "N/A",
+                f"{progress}%",
+                _format_currency_lsl(p.budget or 0),
+                status
+            ])
+        
+        content.append(render_section("Project Status", render_table(["Reference", "Technology", "Progress", "Budget", "Status"], quarterly_rows)))
+        
+        html_body = "".join(content)
+        return title, render_report_html(title, html_body, meta_items)
+
+    elif report_type == "psc_compliance_report":
+        title = "Compliance Report"
+        
+        claims = PaymentClaim.objects.select_related('project', 'vendor').order_by('-submitted_at')[:100]
+        
+        total_claims = claims.count()
+        approved_claims = claims.filter(Q(status__iexact='approved') | Q(status__iexact='paid')).count()
+        
+        content = []
+        stats = [
+            {"label": "Total Claims", "value": str(total_claims)},
+            {"label": "Approved/Paid", "value": str(approved_claims)},
+            {"label": "Pending Review", "value": str(total_claims - approved_claims)},
+        ]
+        content.append(render_section("Payment Compliance", render_stats_grid(stats)))
+        
+        compliance_rows = []
+        for c in claims[:30]:
+            compliance = "COMPLIANT" if str(c.status).lower() in ('approved', 'paid') else "PENDING"
+            compliance_rows.append([
+                f"CLM-{c.id}",
+                c.project.project_reference if c.project else "N/A",
+                _format_currency_lsl(c.claim_amount),
+                c.status.upper(),
+                compliance
+            ])
+        
+        content.append(render_section("Claim Compliance Detail", render_table(["Claim ID", "Project", "Amount", "Status", "Compliance"], compliance_rows)))
+        
+        html_body = "".join(content)
+        return title, render_report_html(title, html_body, meta_items)
+
+    elif report_type == "psc_gender_impact_portfolio":
+        title = "Gender Impact Report (Portfolio)"
+        
+        verified_qs = InstallationReport.objects.filter(status=InstallationStatus.VERIFIED)
+        total = verified_qs.count()
+        
+        female = verified_qs.filter(household_type__icontains="female").count()
+        vulnerable = verified_qs.filter(household_type__icontains="vulnerable").count()
+        low_income = verified_qs.filter(Q(household_type__icontains="low") | Q(household_type__icontains="income")).count()
+        
+        content = []
+        stats = [
+            {"label": "Total Verified", "value": str(total)},
+            {"label": "Female-headed HH", "value": f"{(female/total*100) if total else 0:.1f}%"},
+            {"label": "Vulnerable", "value": f"{(vulnerable/total*100) if total else 0:.1f}%"},
+            {"label": "Low-income", "value": f"{(low_income/total*100) if total else 0:.1f}%"},
+        ]
+        content.append(render_section("Gender & Inclusion KPIs", render_stats_grid(stats)))
+        
+        tech_gender = verified_qs.values('project__tech_type').annotate(
+            total=Count('id'),
+            female=Count('id', filter=Q(household_type__icontains='female'))
+        ).order_by('-total')[:10]
+        
+        gender_rows = []
+        for tg in tech_gender:
+            pct = (tg['female'] / tg['total'] * 100) if tg['total'] else 0
+            gender_rows.append([tg['project__tech_type'] or "Unknown", tg['total'], f"{pct:.1f}%"])
+        
+        if gender_rows:
+            content.append(render_section("By Technology", render_table(["Technology", "Verified", "Female %"], gender_rows)))
+        
+        html_body = "".join(content)
+        return title, render_report_html(title, html_body, meta_items)
+
+    elif report_type == "psc_vendor_payment_trail":
+        title = "Vendor Payment Trail"
+        
+        claims = PaymentClaim.objects.select_related('project', 'vendor').order_by('-submitted_at')[:200]
+        
+        content = []
+        
+        vendor_summary = {}
+        for c in claims:
+            vendor_name = c.vendor.organization_name or c.vendor.full_name if c.vendor else "Unknown"
+            if vendor_name not in vendor_summary:
+                vendor_summary[vendor_name] = {'submitted': 0, 'approved': 0, 'paid': 0, 'total': 0}
+            vendor_summary[vendor_name]['total'] += float(c.claim_amount or 0)
+            vendor_summary[vendor_name]['submitted'] += 1
+            status = str(c.status).lower()
+            if status in ('approved', 'paid'):
+                vendor_summary[vendor_name]['approved'] += 1
+            if status == 'paid':
+                vendor_summary[vendor_name]['paid'] += 1
+        
+        vendor_rows = []
+        for vn, vs in sorted(vendor_summary.items(), key=lambda x: x[1]['total'], reverse=True)[:20]:
+            vendor_rows.append([
+                vn, vs['submitted'], vs['approved'], vs['paid'], _format_currency_lsl(vs['total'])
+            ])
+        
+        content.append(render_section("Vendor Payment Summary", render_table(["Vendor", "Submitted", "Approved", "Paid", "Total Amount"], vendor_rows)))
+        
+        trail_rows = []
+        for c in claims[:50]:
+            trail_rows.append([
+                f"CLM-{c.id}",
+                c.vendor.organization_name or c.vendor.full_name if c.vendor else "N/A",
+                _format_currency_lsl(c.claim_amount),
+                c.status.upper(),
+                _format_date(c.submitted_at)
+            ])
+        
+        content.append(render_section("Payment Trail Detail", render_table(["Claim ID", "Vendor", "Amount", "Status", "Date"], trail_rows)))
+        
+        html_body = "".join(content)
+        return title, render_report_html(title, html_body, meta_items)
+
+    elif report_type == "fo_verification_history":
+        title = "My Verification History"
+        
+        fv_qs = FieldVerification.objects.filter(field_officer=user).select_related('installation__project').order_by('-verified_at')[:200]
+        
+        total = fv_qs.count()
+        verified = fv_qs.filter(verification_status=FieldVerificationStatus.VERIFIED).count()
+        flagged = fv_qs.filter(verification_status=FieldVerificationStatus.FLAGGED).count()
+        
+        content = []
+        stats = [
+            {"label": "Total Verifications", "value": str(total)},
+            {"label": "Verified OK", "value": str(verified)},
+            {"label": "Flagged", "value": str(flagged)},
+        ]
+        content.append(render_section("My Record", render_stats_grid(stats)))
+        
+        history_rows = []
+        for fv in fv_qs[:50]:
+            history_rows.append([
+                f"INS-{fv.installation.id}",
+                fv.installation.project.project_reference if fv.installation and fv.installation.project else "N/A",
+                fv.verification_status.upper(),
+                f"{float(fv.location_distance_meters or 0):.0f}m",
+                _format_date(fv.verified_at)
+            ])
+        
+        content.append(render_section("Verification Detail", render_table(["Installation", "Project", "Status", "GPS Dist", "Date"], history_rows)))
+        
+        html_body = "".join(content)
+        return title, render_report_html(title, html_body, meta_items)
+
+    elif report_type == "fo_performance_summary":
+        title = "My Performance Summary"
+        
+        fv_qs = FieldVerification.objects.filter(field_officer=user)
+        
+        total = fv_qs.count()
+        verified = fv_qs.filter(verification_status=FieldVerificationStatus.VERIFIED).count()
+        flagged = fv_qs.filter(verification_status=FieldVerificationStatus.FLAGGED).count()
+        
+        avg_gps = fv_qs.exclude(location_distance_meters__isnull=True).aggregate(avg=Avg('location_distance_meters')).get('avg')
+        
+        content = []
+        stats = [
+            {"label": "Total Verifications", "value": str(total)},
+            {"label": "Verified", "value": str(verified)},
+            {"label": "Flagged", "value": str(flagged)},
+            {"label": "Success Rate", "value": f"{(verified/total*100) if total else 0:.1f}%"},
+            {"label": "Avg GPS Distance", "value": f"{float(avg_gps or 0):.1f}m"},
+        ]
+        content.append(render_section("Performance Overview", render_stats_grid(stats)))
+        
+        recent = fv_qs.order_by('-verified_at')[:30]
+        recent_rows = []
+        for fv in recent:
+            recent_rows.append([
+                f"INS-{fv.installation.id}",
+                fv.verification_status.upper(),
+                f"{float(fv.location_distance_meters or 0):.0f}m",
+                _format_date(fv.verified_at)
+            ])
+        
+        content.append(render_section("Recent Verifications", render_table(["Installation", "Status", "GPS", "Date"], recent_rows)))
+        
+        html_body = "".join(content)
+        return title, render_report_html(title, html_body, meta_items)
+
+    elif report_type == "auditor_data_integrity":
+        title = "Data Integrity Report"
+        
+        projects_count = Project.objects.count()
+        installations_count = InstallationReport.objects.count()
+        claims_count = PaymentClaim.objects.count()
+        verifications_count = FieldVerification.objects.count()
+        
+        content = []
+        stats = [
+            {"label": "Projects", "value": str(projects_count)},
+            {"label": "Installations", "value": str(installations_count)},
+            {"label": "Payment Claims", "value": str(claims_count)},
+            {"label": "Verifications", "value": str(verifications_count)},
+        ]
+        content.append(render_section("Database Summary", render_stats_grid(stats)))
+        
+        integrity_issues = []
+        
+        projects_no_ref = Project.objects.filter(project_reference__isnull=True).count()
+        if projects_no_ref:
+            integrity_issues.append(["Projects without reference", str(projects_no_ref), "WARNING"])
+        
+        projects_no_vendor = Project.objects.filter(Q(vendor_name__isnull=True) | Q(vendor_name='')).count()
+        if projects_no_vendor:
+            integrity_issues.append(["Projects without vendor", str(projects_no_vendor), "WARNING"])
+        
+        installs_no_location = InstallationReport.objects.filter(Q(latitude__isnull=True) | Q(latitude=0)).count()
+        if installs_no_location:
+            integrity_issues.append(["Installations without GPS", str(installs_no_location), "WARNING"])
+        
+        claims_no_amount = PaymentClaim.objects.filter(claim_amount__isnull=True).count()
+        if claims_no_amount:
+            integrity_issues.append(["Claims without amount", str(claims_no_amount), "ERROR"])
+        
+        if not integrity_issues:
+            integrity_issues.append(["Data Integrity Check", "No issues found", "PASSED"])
+        
+        content.append(render_section("Integrity Checks", render_table(["Check", "Count", "Status"], integrity_issues)))
+        
+        html_body = "".join(content)
+        return title, render_report_html(title, html_body, meta_items)
+
+    elif report_type == "auditor_prospect_sync":
+        title = "Prospect Sync Audit"
+        
+        sync_logs = ProspectSyncLog.objects.order_by('-started_at')[:100]
+        
+        total_syncs = sync_logs.count()
+        successful = sync_logs.filter(status='success').count()
+        failed = sync_logs.filter(status='failed').count()
+        
+        content = []
+        stats = [
+            {"label": "Total Syncs", "value": str(total_syncs)},
+            {"label": "Successful", "value": str(successful)},
+            {"label": "Failed", "value": str(failed)},
+        ]
+        content.append(render_section("Sync Overview", render_stats_grid(stats)))
+        
+        sync_rows = []
+        for log in sync_logs[:50]:
+            status_icon = "✓" if log.status == 'success' else "✗"
+            sync_rows.append([
+                log.id,
+                log.status.upper(),
+                str(log.records_created or 0),
+                str(log.records_updated or 0),
+                str(log.records_failed or 0),
+                _format_datetime(log.started_at)
+            ])
+        
+        content.append(render_section("Sync History", render_table(["Log ID", "Status", "Created", "Updated", "Failed", "Time"], sync_rows)))
+        
         html_body = "".join(content)
         return title, render_report_html(title, html_body, meta_items)
 

@@ -10,8 +10,9 @@ import {
   Send,
   TrendingUp,
 } from "lucide-react";
-import { fetchProjects } from "../api";
-import { Project } from "../types";
+import { fetchProjects, fetchReportTemplates, fetchReportHistory } from "../api";
+import { Project, ReportHistoryItem, ReportTemplate, User } from "../types";
+import { ReportsHub } from "./ReportsHub";
 
 const formatDateTime = (value?: string | null) => (value ? new Date(value).toLocaleString() : "N/A");
 
@@ -53,30 +54,34 @@ export function DoeDashboard({ currentUser, onNavigate }: { currentUser: any; on
   const summaryCards = useMemo(() => {
     const active = projects.filter(p => p.status === "active").length;
     const totalInstallations = projects.reduce((sum, p) => sum + (p.progress || 0), 0);
-    const avgFemale = projects.length > 0 
-      ? projects.reduce((sum, p) => sum + (p.genderImpact || 0), 0) / projects.length 
-      : 0;
-    const avgVerified = projects.length > 0
-      ? projects.reduce((sum, p) => sum + (p.progress || 0), 0) / projects.length
-      : 0;
     
     return {
       activeProjects: active,
       installations: totalInstallations,
-      femalePct: Math.round(avgFemale),
-      verifiedPct: Math.round(avgVerified),
     };
   }, [projects]);
 
   const attentionItems = useMemo(() => {
     const kpisBelowTarget = projects.filter(p => (p.uptime || 0) < 95).length;
-    const lowProgress = projects.filter(p => (p.progress || 0) < 50).length;
-    return { kpisBelowTarget, lowProgress };
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+    const unverifiedOld = projects.filter(p => {
+      if (p.status !== "completed") return false;
+      const created = p.createdAt ? new Date(p.createdAt) : null;
+      return created && created < sevenDaysAgo;
+    }).length;
+    return { kpisBelowTarget, unverifiedOld };
   }, [projects]);
 
   const handleViewMap = () => {
     if (onNavigate) {
       onNavigate("gis");
+    }
+  };
+
+  const handleViewKpis = () => {
+    if (onNavigate) {
+      onNavigate("kpis");
     }
   };
 
@@ -159,7 +164,7 @@ export function DoeDashboard({ currentUser, onNavigate }: { currentUser: any; on
 
       <div className="card p-6">
         <h3 className="text-lg font-bold text-slate-900 mb-4">Summary Cards</h3>
-        <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+        <div className="grid grid-cols-2 gap-4">
           <div className="rounded-xl bg-slate-50 p-4">
             <p className="text-xs font-bold uppercase tracking-widest text-slate-500">Active Projects</p>
             <p className="mt-2 text-3xl font-bold text-slate-900">{summaryCards.activeProjects}</p>
@@ -167,14 +172,6 @@ export function DoeDashboard({ currentUser, onNavigate }: { currentUser: any; on
           <div className="rounded-xl bg-slate-50 p-4">
             <p className="text-xs font-bold uppercase tracking-widest text-slate-500">Installations</p>
             <p className="mt-2 text-3xl font-bold text-slate-900">{summaryCards.installations}</p>
-          </div>
-          <div className="rounded-xl bg-emerald-50 p-4">
-            <p className="text-xs font-bold uppercase tracking-widest text-emerald-600">Female %</p>
-            <p className="mt-2 text-3xl font-bold text-emerald-700">{summaryCards.femalePct}%</p>
-          </div>
-          <div className="rounded-xl bg-blue-50 p-4">
-            <p className="text-xs font-bold uppercase tracking-widest text-blue-600">Verified %</p>
-            <p className="mt-2 text-3xl font-bold text-blue-700">{summaryCards.verifiedPct}%</p>
           </div>
         </div>
       </div>
@@ -189,10 +186,11 @@ export function DoeDashboard({ currentUser, onNavigate }: { currentUser: any; on
               <thead>
                 <tr className="bg-slate-50">
                   <th className="px-4 py-3 text-xs font-bold uppercase text-slate-500">Project</th>
+                  <th className="px-4 py-3 text-xs font-bold uppercase text-slate-500">District</th>
                   <th className="px-4 py-3 text-xs font-bold uppercase text-slate-500">Vendor</th>
                   <th className="px-4 py-3 text-xs font-bold uppercase text-slate-500">Progress</th>
                   <th className="px-4 py-3 text-xs font-bold uppercase text-slate-500">Status</th>
-                  <th className="px-4 py-3 text-xs font-bold uppercase text-slate-500">Female %</th>
+                  <th className="px-4 py-3 text-xs font-bold uppercase text-slate-500">KPI</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -200,6 +198,9 @@ export function DoeDashboard({ currentUser, onNavigate }: { currentUser: any; on
                   <tr key={project.id} className="hover:bg-slate-50">
                     <td className="px-4 py-3 text-sm font-medium text-slate-900">
                       {project.projectReference || project.id}
+                    </td>
+                    <td className="px-4 py-3 text-sm text-slate-600">
+                      {project.district || project.region || "—"}
                     </td>
                     <td className="px-4 py-3 text-sm text-slate-600">
                       {project.vendorName || "—"}
@@ -216,8 +217,16 @@ export function DoeDashboard({ currentUser, onNavigate }: { currentUser: any; on
                         {project.status}
                       </span>
                     </td>
-                    <td className="px-4 py-3 text-sm text-slate-600">
-                      {project.genderImpact || 0}%
+                    <td className="px-4 py-3">
+                      {(project.uptime || 0) >= 95 ? (
+                        <span className="px-2 py-1 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-700">
+                          OK
+                        </span>
+                      ) : (
+                        <span className="px-2 py-1 rounded-full text-[10px] font-bold bg-rose-100 text-rose-700">
+                          LOW
+                        </span>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -240,9 +249,9 @@ export function DoeDashboard({ currentUser, onNavigate }: { currentUser: any; on
           <div className="flex items-center justify-between rounded-xl border border-amber-100 bg-amber-50 px-4 py-3">
             <div className="flex items-center gap-2">
               <Clock size={18} className="text-amber-600" />
-              <span className="text-sm font-medium text-slate-700">Projects with low progress</span>
+              <span className="text-sm font-medium text-slate-700">Unverified installations &gt; 7 days old</span>
             </div>
-            <span className="text-lg font-bold text-amber-700">{attentionItems.lowProgress}</span>
+            <span className="text-lg font-bold text-amber-700">{attentionItems.unverifiedOld}</span>
           </div>
         </div>
       </div>
@@ -252,6 +261,9 @@ export function DoeDashboard({ currentUser, onNavigate }: { currentUser: any; on
         <div className="flex flex-wrap gap-3">
           <button onClick={handleViewMap} className="btn-secondary flex items-center gap-2">
             <Map size={16} /> View Regional Map
+          </button>
+          <button onClick={handleViewKpis} className="btn-secondary flex items-center gap-2">
+            <TrendingUp size={16} /> View Regional KPI
           </button>
           <button onClick={handleViewProjects} className="btn-secondary flex items-center gap-2">
             <FileText size={16} /> View Projects
@@ -335,7 +347,44 @@ export function DoeRegionalMap({ currentUser }: { currentUser: any }) {
   );
 }
 
-export function DoeReports({ currentUser }: { currentUser: any }) {
+export function DoeReports({ currentUser }: { currentUser: User }) {
+  const [templates, setTemplates] = useState<ReportTemplate[]>([]);
+  const [history, setHistory] = useState<ReportHistoryItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadContents = async () => {
+    setLoading(true);
+    setError(null);
+
+    try {
+      const [reportTemplates, reportHistory] = await Promise.all([
+        fetchReportTemplates(),
+        fetchReportHistory(),
+      ]);
+
+      setTemplates(reportTemplates);
+      setHistory(reportHistory);
+    } catch (err: any) {
+      setError(String(err?.message || "Unable to load reports."));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadContents();
+  }, []);
+
+  if (loading) {
+    return (
+      <div className="card p-10 text-center text-slate-500">
+        <Loader2 size={24} className="animate-spin mx-auto mb-2" />
+        Loading reports...
+      </div>
+    );
+  }
+
   const userDistricts = useMemo(() => {
     const districts = currentUser?.district || currentUser?.region || "";
     return districts.split(",").map(d => d.trim()).filter(Boolean);
@@ -343,66 +392,27 @@ export function DoeReports({ currentUser }: { currentUser: any }) {
 
   const regionLabel = userDistricts.length > 0 ? userDistricts.join(" + ") : "All Regions";
 
-  const handleExportReport = (reportType: string) => {
-    const csv = [
-      ["Reference", "Vendor", "Status", "Progress", "Gender Impact"].join(","),
-    ].join("\n");
-    
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-    const objectUrl = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = objectUrl;
-    anchor.download = `${reportType}_${regionLabel.replace(/\s+/g, "_")}.csv`;
-    anchor.click();
-    URL.revokeObjectURL(objectUrl);
-  };
-
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">Reports</h1>
-          <p className="text-sm text-slate-500">Reports scoped to {regionLabel}</p>
+          <h1 className="text-2xl font-bold text-slate-900">REPORTS — Regional Scope</h1>
+          <p className="text-sm text-slate-500">
+            All reports are scoped to your assigned region.
+          </p>
         </div>
+        <button onClick={() => void loadContents()} className="btn-secondary flex items-center gap-2">
+          <RefreshCw size={16} /> Refresh
+        </button>
       </div>
 
-      <div className="card p-6">
-        <h3 className="text-lg font-bold text-slate-900 mb-4">Available Reports</h3>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <button 
-            onClick={() => handleExportReport("regional_progress")}
-            className="rounded-xl border border-slate-200 p-4 hover:bg-slate-50 cursor-pointer text-left"
-          >
-            <FileText size={24} className="text-emerald-600 mb-2" />
-            <p className="font-medium text-slate-900">Regional Progress Report</p>
-            <p className="text-xs text-slate-500">Current progress by project and district</p>
-          </button>
-          <button 
-            onClick={() => handleExportReport("gender_impact")}
-            className="rounded-xl border border-slate-200 p-4 hover:bg-slate-50 cursor-pointer text-left"
-          >
-            <FileText size={24} className="text-emerald-600 mb-2" />
-            <p className="font-medium text-slate-900">Regional Gender Impact Report</p>
-            <p className="text-xs text-slate-500">Female beneficiary analysis</p>
-          </button>
-          <button 
-            onClick={() => handleExportReport("verification_summary")}
-            className="rounded-xl border border-slate-200 p-4 hover:bg-slate-50 cursor-pointer text-left"
-          >
-            <FileText size={24} className="text-emerald-600 mb-2" />
-            <p className="font-medium text-slate-900">Regional Verification Summary</p>
-            <p className="text-xs text-slate-500">Verification status by project</p>
-          </button>
-          <button 
-            onClick={() => handleExportReport("technology_breakdown")}
-            className="rounded-xl border border-slate-200 p-4 hover:bg-slate-50 cursor-pointer text-left"
-          >
-            <FileText size={24} className="text-emerald-600 mb-2" />
-            <p className="font-medium text-slate-900">Technology Breakdown Report</p>
-            <p className="text-xs text-slate-500">SHS/ICS/GMG distribution</p>
-          </button>
+      {error && (
+        <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+          {error}
         </div>
-      </div>
+      )}
+
+      <ReportsHub currentUser={currentUser} />
     </div>
   );
 }

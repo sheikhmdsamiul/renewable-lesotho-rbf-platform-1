@@ -21,6 +21,7 @@ import {
   UserCog,
   Users,
 } from "lucide-react";
+import { ReportsHub } from "./ReportsHub";
 import {
   checkProspectConnection,
   createAdminManagedUser,
@@ -150,6 +151,7 @@ type AdminSection =
   | "system_configuration"
   | "prospect_sync"
   | "audit_logs"
+  | "reports"
   | "notifications"
   | "system_health";
 
@@ -579,6 +581,7 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
     system_configuration: ["System Configuration", "Control thresholds, notification behavior, and boundary assets."],
     prospect_sync: ["Prospect Sync", "Monitor connectivity, failed jobs, and recent sync activity."],
     audit_logs: ["Audit Logs", "Filter the full platform audit trail and export reports."],
+    reports: ["Reports", "Generate and export KPI, financial, verification, and portfolio reports."],
     notifications: ["Notifications", "Review delivery history and open linked workflow items."],
     system_health: ["System Health", "Check database, queue, storage, and recent errors."],
   }[section];
@@ -1399,6 +1402,8 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
           )}
         </div>
       )}
+
+      {section === "reports" && <ReportsHub currentUser={{ role: UserRole.ADMIN }} />}
     </div>
   );
 }

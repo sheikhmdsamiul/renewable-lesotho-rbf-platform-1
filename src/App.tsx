@@ -207,6 +207,20 @@ import PortfolioKpiSummary from "./components/PortfolioKpiSummary";
 import PortfolioMonitoringView from "./components/PortfolioMonitoringView";
 import { FieldOperationalKpiPanel, MacroKpiPortal, VendorKpiPanel } from "./components/RoleBasedKpiPanels";
 import SuperAdminPortal from "./components/SuperAdminPortal";
+import { DoeDashboard, DoeReports } from "./components/DoePortal";
+import { PscReports } from "./components/PscPortal";
+import { TacReports } from "./components/TacPortal";
+import { ReportsHub } from "./components/ReportsHub";
+import {
+  AuditorDashboard,
+  AuditorGisMap,
+  AuditorKpiDashboard,
+  AuditorAuditLogs,
+  AuditorAnomalyReport,
+  AuditorClaimsAudit,
+  AuditorProspectSyncLog
+} from "./components/AuditorPortal";
+import { PscDashboard } from "./components/PscPortal";
 
 // --- Components ---
 
@@ -6642,8 +6656,8 @@ const Disbursements = ({ onOpenProjectKpi }: { onOpenProjectKpi?: (projectId: st
   );
 };
 
-const Reports = () => {
-  const [view, setView] = useState<'list' | 'analytics'>('list');
+const Reports = ({ currentUser }: { currentUser: User | null }) => {
+  const [view, setView] = useState<'list' | 'analytics' | 'hub'>('hub');
   const [dateRange, setDateRange] = useState('Last 30 Days');
   const [notification, setNotification] = useState<string | null>(null);
 
@@ -6692,6 +6706,20 @@ const Reports = () => {
   const requestApiAccess = () => {
     showNotification("API access request submitted.");
   };
+
+  if (view === 'hub') {
+    return (
+      <div className="p-6">
+        <div className="flex items-center gap-4 mb-6">
+          <button onClick={() => setView('list')} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
+            <ChevronRight className="rotate-180" size={20} />
+          </button>
+          <h1 className="text-2xl font-bold text-slate-900">Report Center</h1>
+        </div>
+        {currentUser ? <ReportsHub currentUser={currentUser} /> : <p>Please log in to access reports.</p>}
+      </div>
+    );
+  }
 
   if (view === 'analytics') {
     return (
@@ -6861,63 +6889,17 @@ const Reports = () => {
       </AnimatePresence>
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">Reporting & Exports</h1>
-          <p className="text-sm text-slate-500">Generate and download verified program impact data</p>
+          <h1 className="text-2xl font-bold text-slate-900">Report Center</h1>
+          <p className="text-sm text-slate-500">Generate and download verified program reports</p>
         </div>
         <div className="flex gap-3">
           <button onClick={() => setView('analytics')} className="btn-secondary flex items-center gap-2">
             <BarChart3 size={18} /> View Analytics Dashboard
           </button>
-          <button onClick={createCustomReport} className="btn-primary flex items-center gap-2">
-            <Plus size={18} /> Custom Report
-          </button>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {[
-          { title: 'Gender Impact Report', desc: 'Disaggregated participation by region and tender.', icon: Users, format: 'PDF/Excel', category: 'Gender' },
-          { title: 'Energy Output Log', desc: 'Timestamped and verified generation data.', icon: Zap, format: 'CSV', category: 'Performance' },
-          { title: 'Tender Summary', desc: 'Program progress grouped by technology type.', icon: FileText, format: 'PDF', category: 'Admin' },
-          { title: 'Regional Impact', desc: 'Spatial performance breakdown by district.', icon: MapIcon, format: 'Excel', category: 'Spatial' },
-          { title: 'Beneficiary Export', desc: 'Anonymized household data with GPS tags.', icon: Database, format: 'CSV/GeoJSON', category: 'Data' },
-          { title: 'Vendor Audit Trail', desc: 'Compliance and performance history logs.', icon: ShieldCheck, format: 'PDF', category: 'Audit' },
-        ].map((report, i) => (
-          <div key={i} className="card p-6 hover:shadow-xl transition-all cursor-pointer group border-slate-100 hover:border-emerald-200">
-            <div className="flex justify-between items-start mb-4">
-              <div className="w-12 h-12 rounded-xl bg-slate-50 flex items-center justify-center text-slate-400 group-hover:bg-emerald-50 group-hover:text-emerald-600 transition-colors">
-                <report.icon size={24} />
-              </div>
-              <span className="text-[10px] font-black text-slate-300 uppercase tracking-widest">{report.category}</span>
-            </div>
-            <h3 className="font-bold text-slate-900 mb-2 group-hover:text-emerald-700 transition-colors">{report.title}</h3>
-            <p className="text-sm text-slate-500 mb-6 leading-relaxed">{report.desc}</p>
-            <div className="flex items-center justify-between pt-4 border-t border-slate-50">
-              <div className="flex items-center gap-2">
-                <span className="px-2 py-0.5 rounded bg-slate-100 text-[10px] font-bold text-slate-500 uppercase">{report.format}</span>
-              </div>
-              <button onClick={() => downloadReportCard(report.title)} className="w-8 h-8 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center hover:bg-emerald-600 hover:text-white transition-all">
-                <Download size={16} />
-              </button>
-            </div>
-          </div>
-        ))}
-      </div>
-
-      <div className="card p-8 bg-slate-900 text-white relative overflow-hidden">
-        <div className="relative z-10 flex flex-col md:flex-row items-center justify-between gap-8">
-          <div className="space-y-2 text-center md:text-left">
-            <h3 className="text-xl font-bold">Need a custom data export?</h3>
-            <p className="text-slate-400 text-sm max-w-md">
-              Access the raw Prospect database for advanced spatial-temporal analysis or third-party integration.
-            </p>
-          </div>
-          <button onClick={requestApiAccess} className="px-8 py-3 bg-emerald-500 hover:bg-emerald-600 text-white font-bold rounded-xl transition-colors flex items-center gap-2">
-            <Database size={18} /> Request API Access
-          </button>
-        </div>
-        <div className="absolute top-0 right-0 w-64 h-64 bg-emerald-500/10 rounded-full blur-3xl -mr-32 -mt-32" />
-      </div>
+      {currentUser ? <ReportsHub currentUser={currentUser} /> : <p>Please log in to access reports.</p>}
     </div>
   );
 };
@@ -17387,13 +17369,14 @@ const FieldVerifierView = ({ mode = "dashboard" }: { mode?: "dashboard" | "inspe
   startOfWeek.setHours(0, 0, 0, 0);
   const verifiedToday = queue.filter(({ task }) => task.status === "Verified" && isSameDay(task.updatedAt)).length;
   const flaggedToday = queue.filter(({ task }) => (task.status === "Flagged" || task.status === "Partial") && isSameDay(task.updatedAt)).length;
-  const completedThisWeek = queue.filter(({ task }) => {
-    if (!(task.status === "Verified" || task.status === "Flagged" || task.status === "Partial")) return false;
-    const updated = new Date(task.updatedAt || task.createdAt);
-    return !Number.isNaN(updated.getTime()) && updated >= startOfWeek;
-  }).length;
-  const recentlyVerified = queue
-    .filter(({ task }) => task.status === "Verified" || task.status === "Flagged" || task.status === "Partial")
+   const completedThisWeek = queue.filter(({ task }) => {
+     if (!(task.status === "Verified" || task.status === "Flagged" || task.status === "Partial")) return false;
+     const updated = new Date(task.updatedAt || task.createdAt);
+     return !Number.isNaN(updated.getTime()) && updated >= startOfWeek;
+}).length;
+   
+   const recentlyVerified = queue
+       .filter(({ task }) => task.status === "Verified" || task.status === "Flagged" || task.status === "Partial")
     .slice()
     .sort((a, b) => (b.task.updatedAt || "").localeCompare(a.task.updatedAt || ""))
     .slice(0, 5);
@@ -18781,66 +18764,7 @@ const DoEOfficerView = () => {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="card p-6">
-          <h3 className="text-lg font-bold mb-4">Regional KPI Review</h3>
-          <div className="h-[250px]">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={[
-                { district: 'Maseru', target: 100, actual: 85 },
-                { district: 'Leribe', target: 80, actual: 92 },
-                { district: 'Mafeteng', target: 60, actual: 45 },
-              ]}>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                <XAxis dataKey="district" axisLine={false} tickLine={false} />
-                <YAxis axisLine={false} tickLine={false} />
-                <Tooltip />
-                <Bar dataKey="target" fill="#e2e8f0" radius={[4, 4, 0, 0]} />
-                <Bar dataKey="actual" fill="#059669" radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
 
-        <div className="card p-6">
-          <h3 className="text-lg font-bold mb-4">Technical Endorsements</h3>
-          <div className="space-y-4">
-            {projects.map((p) => (
-              <div key={p.id} className="flex flex-col p-4 bg-slate-50 rounded-xl border border-slate-100">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="font-bold text-slate-900">{p.name}</span>
-                  <span className={`text-[10px] uppercase tracking-widest font-bold px-2 py-1 rounded-full ${
-                    p.status === 'Endorsed' ? 'bg-emerald-100 text-emerald-700' : 
-                    p.status === 'Rejected' ? 'bg-rose-100 text-rose-700' : 
-                    'bg-amber-100 text-amber-700'
-                  }`}>
-                    {p.status}
-                  </span>
-                </div>
-                <div className="flex items-center gap-4 text-xs text-slate-500 mb-4">
-                  <span>District: {p.district}</span>
-                  <span>Capacity: {p.capacity}</span>
-                </div>
-                {p.status === 'Pending Endorsement' && (
-                  <div className="flex gap-2">
-                    <button 
-                      onClick={() => startReview(p)}
-                      className="flex-1 btn-primary py-1.5 text-xs flex items-center justify-center gap-2"
-                    >
-                      <Search size={14} /> Review & Endorse
-                    </button>
-                  </div>
-                )}
-                {p.status !== 'Pending Endorsement' && p.comment && (
-                  <div className="mt-2 p-2 bg-white rounded border border-slate-100 text-[10px] text-slate-500 italic">
-                    " {p.comment} "
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
 
       <div className="card p-6">
         <div className="mb-4">
@@ -19669,7 +19593,7 @@ export default function App() {
       setActiveTab("portfolio");
       return;
     }
-    if (role === UserRole.TAC || role === UserRole.DOE_OFFICER || role === UserRole.AUDITOR) {
+    if (role === UserRole.TAC || role === UserRole.DOE_OFFICER || role === UserRole.AUDITOR || role === UserRole.FIELD_VERIFIER) {
       setActiveTab("projects");
     }
   }, [role]);
@@ -19786,7 +19710,7 @@ export default function App() {
     // Shared tabs across roles (if they have them in sidebar)
     if (activeTab === "monitoring") return <Monitoring />;
     if (activeTab === "gis") return <GISMap />;
-    if (activeTab === "reports") return <Reports />;
+    if (activeTab === "reports") return <Reports currentUser={currentUser} />;
     if (activeTab === "notifications") return <NotificationLogs logs={notifications} onSelect={handleNotificationSelect} />;
 
     // Role-based content filtering
@@ -19853,12 +19777,13 @@ export default function App() {
         case "dashboard":
         case "payments":
         case "evaluations":
-        case "scoring":
         case "blacklisting":
         case "all_vendors":
+        case "reports":
           if (activeTab === "all_vendors") return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={setViewingVendorProfile} />;
           if (activeTab === "blacklisting") return <Blacklisting currentUser={currentUser} />;
           if (activeTab === "payments") return <Disbursements onOpenProjectKpi={openProjectKpiView} />;
+          if (activeTab === "reports") return <TacReports />;
           return <TACView mode="technical" />;
         default:
           return <TACView mode="technical" />;
@@ -19891,33 +19816,42 @@ export default function App() {
         case "audit_logs":
         case "notifications":
         case "system_health":
+        case "reports":
         case "all_vendors":
           if (activeTab === "all_vendors") return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={setViewingVendorProfile} />;
+          if (activeTab === "reports") return <SuperAdminPortal section="reports" notifications={notifications} onNotificationSelect={handleNotificationSelect} />;
           return <SuperAdminPortal section={activeTab as any} notifications={notifications} onNotificationSelect={handleNotificationSelect} />;
         default:
           return <SuperAdminPortal section="dashboard" notifications={notifications} onNotificationSelect={handleNotificationSelect} />;
       }
     }
-    if (role === UserRole.DOE_OFFICER) {
-      switch (activeTab) {
-        case "projects":
-          return <ProjectsHub mode="doe" externalProjectId={selectedProjectId} externalProjectTab={selectedProjectTab} />;
-        case "dashboard":
-        case "regional":
-        case "endorsements":
-        case "kpis":
-        case "blacklisting":
-        case "all_vendors":
-          if (activeTab === "all_vendors") {
-            return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={setViewingVendorProfile} />;
-          }
-          return activeTab === "blacklisting" ? (
-            <Blacklisting currentUser={currentUser} />
-          ) : (
-            <PortfolioMonitoringView
-              title="Department of Energy"
-              description={`Regional GIS and KPI monitoring for ${currentUser?.region || "the assigned region"}.`}
-              emptyProjectsMessage="No projects are currently assigned to this regional scope."
+     if (role === UserRole.DOE_OFFICER) {
+       const handleTabChange = (tab: string) => setActiveTab(tab as any);
+       switch (activeTab) {
+case "projects":
+            return <ProjectsHub mode="doe" externalProjectId={selectedProjectId} externalProjectTab={selectedProjectTab} />;
+          case "dashboard":
+            return <DoeDashboard currentUser={currentUser} onNavigate={handleTabChange} />;
+          case "regional":
+          case "kpis":
+          case "blacklisting":
+          case "all_vendors":
+          case "reports":
+           if (activeTab === "all_vendors") {
+             return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={setViewingVendorProfile} />;
+           }
+if (activeTab === "reports") {
+              return <DoeReports currentUser={currentUser} />;
+            }
+            return activeTab === "blacklisting" ? (
+              <Blacklisting currentUser={currentUser} />
+            ) : (
+              <PortfolioMonitoringView
+                title={activeTab === "kpis" ? "KPI Review" : "Department of Energy"}
+                description={activeTab === "kpis" 
+                  ? `Regional KPI performance for ${currentUser?.region || "the assigned region"}.`
+                  : `Regional GIS and KPI monitoring for ${currentUser?.region || "the assigned region"}.`}
+                emptyProjectsMessage="No projects are currently assigned to this regional scope."
             />
           );
         default:
@@ -19941,14 +19875,15 @@ export default function App() {
         case "funding":
         case "compliance":
         case "all_vendors":
+        case "reports":
           if (activeTab === "all_vendors") {
             return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={setViewingVendorProfile} />;
           }
+          if (activeTab === "reports") {
+            return <PscReports currentUser={currentUser} />;
+          }
           return (
-            <MacroKpiPortal
-              title="Project Steering Committee"
-              description="Macro portfolio monitoring for national progress, inclusion compliance, payment pacing, and system alerts."
-            />
+            <PscDashboard currentUser={currentUser} />
           );
         case "payments":
           return <Disbursements onOpenProjectKpi={openProjectKpiView} />;
@@ -19965,57 +19900,22 @@ export default function App() {
       switch (activeTab) {
         case "projects":
           return <ProjectsHub mode="auditor" externalProjectId={selectedProjectId} externalProjectTab={selectedProjectTab} />;
-        case "dashboard":
-          return (
-            <PortfolioMonitoringView
-              title="Auditor Portal"
-              description="Read-only GIS, KPI, and project evidence monitoring for compliance and anomaly review."
-            />
-          );
-        case "gis":
-          return (
-            <PortfolioMonitoringView
-              title="Auditor Portal"
-              description="Read-only GIS, KPI, and project evidence monitoring for compliance and anomaly review."
-            />
-          );
-        case "kpi_dashboard":
-          return (
-            <PortfolioMonitoringView
-              title="Auditor Portal"
-              description="Read-only GIS, KPI, and project evidence monitoring for compliance and anomaly review."
-            />
-          );
-        case "audit_logs":
-          return (
-            <PortfolioMonitoringView
-              title="Auditor Portal"
-              description="Read-only GIS, KPI, and project evidence monitoring for compliance and anomaly review."
-            />
-          );
-        case "anomaly_report":
-          return (
-            <PortfolioMonitoringView
-              title="Auditor Portal"
-              description="Read-only GIS, KPI, and project evidence monitoring for compliance and anomaly review."
-            />
-          );
-        case "claims_audit":
-          return (
-            <PortfolioMonitoringView
-              title="Auditor Portal"
-              description="Read-only GIS, KPI, and project evidence monitoring for compliance and anomaly review."
-            />
-          );
-        case "prospect_sync":
-          return (
-            <PortfolioMonitoringView
-              title="Auditor Portal"
-              description="Read-only GIS, KPI, and project evidence monitoring for compliance and anomaly review."
-            />
-          );
-        case "reports":
-          return <Reports />;
+case "dashboard":
+            return <AuditorDashboard />;
+          case "gis":
+            return <AuditorGisMap />;
+          case "kpi_dashboard":
+            return <AuditorKpiDashboard />;
+          case "audit_logs":
+            return <AuditorAuditLogs />;
+          case "anomaly_report":
+            return <AuditorAnomalyReport />;
+          case "claims_audit":
+            return <AuditorClaimsAudit />;
+          case "prospect_sync":
+            return <AuditorProspectSyncLog />;
+          case "reports":
+            return <Reports currentUser={currentUser} />;
         case "notifications":
           return <NotificationLogs logs={notifications} onSelect={handleNotificationSelect} />;
         case "all_vendors":
@@ -20032,13 +19932,22 @@ export default function App() {
 
     // Default RBF Official view
     switch (activeTab) {
-      case "dashboard":
-        return (
-          <MacroKpiPortal
-            title="RMT Dashboard"
-            description="Macro oversight across Lesotho with national progress, district performance, payment pacing, inclusion compliance, and live red flags."
-          />
-        );
+case "dashboard":
+            return (
+              <PortfolioMonitoringView
+                title="Department of Energy"
+                description={`Regional GIS and KPI monitoring for ${currentUser?.region || "the assigned region"}.`}
+                emptyProjectsMessage="No projects are currently assigned to this regional scope."
+              />
+            );
+          case "regional":
+            return (
+              <PortfolioMonitoringView
+                title="Department of Energy"
+                description={`Regional GIS and KPI monitoring for ${currentUser?.region || "the assigned region"}.`}
+                emptyProjectsMessage="No projects are currently assigned to this regional scope."
+              />
+            );
       case "evaluations": return <TACView mode="financial" />;
       case "tenders": return (
         <Tenders
@@ -20089,7 +19998,6 @@ export default function App() {
         { id: "projects", icon: FolderKanban, label: "Projects" },
         { id: "payments", icon: CreditCard, label: "Claim Reviews" },
         { id: "evaluations", icon: ClipboardCheck, label: "Evaluations", badge: "4" },
-        { id: "scoring", icon: BarChart3, label: "Scoring Matrix" },
         { id: "blacklisting", icon: FileWarning, label: "Blacklisting" },
       ];
     }
@@ -20118,28 +20026,27 @@ export default function App() {
       ];
     }
 
-    if (role === UserRole.DOE_OFFICER) {
-      return [
-        ...common,
-        { id: "all_vendors", icon: Users, label: "All Vendors" },
-        { id: "projects", icon: FolderKanban, label: "Regional Projects" },
-        { id: "regional", icon: MapIcon, label: "Regional Monitoring" },
-        { id: "endorsements", icon: CheckCircle2, label: "Endorsements" },
-        { id: "kpis", icon: BarChart3, label: "KPI Review" },
-        { id: "blacklisting", icon: FileWarning, label: "Blacklisting" },
-      ];
-    }
-
-     if (role === UserRole.UNDP_DONOR) {
+if (role === UserRole.DOE_OFFICER) {
        return [
          ...common,
          { id: "all_vendors", icon: Users, label: "All Vendors" },
-         { id: "portfolio", icon: FolderKanban, label: "Portfolio Overview" },
-         { id: "payments", icon: CreditCard, label: "Disbursements" },
-         { id: "reports", icon: BarChart3, label: "Briefings & Reports" },
-         { id: "notifications", icon: Bell, label: "Briefings" },
+         { id: "projects", icon: FolderKanban, label: "Regional Projects" },
+         { id: "regional", icon: MapIcon, label: "Regional Monitoring" },
+         { id: "kpis", icon: BarChart3, label: "KPI Review" },
+         { id: "blacklisting", icon: FileWarning, label: "Blacklisting" },
        ];
      }
+
+     if (role === UserRole.UNDP_DONOR) {
+      return [
+        ...common,
+        { id: "all_vendors", icon: Users, label: "All Vendors" },
+        { id: "portfolio", icon: FolderKanban, label: "Portfolio Overview" },
+        { id: "payments", icon: CreditCard, label: "Disbursements" },
+        { id: "reports", icon: BarChart3, label: "Briefings & Reports" },
+        { id: "notifications", icon: Bell, label: "Briefings" },
+      ];
+    }
 
     if (role === UserRole.AUDITOR) {
       return [

@@ -8,7 +8,52 @@ import {
   RefreshCw,
   TrendingUp,
 } from "lucide-react";
-import { fetchTenderBids, fetchPaymentClaims } from "../api";
+import { fetchTenderBids, fetchPaymentClaims, fetchReportTemplates, fetchReportHistory, generateReport, downloadGeneratedReport } from "../api";
+import { ReportFormat, ReportHistoryItem, ReportTemplate, User, UserRole } from "../types";
+import { ReportsHub } from "./ReportsHub";
+
+function saveBlob(blob: Blob, filename: string) {
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download = filename;
+  anchor.click();
+  URL.revokeObjectURL(objectUrl);
+}
+
+function formatFormat(format: ReportFormat) {
+  if (format === "excel") return "Excel";
+  return format.toUpperCase();
+}
+
+function filenameFor(reportType: string, format: ReportFormat) {
+  const safe = reportType.replace(/[^a-z0-9_-]+/gi, "_");
+  const ext = format === "excel" ? "xlsx" : format;
+  return `${safe}.${ext}`;
+}
+
+function isPerProjectTemplate(templateId: string) {
+  return [
+    "rmt_kpi_project",
+    "rmt_verification_project",
+    "doe_regional_progress",
+    "doe_verification_summary",
+  ].includes(templateId);
+}
+
+export function TacReports() {
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-900">TAC Reports</h1>
+          <p className="text-sm text-slate-500">Technical Advisory Committee reports and audit trails.</p>
+        </div>
+      </div>
+      <ReportsHub currentUser={{ role: UserRole.TAC }} />
+    </div>
+  );
+}
 
 export function TacDashboard({ currentUser }: { currentUser: any }) {
   const [loading, setLoading] = useState(true);
