@@ -13,6 +13,9 @@ from .views import (
     AuditLogViewSet,
     ProspectSyncLogViewSet,
     AnomalyFlagViewSet,
+    ConcernViewSet,
+    ConcernResponseViewSet,
+    AuditFindingViewSet,
     ProjectReportTemplatesView,
     ProjectReportGenerateView,
     ProjectReportHistoryView,
@@ -31,6 +34,9 @@ router.register(r'installations', InstallationReportViewSet, basename='installat
 router.register(r'verification-tasks', VerificationTaskViewSet, basename='verification-task')
 router.register(r'smart-meter-readings', SmartMeterReadingViewSet, basename='smart-meter-reading')
 router.register(r'milestones', MilestoneViewSet, basename='milestone')
+router.register(r'concerns', ConcernViewSet, basename='concern')
+router.register(r'concern-responses', ConcernResponseViewSet, basename='concern-response')
+router.register(r'audit-findings', AuditFindingViewSet, basename='audit-finding')
 router.register(r'', ProjectViewSet, basename='project')
 
 urlpatterns = router.urls + [

@@ -42,6 +42,14 @@ import {
   ReportTemplate,
   ReportHistoryItem,
   ReportFormat,
+  Concern,
+  ConcernResponse,
+  AuditFinding,
+  ConcernType,
+  ConcernSeverity,
+  ConcernStatus,
+  FindingCategory,
+  RiskLevel,
 } from "./types";
 
 const env = (import.meta as any)?.env ?? {};
@@ -3350,4 +3358,178 @@ export async function verifyRegistrationOtp(email: string, otp: string): Promise
     headers: { "X-Skip-Auth": "1" } as any,
     body: JSON.stringify({ email, otp }),
   });
+}
+
+function mapConcernFromApi(api: any): Concern {
+  return {
+    id: String(api.id ?? ""),
+    raisedBy: String(api.raised_by ?? ""),
+    raisedByUsername: api.raised_by_username ?? undefined,
+    raisedByRole: api.raised_by_role ?? "doe",
+    raisedByRegion: api.raised_by_region ?? undefined,
+    concernType: api.concern_type ?? ConcernType.OTHER,
+    severity: api.severity ?? ConcernSeverity.LOW,
+    linkedProject: api.linked_project ?? undefined,
+    linkedProjectName: api.linked_project_ref ?? api.linked_project_name ?? undefined,
+    linkedProjectVendor: api.linked_project_vendor ?? undefined,
+    linkedProjectDistrict: api.linked_project_district ?? undefined,
+    linkedInstallation: api.linked_installation ?? undefined,
+    linkedClaim: api.linked_claim ?? undefined,
+    description: api.description ?? "",
+    evidenceFiles: Array.isArray(api.evidence_files) ? api.evidence_files : undefined,
+    status: api.status ?? ConcernStatus.OPEN,
+    createdAt: api.created_at ?? "",
+    updatedAt: api.updated_at ?? undefined,
+    notifyRmt: api.notify_rmt,
+    notifyPsc: api.notify_psc,
+    responses: Array.isArray(api.responses) ? api.responses.map(mapConcernResponseFromApi) : undefined,
+  };
+}
+
+function mapConcernResponseFromApi(api: any): ConcernResponse {
+  return {
+    id: String(api.id ?? ""),
+    concernId: String(api.concern ?? ""),
+    respondedBy: String(api.responded_by ?? ""),
+    respondedByUsername: api.responded_by_username ?? undefined,
+    respondedByRole: api.responded_by_role ?? undefined,
+    responseText: api.response_text ?? "",
+    actionTaken: api.action_taken ?? "under_investigation",
+    evidenceFiles: Array.isArray(api.evidence_files) ? api.evidence_files : undefined,
+    createdAt: api.created_at ?? "",
+  };
+}
+
+function mapAuditFindingFromApi(api: any): AuditFinding {
+  return {
+    id: String(api.id ?? ""),
+    findingReference: api.finding_reference ?? undefined,
+    raisedBy: String(api.raised_by ?? ""),
+    raisedByUsername: api.raised_by_username ?? undefined,
+    raisedByRole: api.raised_by_role ?? undefined,
+    raisedByRegion: api.raised_by_region ?? undefined,
+    findingCategory: api.finding_category ?? FindingCategory.OTHER_COMPLIANCE,
+    riskLevel: api.risk_level ?? RiskLevel.OBSERVATION,
+    linkedProject: api.linked_project ?? undefined,
+    linkedProjectName: api.linked_project_ref ?? api.linked_project_name ?? undefined,
+    linkedProjectVendor: api.linked_project_vendor ?? undefined,
+    linkedProjectDistrict: api.linked_project_district ?? undefined,
+    linkedClaim: api.linked_claim ?? undefined,
+    linkedInstallation: api.linked_installation ?? undefined,
+    linkedAuditLog: api.linked_audit_log ?? undefined,
+    description: api.description ?? "",
+    recommendedAction: api.recommended_action ?? undefined,
+    evidenceFiles: Array.isArray(api.evidence_files) ? api.evidence_files : undefined,
+    status: api.status ?? ConcernStatus.OPEN,
+    rmtResponse: api.rmt_response ?? undefined,
+    rmtActionTaken: api.rmt_action_taken ?? undefined,
+    rmtRespondedAt: api.rmt_responded_at ?? undefined,
+    pscComment: api.psc_comment ?? undefined,
+    pscCommentedAt: api.psc_commented_at ?? undefined,
+    pscNotified: Boolean(api.psc_notified || api.notify_psc),
+    superAdminNotified: Boolean(api.super_admin_notified),
+    createdAt: api.created_at ?? "",
+    updatedAt: api.updated_at ?? undefined,
+  };
+}
+
+export async function fetchConcerns(): Promise<Concern[]> {
+  const data = await http<any>(`/api/projects/concerns/`);
+  const items = unwrapListResponse<any>(data);
+  return items.map(mapConcernFromApi);
+}
+
+export async function createConcern(concern: {
+  concern_type: ConcernType;
+  severity: ConcernSeverity;
+  linked_project?: string;
+  linked_installation?: string;
+  description: string;
+  evidence_files?: string[];
+  notify_rmt?: boolean;
+  notify_psc?: boolean;
+}): Promise<Concern> {
+  const data = await http<any>(`/api/projects/concerns/`, {
+    method: "POST",
+    body: JSON.stringify(concern),
+  });
+  return mapConcernFromApi(data);
+}
+
+export async function updateConcern(concernId: string, data: {
+  status?: string;
+  notify_psc?: boolean;
+  notify_rmt?: boolean;
+}): Promise<Concern> {
+  const result = await http<any>(`/api/projects/concerns/${concernId}/`, {
+    method: "PATCH",
+    body: JSON.stringify(data),
+  });
+  return mapConcernFromApi(result);
+}
+
+export async function fetchConcernResponses(concernId: string): Promise<ConcernResponse[]> {
+  const data = await http<any>(`/api/projects/concern-responses/?concern=${concernId}`);
+  const items = unwrapListResponse<any>(data);
+  return items.map(mapConcernResponseFromApi);
+}
+
+export async function createConcernResponse(concernId: string, response: {
+  response_text: string;
+  action_taken?: string;
+  evidence_files?: string[];
+  responded_by?: string | number;
+}): Promise<ConcernResponse> {
+  const data = await http<any>(`/api/projects/concern-responses/`, {
+    method: "POST",
+    body: JSON.stringify({ concern: concernId, responded_by: response.responded_by, response_text: response.response_text, action_taken: response.action_taken, evidence_files: response.evidence_files }),
+  });
+  return mapConcernResponseFromApi(data);
+}
+
+export async function fetchAuditFindings(): Promise<AuditFinding[]> {
+  const data = await http<any>(`/api/projects/audit-findings/`);
+  const items = unwrapListResponse<any>(data);
+  return items.map(mapAuditFindingFromApi);
+}
+
+export async function createAuditFinding(finding: {
+  finding_category: FindingCategory;
+  risk_level: RiskLevel;
+  linked_project?: string;
+  linked_claim?: string;
+  linked_installation?: string;
+  description: string;
+  recommended_action?: string;
+  evidence_files?: string[];
+  rised_to_rmt?: boolean;
+  rised_to_psc?: boolean;
+  rised_to_super_admin?: boolean;
+}): Promise<AuditFinding> {
+  const data = await http<any>(`/api/projects/audit-findings/`, {
+    method: "POST",
+    body: JSON.stringify(finding),
+  });
+  return mapAuditFindingFromApi(data);
+}
+
+export async function updateAuditFinding(findingId: string, data: {
+  status?: string;
+}): Promise<AuditFinding> {
+  const result = await http<any>(`/api/projects/audit-findings/${findingId}/`, {
+    method: "PATCH",
+    body: JSON.stringify(data),
+  });
+  return mapAuditFindingFromApi(result);
+}
+
+export async function respondAuditFinding(findingId: string, response: {
+  response: string;
+  action_taken: string;
+}): Promise<any> {
+  const data = await http<any>(`/api/projects/audit-findings/${findingId}/respond/`, {
+    method: "POST",
+    body: JSON.stringify(response),
+  });
+  return data;
 }

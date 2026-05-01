@@ -207,8 +207,9 @@ import PortfolioKpiSummary from "./components/PortfolioKpiSummary";
 import PortfolioMonitoringView from "./components/PortfolioMonitoringView";
 import { FieldOperationalKpiPanel, MacroKpiPortal, VendorKpiPanel } from "./components/RoleBasedKpiPanels";
 import SuperAdminPortal from "./components/SuperAdminPortal";
-import { DoeDashboard, DoeReports } from "./components/DoePortal";
-import { PscReports } from "./components/PscPortal";
+import { DoeDashboard, DoeRegionalMap, DoeReports } from "./components/DoePortal";
+import RmtIssuesFindings from "./components/RmtIssuesFindings";
+import { PscReports, PscDashboard, default as PscIssuesView } from "./components/PscPortal";
 import { TacReports } from "./components/TacPortal";
 import { ReportsHub } from "./components/ReportsHub";
 import {
@@ -217,10 +218,10 @@ import {
   AuditorKpiDashboard,
   AuditorAuditLogs,
   AuditorAnomalyReport,
+  AuditorAuditFindings,
   AuditorClaimsAudit,
   AuditorProspectSyncLog
 } from "./components/AuditorPortal";
-import { PscDashboard } from "./components/PscPortal";
 
 // --- Components ---
 
@@ -12816,6 +12817,10 @@ const ProjectsHub = ({
       const matchedProject = projects.find((project) => project.id === externalProjectId);
       if (matchedProject) {
         setSelectedProject(matchedProject);
+        setTimeout(() => {
+          const el = document.getElementById(`project-card-${externalProjectId}`);
+          el?.scrollIntoView({ behavior: "smooth", block: "center" });
+        }, 100);
       }
     } else if (!externalProjectId) {
       setSelectedProject(null);
@@ -14239,7 +14244,7 @@ const ProjectsHub = ({
               )}
               {canFlagConcern && (
                 <>
-                  <button onClick={() => void handleAddProjectNote(project, "DoE concern", "Describe the concern to send to RMT.")} className="btn-secondary text-xs">Flag Concern to RMT</button>
+                  <button onClick={() => window.location.href = "?tab=dashboard"} className="btn-secondary text-xs">Flag Concern to RMT</button>
                   <button onClick={() => handleGenerateProjectReport(project)} className="btn-secondary text-xs">Export Regional Report</button>
                   <button onClick={() => setProjectTab("installations")} className="btn-secondary text-xs">View on Regional Map</button>
                 </>
@@ -16031,7 +16036,7 @@ const ProjectsHub = ({
                       .reduce((sum, claim) => sum + Number(claim.claimAmount || 0), 0);
                     return (
                       <React.Fragment key={project.id}>
-                        <tr className={`border-t border-slate-100 ${statusMeta.rowClass}`}>
+                        <tr id={`project-card-${project.id}`} className={`border-t border-slate-100 ${statusMeta.rowClass}`}>
                           <td className="px-4 py-3 font-semibold text-slate-900">{project.projectReference || `PRJ-${project.id}`}</td>
                           {!isUndpPortal && <td className="px-4 py-3">{project.vendorName || "N/A"}</td>}
                           <td className="px-4 py-3">{project.techType || "N/A"}</td>
@@ -19428,6 +19433,24 @@ export default function App() {
   const [authMessage, setAuthMessage] = useState<string | null>(null);
   const [fieldVerifierInspectionBadge, setFieldVerifierInspectionBadge] = useState<string | undefined>(undefined);
   const [viewingVendorProfile, setViewingVendorProfile] = useState<string | null>(null);
+  const [showDoeConcernModal, setShowDoeConcernModal] = useState(false);
+  const [selectedProjectForConcern, setSelectedProjectForConcern] = useState<Project | null>(null);
+  const [doeConcernType, setDoeConcernType] = useState("");
+
+  React.useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const tab = params.get("tab");
+    const projectId = params.get("projectId");
+    const projectTab = params.get("projectTab");
+    if (tab) setActiveTab(tab);
+    if (projectId) setSelectedProjectId(projectId);
+    if (projectTab) setSelectedProjectTab(projectTab);
+  }, []);
+  const [doeConcernSeverity, setDoeConcernSeverity] = useState("");
+  const [doeConcernDesc, setDoeConcernDesc] = useState("");
+  const [doeConcernNotifyPsc, setDoeConcernNotifyPsc] = useState(false);
+  const [doeConcernSubmitting, setDoeConcernSubmitting] = useState(false);
   const isApplyingBrowserStateRef = React.useRef(false);
   const lastBrowserStateKeyRef = React.useRef("");
 
@@ -19832,14 +19855,15 @@ case "projects":
             return <ProjectsHub mode="doe" externalProjectId={selectedProjectId} externalProjectTab={selectedProjectTab} />;
           case "dashboard":
             return <DoeDashboard currentUser={currentUser} onNavigate={handleTabChange} />;
-          case "regional":
+case "regional":
+            return <DoeRegionalMap currentUser={currentUser} />;
           case "kpis":
           case "blacklisting":
           case "all_vendors":
           case "reports":
-           if (activeTab === "all_vendors") {
-             return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={setViewingVendorProfile} />;
-           }
+            if (activeTab === "all_vendors") {
+              return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={setViewingVendorProfile} />;
+            }
 if (activeTab === "reports") {
               return <DoeReports currentUser={currentUser} />;
             }
@@ -19876,11 +19900,15 @@ if (activeTab === "reports") {
         case "compliance":
         case "all_vendors":
         case "reports":
+        case "issues":
           if (activeTab === "all_vendors") {
             return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={setViewingVendorProfile} />;
           }
           if (activeTab === "reports") {
             return <PscReports currentUser={currentUser} />;
+          }
+          if (activeTab === "issues") {
+            return <PscIssuesView currentUser={currentUser} />;
           }
           return (
             <PscDashboard currentUser={currentUser} />
@@ -19916,6 +19944,8 @@ case "dashboard":
             return <AuditorProspectSyncLog />;
           case "reports":
             return <Reports currentUser={currentUser} />;
+          case "audit_findings":
+            return <AuditorAuditFindings currentUser={currentUser} />;
         case "notifications":
           return <NotificationLogs logs={notifications} onSelect={handleNotificationSelect} />;
         case "all_vendors":
@@ -19961,6 +19991,8 @@ case "dashboard":
       case "blacklisting": return <Blacklisting currentUser={currentUser} />;
       case "payments": return <Disbursements onOpenProjectKpi={openProjectKpiView} />;
       case "all_vendors": return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={setViewingVendorProfile} />;
+      case "issues_findings": return <RmtIssuesFindings currentUser={currentUser} />;
+      case "notifications": return <NotificationLogs logs={notifications} onSelect={handleNotificationSelect} />;
       default:
         return (
           <MacroKpiPortal
@@ -20043,6 +20075,7 @@ if (role === UserRole.DOE_OFFICER) {
         { id: "all_vendors", icon: Users, label: "All Vendors" },
         { id: "portfolio", icon: FolderKanban, label: "Portfolio Overview" },
         { id: "payments", icon: CreditCard, label: "Disbursements" },
+        { id: "issues", icon: AlertTriangle, label: "Issues" },
         { id: "reports", icon: BarChart3, label: "Briefings & Reports" },
         { id: "notifications", icon: Bell, label: "Briefings" },
       ];
@@ -20055,6 +20088,7 @@ if (role === UserRole.DOE_OFFICER) {
         { id: "gis", icon: MapIcon, label: "GIS Map" },
         { id: "kpi_dashboard", icon: BarChart3, label: "KPI Dashboard" },
         { id: "audit_logs", icon: FileText, label: "Audit Logs" },
+        { id: "audit_findings", icon: FileText, label: "Audit Findings" },
         { id: "anomaly_report", icon: AlertTriangle, label: "Anomaly Report" },
         { id: "claims_audit", icon: ClipboardCheck, label: "Claims Audit" },
         { id: "prospect_sync", icon: History, label: "Prospect Sync Log" },
@@ -20076,6 +20110,8 @@ if (role === UserRole.DOE_OFFICER) {
       { id: "gis", icon: MapIcon, label: "GIS Mapping" },
       { id: "payments", icon: CreditCard, label: "Disbursements" },
       { id: "reports", icon: BarChart3, label: "Reports" },
+      { id: "issues_findings", icon: AlertTriangle, label: "Issues & Findings" },
+      { id: "notifications", icon: Bell, label: "Notifications" },
     ];
   };
 

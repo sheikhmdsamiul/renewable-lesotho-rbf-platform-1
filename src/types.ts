@@ -1304,3 +1304,114 @@ export interface AnomalyFlag {
   createdAt: string;
   resolvedAt?: string;
 }
+
+export enum ConcernType {
+  KPI_ISSUE = "kpi_issue",
+  GPS_ISSUE = "gps_issue",
+  VERIFICATION_ISSUE = "verification_issue",
+  VENDOR_BEHAVIOUR = "vendor_behaviour",
+  INSTALLATION_QUALITY = "installation_quality",
+  DATA_DISCREPANCY = "data_discrepancy",
+  OTHER = "other",
+}
+
+export enum ConcernSeverity {
+  LOW = "low",
+  MEDIUM = "medium",
+  HIGH = "high",
+  CRITICAL = "critical",
+}
+
+export enum ConcernStatus {
+  OPEN = "open",
+  UNDER_INVESTIGATION = "under_investigation",
+  RESOLVED = "resolved",
+  DISMISSED = "dismissed",
+  ESCALATED_TO_PSC = "escalated_to_psc",
+}
+
+export interface Concern {
+  id: string;
+  raisedBy: string;
+  raisedByUsername?: string;
+  raisedByRole: "doe" | "auditor";
+  raisedByRegion?: string;
+  concernType: ConcernType;
+  severity: ConcernSeverity;
+  linkedProject?: string;
+  linkedProjectName?: string;
+  linkedProjectVendor?: string;
+  linkedProjectDistrict?: string;
+  linkedInstallation?: string;
+  linkedClaim?: string;
+  description: string;
+  evidenceFiles?: Array<{ url: string; name: string }>;
+  status: ConcernStatus;
+  createdAt: string;
+  updatedAt?: string;
+  notifyRmt?: boolean;
+  notifyPsc?: boolean;
+  responses?: ConcernResponse[];
+}
+
+export interface ConcernResponse {
+  id: string;
+  concernId: string;
+  respondedBy: string;
+  respondedByUsername?: string;
+  respondedByRole?: string;
+  responseText: string;
+  actionTaken: "under_investigation" | "action_initiated" | "resolved" | "escalated_to_psc" | "dismissed" | "issue_confirmed" | "payment_suspended" | "blacklist_initiated";
+  evidenceFiles?: Array<{ url: string; name: string }>;
+  createdAt: string;
+}
+
+export enum FindingCategory {
+  PAYMENT_COMPLIANCE = "payment_compliance",
+  APPROVAL_CHAIN_VIOLATION = "approval_chain_violation",
+  DATA_INTEGRITY = "data_integrity",
+  GPS_LOCATION_FRAUD = "gps_location_fraud",
+  KPI_MANIPULATION = "kpi_manipulation",
+  DOCUMENT_IRREGULARITY = "document_irregularity",
+  PROCESS_VIOLATION = "process_violation",
+  CONFLICT_OF_INTEREST = "conflict_of_interest",
+  OTHER_COMPLIANCE = "other_compliance",
+}
+
+export enum RiskLevel {
+  OBSERVATION = "observation",
+  MINOR_FINDING = "minor_finding",
+  MAJOR_FINDING = "major_finding",
+  CRITICAL = "critical",
+}
+
+export interface AuditFinding {
+  id: string;
+  findingReference?: string;
+  raisedBy: string;
+  raisedByUsername?: string;
+  raisedByRole?: string;
+  raisedByRegion?: string;
+  findingCategory: FindingCategory;
+  riskLevel: RiskLevel;
+  linkedProject?: string;
+  linkedProjectName?: string;
+  linkedProjectVendor?: string;
+  linkedProjectDistrict?: string;
+  linkedClaim?: string;
+  linkedInstallation?: string;
+  linkedAuditLog?: string;
+  description: string;
+  recommendedAction?: string;
+  evidenceFiles?: Array<{ url: string; name: string }>;
+  status: ConcernStatus;
+  rmtResponse?: string;
+  rmtActionTaken?: string;
+  rmtRespondedAt?: string;
+  pscComment?: string;
+  pscCommentedAt?: string;
+  pscNotified?: boolean;
+  superAdminNotified?: boolean;
+  createdAt: string;
+  updatedAt?: string;
+}

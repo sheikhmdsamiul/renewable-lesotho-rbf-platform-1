@@ -649,3 +649,181 @@ class ProspectSyncLog(models.Model):
 
     def __str__(self):
         return f"{self.method_name} ({self.status})"
+
+
+class ConcernType(models.TextChoices):
+    KPI_ISSUE = 'kpi_issue', 'KPI Issue'
+    GPS_ISSUE = 'gps_issue', 'GPS / Location Issue'
+    VERIFICATION_ISSUE = 'verification_issue', 'Field Verification Issue'
+    VENDOR_BEHAVIOUR = 'vendor_behaviour', 'Vendor Behaviour'
+    INSTALLATION_QUALITY = 'installation_quality', 'Installation Quality'
+    DATA_DISCREPANCY = 'data_discrepancy', 'Data Discrepancy'
+    OTHER = 'other', 'Other'
+
+
+class ConcernSeverity(models.TextChoices):
+    LOW = 'low', 'Low'
+    MEDIUM = 'medium', 'Medium'
+    HIGH = 'high', 'High'
+    CRITICAL = 'critical', 'Critical'
+
+
+class ConcernStatus(models.TextChoices):
+    OPEN = 'open', 'Open'
+    UNDER_INVESTIGATION = 'under_investigation', 'Under Investigation'
+    RESOLVED = 'resolved', 'Resolved'
+    DISMISSED = 'dismissed', 'Dismissed'
+    ESCALATED_TO_PSC = 'escalated_to_psc', 'Escalated to PSC'
+
+
+class Concern(models.Model):
+    id = models.CharField(max_length=20, primary_key=True)
+    raised_by = models.ForeignKey('users.User', on_delete=models.CASCADE, related_name='raised_concerns')
+    concern_type = models.CharField(max_length=32, choices=ConcernType.choices)
+    severity = models.CharField(max_length=16, choices=ConcernSeverity.choices)
+    linked_project = models.ForeignKey(
+        'projects.Project', on_delete=models.CASCADE,
+        related_name='concerns', null=True, blank=True
+    )
+    linked_installation = models.ForeignKey(
+        'InstallationReport', on_delete=models.CASCADE,
+        related_name='concerns', null=True, blank=True
+    )
+    description = models.TextField()
+    evidence_files = models.JSONField(default=list, blank=True)
+    status = models.CharField(
+        max_length=24, choices=ConcernStatus.choices,
+        default=ConcernStatus.OPEN
+    )
+    notify_rmt = models.BooleanField(default=True)
+    notify_psc = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['raised_by']),
+            models.Index(fields=['status']),
+            models.Index(fields=['severity']),
+        ]
+
+    def __str__(self):
+        return f"{self.id} - {self.concern_type} ({self.severity})"
+
+    def save(self, *args, **kwargs):
+        if not self.id:
+            last_concern = Concern.objects.order_by('-created_at').first()
+            next_num = 1 if not last_concern else int(last_concern.id.split('-')[1]) + 1
+            self.id = f"CNC-{next_num:03d}"
+        super().save(*args, **kwargs)
+
+
+class ConcernResponse(models.Model):
+    concern = models.ForeignKey(
+        Concern, on_delete=models.CASCADE,
+        related_name='responses'
+    )
+    responded_by = models.ForeignKey('users.User', on_delete=models.CASCADE)
+    response_text = models.TextField()
+    action_taken = models.CharField(max_length=32, blank=True)
+    evidence_files = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['created_at']
+
+    def __str__(self):
+        return f"Response to {self.concern_id}"
+
+
+class FindingCategory(models.TextChoices):
+    PAYMENT_COMPLIANCE = 'payment_compliance', 'Payment Compliance'
+    APPROVAL_CHAIN_VIOLATION = 'approval_chain_violation', 'Approval Chain Violation'
+    DATA_INTEGRITY = 'data_integrity', 'Data Integrity'
+    GPS_FRAUD = 'gps_fraud', 'GPS / Location Fraud'
+    KPI_MANIPULATION = 'kpi_manipulation', 'KPI Manipulation'
+    DOCUMENT_IRREGULARITY = 'document_irregularity', 'Document Irregularity'
+    PROCESS_VIOLATION = 'process_violation', 'Process Violation'
+    CONFLICT_OF_INTEREST = 'conflict_of_interest', 'Conflict of Interest'
+    OTHER = 'other', 'Other Compliance Issue'
+
+
+class FindingRiskLevel(models.TextChoices):
+    OBSERVATION = 'observation', 'Observation'
+    MINOR = 'minor', 'Minor Finding'
+    MAJOR = 'major', 'Major Finding'
+    CRITICAL = 'critical', 'Critical'
+
+
+class AuditFinding(models.Model):
+    id = models.CharField(max_length=24, primary_key=True)
+    raised_by = models.ForeignKey(
+        'users.User', on_delete=models.CASCADE,
+        related_name='raised_findings'
+    )
+    finding_category = models.CharField(
+        max_length=32, choices=FindingCategory.choices
+    )
+    risk_level = models.CharField(
+        max_length=16, choices=FindingRiskLevel.choices
+    )
+    linked_project = models.ForeignKey(
+        'projects.Project', on_delete=models.CASCADE,
+        related_name='audit_findings', null=True, blank=True
+    )
+    linked_claim = models.ForeignKey(
+        'PaymentClaim', on_delete=models.CASCADE,
+        related_name='audit_findings', null=True, blank=True
+    )
+    linked_installation = models.ForeignKey(
+        'InstallationReport', on_delete=models.CASCADE,
+        related_name='audit_findings', null=True, blank=True
+    )
+    description = models.TextField()
+    recommended_action = models.TextField(blank=True)
+    evidence_files = models.JSONField(default=list, blank=True)
+    status = models.CharField(
+        max_length=24, choices=ConcernStatus.choices,
+        default=ConcernStatus.OPEN
+    )
+    rised_to_rmt = models.BooleanField(default=True)
+    rised_to_psc = models.BooleanField(default=True)
+    rised_to_super_admin = models.BooleanField(default=False)
+    resolved = models.BooleanField(default=False)
+    rmt_response = models.TextField(blank=True, default="")
+    rmt_response_action = models.CharField(max_length=32, blank=True, default="")
+    rmt_responded_by = models.ForeignKey(
+        'users.User', on_delete=models.SET_NULL,
+        related_name='audit_finding_responses', null=True, blank=True
+    )
+    rmt_responded_at = models.DateTimeField(null=True, blank=True)
+    psc_comment = models.TextField(blank=True, default="")
+    psc_commented_at = models.DateTimeField(null=True, blank=True)
+    psc_commented_by = models.ForeignKey(
+        'users.User', on_delete=models.SET_NULL,
+        related_name='audit_finding_psc_comments', null=True, blank=True
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['raised_by']),
+            models.Index(fields=['status']),
+            models.Index(fields=['risk_level']),
+        ]
+
+    def __str__(self):
+        return f"{self.id} - {self.finding_category} ({self.risk_level})"
+
+    def save(self, *args, **kwargs):
+        if not self.id:
+            year = timezone.now().year
+            last_finding = AuditFinding.objects.filter(
+                id__startswith=f'AUD-FND-{year}'
+            ).order_by('-created_at').first()
+            next_num = 1 if not last_finding else int(last_finding.id.split('-')[-1]) + 1
+            self.id = f"AUD-FND-{year}-{next_num:03d}"
+        super().save(*args, **kwargs)

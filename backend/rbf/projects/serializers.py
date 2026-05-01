@@ -16,6 +16,9 @@ from .models import (
     AuditLog,
     ProspectSyncLog,
     AnomalyFlag,
+    Concern,
+    ConcernResponse,
+    AuditFinding,
 )
 from rbf.tenders.models import TenderContract
 from django.conf import settings
@@ -628,3 +631,41 @@ class AnomalyFlagSerializer(serializers.ModelSerializer):
         model = AnomalyFlag
         fields = '__all__'
         read_only_fields = ['id', 'created_at', 'resolved_at']
+
+
+class ConcernResponseSerializer(serializers.ModelSerializer):
+    responded_by_username = serializers.CharField(source='responded_by.username', read_only=True)
+
+    class Meta:
+        model = ConcernResponse
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at', 'responded_by_username']
+
+
+class ConcernSerializer(serializers.ModelSerializer):
+    raised_by_username = serializers.CharField(source='raised_by.username', read_only=True)
+    raised_by_role = serializers.CharField(source='raised_by.get_role_display', read_only=True)
+    raised_by_region = serializers.CharField(source='raised_by.region', read_only=True)
+    linked_project_ref = serializers.CharField(source='linked_project.project_reference', read_only=True, allow_null=True)
+    linked_project_vendor = serializers.CharField(source='linked_project.vendor.name', read_only=True, allow_null=True)
+    linked_project_district = serializers.CharField(source='linked_project.district', read_only=True, allow_null=True)
+    responses = ConcernResponseSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Concern
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at', 'updated_at', 'raised_by', 'raised_by_username', 'raised_by_role', 'raised_by_region', 'linked_project_ref', 'linked_project_vendor', 'linked_project_district']
+
+
+class AuditFindingSerializer(serializers.ModelSerializer):
+    raised_by_username = serializers.CharField(source='raised_by.username', read_only=True)
+    raised_by_role = serializers.CharField(source='raised_by.get_role_display', read_only=True)
+    raised_by_region = serializers.CharField(source='raised_by.region', read_only=True)
+    linked_project_ref = serializers.CharField(source='linked_project.project_reference', read_only=True, allow_null=True)
+    linked_project_vendor = serializers.CharField(source='linked_project.vendor.name', read_only=True, allow_null=True)
+    linked_project_district = serializers.CharField(source='linked_project.district', read_only=True, allow_null=True)
+
+    class Meta:
+        model = AuditFinding
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at', 'updated_at', 'raised_by', 'raised_by_username', 'raised_by_role', 'raised_by_region', 'linked_project_ref', 'linked_project_vendor', 'linked_project_district']

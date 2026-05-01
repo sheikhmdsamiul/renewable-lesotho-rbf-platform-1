@@ -20,6 +20,7 @@ import {
   FileSearch,
   CreditCard,
   Building2,
+  X,
 } from "lucide-react";
 import {
   fetchProjects,
@@ -32,6 +33,8 @@ import {
   fetchProspectSyncSummary,
   exportSystemAuditLogs,
   API_BASE,
+  fetchAuditFindings,
+  createAuditFinding,
 } from "../api";
 import {
   AuditLog,
@@ -41,7 +44,28 @@ import {
   PaymentClaim,
   ProspectSyncLog,
   UserRole,
+  FindingCategory,
+  RiskLevel,
 } from "../types";
+
+const FINDING_CATEGORIES = [
+  { value: "payment_compliance", label: "Payment Compliance", desc: "Payment made without required KPI conditions" },
+  { value: "approval_chain_violation", label: "Approval Chain Violation", desc: "Payment approved without full chain" },
+  { value: "data_integrity", label: "Data Integrity", desc: "Data mismatch between system and Prospect" },
+  { value: "gps_fraud", label: "GPS / Location Fraud", desc: "Suspicious GPS patterns or location fraud" },
+  { value: "kpi_manipulation", label: "KPI Manipulation", desc: "KPI data appears manipulated or fabricated" },
+  { value: "document_irregularity", label: "Document Irregularity", desc: "Missing, forged, or inconsistent documents" },
+  { value: "process_violation", label: "Process Violation", desc: "System process was bypassed or overridden" },
+  { value: "conflict_of_interest", label: "Conflict of Interest", desc: "Potential conflict between actors" },
+  { value: "other", label: "Other Compliance Issue", desc: "Other compliance issue" },
+];
+
+const RISK_LEVELS = [
+  { value: "observation", label: "Observation", desc: "Minor issue, note for record", color: "yellow" },
+  { value: "minor", label: "Minor Finding", desc: "Issue found, corrective action needed", color: "orange" },
+  { value: "major", label: "Major Finding", desc: "Serious breach, immediate action required", color: "red" },
+  { value: "critical", label: "Critical", desc: "Fraud suspected, escalate immediately", color: "rose" },
+];
 
 const formatDateTime = (value?: string | null) => (value ? new Date(value).toLocaleString() : "N/A");
 
@@ -992,6 +1016,354 @@ export function AuditorProspectSyncLog() {
             ))}
           </tbody>
         </table>
+      </div>
+    </div>
+  );
+}
+
+export function AuditorAuditFindings({ currentUser }: { currentUser: any }) {
+  const [loading, setLoading] = useState(true);
+  const [findings, setFindings] = useState<any[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [claims, setClaims] = useState<PaymentClaim[]>([]);
+  const [showFindingModal, setShowFindingModal] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+
+  const [findingCategory, setFindingCategory] = useState("");
+  const [riskLevel, setRiskLevel] = useState("");
+  const [linkedProject, setLinkedProject] = useState("");
+  const [linkedClaim, setLinkedClaim] = useState("");
+  const [description, setDescription] = useState("");
+  const [recommendedAction, setRecommendedAction] = useState("");
+  const [notifyRmt, setNotifyRmt] = useState(true);
+  const [notifyPsc, setNotifyPsc] = useState(true);
+  const [notifySuperAdmin, setNotifySuperAdmin] = useState(false);
+
+  const loadData = async () => {
+    setLoading(true);
+    try {
+      const [findingsData, projList, claimsData] = await Promise.all([
+        fetchAuditFindings(),
+        fetchProjects(),
+        fetchPaymentClaims(),
+      ]);
+      setFindings(findingsData);
+      setProjects(projList);
+      setClaims(claimsData);
+    } catch (err) {
+      console.error("Failed to load audit findings:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadData();
+  }, []);
+
+  const openFindings = findings.filter((f: any) => f.status === "open");
+  const resolvedFindings = findings.filter((f: any) => f.status === "resolved");
+
+  const handleSubmitFinding = async () => {
+    if (!findingCategory || !riskLevel || !description.trim()) {
+      alert("Please fill in all required fields.");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await createAuditFinding({
+        finding_category: findingCategory as FindingCategory,
+        risk_level: riskLevel as RiskLevel,
+        linked_project: linkedProject || undefined,
+        linked_claim: linkedClaim || undefined,
+        description: description,
+        recommended_action: recommendedAction,
+        rised_to_rmt: notifyRmt,
+        rised_to_psc: notifyPsc,
+        rised_to_super_admin: notifySuperAdmin,
+      });
+      alert("Audit finding submitted successfully!");
+      setShowFindingModal(false);
+      resetForm();
+      void loadData();
+    } catch (err) {
+      console.error("Failed to submit finding:", err);
+      alert("Failed to submit finding. Please try again.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const resetForm = () => {
+    setFindingCategory("");
+    setRiskLevel("");
+    setLinkedProject("");
+    setLinkedClaim("");
+    setDescription("");
+    setRecommendedAction("");
+    setNotifyRmt(true);
+    setNotifyPsc(true);
+    setNotifySuperAdmin(false);
+  };
+
+  if (loading) {
+    return (
+      <div className="card p-10 text-center text-slate-500">
+        <Loader2 size={24} className="animate-spin mx-auto mb-2" />
+        Loading audit findings...
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      {showFindingModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 overflow-y-auto">
+          <div className="bg-white rounded-2xl p-6 max-w-3xl w-full mx-4 my-8 shadow-xl max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                <FileText size={20} className="text-amber-600" />
+                Raise Audit Finding
+              </h3>
+              <button onClick={() => setShowFindingModal(false)} className="text-slate-400 hover:text-slate-600">
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="mb-4">
+              <label className="text-sm font-bold text-slate-900 mb-2 block">Finding Category *</label>
+              <div className="grid grid-cols-2 gap-2">
+                {FINDING_CATEGORIES.map((cat) => (
+                  <button
+                    key={cat.value}
+                    onClick={() => setFindingCategory(cat.value)}
+                    className={`p-3 rounded-xl text-left border transition-all ${
+                      findingCategory === cat.value
+                        ? "border-amber-500 bg-amber-50"
+                        : "border-slate-200 hover:border-slate-300"
+                    }`}
+                  >
+                    <p className="font-medium text-slate-900 text-sm">{cat.label}</p>
+                    <p className="text-xs text-slate-500">{cat.desc}</p>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="mb-4">
+              <label className="text-sm font-bold text-slate-900 mb-2 block">Risk Level *</label>
+              <div className="flex gap-2">
+                {RISK_LEVELS.map((level) => (
+                  <button
+                    key={level.value}
+                    onClick={() => setRiskLevel(level.value)}
+                    className={`flex-1 p-3 rounded-xl text-center border transition-all ${
+                      riskLevel === level.value
+                        ? level.color === "rose" ? "border-rose-500 bg-rose-50"
+                          : level.color === "red" ? "border-red-500 bg-red-50"
+                          : level.color === "orange" ? "border-orange-500 bg-orange-50"
+                          : "border-yellow-500 bg-yellow-50"
+                        : "border-slate-200 hover:border-slate-300"
+                    }`}
+                  >
+                    <p className="font-medium text-slate-900 text-sm">{level.label}</p>
+                    <p className="text-xs text-slate-500">{level.desc}</p>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4 mb-4">
+              <div>
+                <label className="text-sm font-bold text-slate-900 mb-2 block">Linked Project</label>
+                <select
+                  className="input-field"
+                  value={linkedProject}
+                  onChange={(e) => { setLinkedProject(e.target.value); setLinkedClaim(""); }}
+                >
+                  <option value="">Select project...</option>
+                  {projects.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.projectReference || `PRJ-${p.id}`} | {p.vendorName || p.vendorId || "Vendor"} | {p.techType || "Tech"} | {p.district || p.region || "Region"} | {p.status}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="text-sm font-bold text-slate-900 mb-2 block">
+                  Linked Payment Claim
+                  {!linkedProject && <span className="text-slate-400 text-xs ml-2">(select project first)</span>}
+                </label>
+                <select
+                  className="input-field"
+                  value={linkedClaim}
+                  onChange={(e) => setLinkedClaim(e.target.value)}
+                  disabled={!linkedProject}
+                >
+                  <option value="">{linkedProject ? "Select claim..." : "Select a project first"}</option>
+                  {claims.filter(c => !linkedProject || String(c.projectId) === linkedProject).map((c) => (
+                    <option key={c.id} value={c.id}>
+                      CLM-{c.id} | {c.milestoneId ? `M${c.milestoneId}` : "Milestone"} | ${c.claimAmount?.toLocaleString() || "0"} | {c.status}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="mb-4">
+              <label className="text-sm font-bold text-slate-900 mb-2 block">Finding Description *</label>
+              <textarea
+                className="input-field min-h-[150px]"
+                placeholder="Describe the audit finding in detail..."
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+              />
+            </div>
+
+            <div className="mb-4">
+              <label className="text-sm font-bold text-slate-900 mb-2 block">Recommended Action</label>
+              <textarea
+                className="input-field min-h-[100px]"
+                placeholder="What action do you recommend be taken?"
+                value={recommendedAction}
+                onChange={(e) => setRecommendedAction(e.target.value)}
+              />
+            </div>
+
+            <div className="mb-4">
+              <label className="text-sm font-bold text-slate-900 mb-2 block">Notify *</label>
+              <div className="space-y-2">
+                <label className="flex items-center gap-2 p-3 bg-slate-50 rounded-xl">
+                  <input
+                    type="checkbox"
+                    checked={notifyRmt}
+                    onChange={(e) => setNotifyRmt(e.target.checked)}
+                    className="rounded border-slate-300 text-amber-600"
+                  />
+                  <span className="text-sm font-medium text-slate-700">RMT (always notified)</span>
+                </label>
+                <label className="flex items-center gap-2 p-3 bg-slate-50 rounded-xl">
+                  <input
+                    type="checkbox"
+                    checked={notifyPsc}
+                    onChange={(e) => setNotifyPsc(e.target.checked)}
+                    className="rounded border-slate-300 text-amber-600"
+                  />
+                  <span className="text-sm font-medium text-slate-700">PSC (always notified for audit findings)</span>
+                </label>
+                <label className="flex items-center gap-2 p-3 bg-slate-50 rounded-xl">
+                  <input
+                    type="checkbox"
+                    checked={notifySuperAdmin}
+                    onChange={(e) => setNotifySuperAdmin(e.target.checked)}
+                    className="rounded border-slate-300 text-amber-600"
+                  />
+                  <span className="text-sm font-medium text-slate-700">Super Admin (notify for system-level issues)</span>
+                </label>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-3 mt-6">
+              <button
+                onClick={() => { setShowFindingModal(false); resetForm(); }}
+                className="btn-secondary"
+                disabled={submitting}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSubmitFinding}
+                className="btn-primary flex items-center gap-2"
+                disabled={submitting || !findingCategory || !riskLevel || !description.trim()}
+              >
+                {submitting ? <Loader2 size={16} className="animate-spin" /> : <FileText size={16} />}
+                Submit Finding
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-900">Audit Findings</h1>
+          <p className="text-sm text-slate-500">Raise and manage formal audit findings</p>
+        </div>
+        <button onClick={() => setShowFindingModal(true)} className="btn-primary flex items-center gap-2">
+          <FileText size={16} /> Raise Audit Finding
+        </button>
+      </div>
+
+      <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+        <div className="rounded-xl bg-slate-50 p-4">
+          <p className="text-xs font-bold uppercase tracking-widest text-slate-500">Total Findings</p>
+          <p className="mt-2 text-3xl font-bold text-slate-900">{findings.length}</p>
+        </div>
+        <div className="rounded-xl bg-amber-50 p-4">
+          <p className="text-xs font-bold uppercase tracking-widest text-amber-600">Open</p>
+          <p className="mt-2 text-3xl font-bold text-amber-700">{openFindings.length}</p>
+        </div>
+        <div className="rounded-xl bg-emerald-50 p-4">
+          <p className="text-xs font-bold uppercase tracking-widest text-emerald-600">Resolved</p>
+          <p className="mt-2 text-3xl font-bold text-emerald-700">{resolvedFindings.length}</p>
+        </div>
+        <div className="rounded-xl bg-rose-50 p-4">
+          <p className="text-xs font-bold uppercase tracking-widest text-rose-600">Critical</p>
+          <p className="mt-2 text-3xl font-bold text-rose-700">
+            {findings.filter((f: any) => f.riskLevel === "critical").length}
+          </p>
+        </div>
+      </div>
+
+      <div className="card p-6">
+        <h3 className="text-lg font-bold text-slate-900 mb-4">My Audit Findings</h3>
+        {findings.length === 0 ? (
+          <p className="text-slate-500">No audit findings raised yet.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left">
+              <thead>
+                <tr className="bg-slate-50">
+                  <th className="px-4 py-3 text-xs font-bold uppercase text-slate-500">ID</th>
+                  <th className="px-4 py-3 text-xs font-bold uppercase text-slate-500">Category</th>
+                  <th className="px-4 py-3 text-xs font-bold uppercase text-slate-500">Risk Level</th>
+                  <th className="px-4 py-3 text-xs font-bold uppercase text-slate-500">Project</th>
+                  <th className="px-4 py-3 text-xs font-bold uppercase text-slate-500">Status</th>
+                  <th className="px-4 py-3 text-xs font-bold uppercase text-slate-500">Date</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {findings.map((finding: any) => (
+                  <tr key={finding.id} className="hover:bg-slate-50">
+                    <td className="px-4 py-3 text-sm font-medium text-slate-900">{finding.id}</td>
+                    <td className="px-4 py-3 text-sm text-slate-600">{finding.findingCategory}</td>
+                    <td className="px-4 py-3">
+                      <span className={`px-2 py-1 rounded-full text-[10px] font-bold ${
+                        finding.riskLevel === "critical" ? "bg-rose-600 text-white" :
+                        finding.riskLevel === "major" ? "bg-red-500 text-white" :
+                        finding.riskLevel === "minor" ? "bg-orange-500 text-white" :
+                        "bg-yellow-500 text-white"
+                      }`}>
+                        {finding.riskLevel?.toUpperCase()}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 text-sm text-slate-600">{finding.linkedProject || "—"}</td>
+                    <td className="px-4 py-3">
+                      <span className={`px-2 py-1 rounded-full text-[10px] font-bold ${
+                        finding.status === "resolved" ? "bg-emerald-100 text-emerald-700" :
+                        finding.status === "under_investigation" ? "bg-amber-100 text-amber-700" :
+                        "bg-amber-100 text-amber-700"
+                      }`}>
+                        {finding.status?.replace(/_/g, " ")}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 text-sm text-slate-500">{formatDateTime(finding.createdAt)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </div>
   );

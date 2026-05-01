@@ -47,6 +47,9 @@ from .models import (
     AnomalyFlag,
     GisStatus,
     GeneratedReport,
+    Concern,
+    ConcernResponse,
+    AuditFinding,
 )
 from .serializers import (
     ProjectSerializer,
@@ -63,6 +66,9 @@ from .serializers import (
     AuditLogSerializer,
     ProspectSyncLogSerializer,
     AnomalyFlagSerializer,
+    ConcernSerializer,
+    ConcernResponseSerializer,
+    AuditFindingSerializer,
 )
 from rbf.users.models import User, UserRole
 from rbf.users.blacklisting import is_vendor_restricted
@@ -3943,3 +3949,202 @@ class ProjectReportDownloadView(APIView):
         if not privileged and report.generated_by_id != request.user.id:
             raise PermissionDenied('You do not have permission to download this report.')
         return FileResponse(report.file.open('rb'), as_attachment=True, filename=Path(report.file.name).name)
+
+
+class ConcernViewSet(viewsets.ModelViewSet):
+    queryset = Concern.objects.select_related('raised_by', 'linked_project').all()
+    serializer_class = ConcernSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['status', 'severity', 'concern_type']
+    search_fields = ['description', 'id']
+    ordering_fields = ['created_at', 'severity']
+
+    def get_queryset(self):
+        user = self.request.user
+        if user.role == UserRole.DOE_OFFICER:
+            return self.queryset.filter(raised_by=user)
+        if user.role == UserRole.AUDITOR:
+            return self.queryset.none()
+        if user.role == UserRole.RBF_OFFICIAL:
+            return self.queryset.all()
+        if user.role == "Project Steering Committee" or user.role == "UNDP_DONOR":
+            return self.queryset.filter(notify_psc=True)
+        return self.queryset.none()
+
+    def perform_create(self, serializer):
+        concern = serializer.save(raised_by=self.request.user)
+        if concern.notify_rmt:
+            Notification.objects.create(
+                recipient_id="rmt",
+                recipient_name="RMT Team",
+                type=NotificationChannel.IN_APP,
+                event="doe_concern",
+                title=f"[{concern.severity.upper()}] New concern raised by DoE",
+                body=f"{concern.linked_project.project_reference if concern.linked_project else 'General'} — {concern.get_concern_type_display()}",
+                status=NotificationStatus.SENT,
+            )
+        if concern.notify_psc:
+            Notification.objects.create(
+                recipient_id="psc",
+                recipient_name="PSC Team",
+                type=NotificationChannel.IN_APP,
+                event="doe_concern",
+                title=f"DoE has flagged a concern",
+                body=f"Review recommended: {concern.description[:100]}",
+                status=NotificationStatus.SENT,
+            )
+
+
+class ConcernResponseViewSet(viewsets.ModelViewSet):
+    queryset = ConcernResponse.objects.select_related('responded_by', 'concern').all()
+    serializer_class = ConcernResponseSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        if user.role in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}:
+            return self.queryset.all()
+        if user.role == "Project Steering Committee" or user.role == "UNDP_DONOR":
+            return self.queryset.all()
+        return self.queryset.none()
+
+    def perform_create(self, serializer):
+        response = serializer.save(responded_by=self.request.user)
+        
+        user = self.request.user
+        if user.role == "Project Steering Committee" or user.role == "UNDP_DONOR":
+            Notification.objects.create(
+                recipient_id="rmt",
+                recipient_name="RMT Team",
+                type=NotificationChannel.IN_APP,
+                event="psc_comment",
+                title=f"PSC Comment on {response.concern.id}",
+                body=f"PSC has added a comment to concern {response.concern.id}: {response.response_text[:100]}",
+                status=NotificationStatus.SENT,
+                linked_entity_id=response.concern.id,
+            )
+
+
+class AuditFindingViewSet(viewsets.ModelViewSet):
+    queryset = AuditFinding.objects.select_related('raised_by', 'linked_project').all()
+    serializer_class = AuditFindingSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['status', 'risk_level', 'finding_category']
+    search_fields = ['description', 'id']
+    ordering_fields = ['created_at', 'risk_level']
+
+    def get_queryset(self):
+        user = self.request.user
+        if user.role == UserRole.AUDITOR:
+            return self.queryset.filter(raised_by=user)
+        if user.role in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}:
+            return self.queryset.all()
+        if user.role == "Project Steering Committee" or user.role == "UNDP_DONOR":
+            return self.queryset.all()
+        return self.queryset.none()
+
+    def perform_create(self, serializer):
+        finding = serializer.save(raised_by=self.request.user)
+        
+        log_audit(
+            actor=self.request.user,
+            action="audit_finding_raised",
+            entity=finding,
+            details={
+                "finding_category": finding.finding_category,
+                "risk_level": finding.risk_level,
+                "linked_project": finding.linked_project.id if finding.linked_project else None,
+                "linked_claim": finding.linked_claim.id if finding.linked_claim else None,
+                "description": finding.description[:200],
+            },
+        )
+        
+        if finding.rised_to_rmt:
+            Notification.objects.create(
+                recipient_id="rmt",
+                recipient_name="RMT Team",
+                type=NotificationChannel.IN_APP,
+                event="audit_finding",
+                title=f"[{finding.risk_level.upper()} AUDIT FINDING] raised by Auditor",
+                body=f"{finding.linked_project.project_reference if finding.linked_project else 'General'} — {finding.get_finding_category_display()}",
+                status=NotificationStatus.SENT,
+                linked_entity_id=finding.id,
+            )
+        if finding.rised_to_psc:
+            Notification.objects.create(
+                recipient_id="psc",
+                recipient_name="PSC Team",
+                type=NotificationChannel.IN_APP,
+                event="audit_finding",
+                title=f"Audit finding requires your attention",
+                body=f"A {finding.risk_level} finding has been raised on {finding.linked_project.project_reference if finding.linked_project else 'project'}.",
+                status=NotificationStatus.SENT,
+                linked_entity_id=finding.id,
+            )
+        if finding.risk_level == 'critical':
+            Notification.objects.create(
+                recipient_id="super_admin",
+                recipient_name="Super Admin",
+                type=NotificationChannel.IN_APP,
+                event="critical_audit_finding",
+                title="CRITICAL AUDIT FINDING — Immediate action required",
+                body=finding.description[:200],
+                status=NotificationStatus.SENT,
+                linked_entity_id=finding.id,
+            )
+
+    @action(detail=True, methods=['post'])
+    def respond(self, request, pk=None):
+        finding = self.get_object()
+        response_text = request.data.get('response', '')
+        action_taken = request.data.get('action_taken', '')
+
+        if not response_text:
+            return Response({'error': 'Response text is required'}, status=400)
+
+        user_role = str(request.user.role)
+        is_psc = user_role == "Project Steering Committee" or user_role == "UNDP_DONOR"
+
+        if is_psc and action_taken == 'psc_directive':
+            finding.psc_comment = response_text
+            finding.psc_commented_at = timezone.now()
+            finding.psc_commented_by = request.user
+            finding.save()
+
+            Notification.objects.create(
+                recipient_id="rmt",
+                recipient_name="RMT Team",
+                type=NotificationChannel.IN_APP,
+                event="psc_comment",
+                title=f"PSC Comment on {finding.id}",
+                body=f"PSC has commented on audit finding {finding.id}: {response_text[:100]}",
+                status=NotificationStatus.SENT,
+                linked_entity_id=finding.id,
+            )
+        else:
+            resolution_statuses = [
+                'evidence_reviewed_no_issue',
+                'issue_confirmed_corrective',
+                'issue_confirmed_suspend',
+                'issue_confirmed_blacklist',
+                'referred_legal'
+            ]
+
+            if action_taken in resolution_statuses:
+                finding.status = 'resolved'
+            elif action_taken == 'escalated_to_psc':
+                finding.status = 'escalated_to_psc'
+            elif action_taken == 'under_investigation':
+                finding.status = 'under_investigation'
+            else:
+                finding.status = 'open'
+
+            finding.rmt_response = response_text
+            finding.rmt_response_action = action_taken
+            finding.rmt_responded_by = request.user
+            finding.rmt_responded_at = timezone.now()
+            finding.save()
+
+        return Response(AuditFindingSerializer(finding).data)

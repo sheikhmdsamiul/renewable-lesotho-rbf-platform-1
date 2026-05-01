@@ -91,11 +91,13 @@ export function GisInstallationsMap({
   showFilters = true,
   height = "500px",
   emptyStateMessage,
+  onFlagInstallation,
 }: {
   projectId?: string;
   showFilters?: boolean;
   height?: string;
   emptyStateMessage?: string;
+  onFlagInstallation?: (installation: any) => void;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<any>(null);
@@ -157,6 +159,13 @@ export function GisInstallationsMap({
     };
   }, [leafletReady]);
 
+  // Initial load of installations
+  useEffect(() => {
+    if (!leafletReady) return;
+    console.log("GisInstallationsMap: Loading installations on mount...");
+    loadInstallations(appliedFilters);
+  }, [leafletReady]);
+
   useEffect(() => {
     if (!leafletReady || !mapRef.current || boundaryLayerRef.current) return;
     let cancelled = false;
@@ -184,6 +193,7 @@ export function GisInstallationsMap({
     setLoading(true);
     setError(null);
     try {
+      console.log("GisInstallationsMap: Fetching with filters:", filters, "projectId:", projectId);
       const response = await fetchMapInstallations({
         project_id: projectId,
         technology: filters.technology || undefined,
@@ -192,6 +202,8 @@ export function GisInstallationsMap({
         date_from: filters.date_from || undefined,
         date_to: filters.date_to || undefined,
       });
+      console.log("GisInstallationsMap: Got response:", response);
+      console.log("GisInstallationsMap: Installations count:", response.installations?.length);
       setMapData(response);
     } catch (err: any) {
       setError(String(err?.message || "Could not load map data."));
@@ -243,25 +255,46 @@ export function GisInstallationsMap({
         color: "white",
         fillColor,
       });
-      marker.bindPopup(`
-        <div style="min-width:220px;font-family:inherit;">
-          <div style="font-weight:700;margin-bottom:8px;">${escapeHtml(installation.serialNumber || `INS-${String(installation.id).padStart(3, "0")}`)}</div>
-          <div style="font-size:12px;line-height:1.5;">
-            <div><strong>Beneficiary:</strong> ${escapeHtml(installation.beneficiaryName || "N/A")}</div>
-            <div><strong>Household:</strong> ${escapeHtml(formatTitleCase(installation.householdType))}</div>
-            <div><strong>Technology:</strong> ${escapeHtml(formatTitleCase(installation.technologyType))}</div>
-            <div><strong>Status:</strong> ${escapeHtml(statusLabelFromGisStatus(installation.gisStatus))}</div>
-            <div><strong>Verification:</strong> ${escapeHtml(formatTitleCase(installation.verificationStatus))}</div>
-            <div><strong>Vendor:</strong> ${escapeHtml(installation.vendorName || "N/A")}</div>
-            <div><strong>District:</strong> ${escapeHtml(installation.district || "N/A")}</div>
-            <div><strong>Installed:</strong> ${escapeHtml(formatInstalledDate(installation.installationDate))}</div>
-            <div><strong>Uptime:</strong> ${escapeHtml(formatUptime(installation.uptimePct))}</div>
-          </div>
-          <div style="margin-top:10px;">
-            <a href="/api/projects/installations/${encodeURIComponent(installation.id)}/" target="_blank" rel="noreferrer">View Details</a>
-          </div>
+
+      const popupContent = document.createElement("div");
+      popupContent.style.minWidth = "220px";
+      popupContent.style.fontFamily = "inherit";
+      popupContent.innerHTML = `
+        <div style="font-weight:700;margin-bottom:8px;">${escapeHtml(installation.serialNumber || `INS-${String(installation.id).padStart(3, "0")}`)}</div>
+        <div style="font-size:12px;line-height:1.5;">
+          <div><strong>Beneficiary:</strong> ${escapeHtml(installation.beneficiaryName || "N/A")}</div>
+          <div><strong>Household:</strong> ${escapeHtml(formatTitleCase(installation.householdType))}</div>
+          <div><strong>Technology:</strong> ${escapeHtml(formatTitleCase(installation.technologyType))}</div>
+          <div><strong>Status:</strong> ${escapeHtml(statusLabelFromGisStatus(installation.gisStatus))}</div>
+          <div><strong>Verification:</strong> ${escapeHtml(formatTitleCase(installation.verificationStatus))}</div>
+          <div><strong>Vendor:</strong> ${escapeHtml(installation.vendorName || "N/A")}</div>
+          <div><strong>District:</strong> ${escapeHtml(installation.district || "N/A")}</div>
+          <div><strong>Installed:</strong> ${escapeHtml(formatInstalledDate(installation.installationDate))}</div>
+          <div><strong>Uptime:</strong> ${escapeHtml(formatUptime(installation.uptimePct))}</div>
         </div>
-      `);
+        <div style="margin-top:10px;">
+          <a href="/api/projects/installations/${encodeURIComponent(installation.id)}/" target="_blank" rel="noreferrer">View Details</a>
+        </div>
+      `;
+
+      if (onFlagInstallation) {
+        console.log("Adding flag button for installation:", installation.id, "onFlagInstallation exists:", typeof onFlagInstallation);
+        const flagButton = document.createElement("button");
+        flagButton.textContent = "Flag This Installation";
+        flagButton.style.marginTop = "10px";
+        flagButton.style.padding = "6px 12px";
+        flagButton.style.backgroundColor = "#F59E0B";
+        flagButton.style.color = "white";
+        flagButton.style.border = "none";
+        flagButton.style.borderRadius = "6px";
+        flagButton.style.cursor = "pointer";
+        flagButton.style.fontSize = "12px";
+        flagButton.style.fontWeight = "600";
+        flagButton.onclick = () => onFlagInstallation(installation);
+        popupContent.appendChild(flagButton);
+      }
+
+      marker.bindPopup(popupContent);
       marker.addTo(targetLayer);
       bounds.push([installation.latitude, installation.longitude]);
     });
