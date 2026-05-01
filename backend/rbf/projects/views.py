@@ -2653,6 +2653,13 @@ class PortfolioKpiView(APIView):
         return Response(KpiService.getPortfolioSummary(request.user))
 
 
+class PublicPortfolioKpiView(APIView):
+    permission_classes = []
+
+    def get(self, request):
+        return Response(KpiService.getPublicPortfolioSummary())
+
+
 REPORT_TEMPLATES = [
     # RMT (RBF Official)
     {

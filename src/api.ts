@@ -2049,6 +2049,10 @@ export async function fetchPortfolioKpiSummary(): Promise<PortfolioKpiSummary> {
   return await http<PortfolioKpiSummary>(`/api/kpi/portfolio`);
 }
 
+export async function fetchPublicPortfolioKpi(): Promise<Record<string, any>> {
+  return await http<Record<string, any>>(`/api/kpi/public-portfolio`, { headers: { "X-Skip-Auth": "true" } });
+}
+
 export async function fetchMapBoundaryGeoJson(): Promise<any> {
   return await http<any>(`/api/map/boundary`);
 }

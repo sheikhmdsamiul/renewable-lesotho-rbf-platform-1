@@ -39,6 +39,7 @@ import {
   fetchProjectKpiSummary,
   fetchProjects,
   fetchSmartMeterReadings,
+  fetchTenders,
 } from "../api";
 import {
   AnomalyFlag,
@@ -48,6 +49,7 @@ import {
   Project,
   ProjectKpiSummary,
   SmartMeterReading,
+  Tender,
   VerificationTask,
 } from "../types";
 
@@ -297,6 +299,7 @@ export function MacroKpiPortal({
   const [installations, setInstallations] = useState<MapInstallationRecord[]>([]);
   const [meterReadings, setMeterReadings] = useState<SmartMeterReading[]>([]);
   const [projectSummaries, setProjectSummaries] = useState<ProjectKpiSummary[]>([]);
+  const [tenders, setTenders] = useState<Tender[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -310,13 +313,20 @@ export function MacroKpiPortal({
       fetchProjects(),
       fetchMapInstallations(),
       fetchSmartMeterReadings(),
+      ...(portalType === "rbf" ? [fetchTenders()] : []),
     ])
-      .then(async ([portfolioSummary, projectRows, mapData, readings]) => {
+      .then(async (results) => {
         if (!active) return;
+        const [portfolioSummary, projectRows, mapData, readings] = results;
         setPortfolio(portfolioSummary);
         setProjects(projectRows);
         setInstallations(mapData.installations);
         setMeterReadings(readings);
+
+        if (portalType === "rbf" && results.length > 4) {
+          const tenderData = results[4] as Tender[];
+          setTenders(tenderData);
+        }
 
         const summaries = await Promise.all(projectRows.map((project) => fetchProjectKpiSummary(project.id).catch(() => null)));
         if (!active) return;
@@ -470,6 +480,18 @@ export function MacroKpiPortal({
 
   const laggingDistrictCount = districtRows.filter((item) => item.score < 40).length;
 
+  const tenderStats = useMemo(() => {
+    const published = tenders.filter(t => t.status === "Published");
+    const closingSoon = published.filter(t => {
+      const deadline = Date.parse(t.lastDateSubmission || t.deadline || "");
+      if (Number.isNaN(deadline)) return false;
+      const days = Math.ceil((deadline - Date.now()) / (1000 * 60 * 60 * 24));
+      return days >= 0 && days <= 7;
+    });
+    const newest = [...published].sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()).slice(0, 5);
+    return { published: published.length, closingSoon: closingSoon.length, total: tenders.length, newest };
+  }, [tenders]);
+
   return (
     <DashboardFrame title={title} description={description} loading={loading} error={error} refreshedAt={refreshedAt}>
       {portfolio && (
@@ -510,11 +532,11 @@ export function MacroKpiPortal({
             {portalType === "rbf" && (
               <KpiCard
                 label="Tenders"
-                value="12"
-                hint="Awarded: 8 | Yet to Verify: 2"
+                value={String(tenderStats.published)}
+                hint={`${tenderStats.closingSoon} closing soon`}
                 icon={FileText}
                 tone="blue"
-                status="4 active tenders"
+                status={`${tenderStats.total} total, ${tenderStats.published} active`}
               />
             )}
           </div>
@@ -739,6 +761,69 @@ export function MacroKpiPortal({
               </div>
             </SectionCard>
           </div>
+
+          {portalType === "rbf" && (
+            <div className="grid grid-cols-1 gap-6">
+              <SectionCard
+                title="Active Tenders Overview"
+                description="Current open tenders, upcoming deadlines, and procurement activity."
+              >
+                {tenderStats.published === 0 ? (
+                  <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-8 text-center">
+                    <FileText size={32} className="mx-auto mb-3 text-slate-300" />
+                    <p className="text-sm font-medium text-slate-600">No active tenders</p>
+                    <p className="mt-1 text-xs text-slate-400">Published tenders will appear here.</p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {tenderStats.newest.map((t) => {
+                      const deadline = t.lastDateSubmission || t.deadline;
+                      const deadlineMs = deadline ? Date.parse(deadline) : NaN;
+                      const daysLeft = Number.isNaN(deadlineMs) ? null : Math.ceil((deadlineMs - Date.now()) / (1000 * 60 * 60 * 24));
+                      const isClosingSoon = daysLeft !== null && daysLeft >= 0 && daysLeft <= 7;
+                      const isExpired = daysLeft !== null && daysLeft < 0;
+                      const deadlineLabel = daysLeft === null ? "N/A" : isExpired ? "Closed" : daysLeft === 0 ? "Today" : daysLeft === 1 ? "Tomorrow" : `${daysLeft}d left`;
+                      const deadlineColor = isExpired ? "text-rose-600" : isClosingSoon ? "text-amber-600" : "text-emerald-600";
+                      const deadlineBg = isExpired ? "border-rose-100 bg-rose-50" : isClosingSoon ? "border-amber-100 bg-amber-50" : "border-emerald-100 bg-emerald-50";
+
+                      return (
+                        <div key={t.id} className="rounded-xl border border-slate-100 bg-white p-4 transition-all hover:border-emerald-200 hover:shadow-sm">
+                          <div className="mb-2 flex items-start justify-between gap-3">
+                            <div className="min-w-0 flex-1">
+                              <div className="mb-1 flex items-center gap-2">
+                                <span className="text-[10px] font-mono text-slate-400">{t.referenceNumber}</span>
+                                <span className="rounded border border-emerald-100 bg-emerald-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-emerald-700">Published</span>
+                                {isClosingSoon && (
+                                  <span className="rounded border border-amber-100 bg-amber-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-amber-700">Urgent</span>
+                                )}
+                              </div>
+                              <p className="truncate text-sm font-bold text-slate-900">{t.name}</p>
+                              <p className="mt-0.5 text-xs text-slate-500">{t.department}</p>
+                            </div>
+                            <div className={`flex-shrink-0 rounded-lg border px-3 py-2 text-center ${deadlineBg}`}>
+                              <p className={`text-xs font-black ${deadlineColor}`}>{deadlineLabel}</p>
+                            </div>
+                          </div>
+                          <div className="mt-2 flex flex-wrap gap-1.5">
+                            {(t.technologyTypes || []).slice(0, 3).map((tech) => (
+                              <span key={tech} className="rounded border border-slate-100 bg-slate-50 px-2 py-0.5 text-[10px] font-bold uppercase text-slate-500">{tech}</span>
+                            ))}
+                            <span className="rounded border border-blue-100 bg-blue-50 px-2 py-0.5 text-[10px] font-bold uppercase text-blue-600">{t.category}</span>
+                          </div>
+                          {t.budget != null && (
+                            <p className="mt-2 text-xs text-slate-500">Est. Budget: <span className="font-bold text-slate-900">M {t.budget.toLocaleString()}</span></p>
+                          )}
+                        </div>
+                      );
+                    })}
+                    <div className="flex items-center justify-between border-t border-slate-100 pt-2">
+                      <p className="text-xs text-slate-500">{tenderStats.published} active · {tenderStats.closingSoon} closing soon</p>
+                    </div>
+                  </div>
+                )}
+              </SectionCard>
+            </div>
+          )}
         </>
       )}
     </DashboardFrame>
@@ -1075,9 +1160,9 @@ export function VendorKpiPanel({
                 <p className="mt-1 text-lg font-semibold text-amber-700">{quality.submitted}</p>
               </div>
             </div>
-          </SectionCard>
+            </SectionCard>
 
-          <SectionCard
+            <SectionCard
             title="Inclusion Tracker"
             description="Verified-beneficiary mix so your next deployment cycle can target the right households."
           >

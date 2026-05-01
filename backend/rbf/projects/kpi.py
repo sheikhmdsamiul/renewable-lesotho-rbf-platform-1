@@ -687,6 +687,44 @@ class KpiService:
             "projects": rows,
         }
 
+    @classmethod
+    def getPublicPortfolioSummary(cls) -> dict[str, Any]:
+        projects = Project.objects.exclude(status=ProjectStatus.HALTED)
+        
+        total_projects = projects.count()
+        total_target = 0
+        total_verified = 0
+        female_numerator = 0
+        female_denominator = 0
+        total_energy_kwh = 0
+        
+        for project in projects:
+            service = cls(str(project.id))
+            summary = service.getFullKpiSummary()
+            installation = summary["installation_progress"]
+            gender = summary["gender_kpi"]
+            energy = summary.get("energy_kpi", {})
+            
+            target = installation.get("target_installations", 0)
+            verified = installation.get("verified_installations", 0)
+            total_target += target
+            total_verified += verified
+            
+            female_denominator += verified
+            female_numerator += int(verified * (gender.get("female_pct", 0) / 100))
+            
+            total_energy_kwh += energy.get("total_energy_kwh", 0)
+        
+        overall_female_pct = (female_numerator / female_denominator * 100) if female_denominator else 0
+        
+        return {
+            "total_projects": total_projects,
+            "total_installations_target": total_target,
+            "total_verified": total_verified,
+            "overall_female_pct": round(overall_female_pct, 1),
+            "total_energy_kwh_monthly": total_energy_kwh,
+        }
+
 
 def build_svg_bar_chart(title: str, labels: list[str], values: list[float], line_values: list[float] | None = None) -> str:
     width = 720

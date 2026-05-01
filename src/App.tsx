@@ -53,7 +53,8 @@ import {
   Trash2,
   Building2,
   Gavel,
-  FolderKanban
+  FolderKanban,
+  RefreshCw
 } from "lucide-react";
 import { 
   LineChart, 
@@ -188,6 +189,8 @@ import {
   submitProjectSetup,
   testProjectSetupConnection,
   fetchProjectKpiSummary,
+  fetchPortfolioKpiSummary,
+  fetchPublicPortfolioKpi,
   fetchDisbursementSheet,
   fetchVendorBankDetailsWithAccess,
   fetchVendorProfile,
@@ -1200,6 +1203,8 @@ const Tenders = ({
   const [notifyEmail, setNotifyEmail] = useState(true);
   const [isActioning, setIsActioning] = useState(false);
   const [districtDropdownOpen, setDistrictDropdownOpen] = useState(false);
+  const [page, setPage] = useState(1);
+  const perPage = 10;
   const lesothoDistrictOptions = ["Berea", "Butha-Buthe", "Leribe", "Mafeteng", "Maseru", "Mohale's Hoek", "Mokhotlong", "Qacha's Nek", "Quthing", "Thaba-Tseka"];
   const tenderTechnologyTypeOptions = ["SHS", "ICS", "GMG", "SWP", "PUE"];
   const [tenderContracts, setTenderContracts] = useState<TenderContract[]>([]);
@@ -1398,6 +1403,9 @@ const Tenders = ({
       return new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime();
     });
   }, [tenders, searchQuery, selectedCategory, selectedDepartment, selectedProcurement, sortBy]);
+
+  const totalPages = Math.ceil(filteredTenders.length / perPage);
+  const paginatedTenders = filteredTenders.slice((page - 1) * perPage, page * perPage);
 
   // Sync view with initialView prop when it changes
   React.useEffect(() => {
@@ -2979,7 +2987,7 @@ const Tenders = ({
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-200">
-            {filteredTenders.map((tender) => (
+            {paginatedTenders.map((tender) => (
               <tr key={tender.id} className="hover:bg-slate-50 transition-colors">
                 <td className="px-6 py-4 font-mono text-xs text-slate-500">{tender.id}</td>
                 <td className="px-6 py-4 font-mono text-sm text-slate-600">{tender.referenceNumber}</td>
@@ -3042,6 +3050,11 @@ const Tenders = ({
             ))}
           </tbody>
         </table>
+        {totalPages > 1 && <div className="flex items-center justify-between p-4 border-t border-slate-100">
+          <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1} className="btn-secondary text-sm py-1.5 disabled:opacity-50">Previous</button>
+          <span className="text-sm text-slate-500">Page {page} of {totalPages}</span>
+          <button onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page === totalPages} className="btn-secondary text-sm py-1.5 disabled:opacity-50">Next</button>
+        </div>}
       </div>
 
       {/* Award Notification Overlay */}
@@ -4020,12 +4033,12 @@ const Monitoring = () => {
                   </td>
                 </tr>
               ))}
-            </tbody>
-          </table>
-        </div>
+</tbody>
+        </table>
       </div>
-    );
-  };
+    </div>
+  );
+};
 
   const renderGIS = () => (
     <div className="space-y-6 h-full flex flex-col">
@@ -7910,7 +7923,9 @@ const VendorTenders = ({ onSubmitTender }: { onSubmitTender?: (tenderId: string)
   const [selectedCategory, setSelectedCategory] = useState("All Categories");
   const [selectedStage, setSelectedStage] = useState("All Stages");
   const [selectedTech, setSelectedTech] = useState("All Technologies");
-  const [sortBy, setSortBy] = useState<"deadline" | "recent">("deadline");
+  const [sortBy, setSortBy] = useState<"deadline" | "recent">("recent");
+  const [page, setPage] = useState(1);
+  const perPage = 10;
 
   const loadPublishedTenders = React.useCallback(async () => {
     try {
@@ -7968,6 +7983,9 @@ const VendorTenders = ({ onSubmitTender }: { onSubmitTender?: (tenderId: string)
         return new Date(a.deadline || 0).getTime() - new Date(b.deadline || 0).getTime();
       });
   }, [tenders, searchQuery, selectedCategory, selectedStage, selectedTech, sortBy]);
+
+  const totalPages = Math.ceil(filteredTenders.length / perPage);
+  const paginatedTenders = filteredTenders.slice((page - 1) * perPage, page * perPage);
 
   const publishedCount = useMemo(() => tenders.filter(t => t.status === TenderStatus.PUBLISHED).length, [tenders]);
   const closingSoonCount = useMemo(() => {
@@ -8282,196 +8300,303 @@ const VendorTenders = ({ onSubmitTender }: { onSubmitTender?: (tenderId: string)
   }
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900">Published Tenders</h1>
-          <p className="text-slate-500">Calls for Proposals open to pre-qualified vendors</p>
+    <div className="space-y-8 -mx-8 -mt-8">
+      {/* Hero Header */}
+      <div className="relative overflow-hidden bg-gradient-to-br from-emerald-700 via-emerald-600 to-teal-600 px-8 py-10">
+        <div className="absolute inset-0 opacity-10">
+          <div className="absolute top-0 right-0 w-96 h-96 bg-white rounded-full blur-3xl -translate-y-1/2 translate-x-1/3" />
+          <div className="absolute bottom-0 left-0 w-72 h-72 bg-white rounded-full blur-3xl translate-y-1/2 -translate-x-1/4" />
         </div>
-        <button onClick={loadPublishedTenders} className="btn-secondary text-sm">Refresh</button>
-      </div>
-
-      {error && (
-        <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 font-medium">
-          {error}
-        </div>
-      )}
-
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div className="card p-5">
-          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Published</p>
-          <p className="text-2xl font-bold text-slate-900 mt-2">{publishedCount}</p>
-          <p className="text-xs text-slate-500 mt-1">Active tenders available to vendors</p>
-        </div>
-        <div className="card p-5">
-          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Closing Soon</p>
-          <p className="text-2xl font-bold text-amber-600 mt-2">{closingSoonCount}</p>
-          <p className="text-xs text-slate-500 mt-1">Deadlines within the next 7 days</p>
-        </div>
-        <div className="card p-5">
-          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Newest Tender</p>
-          <p className="text-lg font-bold text-slate-900 mt-2">{newestTender?.name || "N/A"}</p>
-          <p className="text-xs text-slate-500 mt-1">{newestTender?.referenceNumber || "—"}</p>
-        </div>
-      </div>
-
-      <div className="card p-6 space-y-5">
-        <div className="flex items-center justify-between">
+        <div className="relative max-w-7xl mx-auto flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
           <div>
-            <h3 className="text-lg font-bold text-slate-900">Filter Published Tenders</h3>
-            <p className="text-xs text-slate-500">Find open opportunities by category, stage, and technology.</p>
+            <div className="flex items-center gap-3 mb-2">
+              <div className="w-10 h-10 rounded-xl bg-white/20 flex items-center justify-center">
+                <FileText size={20} className="text-white" />
+              </div>
+              <h1 className="text-3xl font-black text-white tracking-tight">Published Tenders</h1>
+            </div>
+            <p className="text-emerald-100 text-sm">Open calls for proposals — pre-qualified vendors only</p>
           </div>
           <button
-            onClick={() => {
-              setSearchQuery("");
-              setSelectedCategory("All Categories");
-              setSelectedStage("All Stages");
-              setSelectedTech("All Technologies");
-              setSortBy("deadline");
-            }}
-            className="btn-secondary text-sm"
+            onClick={loadPublishedTenders}
+            className="flex items-center gap-2 px-4 py-2.5 bg-white/15 hover:bg-white/25 backdrop-blur-sm rounded-xl text-white text-sm font-semibold transition-all"
           >
-            Reset Filters
+            <RefreshCw size={16} /> Refresh
           </button>
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-4 lg:grid-cols-6 gap-4 items-end">
-          <div className="md:col-span-2 space-y-1">
-            <label className="text-[10px] font-bold text-slate-400 uppercase">Search</label>
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-              <input
-                className="input-field py-2 pl-9 text-sm"
-              placeholder="Search by name, reference, category..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              />
-            </div>
+      </div>
+
+      <div className="px-8 space-y-8">
+        {error && (
+          <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 font-medium">
+            {error}
           </div>
-          <div className="space-y-1">
-            <label className="text-[10px] font-bold text-slate-400 uppercase">Category</label>
+        )}
+
+        {/* Stat Cards */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="bg-white rounded-2xl p-5 border border-slate-100 shadow-sm hover:shadow-md transition-shadow">
+            <div className="flex items-center justify-between mb-3">
+              <div className="w-9 h-9 rounded-lg bg-emerald-50 flex items-center justify-center">
+                <FileText size={18} className="text-emerald-600" />
+              </div>
+              <span className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest">Active</span>
+            </div>
+            <p className="text-3xl font-black text-slate-900">{publishedCount}</p>
+            <p className="text-xs text-slate-500 mt-1">Tenders available</p>
+          </div>
+          <div className="bg-white rounded-2xl p-5 border border-slate-100 shadow-sm hover:shadow-md transition-shadow">
+            <div className="flex items-center justify-between mb-3">
+              <div className="w-9 h-9 rounded-lg bg-amber-50 flex items-center justify-center">
+                <Clock size={18} className="text-amber-600" />
+              </div>
+              <span className="text-[10px] font-bold text-amber-600 uppercase tracking-widest">Urgent</span>
+            </div>
+            <p className="text-3xl font-black text-amber-600">{closingSoonCount}</p>
+            <p className="text-xs text-slate-500 mt-1">Closing within 7 days</p>
+          </div>
+          <div className="bg-white rounded-2xl p-5 border border-slate-100 shadow-sm hover:shadow-md transition-shadow">
+            <div className="flex items-center justify-between mb-3">
+              <div className="w-9 h-9 rounded-lg bg-blue-50 flex items-center justify-center">
+                <Calendar size={18} className="text-blue-600" />
+              </div>
+              <span className="text-[10px] font-bold text-blue-600 uppercase tracking-widest">Latest</span>
+            </div>
+            <p className="text-sm font-bold text-slate-900 truncate">{newestTender?.name || "N/A"}</p>
+            <p className="text-[10px] text-slate-400 mt-1 font-mono">{newestTender?.referenceNumber || "—"}</p>
+          </div>
+        </div>
+
+        {/* Filter Bar */}
+        <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h3 className="text-sm font-bold text-slate-900">Filter Opportunities</h3>
+              <p className="text-xs text-slate-400 mt-0.5">Find open tenders by category, stage, and technology</p>
+            </div>
+            <button
+              onClick={() => {
+                setSearchQuery("");
+                setSelectedCategory("All Categories");
+                setSelectedStage("All Stages");
+                setSelectedTech("All Technologies");
+                setSortBy("recent");
+              }}
+              className="text-xs font-semibold text-slate-400 hover:text-slate-600 transition-colors"
+            >
+              Reset all
+            </button>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3">
+            <div className="sm:col-span-2">
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+                <input
+                  className="input-field py-2.5 pl-9 text-sm rounded-xl border-slate-200 focus:border-emerald-400 focus:ring-emerald-100"
+                  placeholder="Search tenders..."
+                  value={searchQuery}
+                  onChange={(e) => { setSearchQuery(e.target.value); setPage(1); }}
+                />
+              </div>
+            </div>
             <select
-              className="input-field py-2 text-sm"
+              className="input-field py-2.5 text-sm rounded-xl border-slate-200 focus:border-emerald-400 focus:ring-emerald-100"
               value={selectedCategory}
-              onChange={(e) => setSelectedCategory(e.target.value)}
+              onChange={(e) => { setSelectedCategory(e.target.value); setPage(1); }}
             >
               {categories.map(c => <option key={c}>{c}</option>)}
             </select>
-          </div>
-          <div className="space-y-1">
-            <label className="text-[10px] font-bold text-slate-400 uppercase">Stage</label>
             <select
-              className="input-field py-2 text-sm"
+              className="input-field py-2.5 text-sm rounded-xl border-slate-200 focus:border-emerald-400 focus:ring-emerald-100"
               value={selectedStage}
-              onChange={(e) => setSelectedStage(e.target.value)}
+              onChange={(e) => { setSelectedStage(e.target.value); setPage(1); }}
             >
               {stages.map(s => <option key={s}>{s}</option>)}
             </select>
-          </div>
-          <div className="space-y-1">
-            <label className="text-[10px] font-bold text-slate-400 uppercase">Technology</label>
             <select
-              className="input-field py-2 text-sm"
+              className="input-field py-2.5 text-sm rounded-xl border-slate-200 focus:border-emerald-400 focus:ring-emerald-100"
               value={selectedTech}
-              onChange={(e) => setSelectedTech(e.target.value)}
+              onChange={(e) => { setSelectedTech(e.target.value); setPage(1); }}
             >
               {technologies.map(t => <option key={t}>{t}</option>)}
             </select>
-          </div>
-          <div className="space-y-1">
-            <label className="text-[10px] font-bold text-slate-400 uppercase">Sort By</label>
             <select
-              className="input-field py-2 text-sm"
+              className="input-field py-2.5 text-sm rounded-xl border-slate-200 focus:border-emerald-400 focus:ring-emerald-100"
               value={sortBy}
-              onChange={(e) => setSortBy(e.target.value as any)}
+              onChange={(e) => { setSortBy(e.target.value as any); setPage(1); }}
             >
-              <option value="deadline">Deadline</option>
               <option value="recent">Recently Added</option>
+              <option value="deadline">Closing Soon</option>
             </select>
           </div>
         </div>
-      </div>
 
-      <div className="card overflow-x-auto">
-        <table className="w-full text-left border-collapse">
-          <thead>
-            <tr className="bg-slate-50 border-bottom border-slate-200">
-              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">ID</th>
-              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Reference</th>
-              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Tender</th>
-              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Stage</th>
-              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Category</th>
-              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Deadline</th>
-              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider text-right">Actions</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-200">
-            {loading && (
-              <tr>
-                <td colSpan={7} className="px-6 py-6 text-sm text-slate-500">Loading published tenders...</td>
-              </tr>
-            )}
-            {!loading && filteredTenders.length === 0 && (
-              <tr>
-                <td colSpan={7} className="px-6 py-10 text-sm text-slate-500 text-center">
-                  No published tenders match your filters.
-                </td>
-              </tr>
-            )}
-            {!loading && filteredTenders.map((tender) => (
-              <tr key={tender.id} className="hover:bg-slate-50 transition-colors">
-                <td className="px-6 py-4 font-mono text-xs text-slate-500">{tender.id}</td>
-                <td className="px-6 py-4 font-mono text-sm text-slate-600">{tender.referenceNumber}</td>
-                <td className="px-6 py-4">
-                  <p className="font-medium text-slate-900">{tender.name}</p>
-                  <div className="flex flex-wrap gap-2 mt-1">
-                    <span className="text-[10px] font-bold text-slate-400 uppercase">{tender.department}</span>
-                    {(tender.technologyTypes || []).slice(0, 3).map((tech) => (
-                      <span key={tech} className="px-2 py-0.5 bg-emerald-50 text-emerald-700 rounded text-[10px] font-bold uppercase tracking-wider">
-                        {tech}
-                      </span>
-                    ))}
+        {/* Results Count */}
+        <div className="flex items-center justify-between">
+          <p className="text-sm text-slate-500">
+            Showing <span className="font-bold text-slate-900">{paginatedTenders.length}</span> of <span className="font-bold text-slate-900">{filteredTenders.length}</span> tenders
+          </p>
+        </div>
+
+        {/* Tender Cards */}
+        {loading && (
+          <div className="space-y-4">
+            {[1, 2, 3].map(i => (
+              <div key={i} className="bg-white rounded-2xl border border-slate-100 p-6 animate-pulse">
+                <div className="flex flex-col lg:flex-row gap-5">
+                  <div className="flex-1 space-y-3">
+                    <div className="flex gap-2">
+                      <div className="h-5 w-24 bg-slate-100 rounded" />
+                      <div className="h-5 w-16 bg-slate-100 rounded" />
+                    </div>
+                    <div className="h-6 w-3/4 bg-slate-100 rounded" />
+                    <div className="h-4 w-1/2 bg-slate-100 rounded" />
+                    <div className="flex gap-2">
+                      <div className="h-6 w-14 bg-slate-100 rounded" />
+                      <div className="h-6 w-14 bg-slate-100 rounded" />
+                      <div className="h-6 w-14 bg-slate-100 rounded" />
+                    </div>
                   </div>
-                </td>
-                <td className="px-6 py-4">
-                  <span className="badge bg-slate-100 text-slate-600">
-                    {tender.stageType || "N/A"}
-                  </span>
-                </td>
-                <td className="px-6 py-4 text-sm text-slate-600">{tender.category}</td>
-                <td className="px-6 py-4 text-sm">
-                  {(() => {
-                    const deadline = tender.lastDateSubmission || tender.deadline;
-                    const ts = Date.parse(deadline || "");
-                    if (Number.isNaN(ts)) return <span className="text-slate-600">N/A</span>;
-                    const days = Math.ceil((ts - Date.now()) / (1000 * 60 * 60 * 24));
-                    const color =
-                      days < 0 ? "text-rose-600" : days <= 7 ? "text-amber-600" : "text-slate-600";
-                    const dateStr = new Date(ts).toLocaleDateString();
-                    const timeStr = new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-                    return (
-                      <div className={color}>
-                        <div className="font-medium">{dateStr}</div>
-                        <div className="text-[10px] uppercase tracking-widest opacity-70">{timeStr}</div>
-                        {days >= 0 && !Number.isNaN(days) && (
-                          <div className="text-[10px] font-bold">(D-{days})</div>
-                        )}
-                      </div>
-                    );
-                  })()}
-                </td>
-                <td className="px-6 py-4 text-right">
-                  <button
-                    onClick={() => void openTenderDetails(tender)}
-                    className="text-emerald-600 hover:text-emerald-700 font-medium text-sm"
-                    disabled={detailLoading}
-                  >
-                    {detailLoading ? "Loading..." : "View Details"}
-                  </button>
-                </td>
-              </tr>
+                  <div className="flex lg:flex-col items-center lg:items-end gap-4">
+                    <div className="h-14 w-28 bg-slate-100 rounded-xl" />
+                    <div className="h-9 w-28 bg-slate-200 rounded-xl" />
+                  </div>
+                </div>
+              </div>
             ))}
-          </tbody>
-        </table>
+          </div>
+        )}
+
+        {!loading && filteredTenders.length === 0 && (
+          <div className="bg-white rounded-2xl border border-slate-100 p-16 text-center">
+            <div className="w-16 h-16 rounded-2xl bg-slate-50 flex items-center justify-center mx-auto mb-4">
+              <FileText size={28} className="text-slate-300" />
+            </div>
+            <p className="text-lg font-bold text-slate-900">No tenders found</p>
+            <p className="text-sm text-slate-500 mt-1">Try adjusting your filters or check back later for new opportunities.</p>
+          </div>
+        )}
+
+        {!loading && paginatedTenders.map((tender) => {
+          const deadline = tender.lastDateSubmission || tender.deadline;
+          const deadlineMs = deadline ? Date.parse(deadline) : NaN;
+          const daysLeft = Number.isNaN(deadlineMs) ? null : Math.ceil((deadlineMs - Date.now()) / (1000 * 60 * 60 * 24));
+          const isClosingSoon = daysLeft !== null && daysLeft >= 0 && daysLeft <= 7;
+          const isExpired = daysLeft !== null && daysLeft < 0;
+          const deadlineLabel = daysLeft === null ? "N/A" : isExpired ? "Closed" : daysLeft === 0 ? "Today" : daysLeft === 1 ? "Tomorrow" : `${daysLeft} days left`;
+          const deadlineColor = isExpired ? "text-rose-600" : isClosingSoon ? "text-amber-600" : "text-emerald-600";
+          const deadlineBg = isExpired ? "bg-rose-50 border-rose-100" : isClosingSoon ? "bg-amber-50 border-amber-100" : "bg-emerald-50 border-emerald-100";
+          const deadlineRing = isExpired ? "ring-rose-500/20" : isClosingSoon ? "ring-amber-500/20" : "ring-emerald-500/20";
+
+          return (
+            <div
+              key={tender.id}
+              className="group relative bg-white rounded-2xl border border-slate-200 hover:border-emerald-200 hover:shadow-lg hover:shadow-emerald-500/5 transition-all duration-300 overflow-hidden cursor-pointer"
+              onClick={() => void openTenderDetails(tender)}
+            >
+              {/* Top accent line */}
+              <div className={`absolute top-0 left-0 right-0 h-0.5 transition-opacity ${isClosingSoon ? 'bg-gradient-to-r from-amber-400 to-amber-500 opacity-100' : 'bg-gradient-to-r from-emerald-400 to-teal-500 opacity-0 group-hover:opacity-100'} transition-opacity duration-300`} />
+
+              <div className="p-6">
+                <div className="flex flex-col lg:flex-row lg:items-start gap-5">
+                  {/* Left: Tender Info */}
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center flex-wrap gap-2 mb-3">
+                      <span className="text-xs font-mono text-slate-400">{tender.referenceNumber}</span>
+                      <span className="w-1 h-1 rounded-full bg-slate-300" />
+                      <span className="px-2.5 py-1 bg-emerald-50 text-emerald-700 rounded-lg text-[10px] font-bold uppercase tracking-wider border border-emerald-100">Published</span>
+                      {isClosingSoon && (
+                        <span className="px-2.5 py-1 bg-amber-50 text-amber-700 rounded-lg text-[10px] font-bold uppercase tracking-wider border border-amber-100 animate-pulse">Closing Soon</span>
+                      )}
+                      {isExpired && (
+                        <span className="px-2.5 py-1 bg-rose-50 text-rose-700 rounded-lg text-[10px] font-bold uppercase tracking-wider border border-rose-100">Deadline Passed</span>
+                      )}
+                    </div>
+
+                    <h3 className="text-lg font-bold text-slate-900 group-hover:text-emerald-700 transition-colors leading-snug">
+                      {tender.name}
+                    </h3>
+                    <p className="text-sm text-slate-500 mt-1.5">{tender.department}</p>
+
+                    <div className="flex flex-wrap gap-2 mt-4">
+                      {(tender.technologyTypes || []).slice(0, 4).map((tech) => (
+                        <span key={tech} className="px-3 py-1.5 bg-slate-50 text-slate-600 rounded-lg text-[10px] font-bold uppercase tracking-wider border border-slate-100 group-hover:bg-slate-100 transition-colors">{tech}</span>
+                      ))}
+                      <span className="px-3 py-1.5 bg-blue-50 text-blue-600 rounded-lg text-[10px] font-bold uppercase tracking-wider border border-blue-100">{tender.category}</span>
+                      {tender.stageType && (
+                        <span className="px-3 py-1.5 bg-purple-50 text-purple-600 rounded-lg text-[10px] font-bold uppercase tracking-wider border border-purple-100">{tender.stageType}</span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Right: Deadline, Budget, Action */}
+                  <div className="flex lg:flex-col items-center lg:items-end gap-4 lg:gap-3 flex-shrink-0">
+                    {/* Deadline Card */}
+                    <div className={`rounded-xl border ${deadlineBg} px-4 py-3 text-center ring-1 ${deadlineRing}`}>
+                      <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Deadline</p>
+                      <p className={`text-sm font-black ${deadlineColor}`}>{deadlineLabel}</p>
+                      {deadline && !Number.isNaN(deadlineMs) && (
+                        <p className="text-[10px] text-slate-400 mt-0.5">{new Date(deadlineMs).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })}</p>
+                      )}
+                    </div>
+
+                    {/* Budget */}
+                    {tender.budget != null && (
+                      <div className="text-center lg:text-right">
+                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Est. Budget</p>
+                        <p className="text-sm font-black text-slate-900 mt-0.5">M {tender.budget.toLocaleString()}</p>
+                      </div>
+                    )}
+
+                    {/* CTA Button */}
+                    <button
+                      className="flex items-center gap-2 px-5 py-2.5 bg-slate-900 hover:bg-emerald-600 text-white rounded-xl text-sm font-semibold transition-all duration-300 group-hover:bg-emerald-600"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void openTenderDetails(tender);
+                      }}
+                      disabled={detailLoading}
+                    >
+                      View Details
+                      <ChevronRight size={14} className="group-hover:translate-x-0.5 transition-transform" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+
+        {/* Pagination */}
+        {totalPages > 1 && (
+          <div className="flex items-center justify-center gap-3 py-4">
+            <button
+              onClick={() => setPage(p => Math.max(1, p - 1))}
+              disabled={page === 1}
+              className="flex items-center gap-2 px-4 py-2.5 bg-white rounded-xl border border-slate-200 text-sm font-medium text-slate-700 hover:border-emerald-200 hover:text-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+            >
+              <ChevronRight className="rotate-180" size={14} /> Previous
+            </button>
+            <div className="flex items-center gap-1">
+              {Array.from({ length: totalPages }, (_, i) => i + 1).map(p => (
+                <button
+                  key={p}
+                  onClick={() => setPage(p)}
+                  className={`w-10 h-10 rounded-xl text-sm font-bold transition-all ${p === page ? "bg-emerald-600 text-white shadow-lg shadow-emerald-500/25" : "text-slate-500 hover:bg-slate-100"}`}
+                >
+                  {p}
+                </button>
+              ))}
+            </div>
+            <button
+              onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+              disabled={page === totalPages}
+              className="flex items-center gap-2 px-4 py-2.5 bg-white rounded-xl border border-slate-200 text-sm font-medium text-slate-700 hover:border-emerald-200 hover:text-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+            >
+              Next <ChevronRight size={14} />
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -18782,14 +18907,165 @@ const DoEOfficerView = () => {
   );
 };
 
-const PublicPortal = ({ onBack }: { onBack?: () => void }) => {
-  const regionalData = [
-    { region: 'Maseru', funding: 1200000, impact: 4500 },
-    { region: 'Leribe', funding: 850000, impact: 3200 },
-    { region: 'Berea', funding: 600000, impact: 2100 },
-    { region: 'Mafeteng', funding: 550000, impact: 1800 },
-    { region: 'Quthing', funding: 400000, impact: 1200 },
-  ];
+const NoticeBoardSection = ({ tenders }: { tenders: Tender[] }) => {
+  const effectiveTenders = tenders.length > 0 ? tenders : MOCK_TENDERS;
+
+  const formatDate = (raw: string) => {
+    return new Date(raw).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+  };
+
+  const notices = React.useMemo(() => {
+    const items: Array<{ id: string; category: "tender_update" | "award_notice" | "urgent_alert" | "success_story"; headline: string; date: string; summary: string; actionLabel: string }> = [];
+
+    effectiveTenders.forEach((t) => {
+      const pubDate = t.createdAt || t.publishedAt || t.updatedAt;
+      if (t.status === "Published" && pubDate) {
+        items.push({ id: `tp-${t.id}`, category: "tender_update", headline: `Extension of Bid Submission Deadline: ${t.referenceNumber}`, date: formatDate(pubDate), summary: `Please note that the tender for "${t.name}" has been published by the ${t.department}. Eligible vendors are invited to review the scope and submit proposals before the deadline.`, actionLabel: "View Tender Details" });
+      }
+      if (t.awardedAt && t.awardedVendorName) {
+        items.push({ id: `ta-${t.id}`, category: "award_notice", headline: `Award Notification: ${t.name}`, date: formatDate(t.awardedAt), summary: `Following the technical and financial evaluation by the TAC, ${t.awardedVendorName} has been awarded the contract for ${t.category} installations.`, actionLabel: "View Award Details" });
+      }
+    });
+
+    items.push(
+      { id: "ua-001", category: "urgent_alert", headline: "Scheduled System Maintenance: Vendor Portal Offline", date: "May 01, 2026", summary: "The Vendor Portal will undergo scheduled database optimization on Sunday, May 4th, from 02:00 to 06:00 AM. Please ensure all draft bids are saved before this window.", actionLabel: "Check System Status" },
+      { id: "ss-001", category: "success_story", headline: "Milestone Reached: 5,000 Clean Cookstoves Verified in Berea", date: "April 20, 2026", summary: "We are proud to announce that over 5,000 low-income households in Berea now have access to improved cookstoves, reducing local biomass consumption by an estimated 30%.", actionLabel: "Read Full Impact Report" },
+      { id: "ss-002", category: "success_story", headline: "1,200 SHS Units Deployed in Qacha's Nek District", date: "April 15, 2026", summary: "The Phase 1 solar home system deployment in Qacha's Nek has been completed ahead of schedule, bringing clean energy to 1,200 households in remote mountainous areas.", actionLabel: "View Deployment Map" },
+      { id: "ua-002", category: "urgent_alert", headline: "Policy Update: Revised Gender Inclusion Targets for 2026", date: "April 10, 2026", summary: "The RBF Management Team has updated the minimum gender inclusion threshold. All active contracts now require a minimum of 55% female-headed household beneficiaries.", actionLabel: "Read Policy Brief" }
+    );
+
+    items.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    return items.slice(0, 12);
+  }, [effectiveTenders]);
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-8">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-emerald-600 flex items-center justify-center"><Bell className="text-white" size={20} /></div>
+          <div>
+            <h3 className="text-2xl font-bold text-slate-900">Notice Board</h3>
+            <p className="text-sm text-slate-500">Official announcements from the RBF programme</p>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {notices.map((n) => {
+          const isTenderUpdate = n.category === "tender_update";
+          const isAward = n.category === "award_notice";
+          const isUrgent = n.category === "urgent_alert";
+          const isSuccess = n.category === "success_story";
+
+          return (
+            <div key={n.id} className="bg-white rounded-2xl border border-slate-200 p-6 hover:shadow-lg transition-all duration-300">
+              {isTenderUpdate && (
+                <>
+                  <div className="inline-flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-1.5 mb-4">
+                    <span className="text-xs">🔵</span>
+                    <span className="text-xs font-bold text-blue-700 uppercase tracking-wider">Tender Update</span>
+                  </div>
+                  <h4 className="text-base font-bold text-slate-900 leading-snug mb-2">{n.headline}</h4>
+                  <p className="text-xs font-semibold text-slate-400 mb-3">Published: {n.date}</p>
+                  <p className="text-sm text-slate-600 leading-relaxed line-clamp-2 mb-4">{n.summary}</p>
+                  <div className="border-t border-blue-100 pt-4">
+                    <button className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-2 text-xs font-bold text-blue-700 transition-colors hover:bg-blue-100">{n.actionLabel}</button>
+                  </div>
+                </>
+              )}
+
+              {isAward && (
+                <>
+                  <div className="inline-flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 mb-4">
+                    <span className="text-xs">🟢</span>
+                    <span className="text-xs font-bold text-emerald-700 uppercase tracking-wider">Award Notice</span>
+                  </div>
+                  <h4 className="text-base font-bold text-slate-900 leading-snug mb-2">{n.headline}</h4>
+                  <p className="text-xs font-semibold text-slate-400 mb-3">Published: {n.date}</p>
+                  <p className="text-sm text-slate-600 leading-relaxed line-clamp-2 mb-4">{n.summary}</p>
+                  <div className="border-t border-emerald-100 pt-4">
+                    <button className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2 text-xs font-bold text-emerald-700 transition-colors hover:bg-emerald-100">{n.actionLabel}</button>
+                  </div>
+                </>
+              )}
+
+              {isUrgent && (
+                <>
+                  <div className="inline-flex items-center gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 mb-4">
+                    <span className="text-xs">🔴</span>
+                    <span className="text-xs font-bold text-rose-700 uppercase tracking-wider">Urgent Alert</span>
+                  </div>
+                  <h4 className="text-base font-bold text-slate-900 leading-snug mb-2">{n.headline}</h4>
+                  <p className="text-xs font-semibold text-slate-400 mb-3">Published: {n.date}</p>
+                  <p className="text-sm text-slate-600 leading-relaxed line-clamp-2 mb-4">{n.summary}</p>
+                  <div className="border-t border-rose-100 pt-4">
+                    <button className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-2 text-xs font-bold text-rose-700 transition-colors hover:bg-rose-100">{n.actionLabel}</button>
+                  </div>
+                </>
+              )}
+
+              {isSuccess && (
+                <>
+                  <div className="inline-flex items-center gap-2 rounded-lg border border-purple-200 bg-purple-50 px-3 py-1.5 mb-4">
+                    <span className="text-xs">🟣</span>
+                    <span className="text-xs font-bold text-purple-700 uppercase tracking-wider">Success Story</span>
+                  </div>
+                  <h4 className="text-base font-bold text-slate-900 leading-snug mb-2">{n.headline}</h4>
+                  <p className="text-xs font-semibold text-slate-400 mb-3">Published: {n.date}</p>
+                  <p className="text-sm text-slate-600 leading-relaxed line-clamp-2 mb-4">{n.summary}</p>
+                  <div className="border-t border-purple-100 pt-4">
+                    <button className="rounded-lg border border-purple-200 bg-purple-50 px-4 py-2 text-xs font-bold text-purple-700 transition-colors hover:bg-purple-100">{n.actionLabel}</button>
+                  </div>
+                </>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
+const PublicPortal = ({ onBack, onRegisterClick }: { onBack?: () => void; onRegisterClick?: () => void }) => {
+  const [tenders, setTenders] = useState<Tender[]>([]);
+  const [selected, setSelected] = useState<Tender | null>(null);
+  const [page, setPage] = useState(1);
+  const [kpiData, setKpiData] = useState<any>(null);
+  const [kpiLoading, setKpiLoading] = useState(true);
+  const [showFaq, setShowFaq] = useState(false);
+  const perPage = 10;
+
+  React.useEffect(() => { 
+    fetchTenders().then((d: Tender[]) => {
+      const published = d.filter(t => t.status === "Published");
+      const sorted = published.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+      setTenders(sorted);
+    }).catch(() => {}) 
+  }, []);
+
+  React.useEffect(() => {
+    const loadKpi = async () => {
+      try {
+        console.log("Loading public portfolio KPI...");
+        const data = await fetchPublicPortfolioKpi();
+        console.log("Public portfolio KPI data:", data);
+        setKpiData(data);
+      } catch (e) { console.error("Failed to load KPI:", e); }
+      finally { setKpiLoading(false); }
+    };
+    loadKpi();
+  }, []);
+
+  const totalPages = Math.ceil(tenders.length / perPage);
+  const paginatedTenders = tenders.slice((page - 1) * perPage, page * perPage);
+
+  const householdsWithEnergy = kpiData?.total_verified || 0;
+  const femaleHeaded = Math.round((kpiData?.total_verified || 0) * (kpiData?.overall_female_pct || 0) / 100);
+  const femalePct = Math.round(kpiData?.overall_female_pct || 0);
+  const activeProjects = kpiData?.total_projects || 0;
+  
+  const totalEnergyMonthly = kpiData?.total_energy_kwh_monthly || 0;
+  const energyMonthlyFormatted = totalEnergyMonthly >= 1000 ? `${Math.round(totalEnergyMonthly / 1000)} MWh` : `${Math.round(totalEnergyMonthly)} kWh`;
 
   return (
     <div className="min-h-screen bg-white overflow-x-hidden">
@@ -18823,22 +19099,142 @@ const PublicPortal = ({ onBack }: { onBack?: () => void }) => {
       </div>
 
       <div className="max-w-7xl mx-auto px-8 space-y-24 pb-24">
-        {/* Big Numbers */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-12">
-          <div className="text-center space-y-2">
-            <p className="text-sm font-bold text-emerald-600 uppercase tracking-widest">Lives Impacted</p>
-            <h2 className="text-7xl font-black text-slate-900 tabular-nums">12,450+</h2>
-            <p className="text-slate-500">Households with clean energy access</p>
+        {/* Stats Grid */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-100 text-center">
+            <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">Households with Energy Access</p>
+            {kpiLoading ? <p className="text-4xl font-black text-slate-300">...</p> : <p className="text-4xl font-black text-emerald-600">{householdsWithEnergy.toLocaleString()}</p>}
           </div>
-          <div className="text-center space-y-2">
-            <p className="text-sm font-bold text-blue-600 uppercase tracking-widest">CO2 Avoided</p>
-            <h2 className="text-7xl font-black text-slate-900 tabular-nums">1,842</h2>
-            <p className="text-slate-500">Tons of carbon emissions reduced</p>
+          <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-100 text-center">
+            <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">Female-headed Households Served</p>
+            {kpiLoading ? <p className="text-4xl font-black text-slate-300">...</p> : <><p className="text-4xl font-black text-blue-600">{femaleHeaded.toLocaleString()}</p><p className="text-xs font-bold text-blue-500">({femalePct}%)</p></>}
           </div>
-          <div className="text-center space-y-2">
-            <p className="text-sm font-bold text-amber-600 uppercase tracking-widest">Local Jobs</p>
-            <h2 className="text-7xl font-black text-slate-900 tabular-nums">450+</h2>
-            <p className="text-slate-500">Created in the green energy sector</p>
+          <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-100 text-center">
+            <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">Energy Generated Monthly</p>
+            {kpiLoading ? <p className="text-4xl font-black text-slate-300">...</p> : <p className="text-4xl font-black text-amber-600">{energyMonthlyFormatted}</p>}
+          </div>
+          <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-100 text-center">
+            <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">Active Projects</p>
+            {kpiLoading ? <p className="text-4xl font-black text-slate-300">...</p> : <p className="text-4xl font-black text-purple-600">{activeProjects}</p>}
+          </div>
+        </div>
+
+        {/* Notice Board */}
+        <NoticeBoardSection tenders={tenders} />
+
+        <div className="bg-slate-50 rounded-3xl p-6">
+          <div className="flex items-center gap-2 mb-4"><FileText size={20} className="text-emerald-600" /><h3 className="text-xl font-bold text-slate-900">Published Tenders</h3></div>
+          {tenders.length === 0 ? <p className="text-slate-500 text-center py-4">No published tenders.</p> : <div className="space-y-3">
+            {paginatedTenders.map(t => (
+              <div key={t.id} className="bg-white p-4 rounded-xl border border-slate-200 flex justify-between items-center">
+                <div className="flex-1">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-xs font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded">Published</span>
+                    <span className="text-xs text-slate-400">{t.referenceNumber}</span>
+                  </div>
+                  <p className="font-medium text-slate-900">{t.name}</p>
+                  <p className="text-sm text-slate-500 mt-1">{t.department}</p>
+                  <div className="flex items-center gap-2 mt-2">
+                    <Clock size={14} className="text-rose-500" />
+                    <span className="text-sm font-bold text-rose-600">Deadline: {t.deadline ? new Date(t.deadline).toLocaleDateString() : 'N/A'}</span>
+                  </div>
+                </div>
+                <button onClick={() => setSelected(t)} className="btn-primary text-sm py-2">View</button>
+              </div>
+            ))}
+          </div>}
+          {totalPages > 1 && <div className="flex items-center justify-between mt-4 pt-4 border-t border-slate-200">
+            <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1} className="btn-secondary text-sm py-1.5 disabled:opacity-50">Previous</button>
+            <span className="text-sm text-slate-500">Page {page} of {totalPages}</span>
+            <button onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page === totalPages} className="btn-secondary text-sm py-1.5 disabled:opacity-50">Next</button>
+          </div>}
+        </div>
+
+        {selected && <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setSelected(null)}>
+          <div className="bg-white rounded-2xl max-w-sm w-full p-5" onClick={e => e.stopPropagation()}>
+            <div className="text-center">
+              <Lock size={32} className="mx-auto text-emerald-600 mb-3" />
+              <h4 className="font-bold text-slate-900 mb-2">Login Required</h4>
+              <p className="text-sm text-slate-500 mb-3">Please register or log in to View full details</p>
+              <div className="bg-slate-50 p-3 rounded-lg mb-3"><p className="font-medium text-slate-900 text-sm">{selected.name}</p><p className="text-xs text-slate-500">{selected.referenceNumber}</p></div>
+              <div className="flex gap-2"><button onClick={() => setSelected(null)} className="btn-secondary flex-1 text-sm py-2">Cancel</button><button onClick={() => { setSelected(null); alert("Redirect to login"); }} className="btn-primary flex-1 text-sm py-2">Login</button></div>
+            </div>
+          </div>
+        </div>}
+
+        {/* How to Apply */}
+        <div className="space-y-12">
+          <div className="text-center max-w-3xl mx-auto">
+            <span className="text-xs font-bold text-emerald-600 uppercase tracking-widest">How to Apply</span>
+            <h3 className="text-4xl font-bold text-slate-900 mt-3 mb-4">Step-by-Step Guide for Energy Vendors</h3>
+            <p className="text-lg text-slate-600">Follow these steps to join the Renewable Lesotho RBF programme and start delivering clean energy to communities across Lesotho.</p>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
+            {[
+              { step: 1, title: "Check Eligibility", color: "bg-emerald-600", items: ["Registered business or NGO in Lesotho", "Valid trading license", "Tax clearance certificate", "Company bank account in Lesotho", "Experience in renewable energy", "Commitment to inclusion targets (50% female, 30% vulnerable)"] },
+              { step: 2, title: "Register Account", color: "bg-blue-600", items: ["Company email address", "Mobile number for OTP", "Basic company info", "~5 minutes to complete"] },
+              { step: 3, title: "Pre-Qualification", color: "bg-purple-600", items: ["Upload trading license, tax clearance, registration cert", "Provide technical capacity details", "Submit inclusion commitment declaration", "Review takes 3-5 business days"] },
+              { step: 4, title: "Browse & Bid", color: "bg-amber-600", items: ["View all open tenders", "Submit Stage 1 concept note", "Stage 2 full proposal if shortlisted", "Include gender action plan & O&M strategy"] },
+              { step: 5, title: "Implement & Get Paid", color: "bg-rose-600", items: ["Sign performance-based contract", "Deploy installations in the field", "Register each installation on platform", "Claim milestone payments: 20% → 50% → 30%"] },
+            ].map(s => (
+              <div key={s.step} className="bg-white rounded-2xl border border-slate-200 p-5 flex flex-col">
+                <div className={`w-10 h-10 rounded-full ${s.color} text-white flex items-center justify-center font-bold text-lg mb-3`}>{s.step}</div>
+                <h4 className="font-bold text-slate-900 mb-3">{s.title}</h4>
+                <ul className="space-y-2 flex-1">
+                  {s.items.map((item, i) => (
+                    <li key={i} className="text-sm text-slate-600 flex items-start gap-2">
+                      <span className="text-emerald-500 mt-1 flex-shrink-0">✓</span>
+                      <span>{item}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+
+          <div className="bg-slate-50 rounded-3xl p-10">
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-10">
+              <div>
+                <h4 className="text-xl font-bold text-slate-900 mb-6">Payment Schedule</h4>
+                <div className="space-y-4">
+                  {[
+                    { pct: "20%", label: "On contract signing + project setup" },
+                    { pct: "50%", label: "After 80% of installations verified" },
+                    { pct: "30%", label: "After 100% verified + all KPIs met" },
+                  ].map(p => (
+                    <div key={p.pct} className="flex items-center gap-4 bg-white rounded-xl p-4 border border-slate-200">
+                      <span className="text-2xl font-black text-emerald-600 w-16 text-center">{p.pct}</span>
+                      <span className="text-sm text-slate-700">{p.label}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <h4 className="text-xl font-bold text-slate-900 mb-6">Need Help?</h4>
+                <div className="space-y-3 bg-white rounded-2xl p-6 border border-slate-200">
+                  <div className="flex items-start gap-3">
+                    <span className="text-sm font-medium text-slate-500 w-24 flex-shrink-0">Email:</span>
+                    <span className="text-sm text-emerald-600 font-medium">rbf@energy.gov.ls</span>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <span className="text-sm font-medium text-slate-500 w-24 flex-shrink-0">Phone:</span>
+                    <span className="text-sm text-slate-900">+266 2231 XXXX</span>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <span className="text-sm font-medium text-slate-500 w-24 flex-shrink-0">Hours:</span>
+                    <span className="text-sm text-slate-900">Mon-Fri, 08:00-17:00 SAST</span>
+                  </div>
+                </div>
+                <div className="mt-6">
+                  <button onClick={() => setShowFaq(true)} className="text-emerald-600 font-medium text-sm hover:underline">View Frequently Asked Questions →</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex justify-center">
+            <button onClick={onRegisterClick} className="btn-primary px-8 py-3 text-base">Register Now →</button>
           </div>
         </div>
 
@@ -18886,45 +19282,201 @@ const PublicPortal = ({ onBack }: { onBack?: () => void }) => {
           </div>
         </div>
 
-        {/* Regional Map Placeholder / Visual */}
-        <div className="bg-slate-900 rounded-[40px] p-12 text-white overflow-hidden relative">
-          <div className="relative z-10 grid grid-cols-1 lg:grid-cols-2 gap-12">
-            <div className="space-y-8">
-              <div>
-                <h3 className="text-3xl font-bold mb-2">Regional Progress</h3>
-                <p className="text-slate-400">Real-time deployment status across Lesotho's districts</p>
+        {/* About the Programme */}
+        <div className="space-y-20">
+          <div className="text-center max-w-3xl mx-auto">
+            <span className="text-xs font-bold text-emerald-600 uppercase tracking-widest">About the Programme</span>
+            <h3 className="text-4xl font-bold text-slate-900 mt-3 mb-4">What is Renewable Lesotho?</h3>
+            <p className="text-lg text-slate-600 leading-relaxed">
+              Renewable Lesotho is a Results-Based Financing programme implemented by UNDP Lesotho with support from the European Union and Irish Aid. The programme supports the expansion of clean energy access across Lesotho by providing performance-based grants to pre-qualified energy developers.
+            </p>
+            <p className="text-lg text-slate-600 leading-relaxed mt-4">
+              Unlike traditional grant programmes, RBF payments are only released after results are independently verified on the ground. This ensures that every Maloti spent directly delivers clean energy to households that need it most.
+            </p>
+          </div>
+
+          <div className="bg-slate-50 rounded-3xl p-10">
+            <h4 className="text-2xl font-bold text-slate-900 mb-8 text-center">Programme Objectives</h4>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {[
+                { num: 1, text: "Increase household access to clean energy across all 10 districts of Lesotho" },
+                { num: 2, text: "Prioritise female-headed households, vulnerable groups, and low-income communities" },
+                { num: 3, text: "Support the growth of a sustainable local clean energy private sector" },
+                { num: 4, text: "Contribute to Lesotho's climate goals and nationally determined contributions (NDCs)" },
+              ].map(obj => (
+                <div key={obj.num} className="bg-white rounded-2xl p-6 border border-slate-200 flex gap-4">
+                  <span className="flex-shrink-0 w-10 h-10 rounded-full bg-emerald-600 text-white flex items-center justify-center font-bold text-lg">{obj.num}</span>
+                  <p className="text-slate-700 leading-relaxed">{obj.text}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-12 items-start">
+            <div>
+              <h4 className="text-2xl font-bold text-slate-900 mb-6">How the Platform Works</h4>
+              <p className="text-slate-600 mb-6">The RBF Digital Platform manages the complete lifecycle of the programme:</p>
+              <div className="space-y-4">
+                {[
+                  "Vendor pre-qualification and registration",
+                  "Competitive tendering and bid evaluation",
+                  "Contract award and signing",
+                  "Project implementation and monitoring",
+                  "Independent field verification",
+                  "KPI assessment and payment disbursement",
+                ].map((step, i) => (
+                  <div key={i} className="flex items-start gap-4">
+                    <span className="flex-shrink-0 w-8 h-8 rounded-full bg-slate-800 text-white flex items-center justify-center text-sm font-bold">{i + 1}</span>
+                    <p className="text-slate-700 pt-1">{step}</p>
+                  </div>
+                ))}
               </div>
-              <div className="space-y-6">
-                {regionalData.map(region => (
-                  <div key={region.region} className="space-y-2">
-                    <div className="flex justify-between text-sm">
-                      <span className="font-medium">{region.region}</span>
-                      <span className="text-emerald-400 font-bold">{Math.round((region.impact / 4500) * 100)}% Target</span>
-                    </div>
-                    <div className="h-1.5 bg-white/10 rounded-full overflow-hidden">
-                      <motion.div 
-                        initial={{ width: 0 }}
-                        whileInView={{ width: `${(region.impact / 4500) * 100}%` }}
-                        className="h-full bg-emerald-500"
-                      />
-                    </div>
+              <p className="text-sm text-slate-500 mt-6 italic">All data is transparently recorded and available for independent audit at any time.</p>
+            </div>
+            <div>
+              <h4 className="text-2xl font-bold text-slate-900 mb-6">Implementing Partners</h4>
+              <div className="space-y-3 bg-white rounded-2xl p-6 border border-slate-200">
+                {[
+                  { label: "Programme Lead", value: "UNDP Lesotho" },
+                  { label: "Technical Partner", value: "Ministry of Energy" },
+                  { label: "Funder 1", value: "European Union Delegation" },
+                  { label: "Funder 2", value: "Irish Aid" },
+                  { label: "Platform Builder", value: "Dream71 Bangladesh Ltd" },
+                ].map(p => (
+                  <div key={p.label} className="flex justify-between items-center py-2 border-b border-slate-100 last:border-0">
+                    <span className="text-sm font-medium text-slate-500">{p.label}</span>
+                    <span className="text-sm font-bold text-slate-900">{p.value}</span>
                   </div>
                 ))}
               </div>
             </div>
-            <div className="flex items-center justify-center">
-              <div className="w-full aspect-square bg-white/5 rounded-full flex items-center justify-center relative">
-                <Globe size={200} className="text-emerald-500/20 animate-pulse" />
-                <div className="absolute inset-0 flex items-center justify-center">
-                  <div className="text-center">
-                    <p className="text-5xl font-black text-white">100%</p>
-                    <p className="text-xs text-slate-400 uppercase tracking-widest">Transparency</p>
-                  </div>
-                </div>
-              </div>
+          </div>
+
+          <div className="bg-emerald-50 rounded-3xl p-10 text-center">
+            <h4 className="text-2xl font-bold text-slate-900 mb-6">Contact</h4>
+            <div className="space-y-2 text-slate-700">
+              <p className="font-bold text-lg">RBF Management Team</p>
+              <p>Ministry of Energy, Water and Meteorology</p>
+              <p>Maseru, Lesotho</p>
+              <p className="pt-2"><span className="font-medium">Email:</span> rbf@energy.gov.ls</p>
+              <p><span className="font-medium">Phone:</span> +266 2231 XXXX</p>
+              <p><span className="font-medium">Address:</span> Corner Constitution &amp; Parliament Road, Maseru 100, Lesotho</p>
             </div>
           </div>
         </div>
+
+        {/* FAQ Modal */}
+        {showFaq && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setShowFaq(false)}>
+            <div className="bg-white rounded-2xl max-w-2xl w-full max-h-[90vh] overflow-hidden flex flex-col" onClick={e => e.stopPropagation()}>
+              <div className="bg-emerald-600 text-white px-6 py-4 flex items-center justify-between flex-shrink-0">
+                <div>
+                  <h3 className="text-lg font-bold">Frequently Asked Questions</h3>
+                  <p className="text-emerald-100 text-xs mt-0.5">Everything you need to know about the RBF programme</p>
+                </div>
+                <button onClick={() => setShowFaq(false)} className="text-white/80 hover:text-white"><X size={24} /></button>
+              </div>
+              <div className="overflow-y-auto flex-1 p-6 space-y-6">
+                {/* About the Programme */}
+                <div>
+                  <h4 className="text-sm font-bold text-emerald-600 uppercase tracking-widest mb-3">About the Programme</h4>
+                  <div className="space-y-4">
+                    <div>
+                      <p className="font-medium text-slate-900 text-sm">Q: What is Results-Based Financing?</p>
+                      <p className="text-sm text-slate-600 mt-1">RBF is a funding model where payments are only released after results are independently verified. You install first, get verified, then receive payment.</p>
+                    </div>
+                    <div>
+                      <p className="font-medium text-slate-900 text-sm">Q: Who funds this programme?</p>
+                      <p className="text-sm text-slate-600 mt-1">The programme is funded by the European Union and Irish Aid, implemented by UNDP Lesotho in partnership with the Ministry of Energy.</p>
+                    </div>
+                    <div>
+                      <p className="font-medium text-slate-900 text-sm">Q: Which districts are covered?</p>
+                      <p className="text-sm text-slate-600 mt-1">The programme covers all 10 districts of Lesotho, with priority areas announced through each tender.</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="border-t border-slate-200" />
+
+                {/* About Applying */}
+                <div>
+                  <h4 className="text-sm font-bold text-emerald-600 uppercase tracking-widest mb-3">About Applying</h4>
+                  <div className="space-y-4">
+                    <div>
+                      <p className="font-medium text-slate-900 text-sm">Q: Does it cost anything to register?</p>
+                      <p className="text-sm text-slate-600 mt-1">No. Registration and pre-qualification are completely free.</p>
+                    </div>
+                    <div>
+                      <p className="font-medium text-slate-900 text-sm">Q: How long does pre-qualification approval take?</p>
+                      <p className="text-sm text-slate-600 mt-1">The RMT team reviews submissions within 3 to 5 business days.</p>
+                    </div>
+                    <div>
+                      <p className="font-medium text-slate-900 text-sm">Q: Can I apply for multiple tenders?</p>
+                      <p className="text-sm text-slate-600 mt-1">Yes. Once pre-qualified you can apply for any open tender that matches your technology type.</p>
+                    </div>
+                    <div>
+                      <p className="font-medium text-slate-900 text-sm">Q: What if my pre-qualification is rejected?</p>
+                      <p className="text-sm text-slate-600 mt-1">You will receive specific feedback explaining why. You can correct the issues and resubmit.</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="border-t border-slate-200" />
+
+                {/* About Payments */}
+                <div>
+                  <h4 className="text-sm font-bold text-emerald-600 uppercase tracking-widest mb-3">About Payments</h4>
+                  <div className="space-y-4">
+                    <div>
+                      <p className="font-medium text-slate-900 text-sm">Q: When do I receive payment?</p>
+                      <p className="text-sm text-slate-600 mt-1">Payments are milestone-based: 20% after setup and contract signing, 50% after 80% of installations are independently verified, 30% after 100% verified and all KPI targets are met.</p>
+                    </div>
+                    <div>
+                      <p className="font-medium text-slate-900 text-sm">Q: Who verifies my installations?</p>
+                      <p className="text-sm text-slate-600 mt-1">Independent field officers from the Department of Energy physically visit each installation site.</p>
+                    </div>
+                    <div>
+                      <p className="font-medium text-slate-900 text-sm">Q: What are the gender inclusion targets?</p>
+                      <p className="text-sm text-slate-600 mt-1">At least 50% of your installations must benefit female-headed households. At least 30% must benefit vulnerable groups (elderly, disabled, HIV-affected).</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="border-t border-slate-200" />
+
+                {/* Technical Questions */}
+                <div>
+                  <h4 className="text-sm font-bold text-emerald-600 uppercase tracking-widest mb-3">Technical Questions</h4>
+                  <div className="space-y-4">
+                    <div>
+                      <p className="font-medium text-slate-900 text-sm">Q: Do I need smart meters?</p>
+                      <p className="text-sm text-slate-600 mt-1">Smart meters are optional. You can also submit meter data manually using our CSV upload template.</p>
+                    </div>
+                    <div>
+                      <p className="font-medium text-slate-900 text-sm">Q: What file formats are accepted for documents?</p>
+                      <p className="text-sm text-slate-600 mt-1">PDF and DOCX for documents. JPG and PNG for photos. Maximum 10MB per file.</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="border-t border-slate-200" />
+
+                {/* Contact */}
+                <div>
+                  <h4 className="text-sm font-bold text-emerald-600 uppercase tracking-widest mb-3">Contact</h4>
+                  <p className="text-sm text-slate-600 mb-3">Still have questions?</p>
+                  <div className="space-y-2 bg-slate-50 rounded-xl p-4">
+                    <p className="text-sm"><span className="font-medium">Email:</span> rbf@energy.gov.ls</p>
+                    <p className="text-sm"><span className="font-medium">Phone:</span> +266 2231 XXXX</p>
+                  </div>
+                </div>
+              </div>
+              <div className="px-6 py-4 border-t border-slate-200 flex justify-end flex-shrink-0">
+                <button onClick={() => setShowFaq(false)} className="btn-primary text-sm py-2">Close</button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Footer / CTA */}
         <div className="text-center py-24 space-y-8 border-t border-slate-100">
@@ -19700,7 +20252,7 @@ export default function App() {
   };
 
   if (showPublicPortal) {
-    return <PublicPortal onBack={() => setShowPublicPortal(false)} />;
+    return <PublicPortal onBack={() => setShowPublicPortal(false)} onRegisterClick={() => { setShowPublicPortal(false); setAuthView("register"); }} />;
   }
 
   if (!currentUser) {
@@ -19962,22 +20514,22 @@ case "dashboard":
 
     // Default RBF Official view
     switch (activeTab) {
-case "dashboard":
-            return (
-              <PortfolioMonitoringView
-                title="Department of Energy"
-                description={`Regional GIS and KPI monitoring for ${currentUser?.region || "the assigned region"}.`}
-                emptyProjectsMessage="No projects are currently assigned to this regional scope."
-              />
-            );
-          case "regional":
-            return (
-              <PortfolioMonitoringView
-                title="Department of Energy"
-                description={`Regional GIS and KPI monitoring for ${currentUser?.region || "the assigned region"}.`}
-                emptyProjectsMessage="No projects are currently assigned to this regional scope."
-              />
-            );
+      case "dashboard":
+        return (
+          <MacroKpiPortal
+            title="RBF Official Dashboard"
+            description="Macro oversight across Lesotho with national progress, district performance, payment pacing, inclusion compliance, and live red flags."
+            portalType="rbf"
+          />
+        );
+      case "regional":
+        return (
+          <MacroKpiPortal
+            title="RBF Official Dashboard"
+            description="Macro oversight across Lesotho with national progress, district performance, payment pacing, inclusion compliance, and live red flags."
+            portalType="rbf"
+          />
+        );
       case "evaluations": return <TACView mode="financial" />;
       case "tenders": return (
         <Tenders
@@ -19998,6 +20550,7 @@ case "dashboard":
           <MacroKpiPortal
             title="RMT Dashboard"
             description="Macro oversight across Lesotho with national progress, district performance, payment pacing, inclusion compliance, and live red flags."
+            portalType="rbf"
           />
         );
     }
