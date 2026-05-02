@@ -76,6 +76,8 @@ class Tender(models.Model):
     experience_portfolio_file = models.FileField(upload_to='tender_documents/', blank=True)
     is_verified = models.BooleanField(default=False)
     funding_source = models.CharField(max_length=128, blank=True)
+    minimum_service_tier = models.CharField(max_length=64, blank=True)
+    approximate_installation_target = models.PositiveIntegerField(null=True, blank=True)
     technical_weight = models.PositiveIntegerField(default=70)
     financial_weight = models.PositiveIntegerField(default=30)
     technical_threshold = models.PositiveIntegerField(default=70)
@@ -313,3 +315,39 @@ class TenderBidSite(models.Model):
 
     def __str__(self):
         return f"{self.site_name} ({self.bid.tender.reference_number})"
+
+
+class NoticeCategory(models.TextChoices):
+    TENDER = "tender", "Tender"
+    DEADLINE = "deadline", "Deadline"
+    AWARD = "award", "Award"
+    CLARIFICATION = "clarification", "Clarification"
+    TRAINING = "training", "Training"
+    GENERAL = "general", "General"
+
+
+class NoticeStatus(models.TextChoices):
+    DRAFT = "draft", "Draft"
+    PUBLISHED = "published", "Published"
+
+
+class Notice(models.Model):
+    notice_id = models.CharField(max_length=50, unique=True)
+    title = models.CharField(max_length=255)
+    category = models.CharField(max_length=20, choices=NoticeCategory.choices, default=NoticeCategory.GENERAL)
+    summary = models.TextField(blank=True, default="")
+    content = models.TextField(blank=True, default="")
+    linked_tender = models.ForeignKey(Tender, on_delete=models.SET_NULL, null=True, blank=True, related_name="notices")
+    is_pinned = models.BooleanField(default=False)
+    show_countdown = models.BooleanField(default=False)
+    countdown_date = models.DateTimeField(null=True, blank=True)
+    status = models.CharField(max_length=20, choices=NoticeStatus.choices, default=NoticeStatus.DRAFT)
+    published_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-is_pinned", "-published_at", "-created_at"]
+
+    def __str__(self):
+        return f"{self.notice_id} - {self.title}"

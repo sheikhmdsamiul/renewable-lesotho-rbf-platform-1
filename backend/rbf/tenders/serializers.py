@@ -16,6 +16,7 @@ from .models import (
     EvaluationStatus,
     TenderContract,
     ContractStatus,
+    Notice,
 )
 from rbf.users.models import UserRole, VendorPrequalification, PrequalificationStatus
 from rbf.projects.models import TechnologyType, VerificationMethod
@@ -444,21 +445,24 @@ class TenderBidSerializer(serializers.ModelSerializer):
                 if value not in (None, '') and Decimal(str(value)) <= Decimal('0'):
                     errors.setdefault('system_configuration', {})[field_name] = 'Value must be greater than 0.'
 
-                boq_items = attrs.get('boq_items', instance.boq_items if instance else [])
-                if not boq_items:
-                    boq_items = attrs.get('boq_details', [])
-                boq_total = Decimal('0')
-                if not boq_items:
-                    errors['boq_items'] = 'Bill of Quantities is required for site-specific submissions.'
-                elif isinstance(boq_items, list):
-                    for item in boq_items:
-                        qty = item.get('qty') if isinstance(item, dict) else None
-                        unit_price = item.get('unit_price') if isinstance(item, dict) else None
-                        if qty not in (None, '') and unit_price not in (None, ''):
-                            boq_total += Decimal(str(qty)) * Decimal(str(unit_price))
+        stage_key = self._effective_stage_key(attrs)
+        if stage_key == 'site_specific':
+            boq_items = attrs.get('boq_items', instance.boq_items if instance else [])
+            if not boq_items:
+                boq_items = attrs.get('boq_details', [])
+            boq_total = Decimal('0')
+            if not boq_items:
+                errors['boq_items'] = 'Bill of Quantities is required for site-specific submissions.'
+            elif isinstance(boq_items, list):
+                for item in boq_items:
+                    qty = item.get('qty') if isinstance(item, dict) else None
+                    unit_price = item.get('unit_price') if isinstance(item, dict) else None
+                    if qty not in (None, '') and unit_price not in (None, ''):
+                        boq_total += Decimal(str(qty)) * Decimal(str(unit_price))
                     if bid_amount not in (None, '') and boq_total != Decimal(str(bid_amount)):
                         errors['boq_items'] = f'BOQ grand total must equal the bid amount. Current total: {boq_total}.'
 
+            if stage_key == 'site_specific':
                 om_strategy_summary = attrs.get('om_strategy_summary', instance.om_strategy_summary if instance else '')
                 if not str(om_strategy_summary or '').strip():
                     errors['om_strategy_summary'] = 'O&M strategy summary is required for site-specific submissions.'
@@ -1013,7 +1017,7 @@ class TenderListSerializer(serializers.ModelSerializer):
             'id', 'reference_number', 'name', 'department', 'category',
             'status', 'deadline', 'budget', 'published_at', 'is_verified',
             'awarded_vendor_name', 'bid_count', 'created_at',
-            'technology_types', 'target_districts'
+            'technology_types', 'target_districts', 'procurement_method'
         ]
 
 
@@ -1041,6 +1045,7 @@ class TenderSerializer(serializers.ModelSerializer):
         'funding_source',
         'awarded_vendor_id',
         'awarded_vendor_name',
+        'minimum_service_tier',
     )
     OPTIONAL_DATE_FIELDS = (
         'last_date_security',
@@ -1100,6 +1105,9 @@ class TenderSerializer(serializers.ModelSerializer):
             payload['technology_types'] = []
         if payload.get('target_districts') is None:
             payload['target_districts'] = []
+        
+        if payload.get('approximate_installation_target') in ('', None):
+            payload['approximate_installation_target'] = None
 
         return super().to_internal_value(payload)
 
@@ -1198,3 +1206,46 @@ class TenderSerializer(serializers.ModelSerializer):
             'company_registration_file': {'required': False, 'allow_null': True},
             'experience_portfolio_file': {'required': False, 'allow_null': True},
         }
+
+
+class NoticeSerializer(serializers.ModelSerializer):
+    tender_reference = serializers.SerializerMethodField()
+    tender_name = serializers.SerializerMethodField()
+    notice_id = serializers.CharField(read_only=True)
+
+    def get_tender_reference(self, obj):
+        return obj.linked_tender.reference_number if obj.linked_tender else None
+    
+    def get_tender_name(self, obj):
+        return obj.linked_tender.name if obj.linked_tender else None
+
+    def to_internal_value(self, data):
+        ret = super().to_internal_value(data)
+        if ret.get('linked_tender') == '':
+            ret['linked_tender'] = None
+        return ret
+
+    def create(self, validated_data):
+        last_notice = Notice.objects.order_by('-id').first()
+        next_id = (last_notice.id + 1) if last_notice else 1
+        validated_data['notice_id'] = f"NTC-{next_id:04d}"
+        return super().create(validated_data)
+
+    class Meta:
+        model = Notice
+        fields = '__all__'
+
+
+class NoticeListSerializer(serializers.ModelSerializer):
+    tender_reference = serializers.SerializerMethodField()
+    tender_name = serializers.SerializerMethodField()
+
+    def get_tender_reference(self, obj):
+        return obj.linked_tender.reference_number if obj.linked_tender else None
+    
+    def get_tender_name(self, obj):
+        return obj.linked_tender.name if obj.linked_tender else None
+
+    class Meta:
+        model = Notice
+        fields = ['id', 'notice_id', 'title', 'category', 'summary', 'content', 'linked_tender', 'tender_reference', 'tender_name', 'is_pinned', 'show_countdown', 'countdown_date', 'status', 'published_at', 'created_at']

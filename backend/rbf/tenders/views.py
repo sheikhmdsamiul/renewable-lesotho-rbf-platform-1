@@ -25,6 +25,7 @@ from .models import (
     TenderContract,
     ContractStatus,
     ContractSignatureStatus,
+    Notice,
 )
 from .serializers import (
     TenderSerializer,
@@ -36,6 +37,8 @@ from .serializers import (
     normalize_tender_stage,
     is_site_specific_stage,
     tender_stage_label,
+    NoticeSerializer,
+    NoticeListSerializer,
 )
 from .pba_pdf import generate_contract_pdf
 from rbf.users.models import UserRole, VendorPrequalification, PrequalificationStatus
@@ -266,6 +269,7 @@ def _disbursement_preview(contract_value: Decimal) -> dict:
 def _create_project_assignment(request, contract: TenderContract, assignment_data: dict):
     tender = contract.tender
     vendor = assignment_data['vendor']
+    
     district_zones = [str(value or '').strip() for value in assignment_data.get('district_zones', []) if str(value or '').strip()]
     primary_district = district_zones[0] if district_zones else str(assignment_data.get('district_zone') or '').strip()
     district_zone_label = ', '.join(district_zones) if district_zones else primary_district
@@ -1019,7 +1023,7 @@ class TenderViewSet(viewsets.ModelViewSet):
             f"Name: {tender.name}\n"
             f"Category: {tender.category}\n"
             f"Deadline: {tender.deadline}\n"
-            f"View details: {build_frontend_url(f'/rbf-official/tenders?view=details&tenderId={tender.id}', request=request)}\n"
+            f"View details: {build_frontend_url(f'/rbf-official/tenders?view=details&tenderId={tender.id}', request=self.request)}\n"
         )
 
         email_enabled = send_email and bool(
@@ -2171,3 +2175,68 @@ class TenderContractViewSet(viewsets.ModelViewSet):
             linked_entity_id=str(contract.tender.id),
         )
         return Response(TenderContractSerializer(contract).data, status=status.HTTP_200_OK)
+
+
+class NoticeViewSet(viewsets.ModelViewSet):
+    queryset = Notice.objects.all().order_by('-is_pinned', '-published_at')
+    serializer_class = NoticeSerializer
+    pagination_class = TenderPagination
+    permission_classes = []
+
+    def get_queryset(self):
+        qs = Notice.objects.all().order_by('-is_pinned', '-published_at')
+        status = self.request.query_params.get('status')
+        category = self.request.query_params.get('category')
+        if status:
+            qs = qs.filter(status=status)
+        else:
+            qs = qs.filter(status='published')
+        if category and category != 'All':
+            qs = qs.filter(category=category)
+        return qs
+
+    def get_serializer_class(self):
+        if self.action == 'list':
+            return NoticeListSerializer
+        return NoticeSerializer
+
+    def _assert_write_permission(self):
+        user = self.request.user
+        if not user.is_authenticated or user.role not in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}:
+            raise PermissionDenied('Only RBF Officials can manage notices.')
+
+    def create(self, request, *args, **kwargs):
+        self._assert_write_permission()
+        return super().create(request, *args, **kwargs)
+
+    def update(self, request, *args, **kwargs):
+        self._assert_write_permission()
+        return super().update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        self._assert_write_permission()
+        return super().destroy(request, *args, **kwargs)
+
+    @action(detail=True, methods=['post'])
+    def publish(self, request, pk=None):
+        self._assert_write_permission()
+        try:
+            notice = Notice.objects.get(pk=pk)
+            notice.status = 'published'
+            notice.published_at = timezone.now()
+            notice.save(update_fields=['status', 'published_at', 'updated_at'])
+            return Response(NoticeSerializer(notice).data, status=status.HTTP_200_OK)
+        except Notice.DoesNotExist:
+            return Response({'error': 'Notice not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    @action(detail=True, methods=['post'])
+    def unpublish(self, request, pk=None):
+        self._assert_write_permission()
+        try:
+            notice = Notice.objects.get(pk=pk)
+            notice.status = 'draft'
+            notice.published_at = None
+            notice.save(update_fields=['status', 'published_at', 'updated_at'])
+            return Response(NoticeSerializer(notice).data, status=status.HTTP_200_OK)
+        except Notice.DoesNotExist:
+            return Response({'error': 'Notice not found'}, status=status.HTTP_404_NOT_FOUND)

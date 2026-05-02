@@ -188,6 +188,8 @@ export interface Tender {
   targetSiteType?: "Household" | "Business" | "School" | "Clinic";
   isVerified?: boolean;
   fundingSource?: string;
+  minimumServiceTier?: string;
+  approximateInstallationTarget?: number;
   technicalWeight?: number;
   financialWeight?: number;
   technicalThreshold?: number;

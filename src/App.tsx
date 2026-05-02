@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { 
   LayoutDashboard, 
@@ -1200,6 +1200,18 @@ const Tenders = ({
   const [awardBidId, setAwardBidId] = useState("");
   const [awardBidLoading, setAwardBidLoading] = useState(false);
   const [awardRankingRows, setAwardRankingRows] = useState<TenderAwardRankingRow[]>([]);
+  const [tenderBids, setTenderBids] = useState<TenderBid[]>([]);
+  const [bidsLoading, setBidsLoading] = useState(false);
+
+  useEffect(() => {
+    if (view === "details" && selectedTender?.id) {
+      setBidsLoading(true);
+      fetchTenderBids(selectedTender.id)
+        .then(data => setTenderBids(data))
+        .catch(() => setTenderBids([]))
+        .finally(() => setBidsLoading(false));
+    }
+  }, [view, selectedTender?.id]);
   const [notifyEmail, setNotifyEmail] = useState(true);
   const [isActioning, setIsActioning] = useState(false);
   const [districtDropdownOpen, setDistrictDropdownOpen] = useState(false);
@@ -1281,7 +1293,6 @@ const Tenders = ({
     name: "",
     department: "",
     applicationType: "Access Window",
-    stageType: "Stage 1: Concept",
     procurementMethod: "Open Competitive",
     biddingCurrency: "LSL (Maloti)",
     category: "SHS",
@@ -1298,6 +1309,8 @@ const Tenders = ({
     contactDetails: "",
     fundingSource: "",
     coolingOffDays: 7,
+    minimumServiceTier: "",
+    approximateInstallationTarget: 0,
     addressForDocument: "",
     addressForSecurity: "",
     placeForOpening: "",
@@ -1645,7 +1658,7 @@ const Tenders = ({
       Boolean(milestonePaymentScheduleFile) || Boolean(selectedTender?.milestonePaymentScheduleFile);
 
     const requiredFields = [
-      'name','department','applicationType','stageType','procurementMethod',
+      'name','department','applicationType','procurementMethod',
       'addressForDocument','addressForSecurity','placeForOpening',
       'biddersEligibility','invitedBy','biddingCurrency','timeForCompletion',
       'instruction','contactDetails','category','targetSiteType',
@@ -1915,18 +1928,6 @@ const Tenders = ({
               </select>
             </div>
             <div className="space-y-2">
-              <label className="text-sm font-bold text-slate-700">Stage Type *</label>
-              <select 
-                name="stageType"
-                value={formData.stageType}
-                onChange={handleInputChange}
-                className="input-field"
-              >
-                <option>Stage 1: Concept</option>
-                <option>Stage 2: Detailed</option>
-              </select>
-            </div>
-            <div className="space-y-2">
               <label className="text-sm font-bold text-slate-700">Procurement Method *</label>
               <select 
                 name="procurementMethod"
@@ -1952,6 +1953,17 @@ const Tenders = ({
                 <option>USD</option>
                 <option>ZAR</option>
               </select>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-bold text-slate-700">Budget Estimate *</label>
+              <input
+                type="number"
+                name="budget"
+                value={formData.budget ?? 0}
+                onChange={handleInputChange}
+                className="input-field"
+                placeholder="Enter budget estimate"
+              />
             </div>
             <div className="space-y-2">
               <label className="text-sm font-bold text-slate-700">Funding Source (Optional)</label>
@@ -2181,6 +2193,33 @@ const Tenders = ({
                   <option>School</option>
                   <option>Clinic</option>
                 </select>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-bold text-slate-700">Minimum Service Tier</label>
+                <select 
+                  name="minimumServiceTier"
+                  value={formData.minimumServiceTier}
+                  onChange={handleInputChange}
+                  className="input-field"
+                >
+                  <option value="">Select Service Tier</option>
+                  <option>Tier 1</option>
+                  <option>Tier 2</option>
+                  <option>Tier 3</option>
+                  <option>Tier 4</option>
+                  <option>Tier 5</option>
+                </select>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-bold text-slate-700">Approximate Installation Target</label>
+                <input
+                  type="number"
+                  name="approximateInstallationTarget"
+                  value={formData.approximateInstallationTarget ?? 0}
+                  onChange={handleInputChange}
+                  className="input-field"
+                  placeholder="Enter target number"
+                />
               </div>
             </div>
           </div>
@@ -2451,10 +2490,6 @@ const Tenders = ({
                       <p className="font-medium">{selectedTender.applicationType || "N/A"}</p>
                     </div>
                     <div className="space-y-1">
-                      <p className="text-xs font-bold text-slate-500">Stage Type</p>
-                      <p className="font-medium">{selectedTender.stageType || "N/A"}</p>
-                    </div>
-                    <div className="space-y-1">
                       <p className="text-xs font-bold text-slate-500">Procurement Method</p>
                       <p className="font-medium">{selectedTender.procurementMethod || "N/A"}</p>
                     </div>
@@ -2534,6 +2569,14 @@ const Tenders = ({
                     <p className="text-xs font-bold text-slate-500">Target Site Type</p>
                     <p className="text-sm font-medium">{selectedTender.targetSiteType || "N/A"}</p>
                   </div>
+                  <div className="space-y-2">
+                    <p className="text-xs font-bold text-slate-500">Minimum Service Tier</p>
+                    <p className="text-sm font-medium">{selectedTender.minimumServiceTier || "N/A"}</p>
+                  </div>
+                  <div className="space-y-2">
+                    <p className="text-xs font-bold text-slate-500">Approximate Installation Target</p>
+                    <p className="text-sm font-medium">{selectedTender.approximateInstallationTarget != null ? selectedTender.approximateInstallationTarget.toLocaleString() : "N/A"}</p>
+                  </div>
                 </div>
               </div>
 
@@ -2609,19 +2652,23 @@ const Tenders = ({
             </div>
             <div className="card p-6 space-y-4">
               <h3 className="font-bold text-slate-900">Submission Stats</h3>
-              <div className="space-y-4">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm text-slate-500">Total Bids</span>
-                  <span className="font-bold">12</span>
+              {bidsLoading ? (
+                <p className="text-sm text-slate-500">Loading...</p>
+              ) : (
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-slate-500">Total Bids</span>
+                    <span className="font-bold">{tenderBids.length}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-slate-500">Verified Bids (Stage 2)</span>
+                    <span className="font-bold text-emerald-600">{tenderBids.filter(bid => bid.evaluation_status === "evaluated").length}</span>
+                  </div>
+                  <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
+                    <div className="bg-emerald-500 h-full" style={{ width: `${tenderBids.length > 0 ? Math.round((tenderBids.filter(bid => bid.evaluation_status === "evaluated").length / tenderBids.length) * 100) : 0}%` }} />
+                  </div>
                 </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-sm text-slate-500">Verified Bids</span>
-                  <span className="font-bold text-emerald-600">8</span>
-                </div>
-                <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
-                  <div className="bg-emerald-500 h-full w-[66%]" />
-                </div>
-              </div>
+              )}
             </div>
 
             <div className="card p-6 space-y-4">
@@ -2734,10 +2781,6 @@ const Tenders = ({
             <div className="space-y-4">
               <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Procurement & Stage</h3>
               <div className="space-y-1">
-                <p className="text-xs font-bold text-slate-500">Stage Type</p>
-                <p className="text-sm font-medium">{selectedTender.stageType || "Pre-Qualification"}</p>
-              </div>
-              <div className="space-y-1">
                 <p className="text-xs font-bold text-slate-500">Procurement Method</p>
                 <p className="text-sm font-medium">{selectedTender.procurementMethod || "Open Tendering"}</p>
               </div>
@@ -2779,6 +2822,14 @@ const Tenders = ({
               <div className="space-y-1">
                 <p className="text-xs font-bold text-slate-500">Target Site Type</p>
                 <p className="text-sm font-medium">{selectedTender.targetSiteType || "Household"}</p>
+              </div>
+              <div className="space-y-1">
+                <p className="text-xs font-bold text-slate-500">Minimum Service Tier</p>
+                <p className="text-sm font-medium">{selectedTender.minimumServiceTier || "N/A"}</p>
+              </div>
+              <div className="space-y-1">
+                <p className="text-xs font-bold text-slate-500">Approximate Installation Target</p>
+                <p className="text-sm font-medium">{selectedTender.approximateInstallationTarget != null ? selectedTender.approximateInstallationTarget.toLocaleString() : "N/A"}</p>
               </div>
             </div>
             <div className="space-y-4">
@@ -8180,6 +8231,14 @@ const VendorTenders = ({ onSubmitTender }: { onSubmitTender?: (tenderId: string)
                     <p className="text-xs font-bold text-slate-500">Target Site Type</p>
                     <p className="text-sm font-medium">{selectedTender.targetSiteType || "N/A"}</p>
                   </div>
+                  <div className="space-y-2">
+                    <p className="text-xs font-bold text-slate-500">Minimum Service Tier</p>
+                    <p className="text-sm font-medium">{selectedTender.minimumServiceTier || "N/A"}</p>
+                  </div>
+                  <div className="space-y-2">
+                    <p className="text-xs font-bold text-slate-500">Approximate Installation Target</p>
+                    <p className="text-sm font-medium">{selectedTender.approximateInstallationTarget != null ? selectedTender.approximateInstallationTarget.toLocaleString() : "N/A"}</p>
+                  </div>
                 </div>
               </div>
 
@@ -8243,10 +8302,6 @@ const VendorTenders = ({ onSubmitTender }: { onSubmitTender?: (tenderId: string)
                 <div className="flex items-center justify-between">
                   <span className="text-slate-500">Application Type</span>
                   <span className="text-slate-700 font-medium">{selectedTender.applicationType || "N/A"}</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-500">Stage Type</span>
-                  <span className="text-slate-700 font-medium">{selectedTender.stageType || "N/A"}</span>
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-slate-500">Procurement Method</span>
@@ -9680,6 +9735,7 @@ const VendorDashboard = ({
   };
 
   const handleStartClaim = (milestone: Milestone & { projectName?: string }) => {
+    const project = projects.find(p => p.id === milestone.projectId);
     setSelectedMilestone(milestone);
     setClaimData({
       milestoneName: milestone.name,
@@ -9717,8 +9773,8 @@ const VendorDashboard = ({
       boqItems: [
         { itemNumber: 1, description: "", qty: "", unit: "", unitPrice: "", total: 0 },
       ],
-      femaleTargetPct: String(Math.max(50, latestApprovedPrequal?.femaleBeneficiaryTarget ?? 50)),
-      vulnerableTargetPct: String(Math.max(30, latestApprovedPrequal?.vulnerableGroupTarget ?? 30)),
+      femaleTargetPct: "50",
+      vulnerableTargetPct: "30",
       lowIncomeTargetPct: "60",
       inclusionCommitmentConfirmed: false,
       omStrategySummary: "",
@@ -9956,8 +10012,8 @@ const VendorDashboard = ({
   ] as const;
   const uploadedStageTwoDocumentCount = stageTwoDocuments.filter(doc => Boolean((bidFiles as any)[doc.key] || (existingStageTwoDocuments as any)[doc.key])).length;
   const bidSiteCount = bidForm.sites.filter(site => site.siteName.trim()).length;
-  const requiredFemaleTarget = Math.max(50, latestApprovedPrequal?.femaleBeneficiaryTarget ?? 50);
-  const requiredVulnerableTarget = Math.max(30, latestApprovedPrequal?.vulnerableGroupTarget ?? 30);
+  const requiredFemaleTarget = 50;
+  const requiredVulnerableTarget = 30;
   const approvedTierLevel = parseTierLevel(latestApprovedPrequal?.techTier);
   const selectedTierLevel = parseTierLevel(bidForm.techTier);
   const implementationStrategyCharCount = bidForm.conceptNote.trim().length;
@@ -9973,6 +10029,9 @@ const VendorDashboard = ({
   const geographyRows = bidForm.sites.filter(site => site.siteName.trim() || site.estimatedHouseholds || site.latitude || site.longitude);
   const installationTarget = geographyRows.reduce((sum, site) => sum + Number(site.estimatedHouseholds || site.numberOfHouseholds || 0), 0);
   const primaryDistrict = geographyRows.find((site) => site.district?.trim())?.district || bidForm.sites[0]?.district || "Maseru";
+  const districtOptions = (bidTender?.targetDistricts && bidTender.targetDistricts.length > 0) 
+    ? bidTender.targetDistricts 
+    : ["Maseru", "Leribe", "Berea", "Mafeteng", "Mohale's Hoek", "Quthing", "Qacha's Nek", "Mokhotlong", "Thaba-Tseka", "Butha-Buthe"];
   const costPerConnection = subsidyValue > 0 && installationTarget > 0 ? subsidyValue / installationTarget : null;
   const stageOneSiteRows = geographyRows;
   const allStageOneSitesComplete = stageOneSiteRows.length > 0 && stageOneSiteRows.every((site) => (
@@ -10146,7 +10205,7 @@ const VendorDashboard = ({
   const submitBid = async (status: BidStatus) => {
     if (!bidTender) return;
     setBidSubmitError(null);
-    if (editingBidStatus && editingBidStatus !== BidStatus.DRAFT && editingBidStatus !== BidStatus.REVISION_REQUIRED) {
+    if (editingBidStatus && editingBidStatus !== BidStatus.DRAFT && editingBidStatus !== BidStatus.REVISION_REQUIRED && editingBidStatus !== BidStatus.SUBMITTED) {
       setBidMessage("Submitted bids are locked. Open a draft version to make changes.");
       return;
     }
@@ -10456,7 +10515,7 @@ const VendorDashboard = ({
 
   if (view === "bid" && bidTender) {
     const versionsSorted = [...bidVersions].sort((a, b) => (b.version_number || 0) - (a.version_number || 0));
-    const canEdit = !editingBidStatus || editingBidStatus === BidStatus.DRAFT || editingBidStatus === BidStatus.REVISION_REQUIRED;
+    const canEdit = !editingBidStatus || editingBidStatus === BidStatus.DRAFT || editingBidStatus === BidStatus.REVISION_REQUIRED || editingBidStatus === BidStatus.SUBMITTED;
     return (
       <div className="space-y-6 max-w-6xl mx-auto pb-20">
         <div className="flex items-center gap-4 mb-6">
@@ -10469,11 +10528,11 @@ const VendorDashboard = ({
           </div>
         </div>
 
-        {editingBidStatus && editingBidStatus !== BidStatus.DRAFT && (
+        {editingBidStatus && editingBidStatus !== BidStatus.DRAFT && editingBidStatus !== BidStatus.SUBMITTED && (
           <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700 font-medium">
             {editingBidStatus === BidStatus.REVISION_REQUIRED
               ? "Revision required. Update this Stage 1 submission using the review feedback, then resubmit."
-              : "This bid has already been submitted and is now locked for editing."}
+              : "This bid has been locked for editing."}
           </div>
         )}
         <div className="overflow-hidden rounded-[28px] border border-slate-200 bg-gradient-to-br from-slate-950 via-slate-900 to-emerald-900 text-white shadow-xl shadow-slate-200">
@@ -10547,11 +10606,6 @@ const VendorDashboard = ({
             </div>
           </div>
         </div>
-        {bidMessage && !bidSubmitError && (
-          <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 font-medium">
-            {bidMessage}
-          </div>
-        )}
         {inclusionTargetWarning && (
           <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 font-medium">
             {inclusionTargetWarning}
@@ -10609,16 +10663,27 @@ const VendorDashboard = ({
                 <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
                   <div className="space-y-1">
                     <label className="text-sm font-bold text-slate-700 ml-1">Bid Amount (LSL) *</label>
-                    <input type="number" className="input-field" value={bidForm.bidAmount} onChange={(e) => setBidForm(prev => ({ ...prev, bidAmount: e.target.value }))} />
+                    <input type="number" className="input-field" value={bidForm.bidAmount} onChange={(e) => {
+                      const bidAmount = Number(e.target.value || 0);
+                      const subsidy = Number(bidForm.subsidyRequested || 0);
+                      const coFinancing = Math.max(0, bidAmount - subsidy);
+                      setBidForm(prev => ({ ...prev, bidAmount: e.target.value, coFinancingAmount: String(coFinancing) }));
+                    }} />
                   </div>
                   <div className="space-y-1">
                     <label className="text-sm font-bold text-slate-700 ml-1">Subsidy Requested (LSL) *</label>
-                    <input type="number" className="input-field" value={bidForm.subsidyRequested} onChange={(e) => setBidForm(prev => ({ ...prev, subsidyRequested: e.target.value }))} />
+                    <input type="number" className="input-field" value={bidForm.subsidyRequested} onChange={(e) => {
+                      const subsidy = Number(e.target.value || 0);
+                      const bidAmount = Number(bidForm.bidAmount || 0);
+                      const coFinancing = Math.max(0, bidAmount - subsidy);
+                      setBidForm(prev => ({ ...prev, subsidyRequested: e.target.value, coFinancingAmount: String(coFinancing) }));
+                    }} />
                   </div>
                   {isSiteSpecificStage && (
                     <div className="space-y-1">
                       <label className="text-sm font-bold text-slate-700 ml-1">Co-financing Amount (LSL)</label>
-                      <input type="number" className="input-field" value={bidForm.coFinancingAmount} onChange={(e) => setBidForm(prev => ({ ...prev, coFinancingAmount: e.target.value }))} />
+                      <input type="number" className="input-field bg-slate-100" value={bidForm.coFinancingAmount} readOnly />
+                      <p className="text-xs text-slate-500">Auto-calculated: Bid Amount - Subsidy Requested</p>
                     </div>
                   )}
                 </div>
@@ -10694,7 +10759,7 @@ const VendorDashboard = ({
                     <div className="space-y-1">
                       <label className="text-sm font-bold text-slate-700 ml-1">Primary District *</label>
                       <select className="input-field" value={primaryDistrict} onChange={(e) => updatePrimaryDistrict(e.target.value)}>
-                        {districts.map((district) => (
+                        {districtOptions.map((district) => (
                           <option key={district} value={district}>{district}</option>
                         ))}
                       </select>
@@ -10756,7 +10821,7 @@ const VendorDashboard = ({
                             <div className="space-y-1">
                               <label className="text-sm font-bold text-slate-700 ml-1">District *</label>
                               <select className="input-field" value={site.district} onChange={(e) => updateBidSite(index, "district", e.target.value)}>
-                                {districts.map((district) => (
+                                {districtOptions.map((district) => (
                                   <option key={district} value={district}>{district}</option>
                                 ))}
                               </select>
@@ -11001,25 +11066,25 @@ const VendorDashboard = ({
               <div className="space-y-5 p-6">
                 <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
                   <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
-                    <label className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Female-Headed Household Target</label>
+                    <label className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Female-Headed Household Target *</label>
                     <div className="mt-3 flex items-end gap-3">
-                      <input type="number" min={requiredFemaleTarget} className={inclusionInputClass(femaleTargetInvalid)} value={bidForm.femaleTargetPct} onChange={(e) => setBidForm(prev => ({ ...prev, femaleTargetPct: e.target.value }))} />
+                      <input type="number" required min={50} className={inclusionInputClass(femaleTargetInvalid)} value={bidForm.femaleTargetPct} onChange={(e) => setBidForm(prev => ({ ...prev, femaleTargetPct: e.target.value }))} />
                       <span className="pb-3 text-sm font-bold text-slate-500">%</span>
                     </div>
-                    {femaleTargetInvalid && <p className="mt-2 text-xs font-semibold text-rose-600">Minimum {requiredFemaleTarget}% required.</p>}
+                    {femaleTargetInvalid && <p className="mt-2 text-xs font-semibold text-rose-600">Minimum 50% required.</p>}
                   </div>
                   <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
-                    <label className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Vulnerable Group Inclusion</label>
+                    <label className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Vulnerable Group Inclusion *</label>
                     <div className="mt-3 flex items-end gap-3">
-                      <input type="number" min={requiredVulnerableTarget} className={inclusionInputClass(vulnerableTargetInvalid)} value={bidForm.vulnerableTargetPct} onChange={(e) => setBidForm(prev => ({ ...prev, vulnerableTargetPct: e.target.value }))} />
+                      <input type="number" required min={30} className={inclusionInputClass(vulnerableTargetInvalid)} value={bidForm.vulnerableTargetPct} onChange={(e) => setBidForm(prev => ({ ...prev, vulnerableTargetPct: e.target.value }))} />
                       <span className="pb-3 text-sm font-bold text-slate-500">%</span>
                     </div>
-                    {vulnerableTargetInvalid && <p className="mt-2 text-xs font-semibold text-rose-600">Minimum {requiredVulnerableTarget}% required.</p>}
+                    {vulnerableTargetInvalid && <p className="mt-2 text-xs font-semibold text-rose-600">Minimum 30% required.</p>}
                   </div>
                   <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
-                    <label className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Low-Income Household Target</label>
+                    <label className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Low-Income Household Target *</label>
                     <div className="mt-3 flex items-end gap-3">
-                      <input type="number" min={60} className={inclusionInputClass(lowIncomeTargetInvalid)} value={bidForm.lowIncomeTargetPct} onChange={(e) => setBidForm(prev => ({ ...prev, lowIncomeTargetPct: e.target.value }))} />
+                      <input type="number" required min={60} className={inclusionInputClass(lowIncomeTargetInvalid)} value={bidForm.lowIncomeTargetPct} onChange={(e) => setBidForm(prev => ({ ...prev, lowIncomeTargetPct: e.target.value }))} />
                       <span className="pb-3 text-sm font-bold text-slate-500">%</span>
                     </div>
                     {lowIncomeTargetInvalid && <p className="mt-2 text-xs font-semibold text-rose-600">Minimum 60% required.</p>}
@@ -11170,6 +11235,11 @@ const VendorDashboard = ({
                 {isBidSubmitting ? "Submitting..." : "Submit Final Proposal"}
               </button>
             </div>
+            {bidMessage && !bidSubmitError && (
+              <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800 font-medium">
+                {bidMessage}
+              </div>
+            )}
           </div>
 
           <div className="space-y-6 xl:sticky xl:top-6 xl:self-start">
@@ -19037,7 +19107,7 @@ const PublicPortal = ({ onBack, onRegisterClick }: { onBack?: () => void; onRegi
 
   React.useEffect(() => { 
     fetchTenders().then((d: Tender[]) => {
-      const published = d.filter(t => t.status === "Published");
+      const published = d.filter(t => t.status === "Published" && t.procurementMethod === "Open Tendering");
       const sorted = published.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
       setTenders(sorted);
     }).catch(() => {}) 
@@ -19119,9 +19189,7 @@ const PublicPortal = ({ onBack, onRegisterClick }: { onBack?: () => void; onRegi
           </div>
         </div>
 
-        {/* Notice Board */}
-        <NoticeBoardSection tenders={tenders} />
-
+        {/* Published Tenders */}
         <div className="bg-slate-50 rounded-3xl p-6">
           <div className="flex items-center gap-2 mb-4"><FileText size={20} className="text-emerald-600" /><h3 className="text-xl font-bold text-slate-900">Published Tenders</h3></div>
           {tenders.length === 0 ? <p className="text-slate-500 text-center py-4">No published tenders.</p> : <div className="space-y-3">
@@ -19150,14 +19218,132 @@ const PublicPortal = ({ onBack, onRegisterClick }: { onBack?: () => void; onRegi
           </div>}
         </div>
 
+        {tenders.length > 0 && (
+          <div className="bg-emerald-600 rounded-2xl p-6 text-center">
+            <p className="text-white font-medium">Want to submit a bid?</p>
+            <p className="text-emerald-100 text-sm mt-1">Log in or register to access tender documents and submit your proposal</p>
+          </div>
+        )}
+
+        {/* Notice Board */}
+        <NoticeBoardSection tenders={tenders} />
+
         {selected && <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setSelected(null)}>
-          <div className="bg-white rounded-2xl max-w-sm w-full p-5" onClick={e => e.stopPropagation()}>
-            <div className="text-center">
-              <Lock size={32} className="mx-auto text-emerald-600 mb-3" />
-              <h4 className="font-bold text-slate-900 mb-2">Login Required</h4>
-              <p className="text-sm text-slate-500 mb-3">Please register or log in to View full details</p>
-              <div className="bg-slate-50 p-3 rounded-lg mb-3"><p className="font-medium text-slate-900 text-sm">{selected.name}</p><p className="text-xs text-slate-500">{selected.referenceNumber}</p></div>
-              <div className="flex gap-2"><button onClick={() => setSelected(null)} className="btn-secondary flex-1 text-sm py-2">Cancel</button><button onClick={() => { setSelected(null); alert("Redirect to login"); }} className="btn-primary flex-1 text-sm py-2">Login</button></div>
+          <div className="bg-white rounded-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+            <div className="sticky top-0 bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between">
+              <h4 className="font-bold text-slate-900">Tender Details</h4>
+              <button onClick={() => setSelected(null)} className="text-slate-400 hover:text-slate-600">
+                <X size={20} />
+              </button>
+            </div>
+            <div className="p-6 space-y-6">
+              {/* Basic Identity */}
+              <div>
+                <h5 className="text-xs font-bold text-emerald-600 uppercase tracking-wider mb-2">Basic Information</h5>
+                <div className="bg-slate-50 rounded-lg p-4">
+                  <p className="font-bold text-slate-900 text-lg">{selected.name}</p>
+                  <p className="text-sm text-slate-500">Tender ID: {selected.referenceNumber}</p>
+                  <p className="text-sm text-slate-600 mt-1">Department: {selected.department || "N/A"}</p>
+                </div>
+              </div>
+
+              {/* Timeline */}
+              <div>
+                <h5 className="text-xs font-bold text-emerald-600 uppercase tracking-wider mb-2">Timeline</h5>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="bg-slate-50 rounded-lg p-3">
+                    <p className="text-xs text-slate-500">Publication Date</p>
+                    <p className="font-medium text-slate-900">{selected.publishedAt ? new Date(selected.publishedAt).toLocaleDateString() : "N/A"}</p>
+                  </div>
+                  <div className="bg-slate-50 rounded-lg p-3">
+                    <p className="text-xs text-slate-500">Submission Deadline</p>
+                    <p className="font-medium text-rose-600">{selected.deadline ? new Date(selected.deadline).toLocaleDateString() : "N/A"}</p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Scope */}
+              <div>
+                <h5 className="text-xs font-bold text-emerald-600 uppercase tracking-wider mb-2">Scope</h5>
+                <div className="space-y-3">
+                  <div className="bg-slate-50 rounded-lg p-3">
+                    <p className="text-xs text-slate-500">Technology Type</p>
+                    <div className="flex flex-wrap gap-2 mt-1">
+                      {(selected.technologyTypes || []).map(tech => (
+                        <span key={tech} className="px-2 py-1 bg-emerald-50 text-emerald-700 rounded text-xs font-medium">{tech}</span>
+                      ))}
+                      {(selected.technologyTypes || []).length === 0 && <span className="text-sm text-slate-600">N/A</span>}
+                    </div>
+                  </div>
+                  <div className="bg-slate-50 rounded-lg p-3">
+                    <p className="text-xs text-slate-500">Target Districts</p>
+                    <p className="text-sm text-slate-900 mt-1">{(selected.targetDistricts || []).join(", ") || "All districts"}</p>
+                  </div>
+                  <div className="bg-slate-50 rounded-lg p-3">
+                    <p className="text-xs text-slate-500">Installation Target</p>
+                    <p className="text-sm text-slate-900 mt-1">
+                      {selected.approximateInstallationTarget ? `${selected.approximateInstallationTarget.toLocaleString()} installations` : "N/A"}
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Eligibility */}
+              <div>
+                <h5 className="text-xs font-bold text-emerald-600 uppercase tracking-wider mb-2">Eligibility Requirements</h5>
+                <div className="bg-slate-50 rounded-lg p-4">
+                  <p className="text-sm text-slate-700">{selected.biddersEligibility || "Pre-qualification required. Vendors must be registered with valid trading license and tax clearance."}</p>
+                  <p className="text-xs text-emerald-600 mt-2">View full eligibility criteria after login</p>
+                </div>
+              </div>
+
+              {/* Public Documents */}
+              <div>
+                <h5 className="text-xs font-bold text-emerald-600 uppercase tracking-wider mb-2">Public Documents</h5>
+                <div className="space-y-2">
+                  {selected.scheduleFile ? (
+                    <a href={selected.scheduleFile} target="_blank" rel="noopener noreferrer" className="flex items-center gap-3 p-3 bg-slate-50 rounded-lg hover:bg-slate-100 border border-slate-200">
+                      <FileText size={20} className="text-emerald-600" />
+                      <div>
+                        <p className="font-medium text-slate-900 text-sm">Tender Document</p>
+                        <p className="text-xs text-slate-500">Download PDF</p>
+                      </div>
+                    </a>
+                  ) : (
+                    <div className="flex items-center gap-3 p-3 bg-slate-50 rounded-lg border border-slate-200 opacity-50">
+                      <FileText size={20} className="text-slate-400" />
+                      <div>
+                        <p className="font-medium text-slate-500 text-sm">Tender Document</p>
+                        <p className="text-xs text-slate-400">Not available</p>
+                      </div>
+                    </div>
+                  )}
+                  {selected.rfpDocumentsFile ? (
+                    <a href={selected.rfpDocumentsFile} target="_blank" rel="noopener noreferrer" className="flex items-center gap-3 p-3 bg-slate-50 rounded-lg hover:bg-slate-100 border border-slate-200">
+                      <FileText size={20} className="text-blue-600" />
+                      <div>
+                        <p className="font-medium text-slate-900 text-sm">Technical Specifications</p>
+                        <p className="text-xs text-slate-500">Download PDF</p>
+                      </div>
+                    </a>
+                  ) : (
+                    <div className="flex items-center gap-3 p-3 bg-slate-50 rounded-lg border border-slate-200 opacity-50">
+                      <FileText size={20} className="text-slate-400" />
+                      <div>
+                        <p className="font-medium text-slate-500 text-sm">Technical Specifications</p>
+                        <p className="text-xs text-slate-400">Not available</p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* CTA */}
+              <div className="bg-emerald-50 rounded-xl p-4 text-center border border-emerald-100">
+                <p className="font-medium text-emerald-800">Ready to submit a bid?</p>
+                <p className="text-sm text-emerald-600 mt-1">Login or register to access full tender details and submit your proposal</p>
+                <button onClick={() => { setSelected(null); alert("Redirect to login"); }} className="btn-primary mt-3">Login / Register</button>
+              </div>
             </div>
           </div>
         </div>}
