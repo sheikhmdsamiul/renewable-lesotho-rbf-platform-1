@@ -2,7 +2,7 @@ name: Build and Deploy
 
 on:
   push:
-    branches: [main, master]
+    branches: [develop, main, master]
   workflow_dispatch:
 
 env:
@@ -78,7 +78,7 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.ref == 'refs/heads/develop'
 
     steps:
       - name: Deploy to production server
@@ -89,7 +89,8 @@ jobs:
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
             cd /opt/renewable-lesotho-rbf-platform
-            git pull origin main
+            BRANCH=$(echo "${{ github.ref }}" | sed 's|refs/heads/||')
+            git pull origin $BRANCH
             docker compose -f docker-compose.prod.yml pull
             docker compose -f docker-compose.prod.yml up -d --remove-orphans
             docker image prune -f
