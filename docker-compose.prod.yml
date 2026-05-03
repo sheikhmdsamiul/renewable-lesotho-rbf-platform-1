@@ -61,22 +61,14 @@ services:
         condition: service_started
     restart: unless-stopped
 
-  frontend:
-    image: ${DOCKER_REGISTRY}/rbf-frontend:${IMAGE_TAG:-latest}
-    container_name: rbf_frontend_prod
-    restart: unless-stopped
-
   nginx:
-    image: nginx:alpine
+    image: ${DOCKER_REGISTRY}/rbf-frontend:${IMAGE_TAG:-latest}
     container_name: rbf_nginx_prod
-    volumes:
-      - ./nginx/prod.conf:/etc/nginx/nginx.conf:ro
     ports:
       - "80:80"
       - "443:443"
     depends_on:
       - backend
-      - frontend
     restart: unless-stopped
 
 volumes:
