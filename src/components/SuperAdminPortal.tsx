@@ -1218,8 +1218,8 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
                                  <Eye size={14} />
                                  {isExpanded ? "Hide payload" : "View payload"}
                                </button>
-                               {log.status === "failed" && <button onClick={() => void retryJob(log.id)} className="text-xs font-semibold text-emerald-700">Retry</button>}
-                               <button onClick={() => void manualSyncMethod(log)} className="text-xs font-semibold text-emerald-700">Manual Sync</button>
+{log.status !== "success" && <button onClick={() => void retryJob(log.id)} className="text-xs font-semibold text-emerald-700">Retry</button>}
+                                {(log.status === "failed" || log.status === "pending") && <button onClick={() => void manualSyncMethod(log)} className="text-xs font-semibold text-emerald-700">Manual Sync</button>}
                              </div>
                            </td>
                       </tr>

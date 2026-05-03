@@ -83,10 +83,10 @@ function displayMetricValue(value: number, hasData: boolean, suffix = "") {
   return `${value}${suffix}`;
 }
 
-export default function KpiDashboard({ projectId }: { projectId: string }) {
+export default function KpiDashboard({ projectId, projectKpi }: { projectId?: string; projectKpi?: ProjectKpiSummary | null }) {
   const [chartReady, setChartReady] = useState(false);
-  const [summary, setSummary] = useState<ProjectKpiSummary | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [summary, setSummary] = useState<ProjectKpiSummary | null>(projectKpi || null);
+  const [loading, setLoading] = useState(!projectKpi);
   const [error, setError] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
 
@@ -111,6 +111,15 @@ export default function KpiDashboard({ projectId }: { projectId: string }) {
   }, []);
 
   useEffect(() => {
+    if (projectKpi) {
+      setSummary(projectKpi);
+      setLoading(false);
+      return;
+    }
+    if (!projectId) {
+      setLoading(false);
+      return;
+    }
     let active = true;
     setLoading(true);
     setError(null);
@@ -127,7 +136,7 @@ export default function KpiDashboard({ projectId }: { projectId: string }) {
     return () => {
       active = false;
     };
-  }, [projectId]);
+  }, [projectId, projectKpi]);
 
   const kpiRows = useMemo(() => {
     if (!summary) return [];

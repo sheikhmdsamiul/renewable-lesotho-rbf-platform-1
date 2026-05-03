@@ -50,6 +50,9 @@ import {
   ConcernStatus,
   FindingCategory,
   RiskLevel,
+  Notice,
+  NoticeCategory,
+  NoticeStatus,
 } from "./types";
 
 const env = (import.meta as any)?.env ?? {};
@@ -892,7 +895,7 @@ function mapInstallationReportFromApi(api: any): InstallationReport {
     beneficiaryName: api.beneficiary_name ?? undefined,
     householdType: api.household_type ?? undefined,
     verificationStatus: api.verification_status ?? undefined,
-    verifiedBy: api.verified_by ?? undefined,
+    verifiedBy: api.verified_by_username ?? api.verified_by ?? undefined,
     gisStatus: api.gis_status ?? undefined,
   };
 }
@@ -931,6 +934,7 @@ function mapVerificationTaskFromApi(api: any): VerificationTask {
     status: api.status ?? "Pending",
     createdAt: api.created_at ?? "",
     updatedAt: api.updated_at ?? "",
+    concernMessage: api.concern_message ?? undefined,
   };
 }
 
@@ -2313,6 +2317,7 @@ export async function createInstallationReport(payload: {
   photoFiles?: File[];
   meterId?: string;
   kwhReading?: number;
+  householdType?: string;
   confirmOutsideDistrict?: boolean;
 }): Promise<{ report: InstallationReport; warning?: string; requiresConfirmation?: string }> {
   const form = new FormData();
@@ -2324,6 +2329,7 @@ export async function createInstallationReport(payload: {
   form.append("beneficiary_id", payload.beneficiaryId);
   if (payload.meterId) form.append("meter_id", payload.meterId);
   if (payload.kwhReading != null) form.append("kwh_reading", String(payload.kwhReading));
+  if (payload.householdType) form.append("household_type", payload.householdType);
   if (payload.confirmOutsideDistrict) form.append("confirm_outside_district", "true");
   if (payload.receiptFile instanceof File) {
     form.append("receipt_file", payload.receiptFile);
@@ -2356,7 +2362,7 @@ export async function fetchMapInstallations(filters: Record<string, string | und
     if (value != null && value !== "") search.set(key, value);
   });
   const query = search.toString();
-  const data = await http<any>(`/api/installations/map-data${query ? `?${query}` : ""}`);
+  const data = await http<any>(`/api/map/installations${query ? `?${query}` : ""}`);
   const payload = data?.data ?? {};
   return {
     installations: Array.isArray(payload.installations) ? payload.installations.map(mapMapInstallationFromApi) : [],
@@ -3540,4 +3546,95 @@ export async function respondAuditFinding(findingId: string, response: {
     body: JSON.stringify(response),
   });
   return data;
+}
+
+// ======================== NOTICE API FUNCTIONS ========================
+
+function mapNoticeFromApi(data: any): Notice {
+  return {
+    id: data.id,
+    notice_id: data.notice_id,
+    title: data.title,
+    category: data.category as NoticeCategory,
+    summary: data.summary || "",
+    content: data.content || "",
+    linked_tender: data.linked_tender || null,
+    tender_reference: data.tender_reference || null,
+    tender_name: data.tender_name || null,
+    is_pinned: data.is_pinned || false,
+    show_countdown: data.show_countdown || false,
+    countdown_date: data.countdown_date || null,
+    status: data.status as NoticeStatus,
+    published_at: data.published_at || null,
+    created_at: data.created_at,
+    updated_at: data.updated_at,
+  };
+}
+
+function mapNoticeToApi(notice: Partial<Notice>): any {
+  const data: any = {};
+  if (notice.title !== undefined) data.title = notice.title;
+  if (notice.category !== undefined) data.category = notice.category;
+  if (notice.summary !== undefined) data.summary = notice.summary;
+  if (notice.content !== undefined) data.content = notice.content;
+  if (notice.linked_tender !== undefined) data.linked_tender = notice.linked_tender;
+  if (notice.is_pinned !== undefined) data.is_pinned = notice.is_pinned;
+  if (notice.show_countdown !== undefined) data.show_countdown = notice.show_countdown;
+  if (notice.countdown_date !== undefined) data.countdown_date = notice.countdown_date;
+  if (notice.status !== undefined) data.status = notice.status;
+  return data;
+}
+
+export async function fetchNotices(params?: {
+  status?: string;
+  category?: string;
+}): Promise<Notice[]> {
+  const query = new URLSearchParams();
+  if (params?.status) query.set("status", params.status);
+  if (params?.category) query.set("category", params.category);
+  const url = query.toString() ? `/api/notices/?${query.toString()}` : `/api/notices/`;
+  const data = await http<any>(url);
+  const items = unwrapListResponse<any>(data);
+  return items.map(mapNoticeFromApi);
+}
+
+export async function fetchNotice(noticeId: string): Promise<Notice> {
+  const data = await http<any>(`/api/notices/${noticeId}/`);
+  return mapNoticeFromApi(data);
+}
+
+export async function createNotice(notice: Partial<Notice>): Promise<Notice> {
+  const data = await http<any>(`/api/notices/`, {
+    method: "POST",
+    body: JSON.stringify(mapNoticeToApi(notice)),
+  });
+  return mapNoticeFromApi(data);
+}
+
+export async function updateNotice(noticeId: string, notice: Partial<Notice>): Promise<Notice> {
+  const data = await http<any>(`/api/notices/${noticeId}/`, {
+    method: "PATCH",
+    body: JSON.stringify(mapNoticeToApi(notice)),
+  });
+  return mapNoticeFromApi(data);
+}
+
+export async function deleteNotice(noticeId: string): Promise<void> {
+  await http<any>(`/api/notices/${noticeId}/`, {
+    method: "DELETE",
+  });
+}
+
+export async function publishNotice(noticeId: string): Promise<Notice> {
+  const data = await http<any>(`/api/notices/${noticeId}/publish/`, {
+    method: "POST",
+  });
+  return mapNoticeFromApi(data);
+}
+
+export async function unpublishNotice(noticeId: string): Promise<Notice> {
+  const data = await http<any>(`/api/notices/${noticeId}/unpublish/`, {
+    method: "POST",
+  });
+  return mapNoticeFromApi(data);
 }

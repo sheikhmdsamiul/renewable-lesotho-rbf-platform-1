@@ -2365,7 +2365,7 @@ class ProjectProspectTargetSyncTests(APITestCase):
         dispatch_async.assert_called_once()
         method_name, payload = dispatch_async.call_args[0]
         self.assertEqual(method_name, "pushInstallation")
-        self.assertEqual(payload["data"][0]["device_category"], "mini_grid")
+        self.assertEqual(payload["data"][0]["device_category"], "meter")
 
 
 class ProspectSyncLogViewSetTests(SimpleTestCase):

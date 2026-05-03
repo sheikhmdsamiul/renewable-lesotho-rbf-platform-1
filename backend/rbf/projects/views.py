@@ -1990,6 +1990,25 @@ class VerificationTaskViewSet(viewsets.ModelViewSet):
         distance = haversine(float(task.vendor_lat), float(task.vendor_lng), verifier_lat, verifier_lng)
         location_match = distance <= 50
         requested_status = str(request.data.get('verification_status') or '').strip().lower()
+        
+        nearest_distance = None
+        concern_message = None
+        
+        if distance <= 50:
+            nearby_installations = InstallationReport.objects.filter(
+                project_id=task.report.project_id,
+                status__in=[InstallationStatus.SUBMITTED, InstallationStatus.VERIFIED]
+            ).exclude(id=task.report_id)
+            
+            for other in nearby_installations:
+                if other.gps_lat and other.gps_lng:
+                    d = haversine(float(task.vendor_lat), float(task.vendor_lng), float(other.gps_lat), float(other.gps_lng))
+                    if nearest_distance is None or d < nearest_distance:
+                        nearest_distance = d
+            
+            if nearest_distance and nearest_distance > 500:
+                concern_message = f'This installation is {nearest_distance:.0f}m from the nearest installation in this project. Please verify carefully.'
+        
         if requested_status == 'partial':
             next_status = VerificationStatus.PARTIAL
             verification_record_status = FieldVerificationStatus.PARTIAL
@@ -2118,9 +2137,22 @@ class VerificationTaskViewSet(viewsets.ModelViewSet):
                 for user in oversight_users
             ]
         )
+        if concern_message:
+            Notification.objects.create(
+                recipient_id=str(report.vendor_id),
+                recipient_name=report.vendor.full_name or report.vendor.username,
+                type=NotificationChannel.IN_APP,
+                event='verification_concern',
+                title='Installation Location Concern',
+                body=concern_message,
+                status=NotificationStatus.SENT,
+                linked_entity_id=str(report.id),
+            )
         refresh_project_kpis(str(report.project_id))
         payload = self.get_serializer(task).data
         payload['field_verification'] = FieldVerificationSerializer(field_verification, context={'request': request}).data
+        if concern_message:
+            payload['concern_message'] = concern_message
         return Response(payload, status=status.HTTP_200_OK)
 
 

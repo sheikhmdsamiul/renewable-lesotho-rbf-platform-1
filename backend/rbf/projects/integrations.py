@@ -119,10 +119,10 @@ def build_project_target_payload(project: Project) -> dict[str, Any]:
 class ProspectService:
     DEVICE_CATEGORY_MAP = {
         'SHS': 'solar_home_system',
-        'ICS': 'improved_cookstove',
-        'GMG': 'mini_grid',
-        'SWP': 'solar_water_pump',
-        'PUE': 'productive_use',
+        'ICS': 'electric_stove',
+        'GMG': 'meter',
+        'SWP': 'water_pump',
+        'PUE': 'other_production_use',
     }
     WRITE_ENDPOINTS = {
         'pushAgent': '/v1/in/agents',

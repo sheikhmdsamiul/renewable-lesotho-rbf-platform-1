@@ -20571,7 +20571,6 @@ export default function App() {
       switch (activeTab) {
         case "dashboard":
         case "users":
-        case "organizations":
         case "system_configuration":
         case "prospect_sync":
         case "audit_logs":
@@ -20788,7 +20787,6 @@ case "dashboard":
         ...common,
         { id: "all_vendors", icon: Users, label: "All Vendors" },
         { id: "users", icon: Users, label: "User Management" },
-        { id: "organizations", icon: Globe, label: "Organizations" },
         { id: "system_configuration", icon: Settings, label: "System Configuration" },
         { id: "prospect_sync", icon: History, label: "Prospect Sync" },
         { id: "audit_logs", icon: FileText, label: "Audit Logs" },
@@ -20797,7 +20795,7 @@ case "dashboard":
       ];
     }
 
-if (role === UserRole.DOE_OFFICER) {
+   if (role === UserRole.DOE_OFFICER) {
        return [
          ...common,
          { id: "all_vendors", icon: Users, label: "All Vendors" },

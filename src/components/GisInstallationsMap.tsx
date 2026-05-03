@@ -92,12 +92,14 @@ export function GisInstallationsMap({
   height = "500px",
   emptyStateMessage,
   onFlagInstallation,
+  refreshKey,
 }: {
   projectId?: string;
   showFilters?: boolean;
   height?: string;
   emptyStateMessage?: string;
   onFlagInstallation?: (installation: any) => void;
+  refreshKey?: string | number;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<any>(null);
@@ -113,13 +115,6 @@ export function GisInstallationsMap({
     summary: { total: 0, verified: 0, pending: 0, flagged: 0 },
     truncated: false,
   });
-  const [draftFilters, setDraftFilters] = useState<DraftFilters>({
-    technology: "",
-    district: "",
-    household_type: "",
-    date_from: "",
-    date_to: "",
-  });
   const [appliedFilters, setAppliedFilters] = useState<DraftFilters>({
     technology: "",
     district: "",
@@ -127,6 +122,7 @@ export function GisInstallationsMap({
     date_from: "",
     date_to: "",
   });
+  const [draftFilters, setDraftFilters] = useState<DraftFilters>(appliedFilters);
 
   useEffect(() => {
     let active = true;
@@ -214,7 +210,7 @@ export function GisInstallationsMap({
 
   useEffect(() => {
     void loadInstallations(appliedFilters);
-  }, [projectId, appliedFilters]);
+  }, [projectId, appliedFilters, refreshKey]);
 
   useEffect(() => {
     if (!leafletReady || !mapRef.current) return;

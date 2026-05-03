@@ -90,6 +90,7 @@ class ProjectSerializer(serializers.ModelSerializer):
     unresolved_flag_count = serializers.SerializerMethodField()
     latest_audit_entry = serializers.SerializerMethodField()
     contract_value = serializers.SerializerMethodField()
+    awarded_bid_device_info = serializers.SerializerMethodField()
 
     def _get_contract(self, obj: Project):
         if not hasattr(self, '_contract_cache'):
@@ -210,6 +211,24 @@ class ProjectSerializer(serializers.ModelSerializer):
             return obj.tender.budget
         return None
 
+    def get_awarded_bid_device_info(self, obj: Project):
+        tender = getattr(obj, 'tender', None)
+        if not tender:
+            return None
+        try:
+            contract = TenderContract.objects.filter(tender=tender, project_id=str(obj.id)).first()
+            if contract and contract.bid_id:
+                bid = contract.bid
+                if bid and bid.status == 'Awarded':
+                    sys_config = bid.system_configuration or {}
+                    return {
+                        'device_brand': sys_config.get('device_brand', ''),
+                        'device_model': sys_config.get('device_model', ''),
+                    }
+        except Exception:
+            pass
+        return None
+
     def to_representation(self, instance):
         data = super().to_representation(instance)
         request = self.context.get('request')
@@ -310,6 +329,29 @@ class ProjectSetupSerializer(serializers.ModelSerializer):
         tech_tier = current('tech_tier', None)
         if tech_tier is not None and tech_tier not in {1, 2, 3, 4, 5}:
             raise serializers.ValidationError({'tech_tier': 'Technology tier must be between 1 and 5.'})
+
+        if project is not None:
+            tender = getattr(project, 'tender', None)
+            if tender:
+                try:
+                    contract = TenderContract.objects.filter(tender=tender, project_id=str(project.id)).first()
+                    if contract and contract.bid_id:
+                        bid = contract.bid
+                        if bid and bid.status == 'Awarded':
+                            bid_device_brand = str(bid.system_configuration.get('device_brand', '') or '').strip().lower()
+                            bid_device_model = str(bid.system_configuration.get('device_model', '') or '').strip().lower()
+                            setup_device_brand = str(current('device_brand', '') or '').strip().lower()
+                            setup_device_model = str(current('device_model', '') or '').strip().lower()
+                            if bid_device_brand and setup_device_brand and bid_device_brand != setup_device_brand:
+                                raise serializers.ValidationError({
+                                    'device_brand': f"Device brand must match the awarded bid's device brand: '{bid.system_configuration.get('device_brand', '')}'"
+                                })
+                            if bid_device_model and setup_device_model and bid_device_model != setup_device_model:
+                                raise serializers.ValidationError({
+                                    'device_model': f"Device model must match the awarded bid's device model: '{bid.system_configuration.get('device_model', '')}'"
+                                })
+                except Exception:
+                    pass
 
         if not is_submit or project is None:
             return attrs

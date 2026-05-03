@@ -395,7 +395,11 @@ export interface Project {
   claimCount?: number;
   unresolvedFlagCount?: number;
   latestAuditEntry?: AuditLog;
-  contractValue?: number;
+contractValue?: number;
+  awardedBidDeviceInfo?: {
+    device_brand?: string;
+    device_model?: string;
+  };
   energyOutput: number; // kWh
   uptime: number; // %
   genderImpact: number; // % female beneficiaries
@@ -848,6 +852,7 @@ export interface VerificationTask {
   status: VerificationStatus;
   createdAt: string;
   updatedAt: string;
+  concernMessage?: string;
 }
 
 export interface MapInstallationRecord {
@@ -902,8 +907,41 @@ export interface Notification {
   title: string;
   body: string;
   status: NotificationStatus;
-  timestamp: string;
-  linkedEntityId?: string; // Tender ID, Bid ID, etc.
+   timestamp: string;
+   linkedEntityId?: string; // Tender ID, Bid ID, etc.
+}
+
+export enum NoticeCategory {
+  TENDER = "tender",
+  DEADLINE = "deadline",
+  AWARD = "award",
+  CLARIFICATION = "clarification",
+  TRAINING = "training",
+  GENERAL = "general",
+}
+
+export enum NoticeStatus {
+  DRAFT = "draft",
+  PUBLISHED = "published",
+}
+
+export interface Notice {
+  id: string;
+  notice_id: string;
+  title: string;
+  category: NoticeCategory;
+  summary: string;
+  content: string;
+  linked_tender?: string | null;
+  tender_reference?: string | null;
+  tender_name?: string | null;
+  is_pinned: boolean;
+  show_countdown: boolean;
+  countdown_date?: string | null;
+  status: NoticeStatus;
+  published_at?: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export type PrequalificationStatus =
