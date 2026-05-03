@@ -21,7 +21,10 @@ services:
     restart: unless-stopped
 
   backend:
-    image: ${DOCKER_REGISTRY}/rbf-backend:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: rbf-backend:local
     container_name: rbf_web_prod
     environment:
       DJANGO_SETTINGS_MODULE: core.settings
@@ -62,7 +65,10 @@ services:
     restart: unless-stopped
 
   nginx:
-    image: ${DOCKER_REGISTRY}/rbf-frontend:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    image: rbf-frontend:local
     container_name: rbf_nginx_prod
     ports:
       - "80:80"
