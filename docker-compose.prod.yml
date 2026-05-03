@@ -1,0 +1,83 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: rbf_db_prod
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-rbf}
+      POSTGRES_USER: ${POSTGRES_USER:-rbf_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rbf_user} -d ${POSTGRES_DB:-rbf}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: rbf_redis_prod
+    restart: unless-stopped
+
+  backend:
+    image: ${DOCKER_REGISTRY}/rbf-backend:${IMAGE_TAG:-latest}
+    container_name: rbf_web_prod
+    environment:
+      DJANGO_SETTINGS_MODULE: core.settings
+      DJANGO_DEBUG: 0
+      SECRET_KEY: ${SECRET_KEY}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS}
+      API_REQUIRE_AUTH: ${API_REQUIRE_AUTH:-1}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-rbf_user}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-rbf}
+      REDIS_URL: redis://redis:6379/0
+      DB_CONN_MAX_AGE: ${DB_CONN_MAX_AGE:-60}
+      API_PAGE_SIZE: ${API_PAGE_SIZE:-50}
+      API_THROTTLE_ANON: ${API_THROTTLE_ANON:-120/hour}
+      API_THROTTLE_USER: ${API_THROTTLE_USER:-600/hour}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
+      CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS}
+      PBA_RENDER_SCRIPT: ${PBA_RENDER_SCRIPT:-/opt/pba-renderer/render_pdf.mjs}
+      PBA_CHROME_PATH: ${PBA_CHROME_PATH:-/usr/bin/chromium}
+      SECURE_SSL_REDIRECT: ${SECURE_SSL_REDIRECT:-1}
+      SECURE_HSTS_SECONDS: ${SECURE_HSTS_SECONDS:-31536000}
+      SECURE_HSTS_INCLUDE_SUBDOMAINS: ${SECURE_HSTS_INCLUDE_SUBDOMAINS:-1}
+      SECURE_HSTS_PRELOAD: ${SECURE_HSTS_PRELOAD:-1}
+    volumes:
+      - ./backend/scripts/render_pdf.mjs:/opt/pba-renderer/render_pdf.mjs:ro
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/api/health/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    restart: unless-stopped
+
+  frontend:
+    image: ${DOCKER_REGISTRY}/rbf-frontend:${IMAGE_TAG:-latest}
+    container_name: rbf_frontend_prod
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:alpine
+    container_name: rbf_nginx_prod
+    volumes:
+      - ./nginx/prod.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - backend
+      - frontend
+    restart: unless-stopped
+
+volumes:
+  pgdata:
