@@ -47,6 +47,13 @@ services:
       SECURE_HSTS_SECONDS: ${SECURE_HSTS_SECONDS:-31536000}
       SECURE_HSTS_INCLUDE_SUBDOMAINS: ${SECURE_HSTS_INCLUDE_SUBDOMAINS:-1}
       SECURE_HSTS_PRELOAD: ${SECURE_HSTS_PRELOAD:-1}
+      EMAIL_BACKEND: ${EMAIL_BACKEND}
+      EMAIL_HOST: ${EMAIL_HOST}
+      EMAIL_PORT: ${EMAIL_PORT}
+      EMAIL_USE_TLS: ${EMAIL_USE_TLS}
+      EMAIL_HOST_USER: ${EMAIL_HOST_USER}
+      EMAIL_HOST_PASSWORD: ${EMAIL_HOST_PASSWORD}
+      DEFAULT_FROM_EMAIL: ${DEFAULT_FROM_EMAIL}
     volumes:
       - ./backend/scripts/render_pdf.mjs:/opt/pba-renderer/render_pdf.mjs:ro
       - ./media:/app/media
