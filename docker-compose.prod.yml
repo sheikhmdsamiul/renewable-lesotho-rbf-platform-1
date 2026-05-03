@@ -70,11 +70,8 @@ services:
       dockerfile: Dockerfile.frontend
     image: rbf-frontend:local
     container_name: rbf_nginx_prod
-    volumes:
-      - /etc/nginx/ssl:/etc/nginx/ssl:ro
     ports:
       - "80:80"
-      - "443:443"
     depends_on:
       - backend
     restart: unless-stopped
