@@ -1257,6 +1257,88 @@ class ProjectApiTests(APITestCase):
         self.assertEqual(item["verification_status"], "Pending")
         self.assertEqual(item["district"], "Maseru")
 
+    def test_map_installations_endpoint_scopes_field_verifier_using_comma_separated_zone(self):
+        User = get_user_model()
+        verifier = User.objects.create_user(
+            username="field_map_multi_zone",
+            password="securePass123",
+            role="Field Verifier",
+            status="Active",
+            verification_zone="Maseru, Berea",
+        )
+        project_maseru = Project.objects.create(
+            vendor_id="V-100",
+            vendor_name="Vendor A",
+            tech_type="SHS",
+            region="Maseru",
+            district="Maseru",
+            status=ProjectStatus.INSTALLATION,
+            progress=0,
+            energy_output=0,
+            uptime=90,
+            gender_impact=0,
+        )
+        project_berea = Project.objects.create(
+            vendor_id="V-101",
+            vendor_name="Vendor B",
+            tech_type="ICS",
+            region="Berea",
+            district="Berea",
+            status=ProjectStatus.INSTALLATION,
+            progress=0,
+            energy_output=0,
+            uptime=90,
+            gender_impact=0,
+        )
+        project_other = Project.objects.create(
+            vendor_id="V-102",
+            vendor_name="Vendor C",
+            tech_type="SHS",
+            region="Butha-Buthe",
+            district="Butha-Buthe",
+            status=ProjectStatus.INSTALLATION,
+            progress=0,
+            energy_output=0,
+            uptime=90,
+            gender_impact=0,
+        )
+        InstallationReport.objects.create(
+            project=project_maseru,
+            vendor=verifier,
+            gps_lat=-29.31,
+            gps_lng=27.48,
+            serial_number="SERIAL-MULTI-1",
+            beneficiary_id="BEN-MULTI-1",
+            status=InstallationStatus.SUBMITTED,
+        )
+        InstallationReport.objects.create(
+            project=project_berea,
+            vendor=verifier,
+            gps_lat=-29.21,
+            gps_lng=27.58,
+            serial_number="SERIAL-MULTI-2",
+            beneficiary_id="BEN-MULTI-2",
+            status=InstallationStatus.SUBMITTED,
+        )
+        InstallationReport.objects.create(
+            project=project_other,
+            vendor=verifier,
+            gps_lat=-28.76,
+            gps_lng=28.24,
+            serial_number="SERIAL-MULTI-3",
+            beneficiary_id="BEN-MULTI-3",
+            status=InstallationStatus.SUBMITTED,
+        )
+
+        self.client.force_authenticate(verifier)
+        response = self.client.get("/api/map/installations")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        districts = {item["district"] for item in response.data["data"]["installations"]}
+        self.assertIn("Maseru", districts)
+        self.assertIn("Berea", districts)
+        self.assertNotIn("Butha-Buthe", districts)
+
     def test_map_vendor_name_uses_project_vendor_not_report_creator(self):
         User = get_user_model()
         admin_user = User.objects.create_user(

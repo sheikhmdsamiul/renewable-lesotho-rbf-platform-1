@@ -1255,11 +1255,13 @@ export function FieldOperationalKpiPanel({
   reports,
   projects,
   assignedDistrict,
+  assignedDistricts,
 }: {
   tasks: VerificationTask[];
   reports: InstallationReport[];
   projects: Project[];
   assignedDistrict: string;
+  assignedDistricts?: string[];
 }) {
   const [anomalyFlags, setAnomalyFlags] = useState<AnomalyFlag[]>([]);
   const [loading, setLoading] = useState(true);

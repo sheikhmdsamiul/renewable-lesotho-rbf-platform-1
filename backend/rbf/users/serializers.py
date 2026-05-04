@@ -61,7 +61,7 @@ class UserSerializer(serializers.ModelSerializer):
             'organization_name', 'organization_type', 'technology_types',
             'registration_certificate_name', 'tax_id', 'device_id', 'associated_entities',
             'bank_name', 'bank_branch', 'bank_swift_code', 'bank_sort_code',
-            'tier_assignment', 'verification_zone',
+            'tier_assignment', 'verification_zone', 'districts',
             'status', 'must_change_password', 'password', 'vendor_tag', 'blacklist_summary'
         ]
         read_only_fields = ['id']
@@ -270,6 +270,7 @@ class UserSerializer(serializers.ModelSerializer):
 class AdminManagedUserSerializer(serializers.ModelSerializer):
     role = serializers.CharField()
     district = serializers.SerializerMethodField(read_only=True)
+    districts = serializers.JSONField(required=False, default=list)
     role_label = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
@@ -284,6 +285,7 @@ class AdminManagedUserSerializer(serializers.ModelSerializer):
             'role_label',
             'region',
             'verification_zone',
+            'districts',
             'district',
             'status',
             'is_active',
@@ -297,6 +299,8 @@ class AdminManagedUserSerializer(serializers.ModelSerializer):
         }
 
     def get_district(self, obj):
+        if obj.districts and isinstance(obj.districts, list) and len(obj.districts) > 0:
+            return ', '.join(obj.districts)
         return obj.verification_zone or obj.region or ''
 
     def get_role_label(self, obj):
@@ -325,6 +329,7 @@ class AdminManagedUserSerializer(serializers.ModelSerializer):
         gender = str(attrs.get('gender', getattr(self.instance, 'gender', '')) or '').strip()
         region = str(attrs.get('region', getattr(self.instance, 'region', '')) or '').strip()
         verification_zone = str(attrs.get('verification_zone', getattr(self.instance, 'verification_zone', '')) or '').strip()
+        districts = attrs.get('districts', getattr(self.instance, 'districts', None))
 
         errors = {}
         if not full_name:
@@ -333,8 +338,10 @@ class AdminManagedUserSerializer(serializers.ModelSerializer):
             errors['email'] = 'Email is required.'
         if not gender:
             errors['gender'] = 'Gender is required.'
-        if role in {UserRole.FIELD_VERIFIER, UserRole.DOE_OFFICER} and not (verification_zone or region):
-            errors['region'] = 'Assigned district/region is required for Field Officer and DoE users.'
+        if role in {UserRole.FIELD_VERIFIER, UserRole.DOE_OFFICER}:
+            has_districts = districts and isinstance(districts, list) and len(districts) > 0
+            if not has_districts and not verification_zone and not region:
+                errors['districts'] = 'At least one district is required for Field Officer and DoE users.'
         if errors:
             raise serializers.ValidationError(errors)
         return attrs
@@ -363,6 +370,10 @@ class AdminManagedUserSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         old_active = instance.is_active
+        districts = validated_data.get('districts')
+        if districts and isinstance(districts, list) and len(districts) > 0:
+            validated_data['verification_zone'] = districts[0]
+            validated_data['region'] = districts[0]
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         status_value = str(validated_data.get('status', instance.status) or instance.status)

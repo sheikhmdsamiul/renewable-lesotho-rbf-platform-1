@@ -93,6 +93,9 @@ export function GisInstallationsMap({
   emptyStateMessage,
   onFlagInstallation,
   refreshKey,
+  defaultDistrict,
+  focusInstallationId,
+  focusRequestKey,
 }: {
   projectId?: string;
   showFilters?: boolean;
@@ -100,12 +103,16 @@ export function GisInstallationsMap({
   emptyStateMessage?: string;
   onFlagInstallation?: (installation: any) => void;
   refreshKey?: string | number;
+  defaultDistrict?: string;
+  focusInstallationId?: string;
+  focusRequestKey?: string | number;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<any>(null);
   const boundaryLayerRef = useRef<any>(null);
   const layerControlRef = useRef<any>(null);
   const markerLayersRef = useRef<Record<string, { remove: () => void }> | null>(null);
+  const markerByInstallationIdRef = useRef<Record<string, any>>({});
 
   const [leafletReady, setLeafletReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -115,13 +122,13 @@ export function GisInstallationsMap({
     summary: { total: 0, verified: 0, pending: 0, flagged: 0 },
     truncated: false,
   });
-  const [appliedFilters, setAppliedFilters] = useState<DraftFilters>({
+  const [appliedFilters, setAppliedFilters] = useState<DraftFilters>(() => ({
     technology: "",
-    district: "",
+    district: defaultDistrict || "",
     household_type: "",
     date_from: "",
     date_to: "",
-  });
+  }));
   const [draftFilters, setDraftFilters] = useState<DraftFilters>(appliedFilters);
 
   useEffect(() => {
@@ -228,6 +235,7 @@ export function GisInstallationsMap({
     const verifiedLayer = L.layerGroup().addTo(mapRef.current);
     const pendingLayer = L.layerGroup().addTo(mapRef.current);
     const flaggedLayer = L.layerGroup().addTo(mapRef.current);
+    markerByInstallationIdRef.current = {};
     markerLayersRef.current = {
       verified: verifiedLayer,
       pending: pendingLayer,
@@ -292,6 +300,7 @@ export function GisInstallationsMap({
 
       marker.bindPopup(popupContent);
       marker.addTo(targetLayer);
+      markerByInstallationIdRef.current[String(installation.id)] = marker;
       bounds.push([installation.latitude, installation.longitude]);
     });
 
@@ -311,6 +320,17 @@ export function GisInstallationsMap({
       mapRef.current.setView([-29.6, 28.2], 8);
     }
   }, [leafletReady, mapData]);
+
+  useEffect(() => {
+    if (!leafletReady || !mapRef.current || !focusInstallationId) return;
+    const marker = markerByInstallationIdRef.current[String(focusInstallationId)];
+    if (!marker) return;
+    const latLng = marker.getLatLng();
+    if (latLng) {
+      mapRef.current.setView(latLng, Math.max(mapRef.current.getZoom(), 14), { animate: true });
+    }
+    marker.openPopup();
+  }, [leafletReady, mapData.installations, focusInstallationId, focusRequestKey]);
 
   const technologyOptions = useMemo(
     () => Array.from(new Set(mapData.installations.map((item) => item.technologyType).filter(Boolean))).sort(),

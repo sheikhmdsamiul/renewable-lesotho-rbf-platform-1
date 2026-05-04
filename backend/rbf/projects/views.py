@@ -115,15 +115,24 @@ def vendor_query_filter(user, prefix: str = ''):
 
 
 def field_verifier_district_filter(user, project_prefix: str = 'project__'):
-    district = (
-        getattr(user, 'verification_zone', '')
-        or getattr(user, 'district', '')
-        or getattr(user, 'region', '')
-        or ''
-    ).strip()
-    if not district:
+    user_districts = getattr(user, 'districts', None) or []
+    normalized_districts: list[str] = []
+    if isinstance(user_districts, list):
+        normalized_districts = [str(d or '').strip() for d in user_districts if str(d or '').strip()]
+    if not normalized_districts:
+        raw_scope = (
+            getattr(user, 'verification_zone', '')
+            or getattr(user, 'district', '')
+            or getattr(user, 'region', '')
+            or ''
+        )
+        normalized_districts = [part.strip() for part in str(raw_scope).split(',') if part.strip()]
+    if not normalized_districts:
         return Q(pk__in=[])
-    return Q(**{f'{project_prefix}district__iexact': district}) | Q(**{f'{project_prefix}region__iexact': district})
+    district_queries = Q()
+    for district in normalized_districts:
+        district_queries |= Q(**{f'{project_prefix}district__iexact': district}) | Q(**{f'{project_prefix}region__iexact': district})
+    return district_queries
 
 
 def field_verifier_task_scope_filter(user, task_prefix: str = ''):
@@ -1241,6 +1250,7 @@ class PaymentClaimViewSet(viewsets.ModelViewSet):
     VERIFY_ROLES = {UserRole.RBF_OFFICIAL, UserRole.ADMIN}
     TAC_APPROVE_ROLES = {UserRole.TAC}
     PSC_APPROVE_ROLES = {UserRole.UNDP_DONOR}
+    REJECT_ROLES = {UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.TAC, UserRole.UNDP_DONOR}
     PAY_ROLES = {UserRole.ADMIN}
 
     def get_queryset(self):
@@ -1270,6 +1280,7 @@ class PaymentClaimViewSet(viewsets.ModelViewSet):
             return Response({'detail': 'project not found.'}, status=status.HTTP_400_BAD_REQUEST)
         if not Project.objects.filter(id=project.id).filter(vendor_query_filter(request.user)).exists():
             raise PermissionDenied('You can only submit claims for your own projects.')
+        data['district'] = (project.district or project.region or '').strip()
 
         serializer = self.get_serializer(data=data)
         serializer.is_valid(raise_exception=True)
@@ -1532,12 +1543,20 @@ class PaymentClaimViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def reject(self, request, pk=None):
-        if request.user.role not in self.APPROVE_ROLES:
+        if request.user.role not in self.REJECT_ROLES:
             raise PermissionDenied('You do not have permission to reject claims.')
         claim = self.get_object()
         if claim.status in {PaymentClaimStatus.COMPLETED, PaymentClaimStatus.LEGACY_PAID}:
             return Response({'detail': 'Paid claims cannot be rejected.'}, status=status.HTTP_400_BAD_REQUEST)
-        claim.status = PaymentClaimStatus.REJECTED
+        # TAC "push back to RMT" should return the claim to the RMT review stage.
+        if request.user.role == UserRole.TAC and claim.status in {PaymentClaimStatus.RMT_APPROVED, PaymentClaimStatus.LEGACY_VERIFIED}:
+            claim.status = PaymentClaimStatus.SUBMITTED
+            activity_title = 'Payment Claim Pushed Back'
+            activity_body = f"Payment claim {claim.id} was pushed back to RMT by TAC for clarification."
+        else:
+            claim.status = PaymentClaimStatus.REJECTED
+            activity_title = 'Payment Claim Rejected'
+            activity_body = f"Payment claim {claim.id} was rejected."
         claim.reviewed_by = request.user
         claim.remarks = request.data.get('remarks', claim.remarks)
         claim.save(update_fields=['status', 'reviewed_by', 'remarks'])
@@ -1548,8 +1567,8 @@ class PaymentClaimViewSet(viewsets.ModelViewSet):
         create_project_activity_update(
             claim.project,
             request.user,
-            'Payment Claim Rejected',
-            f"Payment claim {claim.id} was rejected.",
+            activity_title,
+            activity_body,
         )
         return Response(self.get_serializer(claim).data, status=status.HTTP_200_OK)
 
@@ -1938,14 +1957,16 @@ class VerificationTaskViewSet(viewsets.ModelViewSet):
             raise PermissionDenied('You do not have permission to verify installations.')
         task = self.get_object()
         if request.user.role == UserRole.FIELD_VERIFIER:
-            assigned_district = (
-                getattr(request.user, 'verification_zone', '')
-                or getattr(request.user, 'district', '')
-                or getattr(request.user, 'region', '')
-                or ''
-            ).strip().lower()
+            user_districts = getattr(request.user, 'districts', []) or []
+            if isinstance(user_districts, list) and len(user_districts) > 0:
+                assigned_districts = [d.strip().lower() for d in user_districts if d]
+            else:
+                assigned_districts = [
+                    (getattr(request.user, 'verification_zone', '') or '').strip().lower(),
+                    (getattr(request.user, 'region', '') or '').strip().lower(),
+                ]
             task_district = (task.report.project.district or task.report.project.region or '').strip().lower()
-            if assigned_district and task_district and assigned_district != task_district:
+            if task_district and task_district not in assigned_districts:
                 raise PermissionDenied('You can only verify installations in your assigned district.')
         if task.status == VerificationStatus.PAUSED:
             return Response({'detail': 'Field verification is paused while the vendor is under suspension.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -1984,6 +2005,10 @@ class VerificationTaskViewSet(viewsets.ModelViewSet):
             beneficiary_gender = BeneficiaryGender.UNKNOWN
         observation_notes = str(request.data.get('observation_notes') or '').strip()
         flag_reason = str(request.data.get('flag_reason') or '').strip()
+        household_type = str(request.data.get('household_type') or '').strip()
+        valid_household_types = {'standard', 'female_headed', 'vulnerable', 'low_income'}
+        if household_type and household_type.lower() not in valid_household_types:
+            household_type = ''
         if len(observation_notes) > 500:
             return Response({'detail': 'observation_notes must be 500 characters or fewer.'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -2067,6 +2092,8 @@ class VerificationTaskViewSet(viewsets.ModelViewSet):
         task.save(update_fields=['verifier_lat', 'verifier_lng', 'distance_meters', 'anomaly_flag', 'status', 'updated_at'])
 
         report = task.report
+        if household_type:
+            report.household_type = household_type
         if next_status == VerificationStatus.VERIFIED:
             report.status = InstallationStatus.VERIFIED
             report.gis_status = GisStatus.GREEN
@@ -2086,7 +2113,7 @@ class VerificationTaskViewSet(viewsets.ModelViewSet):
         else:
             report.status = InstallationStatus.SUBMITTED
             report.gis_status = GisStatus.YELLOW
-        report.save(update_fields=['status', 'gis_status'])
+        report.save(update_fields=['status', 'gis_status', 'household_type'])
         queue_installation_sync(str(report.id), include_customer=False, include_installation=True)
         log_audit(
             request.user,

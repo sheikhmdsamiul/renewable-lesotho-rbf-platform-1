@@ -203,6 +203,7 @@ import {
   requestProjectSetupChange,
   uploadProjectMeterCsv,
   API_BASE,
+  USER_KEY,
 } from "./api";
 import GisInstallationsMap from "./components/GisInstallationsMap";
 import KpiDashboard from "./components/KpiDashboard";
@@ -5147,7 +5148,13 @@ const Blacklisting = ({ currentUser }: { currentUser: User | null }) => {
   );
 };
 
-const Disbursements = ({ onOpenProjectKpi }: { onOpenProjectKpi?: (projectId: string) => void } = {}) => {
+const Disbursements = ({
+  onOpenProjectKpi,
+  onOpenProject,
+}: {
+  onOpenProjectKpi?: (projectId: string) => void;
+  onOpenProject?: (projectId: string) => void;
+} = {}) => {
   const navigate = useNavigate();
   const [claims, setClaims] = useState<PaymentClaim[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -5614,6 +5621,17 @@ const Disbursements = ({ onOpenProjectKpi }: { onOpenProjectKpi?: (projectId: st
     navigate(`/${roleKey}/${projectSection}/${claim.projectId}/kpi`, { replace: true });
   };
 
+  const openClaimProject = (claim: PaymentClaim) => {
+    if (onOpenProject) {
+      onOpenProject(claim.projectId);
+      return;
+    }
+    const roleKey = getRoleKeyForUser(currentUser?.role);
+    const projectSection = getProjectSectionForUser(currentUser?.role);
+    if (!roleKey || !projectSection) return;
+    navigate(`/${roleKey}/${projectSection}/${claim.projectId}/overview`, { replace: true });
+  };
+
   const getClaimEligibilityEntry = React.useCallback((claim: PaymentClaim) => {
     const summary = projectKpis[claim.projectId];
     if (!summary) return null;
@@ -5853,6 +5871,14 @@ const Disbursements = ({ onOpenProjectKpi }: { onOpenProjectKpi?: (projectId: st
                             className="text-blue-600 hover:text-blue-700 font-medium text-sm text-left"
                           >
                             Check KPI
+                          </button>
+                        )}
+                        {!isVendorView && !isTacView && (
+                          <button
+                            onClick={() => openClaimProject(claim)}
+                            className="text-indigo-600 hover:text-indigo-700 font-medium text-sm text-left"
+                          >
+                            Check Project
                           </button>
                         )}
                       </>
@@ -6324,6 +6350,15 @@ const Disbursements = ({ onOpenProjectKpi }: { onOpenProjectKpi?: (projectId: st
                         This claim does not meet mandatory KPI requirements. PSC approval is blocked until the failed KPI conditions are corrected.
                       </div>
                     )}
+                  </div>
+                )}
+
+                {!isTacView && !isPscView && (
+                  <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-4">
+                    <p className="text-[11px] uppercase tracking-wide text-amber-700">Latest Reviewer Note</p>
+                    <p className="mt-2 text-sm text-amber-900">
+                      {selectedClaimForReview.remarks || "No reviewer note was captured for this claim yet."}
+                    </p>
                   </div>
                 )}
 
@@ -8355,26 +8390,20 @@ const VendorTenders = ({ onSubmitTender }: { onSubmitTender?: (tenderId: string)
   }
 
   return (
-    <div className="space-y-8 -mx-8 -mt-8">
-      {/* Hero Header */}
-      <div className="relative overflow-hidden bg-gradient-to-br from-emerald-700 via-emerald-600 to-teal-600 px-8 py-10">
-        <div className="absolute inset-0 opacity-10">
-          <div className="absolute top-0 right-0 w-96 h-96 bg-white rounded-full blur-3xl -translate-y-1/2 translate-x-1/3" />
-          <div className="absolute bottom-0 left-0 w-72 h-72 bg-white rounded-full blur-3xl translate-y-1/2 -translate-x-1/4" />
-        </div>
-        <div className="relative max-w-7xl mx-auto flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+    <div className="space-y-7">
+      <div className="rounded-3xl border border-slate-200 bg-[linear-gradient(130deg,#0f172a_0%,#134e4a_52%,#ecfeff_160%)] p-7">
+        <div className="flex flex-col gap-5 md:flex-row md:items-center md:justify-between">
           <div>
-            <div className="flex items-center gap-3 mb-2">
-              <div className="w-10 h-10 rounded-xl bg-white/20 flex items-center justify-center">
-                <FileText size={20} className="text-white" />
-              </div>
-              <h1 className="text-3xl font-black text-white tracking-tight">Published Tenders</h1>
+            <div className="mb-2 inline-flex items-center gap-2 rounded-full bg-white/15 px-3 py-1 text-[10px] font-bold uppercase tracking-[0.22em] text-white/90">
+              <FileText size={14} />
+              Vendor Opportunities
             </div>
-            <p className="text-emerald-100 text-sm">Open calls for proposals — pre-qualified vendors only</p>
+            <h1 className="text-3xl font-black tracking-tight text-white">Published Tenders</h1>
+            <p className="mt-1 text-sm text-teal-100">Review open calls and move directly into bid submission.</p>
           </div>
           <button
             onClick={loadPublishedTenders}
-            className="flex items-center gap-2 px-4 py-2.5 bg-white/15 hover:bg-white/25 backdrop-blur-sm rounded-xl text-white text-sm font-semibold transition-all"
+            className="inline-flex items-center gap-2 rounded-xl border border-white/25 bg-white/10 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-white/20"
           >
             <RefreshCw size={16} /> Refresh
           </button>
@@ -8388,37 +8417,22 @@ const VendorTenders = ({ onSubmitTender }: { onSubmitTender?: (tenderId: string)
           </div>
         )}
 
-        {/* Stat Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <div className="bg-white rounded-2xl p-5 border border-slate-100 shadow-sm hover:shadow-md transition-shadow">
-            <div className="flex items-center justify-between mb-3">
-              <div className="w-9 h-9 rounded-lg bg-emerald-50 flex items-center justify-center">
-                <FileText size={18} className="text-emerald-600" />
-              </div>
-              <span className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest">Active</span>
-            </div>
-            <p className="text-3xl font-black text-slate-900">{publishedCount}</p>
-            <p className="text-xs text-slate-500 mt-1">Tenders available</p>
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+          <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
+            <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Active</p>
+            <p className="mt-1 text-xl font-black text-slate-900">{publishedCount}</p>
           </div>
-          <div className="bg-white rounded-2xl p-5 border border-slate-100 shadow-sm hover:shadow-md transition-shadow">
-            <div className="flex items-center justify-between mb-3">
-              <div className="w-9 h-9 rounded-lg bg-amber-50 flex items-center justify-center">
-                <Clock size={18} className="text-amber-600" />
-              </div>
-              <span className="text-[10px] font-bold text-amber-600 uppercase tracking-widest">Urgent</span>
-            </div>
-            <p className="text-3xl font-black text-amber-600">{closingSoonCount}</p>
-            <p className="text-xs text-slate-500 mt-1">Closing within 7 days</p>
+          <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
+            <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Urgent</p>
+            <p className="mt-1 text-xl font-black text-amber-600">{closingSoonCount}</p>
           </div>
-          <div className="bg-white rounded-2xl p-5 border border-slate-100 shadow-sm hover:shadow-md transition-shadow">
-            <div className="flex items-center justify-between mb-3">
-              <div className="w-9 h-9 rounded-lg bg-blue-50 flex items-center justify-center">
-                <Calendar size={18} className="text-blue-600" />
-              </div>
-              <span className="text-[10px] font-bold text-blue-600 uppercase tracking-widest">Latest</span>
-            </div>
-            <p className="text-sm font-bold text-slate-900 truncate">{newestTender?.name || "N/A"}</p>
-            <p className="text-[10px] text-slate-400 mt-1 font-mono">{newestTender?.referenceNumber || "—"}</p>
+          <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
+            <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Latest Ref</p>
+            <p className="mt-1 text-sm font-semibold text-slate-900">{newestTender?.referenceNumber || "—"}</p>
+          </div>
+          <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
+            <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Latest Tender</p>
+            <p className="mt-1 truncate text-sm font-semibold text-slate-900">{newestTender?.name || "N/A"}</p>
           </div>
         </div>
 
@@ -11934,72 +11948,127 @@ const VendorDashboard = ({
           <h3 className="text-lg font-bold text-slate-900">Installation Map</h3>
           <p className="text-sm text-slate-500">Your submitted installations appear here for quick spatial review.</p>
         </div>
-        <GisInstallationsMap projectId={projects[0]?.id} showFilters={false} height="400px" />
+        <GisInstallationsMap showFilters={false} height="400px" />
       </div>
 
-      <div className="card">
-        <div className="p-6 border-b border-slate-100 flex items-center justify-between">
-          <div>
-            <h3 className="text-lg font-bold">Calls for Proposals</h3>
-            <p className="text-sm text-slate-500">Published tenders available for bid submission</p>
-          </div>
-          <button
-            onClick={() => {
-              if (!isPreQualified) {
-                alert("You must be pre-qualified to submit bids.");
-                return;
-              }
-              if (vendorRestricted) {
-                alert(vendorRestrictionMessage);
-                return;
-              }
-              if (activeTenders.length > 0) {
-                const latest = activeTenders[0];
-                const deadline = latest.lastDateSubmission || latest.deadline;
-                const deadlineOk = !deadline || new Date(deadline) > new Date();
-                const statusOk = latest.status === TenderStatus.PUBLISHED;
-                if (!deadlineOk || !statusOk) {
-                  alert("This tender is no longer open for bidding.");
+      <div className="card overflow-hidden">
+        <div className="border-b border-slate-100 bg-[linear-gradient(120deg,#f8fafc_0%,#f1f5f9_45%,#ffffff_100%)] p-6">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <h3 className="text-lg font-bold text-slate-900">Published Tenders</h3>
+              <p className="text-sm text-slate-500">Open opportunities you can submit or continue from this workspace.</p>
+            </div>
+            <button
+              onClick={() => {
+                if (!isPreQualified) {
+                  alert("You must be pre-qualified to submit bids.");
                   return;
                 }
-                void openBidForm(latest);
-              }
-            }}
-            className="btn-secondary text-sm"
-            disabled={vendorRestricted}
-          >
-            Open Latest
-          </button>
-        </div>
-        <div className="divide-y divide-slate-100">
-          {activeTenders.map((tender) => (
-            <div key={tender.id} className="p-6 flex items-center justify-between hover:bg-slate-50 transition-colors">
-              <div>
-                <p className="font-bold text-slate-900">{tender.name}</p>
-                <p className="text-xs text-slate-500">{tender.referenceNumber} • Deadline: {tender.lastDateSubmission || tender.deadline}</p>
-                {stageTwoDraftsByTender.get(tender.id) && (
-                  <p className="text-xs text-emerald-700 mt-1">Stage 2 unlocked and ready to complete.</p>
-                )}
-                {!stageTwoDraftsByTender.get(tender.id) && latestBidByTender.get(tender.id)?.status === BidStatus.SUBMITTED && (
-                  <p className="text-xs text-amber-700 mt-1">Stage 1 submitted. Awaiting technical review to unlock Stage 2.</p>
-                )}
-              </div>
-              <button
-                onClick={() => openBidForm(tender)}
-                disabled={vendorRestricted || !isPreQualified || (() => {
-                  const deadline = tender.lastDateSubmission || tender.deadline;
+                if (vendorRestricted) {
+                  alert(vendorRestrictionMessage);
+                  return;
+                }
+                if (activeTenders.length > 0) {
+                  const latest = activeTenders[0];
+                  const deadline = latest.lastDateSubmission || latest.deadline;
                   const deadlineOk = !deadline || new Date(deadline) > new Date();
-                  const statusOk = tender.status === TenderStatus.PUBLISHED;
-                  return !(deadlineOk && statusOk);
-                })()}
-                className="btn-primary py-1.5 px-4 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {stageTwoDraftsByTender.get(tender.id) ? "Continue Stage 2" : "Submit Proposal"}
-              </button>
+                  const statusOk = latest.status === TenderStatus.PUBLISHED;
+                  if (!deadlineOk || !statusOk) {
+                    alert("This tender is no longer open for bidding.");
+                    return;
+                  }
+                  void openBidForm(latest);
+                }
+              }}
+              className="btn-secondary text-sm"
+              disabled={vendorRestricted}
+            >
+              Open Latest
+            </button>
+          </div>
+          <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-4">
+            <div className="rounded-xl border border-slate-200 bg-white px-3 py-2">
+              <p className="text-[10px] uppercase tracking-wide text-slate-400">Active</p>
+              <p className="mt-1 text-sm font-semibold text-slate-900">{activeTenders.length}</p>
             </div>
-          ))}
+            <div className="rounded-xl border border-slate-200 bg-white px-3 py-2">
+              <p className="text-[10px] uppercase tracking-wide text-slate-400">Stage 2 Ready</p>
+              <p className="mt-1 text-sm font-semibold text-emerald-700">{activeTenders.filter((t) => stageTwoDraftsByTender.get(t.id)).length}</p>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-white px-3 py-2">
+              <p className="text-[10px] uppercase tracking-wide text-slate-400">Awaiting Review</p>
+              <p className="mt-1 text-sm font-semibold text-amber-700">{activeTenders.filter((t) => !stageTwoDraftsByTender.get(t.id) && latestBidByTender.get(t.id)?.status === BidStatus.SUBMITTED).length}</p>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-white px-3 py-2">
+              <p className="text-[10px] uppercase tracking-wide text-slate-400">Restricted</p>
+              <p className="mt-1 text-sm font-semibold text-rose-700">{vendorRestricted ? "Yes" : "No"}</p>
+            </div>
+          </div>
+        </div>
+
+        <div className="p-6">
           {activeTenders.length === 0 && (
-            <div className="p-6 text-sm text-slate-500">No published tenders available right now.</div>
+            <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 p-6 text-sm text-slate-500">
+              No published tenders available right now.
+            </div>
+          )}
+
+          {activeTenders.length > 0 && (
+            <div className="grid gap-4 md:grid-cols-2">
+              {activeTenders.map((tender) => {
+                const deadline = tender.lastDateSubmission || tender.deadline;
+                const deadlineMs = deadline ? Date.parse(deadline) : NaN;
+                const daysLeft = Number.isNaN(deadlineMs) ? null : Math.ceil((deadlineMs - Date.now()) / (1000 * 60 * 60 * 24));
+                const canBid =
+                  !vendorRestricted &&
+                  isPreQualified &&
+                  (tender.status === TenderStatus.PUBLISHED) &&
+                  (!deadline || new Date(deadline) > new Date());
+
+                return (
+                  <div key={tender.id} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition hover:border-emerald-200 hover:shadow-md">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="text-xs font-mono text-slate-400">{tender.referenceNumber}</p>
+                        <p className="mt-1 font-bold text-slate-900">{tender.name}</p>
+                        <p className="mt-1 text-xs text-slate-500">{tender.department || "Department not specified"}</p>
+                      </div>
+                      <span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${
+                        daysLeft == null ? "bg-slate-100 text-slate-700" :
+                        daysLeft < 0 ? "bg-rose-100 text-rose-700" :
+                        daysLeft <= 7 ? "bg-amber-100 text-amber-700" :
+                        "bg-emerald-100 text-emerald-700"
+                      }`}>
+                        {daysLeft == null ? "No deadline" : daysLeft < 0 ? "Closed" : `${daysLeft}d left`}
+                      </span>
+                    </div>
+
+                    <div className="mt-4 flex flex-wrap gap-2">
+                      <span className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-[10px] font-semibold text-slate-600">{tender.stageType || "Stage N/A"}</span>
+                      <span className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-[10px] font-semibold text-slate-600">{tender.category || "Category N/A"}</span>
+                      {stageTwoDraftsByTender.get(tender.id) && (
+                        <span className="rounded-lg border border-emerald-200 bg-emerald-50 px-2 py-1 text-[10px] font-semibold text-emerald-700">Stage 2 unlocked</span>
+                      )}
+                    </div>
+
+                    {!stageTwoDraftsByTender.get(tender.id) && latestBidByTender.get(tender.id)?.status === BidStatus.SUBMITTED && (
+                      <p className="mt-3 text-xs text-amber-700">Stage 1 submitted. Awaiting technical review to unlock Stage 2.</p>
+                    )}
+
+                    <div className="mt-4 flex items-center justify-between gap-3">
+                      <p className="text-xs text-slate-500">Deadline: {deadline || "N/A"}</p>
+                      <button
+                        onClick={() => openBidForm(tender)}
+                        disabled={!canBid}
+                        className="btn-primary py-1.5 px-4 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {stageTwoDraftsByTender.get(tender.id) ? "Continue Stage 2" : "Submit Proposal"}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           )}
         </div>
       </div>
@@ -13038,6 +13107,7 @@ const ProjectsHub = ({
   const [reportDraft, setReportDraft] = useState({
     serialNumber: "",
     beneficiaryId: "",
+    householdType: "",
     gpsLat: "",
     gpsLng: "",
     meterId: "",
@@ -13914,6 +13984,7 @@ const ProjectsHub = ({
         gpsLng,
         serialNumber,
         beneficiaryId,
+        householdType: reportDraft.householdType || undefined,
         meterId: reportDraft.meterId.trim() || undefined,
         kwhReading: reportDraft.kwhReading ? Number(reportDraft.kwhReading) : undefined,
         receiptFile: reportReceipt,
@@ -13921,7 +13992,7 @@ const ProjectsHub = ({
       });
       setInstallationReports(prev => [created.report, ...prev]);
       await refreshProjectUpdates(selectedProject.id);
-      setReportDraft({ serialNumber: "", beneficiaryId: "", gpsLat: "", gpsLng: "", meterId: "", kwhReading: "" });
+      setReportDraft({ serialNumber: "", beneficiaryId: "", householdType: "", gpsLat: "", gpsLng: "", meterId: "", kwhReading: "" });
       setReportPhotos([]);
       setReportReceipt(null);
       setReportMessage(created.warning || "Installation report submitted.");
@@ -15428,6 +15499,20 @@ const ProjectsHub = ({
             </div>
           )}
 
+          {projectTab === "kpi" && (
+            <div className="space-y-4">
+              <KpiDashboard projectId={project.id} />
+              {isRbfPortal && (
+                <div className="flex flex-wrap gap-2">
+                  <button onClick={() => void handleAddProjectNote(project, "Performance note", "Add a performance note for this project.")} className="btn-secondary text-xs">Add Performance Note</button>
+                  <button onClick={() => void handleAddProjectNote(project, "Project set at risk", "Why is this project at risk?")} className="btn-secondary text-xs">Set Project At Risk</button>
+                  <button onClick={() => handleGenerateProjectReport(project)} className="btn-secondary text-xs">Download KPI Report</button>
+                  <button onClick={() => setProjectTab("prospect_sync")} className="btn-secondary text-xs">View Prospect Sync</button>
+                </div>
+              )}
+            </div>
+          )}
+
           {projectTab === "map" && (
             <div className="space-y-4">
               <div>
@@ -15599,6 +15684,13 @@ const ProjectsHub = ({
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                   <input className="input-field" placeholder="Serial number" value={reportDraft.serialNumber} onChange={(e) => setReportDraft(prev => ({ ...prev, serialNumber: e.target.value }))} />
                   <input className="input-field" placeholder="Beneficiary ID (NID)" value={reportDraft.beneficiaryId} onChange={(e) => setReportDraft(prev => ({ ...prev, beneficiaryId: e.target.value }))} />
+                  <select className="input-field" value={reportDraft.householdType} onChange={(e) => setReportDraft(prev => ({ ...prev, householdType: e.target.value }))}>
+                    <option value="">Select Household Type</option>
+                    <option value="standard">Standard</option>
+                    <option value="female_headed">Female Headed</option>
+                    <option value="vulnerable">Vulnerable</option>
+                    <option value="low_income">Low Income</option>
+                  </select>
                   <input className="input-field" placeholder="GPS Latitude" value={reportDraft.gpsLat} onChange={(e) => setReportDraft(prev => ({ ...prev, gpsLat: e.target.value }))} />
                   <input className="input-field" placeholder="GPS Longitude" value={reportDraft.gpsLng} onChange={(e) => setReportDraft(prev => ({ ...prev, gpsLng: e.target.value }))} />
                   <input className="input-field" placeholder="Smart meter ID (optional)" value={reportDraft.meterId} onChange={(e) => setReportDraft(prev => ({ ...prev, meterId: e.target.value }))} />
@@ -17454,11 +17546,14 @@ const FieldVerifierView = ({ mode = "dashboard" }: { mode?: "dashboard" | "inspe
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
+  const [focusedInstallationId, setFocusedInstallationId] = useState<string | null>(null);
+  const [mapFocusRequestKey, setMapFocusRequestKey] = useState(0);
   const [locating, setLocating] = useState(false);
   const [inspectionData, setInspectionData] = useState({
     gpsLat: "",
     gpsLong: "",
     serialNumber: "",
+    householdType: "",
     beneficiaryConfirmed: false,
     beneficiaryGender: "unknown",
     systemWorking: true,
@@ -17470,7 +17565,10 @@ const FieldVerifierView = ({ mode = "dashboard" }: { mode?: "dashboard" | "inspe
   });
 
   const currentUser = getStoredUser();
-  const assignedDistrict = currentUser?.district || currentUser?.verificationZone || currentUser?.region || "District not assigned";
+  const assignedDistricts = currentUser?.districts && currentUser.districts.length > 0 
+    ? currentUser.districts 
+    : [currentUser?.district || currentUser?.verificationZone || currentUser?.region || ""].filter(Boolean);
+  const assignedDistrict = assignedDistricts[0] || "District not assigned";
 
   const formatDateTime = (value?: string | null) => {
     if (!value) return "N/A";
@@ -17524,21 +17622,24 @@ const FieldVerifierView = ({ mode = "dashboard" }: { mode?: "dashboard" | "inspe
         const report = reportsById[task.report];
         const project = report ? projectsById[report.projectId] : undefined;
         const siteName = project?.projectTitle || project?.projectReference || `Project ${report?.projectId || "Unknown"}`;
+        const taskDistrict = project?.district || project?.region || "";
+        const inAssignedDistricts = assignedDistricts.length === 0 || assignedDistricts.includes(taskDistrict);
+        if (!inAssignedDistricts) return null;
         return {
           task,
           report,
           project,
           siteName,
           vendorName: project?.vendorName || report?.vendorUsername || "Assigned vendor",
-          district: project?.district || project?.region || assignedDistrict,
+          district: taskDistrict || assignedDistrict,
           submittedAt: report?.submittedAt || task.createdAt,
           technology: project?.techType || "Installation",
           beneficiaryName: report?.beneficiaryName || report?.beneficiaryId || "Beneficiary not named",
         };
       })
-      .filter((item) => item.report)
-      .sort((a, b) => (a.submittedAt || "").localeCompare(b.submittedAt || ""))
-  ), [assignedDistrict, projectsById, reportsById, tasks]);
+      .filter((item) => item && item.report)
+      .sort((a, b) => (a?.submittedAt || "").localeCompare(b?.submittedAt || ""))
+  ), [assignedDistricts, projectsById, reportsById, tasks]);
 
   const filteredQueue = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -17606,6 +17707,16 @@ const FieldVerifierView = ({ mode = "dashboard" }: { mode?: "dashboard" | "inspe
     setMessage(null);
     setError(null);
     setView("inspect");
+  };
+
+  const focusQueueItemOnGisMap = (item: (typeof queue)[number]) => {
+    if (!item?.report?.id) return;
+    setFocusedInstallationId(item.report.id);
+    setMapFocusRequestKey((prev) => prev + 1);
+    const mapAnchor = document.getElementById("fo-verification-gis-map");
+    if (mapAnchor) {
+      mapAnchor.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
   };
 
   const handleUseCurrentLocation = () => {
@@ -17677,6 +17788,9 @@ const FieldVerifierView = ({ mode = "dashboard" }: { mode?: "dashboard" | "inspe
       form.append("verifier_lat", String(Number(inspectionData.gpsLat)));
       form.append("verifier_lng", String(Number(inspectionData.gpsLong)));
       form.append("verification_status", inspectionData.verificationStatus);
+      if (inspectionData.householdType) {
+        form.append("household_type", inspectionData.householdType);
+      }
       form.append("beneficiary_present", inspectionData.beneficiaryConfirmed ? "true" : "false");
       form.append("beneficiary_gender", inspectionData.beneficiaryGender);
       form.append("system_working", inspectionData.systemWorking ? "true" : "false");
@@ -17863,15 +17977,17 @@ const FieldVerifierView = ({ mode = "dashboard" }: { mode?: "dashboard" | "inspe
                       />
                     </div>
                     <div className="space-y-1">
-                      <label className="text-sm font-bold text-slate-700 ml-1">Verification Outcome *</label>
+                      <label className="text-sm font-bold text-slate-700 ml-1">Household Type</label>
                       <select
                         className="input-field"
-                        value={inspectionData.verificationStatus}
-                        onChange={(e) => setInspectionData((prev) => ({ ...prev, verificationStatus: e.target.value as "verified" | "flagged" | "partial" }))}
+                        value={inspectionData.householdType}
+                        onChange={(e) => setInspectionData((prev) => ({ ...prev, householdType: e.target.value }))}
                       >
-                        <option value="verified">Verified</option>
-                        <option value="partial">Partial</option>
-                        <option value="flagged">Flagged</option>
+                        <option value="">Select Household Type</option>
+                        <option value="standard">Standard</option>
+                        <option value="female_headed">Female Headed</option>
+                        <option value="vulnerable">Vulnerable</option>
+                        <option value="low_income">Low Income</option>
                       </select>
                     </div>
                     <div className="space-y-1">
@@ -17992,7 +18108,19 @@ const FieldVerifierView = ({ mode = "dashboard" }: { mode?: "dashboard" | "inspe
 
               {inspectionStep === 3 && (
                 <div className="space-y-6">
-                  <h3 className="text-lg font-bold text-slate-900 border-b border-slate-100 pb-2">Submission Summary</h3>
+                  <h3 className="text-lg font-bold text-slate-900 border-b border-slate-100 pb-2">Submit Verification</h3>
+                  <div className="space-y-1">
+                    <label className="text-sm font-bold text-slate-700 ml-1">Verification Outcome *</label>
+                    <select
+                      className="input-field"
+                      value={inspectionData.verificationStatus}
+                      onChange={(e) => setInspectionData((prev) => ({ ...prev, verificationStatus: e.target.value as "verified" | "flagged" | "partial" }))}
+                    >
+                      <option value="verified">Verified</option>
+                      <option value="partial">Partial</option>
+                      <option value="flagged">Flagged</option>
+                    </select>
+                  </div>
                   <div className="space-y-1">
                     <label className="text-sm font-bold text-slate-700 ml-1">Site Photos (minimum 1, maximum 5)</label>
                     <input
@@ -18119,6 +18247,7 @@ const FieldVerifierView = ({ mode = "dashboard" }: { mode?: "dashboard" | "inspe
           reports={reports}
           projects={projects}
           assignedDistrict={assignedDistrict}
+          assignedDistricts={assignedDistricts}
         />
       )}
 
@@ -18157,13 +18286,13 @@ const FieldVerifierView = ({ mode = "dashboard" }: { mode?: "dashboard" | "inspe
         </div>
 
         <div className="card p-6">
-          <h3 className="text-lg font-bold mb-4">Assigned District</h3>
+          <h3 className="text-lg font-bold mb-4">Assigned Districts</h3>
           <div className="flex items-center gap-4">
             <div className="w-12 h-12 rounded-xl bg-blue-50 flex items-center justify-center text-blue-600">
               <MapIcon size={24} />
             </div>
             <div>
-              <p className="font-bold text-slate-900">{assignedDistrict}</p>
+              <p className="font-bold text-slate-900">{assignedDistricts.length > 0 ? assignedDistricts.join(", ") : assignedDistrict}</p>
               <p className="text-xs text-slate-500">{queue.length} queue items mapped to your current verifier workspace</p>
             </div>
           </div>
@@ -18180,13 +18309,20 @@ const FieldVerifierView = ({ mode = "dashboard" }: { mode?: "dashboard" | "inspe
         </div>
       </div>
 
-      <div className="card p-6">
-        <div className="mb-4">
-          <h3 className="text-lg font-bold text-slate-900">District GIS Map</h3>
-          <p className="text-sm text-slate-500">Installations in the current verifier scope appear here for route planning and anomaly review.</p>
-        </div>
-        <GisInstallationsMap showFilters={false} height="450px" />
-      </div>
+          <div id="fo-verification-gis-map" className="card p-6">
+            <div className="mb-4">
+              <h3 className="text-lg font-bold text-slate-900">District GIS Map</h3>
+              <p className="text-sm text-slate-500">Installations in the current verifier scope appear here for route planning and anomaly review.</p>
+            </div>
+            {/* Don't filter by district when multiple districts - backend handles all assigned districts */}
+            <GisInstallationsMap
+              showFilters={false}
+              height="450px"
+              defaultDistrict={assignedDistricts.length === 1 ? assignedDistricts[0] : ""}
+              focusInstallationId={focusedInstallationId || undefined}
+              focusRequestKey={mapFocusRequestKey}
+            />
+          </div>
 
       {mode === "dashboard" && (
         <div className="card">
@@ -18279,14 +18415,23 @@ const FieldVerifierView = ({ mode = "dashboard" }: { mode?: "dashboard" | "inspe
                       <p className="text-xs text-slate-500">
                         Task {item.task.id} • Beneficiary: {item.beneficiaryName} • Serial: {item.report?.serialNumber || "N/A"}
                       </p>
-                      <a
-                        href={`https://www.google.com/maps?q=${item.report?.gpsLat},${item.report?.gpsLng}`}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="mt-2 inline-flex text-xs font-semibold text-blue-600 hover:text-blue-700"
-                      >
-                        Map pin
-                      </a>
+                      <div className="mt-2 flex items-center gap-3">
+                        <button
+                          type="button"
+                          onClick={() => focusQueueItemOnGisMap(item)}
+                          className="inline-flex text-xs font-semibold text-emerald-700 hover:text-emerald-800"
+                        >
+                          GIS map pin
+                        </button>
+                        <a
+                          href={`https://www.google.com/maps?q=${item.report?.gpsLat},${item.report?.gpsLng}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex text-xs font-semibold text-blue-600 hover:text-blue-700"
+                        >
+                          Google map pin
+                        </a>
+                      </div>
                     </div>
                   </div>
 
@@ -18334,6 +18479,7 @@ const AdminView = () => {
     role: "",
     gender: "Male" as "Male" | "Female" | "Other",
     district: "",
+    districts: [] as string[],
     isActive: true,
   });
 
@@ -18411,6 +18557,7 @@ const AdminView = () => {
         role: detail.role || roleOptions[0]?.value || "",
         gender: detail.gender || "Male",
         district: detail.district || detail.region || detail.verificationZone || "",
+        districts: detail.districts || [],
         isActive: detail.isActive ?? detail.status === "Active",
       });
       setView(nextView);
@@ -18430,8 +18577,8 @@ const AdminView = () => {
       return;
     }
     const districtRequired = [UserRole.FIELD_VERIFIER, UserRole.DOE_OFFICER].includes(form.role as UserRole);
-    if (districtRequired && !form.district.trim()) {
-      setFormError("Assigned district is required for Field Officer and DoE roles.");
+    if (districtRequired && form.districts.length === 0 && !form.district.trim()) {
+      setFormError("At least one district is required for Field Officer and DoE roles.");
       return;
     }
     try {
@@ -18443,6 +18590,7 @@ const AdminView = () => {
           role: form.role,
           gender: form.gender,
           district: form.district.trim() || undefined,
+          districts: form.districts.length > 0 ? form.districts : undefined,
         });
         setMessage(result.initialPassword
           ? `User created. Username: ${result.user.username || result.user.email}. Temporary password: ${result.initialPassword}`
@@ -18450,15 +18598,24 @@ const AdminView = () => {
             ? `User created, but email delivery failed: ${result.emailError}`
             : `User created. Username: ${result.user.username || result.user.email}. Credentials email sent.`);
       } else if (selectedUser) {
-        const updated = await updateAdminManagedUser(selectedUser.id, {
+        await updateAdminManagedUser(selectedUser.id, {
           fullName: form.fullName.trim(),
           email: form.email.trim(),
           role: form.role,
           gender: form.gender,
           district: form.district.trim() || undefined,
+          districts: form.districts.length > 0 ? form.districts : undefined,
           isActive: form.isActive,
         });
-        setSelectedUser(updated);
+        const freshDetail = await fetchAdminUserDetail(selectedUser.id);
+        setSelectedUser(freshDetail);
+        const currentStored = localStorage.getItem(USER_KEY);
+        if (currentStored) {
+          const parsed = JSON.parse(currentStored);
+          parsed.districts = freshDetail.districts || [];
+          parsed.district = freshDetail.district || "";
+          localStorage.setItem(USER_KEY, JSON.stringify(parsed));
+        }
         setMessage("User updated successfully.");
       }
       await loadUsers();
@@ -18548,11 +18705,36 @@ const AdminView = () => {
                 </select>
               </div>
               <div className="space-y-1">
-                <label className="ml-1 text-sm font-bold text-slate-700">Assigned District/Region {districtRequired ? "*" : "(Optional)"}</label>
-                <select className="input-field" value={form.district} onChange={(e) => setForm(prev => ({ ...prev, district: e.target.value }))}>
-                  <option value="">Select district</option>
-                  {districts.map(district => <option key={district} value={district}>{district}</option>)}
-                </select>
+                <label className="ml-1 text-sm font-bold text-slate-700">Assigned Districts {districtRequired ? "*" : "(Optional)"}</label>
+                <div className="flex flex-wrap gap-2 mb-2">
+                  {districts.map(district => {
+                    const isSelected = form.districts.includes(district);
+                    return (
+                      <button
+                        key={district}
+                        type="button"
+                        onClick={() => {
+                          if (isSelected) {
+                            setForm(prev => ({ ...prev, districts: prev.districts.filter(d => d !== district) }));
+                          } else {
+                            setForm(prev => ({ ...prev, districts: [...prev.districts, district] }));
+                          }
+                        }}
+                        className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${
+                          isSelected
+                            ? "bg-emerald-100 border-emerald-300 text-emerald-700"
+                            : "bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100"
+                        }`}
+                      >
+                        {isSelected && <span className="mr-1">✓</span>}
+                        {district}
+                      </button>
+                    );
+                  })}
+                </div>
+                {form.districts.length > 0 && (
+                  <p className="text-xs text-slate-500">Selected: {form.districts.join(", ")}</p>
+                )}
               </div>
               {isEdit && (
                 <div className="space-y-1">
@@ -18740,7 +18922,7 @@ const AdminView = () => {
                   </td>
                   <td className="p-4 text-sm text-slate-600">{user.email}</td>
                   <td className="p-4"><span className="rounded bg-slate-100 px-2 py-1 text-xs font-medium text-slate-600">{user.roleLabel || user.role}</span></td>
-                  <td className="p-4 text-sm text-slate-600">{user.district || user.region || "—"}</td>
+                  <td className="p-4 text-sm text-slate-600">{user.districts && user.districts.length > 0 ? user.districts.join(", ") : (user.district || user.region || "—")}</td>
                   <td className="p-4">
                     <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-widest ${(user.isActive !== false && user.status !== "Inactive") ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>
                       {(user.isActive !== false && user.status !== "Inactive") ? "Active" : "Inactive"}
@@ -20359,6 +20541,26 @@ export default function App() {
     }
   }, [role]);
 
+  const openProjectHubView = React.useCallback((projectId: string) => {
+    setSelectedProjectId(projectId);
+    setSelectedProjectTab("overview");
+    if (role === UserRole.VENDOR) {
+      setActiveTab("projects_hub");
+      return;
+    }
+    if (role === UserRole.RBF_OFFICIAL) {
+      setActiveTab("rbf_projects");
+      return;
+    }
+    if (role === UserRole.UNDP_DONOR) {
+      setActiveTab("portfolio");
+      return;
+    }
+    if (role === UserRole.TAC || role === UserRole.DOE_OFFICER || role === UserRole.AUDITOR || role === UserRole.FIELD_VERIFIER) {
+      setActiveTab("projects");
+    }
+  }, [role]);
+
   const resolveNotificationTarget = (note: Notification) => {
     const event = (note.event || "").toLowerCase();
     const linkedId = (note.linkedEntityId || "").trim();
@@ -20525,7 +20727,7 @@ export default function App() {
           />
         );
         case "projects_hub": return <ProjectsHub mode="vendor" externalProjectId={selectedProjectId} externalProjectTab={selectedProjectTab} />;
-        case "claims": return <Disbursements onOpenProjectKpi={openProjectKpiView} />;
+        case "claims": return <Disbursements onOpenProjectKpi={openProjectKpiView} onOpenProject={openProjectHubView} />;
         case "my_profile":
           return <VendorProfileView viewerRole={currentUser.role} useOwnProfile embedded />;
         default: return <VendorDashboard />;
@@ -20543,7 +20745,7 @@ export default function App() {
         case "reports":
           if (activeTab === "all_vendors") return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={setViewingVendorProfile} />;
           if (activeTab === "blacklisting") return <Blacklisting currentUser={currentUser} />;
-          if (activeTab === "payments") return <Disbursements onOpenProjectKpi={openProjectKpiView} />;
+          if (activeTab === "payments") return <Disbursements onOpenProjectKpi={openProjectKpiView} onOpenProject={openProjectHubView} />;
           if (activeTab === "reports") return <TacReports />;
           return <TACView mode="technical" />;
         default:
@@ -20651,7 +20853,7 @@ if (activeTab === "reports") {
             <PscDashboard currentUser={currentUser} />
           );
         case "payments":
-          return <Disbursements onOpenProjectKpi={openProjectKpiView} />;
+          return <Disbursements onOpenProjectKpi={openProjectKpiView} onOpenProject={openProjectHubView} />;
         default:
           return (
             <MacroKpiPortal
@@ -20726,7 +20928,7 @@ case "dashboard":
       case "prequal": return <PreQualification />;
       case "rbf_projects": return <ProjectsHub mode="rbf" externalProjectId={selectedProjectId} externalProjectTab={selectedProjectTab} />;
       case "blacklisting": return <Blacklisting currentUser={currentUser} />;
-      case "payments": return <Disbursements onOpenProjectKpi={openProjectKpiView} />;
+      case "payments": return <Disbursements onOpenProjectKpi={openProjectKpiView} onOpenProject={openProjectHubView} />;
       case "all_vendors": return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={setViewingVendorProfile} />;
       case "issues_findings": return <RmtIssuesFindings currentUser={currentUser} />;
       case "notifications": return <NotificationLogs logs={notifications} onSelect={handleNotificationSelect} />;

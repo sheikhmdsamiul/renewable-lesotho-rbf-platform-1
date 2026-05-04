@@ -45,6 +45,7 @@ class User(AbstractUser):
     bank_sort_code = models.CharField(max_length=64, blank=True)
     tier_assignment = models.CharField(max_length=64, blank=True)
     verification_zone = models.CharField(max_length=128, blank=True)
+    districts = models.JSONField(default=list, blank=True)
     status = models.CharField(max_length=16, choices=UserStatus.choices, default=UserStatus.ACTIVE)
     must_change_password = models.BooleanField(default=False)
     last_viewed_at = models.DateTimeField(null=True, blank=True)

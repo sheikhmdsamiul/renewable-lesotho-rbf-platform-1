@@ -47,6 +47,7 @@ import {
   updateAdminManagedUser,
   updateOrganization,
   updatePlatformConfiguration,
+  USER_KEY,
 } from "../api";
 import {
   AuditLog,
@@ -79,6 +80,7 @@ const emptyUserForm = {
   role: "",
   gender: "Male" as "Male" | "Female" | "Other",
   district: "",
+  districts: [] as string[],
   isActive: true,
 };
 
@@ -357,6 +359,7 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
         role: detail.role || roleOptions[0]?.value || "",
         gender: detail.gender || "Male",
         district: detail.district || detail.region || detail.verificationZone || "",
+        districts: detail.districts || [],
         isActive: detail.isActive ?? detail.status === "Active",
       });
       setUserView(nextView);
@@ -375,8 +378,8 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
       setError("Full name, email, role, and gender are required.");
       return;
     }
-    if (requiresDistrict && !userForm.district.trim()) {
-      setError("Assigned district is required for Field Officer and DoE roles.");
+    if (requiresDistrict && userForm.districts.length === 0 && !userForm.district.trim()) {
+      setError("At least one district is required for Field Officer and DoE roles.");
       return;
     }
     setUserSubmitting(true);
@@ -388,6 +391,7 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
           role: userForm.role,
           gender: userForm.gender,
           district: userForm.district.trim() || undefined,
+          districts: userForm.districts.length > 0 ? userForm.districts : undefined,
         });
         setBanner(
           result.initialPassword
@@ -397,15 +401,24 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
               : "User created and credentials email sent.",
         );
       } else if (selectedUser) {
-        const updated = await updateAdminManagedUser(selectedUser.id, {
+        await updateAdminManagedUser(selectedUser.id, {
           fullName: userForm.fullName.trim(),
           email: userForm.email.trim(),
           role: userForm.role,
           gender: userForm.gender,
           district: userForm.district.trim() || undefined,
+          districts: userForm.districts.length > 0 ? userForm.districts : undefined,
           isActive: userForm.isActive,
         });
-        setSelectedUser(updated);
+        const freshDetail = await fetchAdminUserDetail(selectedUser.id);
+        setSelectedUser(freshDetail);
+        const currentStored = localStorage.getItem(USER_KEY);
+        if (currentStored) {
+          const parsed = JSON.parse(currentStored);
+          parsed.districts = freshDetail.districts || [];
+          parsed.district = freshDetail.district || "";
+          localStorage.setItem(USER_KEY, JSON.stringify(parsed));
+        }
         setBanner("User updated successfully.");
       }
       setUserView("list");
@@ -731,10 +744,38 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
                   <option value="Female">Female</option>
                   <option value="Other">Other</option>
                 </select>
-                <select className="input-field" value={userForm.district} onChange={(e) => setUserForm((prev) => ({ ...prev, district: e.target.value }))}>
-                  <option value="">Assigned District</option>
-                  {DISTRICTS.map((district) => <option key={district} value={district}>{district}</option>)}
-                </select>
+                <div className="md:col-span-2 space-y-2">
+                  <label className="text-sm font-bold text-slate-700">Assigned Districts</label>
+                  <div className="flex flex-wrap gap-1.5">
+                    {DISTRICTS.map((district) => {
+                      const isSelected = userForm.districts.includes(district);
+                      return (
+                        <button
+                          key={district}
+                          type="button"
+                          onClick={() => {
+                            if (isSelected) {
+                              setUserForm((prev) => ({ ...prev, districts: prev.districts.filter((d) => d !== district) }));
+                            } else {
+                              setUserForm((prev) => ({ ...prev, districts: [...prev.districts, district] }));
+                            }
+                          }}
+                          className={`px-2 py-1 text-xs font-medium rounded border transition-colors ${
+                            isSelected
+                              ? "bg-emerald-100 border-emerald-300 text-emerald-700"
+                              : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50"
+                          }`}
+                        >
+                          {isSelected && <span className="mr-0.5">✓</span>}
+                          {district}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {userForm.districts.length > 0 && (
+                    <p className="text-xs text-slate-500">Selected: {userForm.districts.join(", ")}</p>
+                  )}
+                </div>
                 {userView === "edit" && (
                   <select className="input-field" value={userForm.isActive ? "active" : "inactive"} onChange={(e) => setUserForm((prev) => ({ ...prev, isActive: e.target.value === "active" }))}>
                     <option value="active">Active</option>
@@ -871,7 +912,7 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
                           <td className="px-6 py-4 font-semibold text-slate-900">{user.fullName}</td>
                           <td className="px-6 py-4 text-sm text-slate-600">{user.email}</td>
                           <td className="px-6 py-4 text-sm text-slate-600">{user.roleLabel || user.role}</td>
-                          <td className="px-6 py-4 text-sm text-slate-600">{user.district || user.region || "—"}</td>
+                          <td className="px-6 py-4 text-sm text-slate-600">{user.districts && user.districts.length > 0 ? user.districts.join(", ") : (user.district || user.region || "—")}</td>
                           <td className="px-6 py-4"><span className={`rounded-full px-2 py-1 text-[10px] font-bold ${(user.isActive !== false && user.status !== "Inactive") ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-600"}`}>{(user.isActive !== false && user.status !== "Inactive") ? "Active" : "Inactive"}</span></td>
                           <td className="px-6 py-4 text-sm text-slate-500">{formatDateTime(user.lastLogin)}</td>
                           <td className="px-6 py-4">

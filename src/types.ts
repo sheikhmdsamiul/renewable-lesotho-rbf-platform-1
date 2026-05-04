@@ -555,6 +555,7 @@ export interface User {
   gender: "Male" | "Female" | "Other";
   region?: string;
   district?: string;
+  districts?: string[];
   mobileNumber?: string;
   nationalId?: string;
   address?: string;

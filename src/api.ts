@@ -61,7 +61,7 @@ const requestTimeoutMs = Number(env?.VITE_API_TIMEOUT_MS ?? 15000);
 const isDevMode = Boolean(env?.DEV);
 const ACCESS_TOKEN_KEY = "rbf_access_token";
 const REFRESH_TOKEN_KEY = "rbf_refresh_token";
-const USER_KEY = "rbf_user";
+export const USER_KEY = "rbf_user";
 const DEMO_USERNAMES = new Set([
   "vendor_approved",
   "admin_user",
@@ -310,6 +310,7 @@ function mapUserFromApi(api: any): User {
     gender: api.gender === "Male" || api.gender === "Female" || api.gender === "Other" ? api.gender : "Other",
     region: api.region ?? undefined,
     district: api.district ?? api.verification_zone ?? api.region ?? undefined,
+    districts: Array.isArray(api.districts) ? api.districts : [],
     mobileNumber: api.mobile_number ?? undefined,
     nationalId: api.national_id ?? undefined,
     address: api.address ?? undefined,
@@ -3050,12 +3051,7 @@ export async function loginUser(username: string, password: string): Promise<{ u
     localStorage.setItem(REFRESH_TOKEN_KEY, data.refresh);
   }
 
-  let user: User;
-  if (data?.user) {
-    user = mapUserFromApi(data.user);
-  } else {
-    user = await fetchCurrentUser();
-  }
+  const user = await fetchCurrentUser();
 
   if (typeof window !== "undefined") {
     localStorage.setItem(USER_KEY, JSON.stringify(user));
@@ -3133,17 +3129,25 @@ export async function createAdminManagedUser(payload: {
   gender: "Male" | "Female" | "Other";
   role: string;
   district?: string;
+  districts?: string[];
 }): Promise<{ user: User; initialPassword?: string; emailError?: string }> {
+  const body: Record<string, any> = {
+    full_name: payload.fullName,
+    email: payload.email,
+    gender: payload.gender,
+    role: payload.role,
+  };
+  if (payload.districts && payload.districts.length > 0) {
+    body.districts = payload.districts;
+    body.verification_zone = payload.districts[0];
+    body.region = payload.districts[0];
+  } else if (payload.district) {
+    body.region = payload.district;
+    body.verification_zone = payload.district;
+  }
   const data = await http<any>(`/api/users/`, {
     method: "POST",
-    body: JSON.stringify({
-      full_name: payload.fullName,
-      email: payload.email,
-      gender: payload.gender,
-      role: payload.role,
-      region: payload.district ?? "",
-      verification_zone: payload.district ?? "",
-    }),
+    body: JSON.stringify(body),
   });
   return {
     user: mapUserFromApi(data),
@@ -3158,19 +3162,26 @@ export async function updateAdminManagedUser(userId: string, payload: {
   gender?: "Male" | "Female" | "Other";
   role?: string;
   district?: string;
+  districts?: string[];
   isActive?: boolean;
 }): Promise<User> {
+  const body: Record<string, any> = {};
+  if (payload.fullName !== undefined) body.full_name = payload.fullName;
+  if (payload.email !== undefined) body.email = payload.email;
+  if (payload.gender !== undefined) body.gender = payload.gender;
+  if (payload.role !== undefined) body.role = payload.role;
+  if (payload.isActive !== undefined) body.is_active = payload.isActive;
+  if (payload.districts && payload.districts.length > 0) {
+    body.districts = payload.districts;
+    body.verification_zone = payload.districts[0];
+    body.region = payload.districts[0];
+  } else if (payload.district !== undefined) {
+    body.region = payload.district;
+    body.verification_zone = payload.district;
+  }
   const data = await http<any>(`/api/users/${userId}/`, {
     method: "PATCH",
-    body: JSON.stringify({
-      full_name: payload.fullName,
-      email: payload.email,
-      gender: payload.gender,
-      role: payload.role,
-      region: payload.district,
-      verification_zone: payload.district,
-      is_active: payload.isActive,
-    }),
+    body: JSON.stringify(body),
   });
   return mapUserFromApi(data);
 }

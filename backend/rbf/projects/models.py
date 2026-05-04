@@ -319,6 +319,7 @@ class PaymentClaim(models.Model):
     project = models.ForeignKey(Project, related_name='payment_claims', on_delete=models.CASCADE)
     vendor = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='payment_claims', on_delete=models.CASCADE)
     milestone = models.ForeignKey(Milestone, related_name='payment_claims', on_delete=models.SET_NULL, null=True, blank=True)
+    district = models.CharField(max_length=64, blank=True)
     completion_date = models.DateField(null=True, blank=True)
     claim_amount = models.DecimalField(max_digits=14, decimal_places=2)
     actual_beneficiaries = models.PositiveIntegerField(default=0)
