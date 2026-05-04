@@ -66,6 +66,17 @@ LESOTHO_DISTRICTS = [
     'Thaba-Tseka',
 ]
 
+APPLICATION_WINDOW = 'application window'
+ACCESS_WINDOW = 'access window'
+
+
+def _normalized_application_type(tender: Tender) -> str:
+    return str(getattr(tender, 'application_type', '') or '').strip().lower()
+
+
+def _uses_hard_deadline(tender: Tender) -> bool:
+    return _normalized_application_type(tender) == APPLICATION_WINDOW
+
 
 CONTRACT_ANNEX_SPECS = (
     (
@@ -164,9 +175,17 @@ def _hydrate_contract_from_bid(contract: TenderContract):
 def _assignment_defaults(contract: TenderContract):
     bid = _get_contract_bid(contract)
     vendor = User.objects.filter(id=contract.vendor_id).first()
-    technology_type = contract.tender.category
-    if isinstance(contract.tender.technology_types, list) and contract.tender.technology_types:
-        technology_type = contract.tender.technology_types[0]
+    technology_choices = _assignment_technology_choices(contract)
+    technology_type = technology_choices[0] if technology_choices else _normalize_technology_type(contract.tender.category)
+    if bid:
+        system_configuration = getattr(bid, 'system_configuration', None)
+        bid_technology_type = ''
+        if isinstance(system_configuration, dict):
+            bid_technology_type = _normalize_technology_type(system_configuration.get('technology_type'))
+        if not bid_technology_type:
+            bid_technology_type = _normalize_technology_type(getattr(bid, 'technology_type', ''))
+        if bid_technology_type and bid_technology_type in technology_choices:
+            technology_type = bid_technology_type
     tender_target_districts = [
         str(value or '').strip()
         for value in (contract.tender.target_districts if isinstance(contract.tender.target_districts, list) else [])
@@ -1476,7 +1495,7 @@ class TenderBidViewSet(viewsets.ModelViewSet):
         if tender.status != TenderStatus.PUBLISHED:
             raise ValidationError({'tender': 'Tender is not open for bidding.'})
         deadline = tender.last_date_submission or tender.deadline
-        if deadline and timezone.now() > deadline:
+        if _uses_hard_deadline(tender) and deadline and timezone.now() >= deadline:
             raise ValidationError({'tender': 'Bidding deadline has passed.'})
         existing_submitted_bid = TenderBid.objects.filter(
             tender=tender,
@@ -1684,7 +1703,7 @@ class TenderBidViewSet(viewsets.ModelViewSet):
         bid.save(update_fields=['status', 'reviewed_at', 'reviewed_by'])
         if bid.tender.status == TenderStatus.PUBLISHED:
             deadline = bid.tender.last_date_submission or bid.tender.deadline
-            if deadline and timezone.now() > deadline:
+            if _uses_hard_deadline(bid.tender) and deadline and timezone.now() >= deadline:
                 bid.tender.status = TenderStatus.EVALUATION
                 bid.tender.save(update_fields=['status', 'updated_at'])
         log_audit(request.user, 'bid_under_review', bid, {'tender_id': str(bid.tender_id)})
@@ -1706,7 +1725,7 @@ class TenderBidViewSet(viewsets.ModelViewSet):
             )
 
         deadline = bid.tender.last_date_submission or bid.tender.deadline
-        if deadline and timezone.now() > deadline:
+        if _uses_hard_deadline(bid.tender) and deadline and timezone.now() >= deadline:
             return Response(
                 {'detail': 'Bidding deadline has passed.'},
                 status=status.HTTP_400_BAD_REQUEST,

@@ -970,9 +970,27 @@ class ProjectAssignmentSerializer(serializers.Serializer):
 
     def validate_technology_type(self, value):
         normalized = normalize_technology_type(value)
-        if normalized:
-            return normalized
-        raise serializers.ValidationError(f'"{value}" is not a valid choice.')
+        if not normalized:
+            raise serializers.ValidationError(f'"{value}" is not a valid choice.')
+
+        contract = self.context.get('contract')
+        tender = getattr(contract, 'tender', None) if contract is not None else None
+        tender_technologies = []
+        if tender is not None:
+            if isinstance(getattr(tender, 'technology_types', None), list):
+                for tech in tender.technology_types:
+                    normalized_tech = normalize_technology_type(tech)
+                    if normalized_tech and normalized_tech not in tender_technologies:
+                        tender_technologies.append(normalized_tech)
+            if not tender_technologies:
+                fallback = normalize_technology_type(getattr(tender, 'category', ''))
+                if fallback:
+                    tender_technologies.append(fallback)
+        if tender_technologies and normalized not in tender_technologies:
+            allowed = ', '.join(tender_technologies)
+            raise serializers.ValidationError(f'Technology type must be one of tender technologies: {allowed}.')
+
+        return normalized
 
     def validate(self, attrs):
         district_values = attrs.get('district_zones')

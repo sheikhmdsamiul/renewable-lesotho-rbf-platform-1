@@ -173,7 +173,6 @@ import {
   reviewTenderBid,
   acceptTenderBid,
   rejectTenderBid,
-  markTenderBidPartialConformity,
   fetchBidEvaluations,
   createBidEvaluation,
   updateBidEvaluation,
@@ -1652,6 +1651,7 @@ const Tenders = ({
 
   const handleSaveTender = async (tenderData: any) => {
     const payload = { ...tenderData };
+    const isAccessWindow = String(payload.applicationType || "").toLowerCase() === "access window";
     const isEditing = view === "edit" && Boolean(selectedTender);
     const hasExistingSchedule = Boolean(selectedTender?.scheduleFile);
     const hasRfp = Boolean(rfpDocumentsFile) || Boolean(selectedTender?.rfpDocumentsFile);
@@ -1663,15 +1663,22 @@ const Tenders = ({
       'addressForDocument','addressForSecurity','placeForOpening',
       'biddersEligibility','invitedBy','biddingCurrency','timeForCompletion',
       'instruction','contactDetails','category','targetSiteType',
-      'lastDateSecurity','lastDateSubmission','dateOpening'
+      'lastDateSecurity','dateOpening',
+      ...(!isAccessWindow ? ['lastDateSubmission'] : [])
     ];
     const missing = requiredFields.filter(f => !payload[f] || payload[f]?.length === 0);
     if (missing.length) {
       setTenderError(`Fill required fields: ${missing.join(', ')}`);
       return;
     }
-    // Align backend mandatory deadline with the document submission deadline provided by user
-    payload.deadline = payload.lastDateSubmission;
+    // Application Window uses hard deadline; Access Window stays open until RMT closes bidding.
+    if (isAccessWindow) {
+      const fallbackDeadline = payload.dateOpening || new Date(new Date().setFullYear(new Date().getFullYear() + 10)).toISOString();
+      payload.deadline = payload.lastDateSubmission || fallbackDeadline;
+      payload.lastDateSubmission = payload.lastDateSubmission || "";
+    } else {
+      payload.deadline = payload.lastDateSubmission;
+    }
     if (!payload.technologyTypes || payload.technologyTypes.length === 0) {
       setTenderError("Select at least one Technology Type.");
       return;
@@ -1729,6 +1736,25 @@ const Tenders = ({
       setView("list");
     } catch (err: any) {
       showNotification(toActionError(err, "Failed to verify tender."));
+    } finally {
+      setIsActioning(false);
+    }
+  };
+
+  const handleCloseBidding = async (tenderId: string) => {
+    const tenderLabel = selectedTender?.name || "this tender";
+    if (!window.confirm(`Close bidding for "${tenderLabel}" now? Vendors will no longer be able to submit bids.`)) {
+      return;
+    }
+    try {
+      setIsActioning(true);
+      const updated = await closeTender(tenderId);
+      upsertTender(updated);
+      await loadTenders();
+      showNotification(`Bidding closed for ${tenderLabel}.`);
+      setView("list");
+    } catch (err: any) {
+      showNotification(toActionError(err, "Failed to close bidding."));
     } finally {
       setIsActioning(false);
     }
@@ -2048,7 +2074,7 @@ const Tenders = ({
             {/* Security Submission Deadline */}
             <div>
               <label className="text-sm font-bold text-slate-700 mb-2">Security Submission Deadline *</label>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <div className="relative">
                   <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
                   <input 
@@ -2080,7 +2106,12 @@ const Tenders = ({
 
             {/* Document Submission Deadline */}
             <div>
-              <label className="text-sm font-bold text-slate-700 mb-2">Document Submission Deadline *</label>
+              <label className="text-sm font-bold text-slate-700 mb-2">
+                Document Submission Deadline {String(formData.applicationType || "").toLowerCase() === "access window" ? "(Optional for Access Window)" : "*"}
+              </label>
+              {String(formData.applicationType || "").toLowerCase() === "access window" && (
+                <p className="mb-2 text-xs text-slate-500">Access Window has no hard cutoff. Bidding stays open until RMT manually closes the tender.</p>
+              )}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <div className="relative">
                   <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
@@ -2681,6 +2712,15 @@ const Tenders = ({
                 <button onClick={exportBidList} className="btn-secondary w-full flex items-center justify-center gap-2">
                   <Download size={16} /> Export Bid List
                 </button>
+                {(selectedTender.status === TenderStatus.PUBLISHED || selectedTender.status === TenderStatus.EVALUATION) && (
+                  <button
+                    onClick={() => void handleCloseBidding(selectedTender.id)}
+                    disabled={isActioning}
+                    className="btn-secondary w-full border-rose-200 text-rose-700 hover:bg-rose-50 disabled:opacity-60"
+                  >
+                    {isActioning ? "Closing..." : "Close Bidding"}
+                  </button>
+                )}
                 {(selectedTender.status === TenderStatus.EVALUATION || selectedTender.status === TenderStatus.PUBLISHED) && (
                   <button onClick={() => setView("award")} className="btn-primary w-full bg-purple-600 hover:bg-purple-700">
                     Issue Award
@@ -9987,6 +10027,9 @@ const VendorDashboard = ({
   const bidStageLabel = bidStageKey === "site_specific" ? "Stage 2: Detailed" : "Stage 1: Concept";
   const isPreQualificationStage = bidStageKey === "pre_qualification";
   const isSiteSpecificStage = bidStageKey === "site_specific";
+  const bidTechnologyTypeOptions = Array.isArray(bidTender?.technologyTypes)
+    ? bidTender.technologyTypes.filter((value): value is string => Boolean(String(value || "").trim()))
+    : [];
   const isShsTender = (bidTender?.technologyTypes || []).some((tech) => String(tech).toUpperCase() === "SHS" || String(tech).toLowerCase().includes("solar home"));
   const isMiniGridTender = (bidTender?.technologyTypes || []).some((tech) => {
     const normalized = String(tech || "").toLowerCase();
@@ -10915,9 +10958,22 @@ const VendorDashboard = ({
                 <div className="grid grid-cols-1 gap-4 p-6 md:grid-cols-2">
                   <div className="space-y-1">
                     <label className="text-sm font-bold text-slate-700 ml-1">Technology Type *</label>
-                    <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-medium text-slate-700">
-                      {bidForm.systemConfiguration.technologyType || bidTender.technologyTypes?.[0] || "N/A"}
-                    </div>
+                    <select
+                      className="input-field"
+                      value={bidForm.systemConfiguration.technologyType || bidTechnologyTypeOptions[0] || ""}
+                      onChange={(e) => setBidForm(prev => ({
+                        ...prev,
+                        systemConfiguration: { ...prev.systemConfiguration, technologyType: e.target.value },
+                      }))}
+                    >
+                      {bidTechnologyTypeOptions.length === 0 ? (
+                        <option value="">No technology type configured in this tender</option>
+                      ) : (
+                        bidTechnologyTypeOptions.map((tech) => (
+                          <option key={tech} value={tech}>{tech}</option>
+                        ))
+                      )}
+                    </select>
                   </div>
                   <div className="space-y-1">
                     <label className="text-sm font-bold text-slate-700 ml-1">Device Brand *</label>
@@ -11971,7 +12027,8 @@ const VendorDashboard = ({
                 if (activeTenders.length > 0) {
                   const latest = activeTenders[0];
                   const deadline = latest.lastDateSubmission || latest.deadline;
-                  const deadlineOk = !deadline || new Date(deadline) > new Date();
+                  const usesHardDeadline = String(latest.applicationType || "").toLowerCase() === "application window";
+                  const deadlineOk = !usesHardDeadline || !deadline || new Date(deadline) > new Date();
                   const statusOk = latest.status === TenderStatus.PUBLISHED;
                   if (!deadlineOk || !statusOk) {
                     alert("This tender is no longer open for bidding.");
@@ -12017,13 +12074,14 @@ const VendorDashboard = ({
             <div className="grid gap-4 md:grid-cols-2">
               {activeTenders.map((tender) => {
                 const deadline = tender.lastDateSubmission || tender.deadline;
+                const usesHardDeadline = String(tender.applicationType || "").toLowerCase() === "application window";
                 const deadlineMs = deadline ? Date.parse(deadline) : NaN;
                 const daysLeft = Number.isNaN(deadlineMs) ? null : Math.ceil((deadlineMs - Date.now()) / (1000 * 60 * 60 * 24));
                 const canBid =
                   !vendorRestricted &&
                   isPreQualified &&
                   (tender.status === TenderStatus.PUBLISHED) &&
-                  (!deadline || new Date(deadline) > new Date());
+                  (!usesHardDeadline || !deadline || new Date(deadline) > new Date());
 
                 return (
                   <div key={tender.id} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition hover:border-emerald-200 hover:shadow-md">
@@ -12034,12 +12092,13 @@ const VendorDashboard = ({
                         <p className="mt-1 text-xs text-slate-500">{tender.department || "Department not specified"}</p>
                       </div>
                       <span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${
+                        !usesHardDeadline ? "bg-blue-100 text-blue-700" :
                         daysLeft == null ? "bg-slate-100 text-slate-700" :
                         daysLeft < 0 ? "bg-rose-100 text-rose-700" :
                         daysLeft <= 7 ? "bg-amber-100 text-amber-700" :
                         "bg-emerald-100 text-emerald-700"
                       }`}>
-                        {daysLeft == null ? "No deadline" : daysLeft < 0 ? "Closed" : `${daysLeft}d left`}
+                        {!usesHardDeadline ? "Open until RMT closes" : (daysLeft == null ? "No deadline" : daysLeft < 0 ? "Closed" : `${daysLeft}d left`)}
                       </span>
                     </div>
 
@@ -12056,7 +12115,9 @@ const VendorDashboard = ({
                     )}
 
                     <div className="mt-4 flex items-center justify-between gap-3">
-                      <p className="text-xs text-slate-500">Deadline: {deadline || "N/A"}</p>
+                      <p className="text-xs text-slate-500">
+                        {usesHardDeadline ? `Deadline: ${deadline || "N/A"}` : "Access Window: no hard deadline (RMT closes manually)"}
+                      </p>
                       <button
                         onClick={() => openBidForm(tender)}
                         disabled={!canBid}
@@ -17187,11 +17248,11 @@ const TACView = ({ mode }: { mode: "technical" | "financial" }) => {
     setView("evaluate");
   };
 
-  const handleStageOneDecision = async (decision: "shortlist" | "partial" | "reject") => {
+  const handleStageOneDecision = async (decision: "shortlist" | "reject") => {
     if (!selectedEval || isStageOneDecisionSubmitting) return;
     const reason = selectedEval.comments.trim();
-    if ((decision === "partial" || decision === "reject") && !reason) {
-      showNotification("Feedback is required for partial conformity or rejection.");
+    if (decision === "reject" && !reason) {
+      showNotification("Feedback is required for rejection.");
       return;
     }
     setIsStageOneDecisionSubmitting(true);
@@ -17199,9 +17260,6 @@ const TACView = ({ mode }: { mode: "technical" | "financial" }) => {
       if (decision === "shortlist") {
         await acceptTenderBid(selectedEval.bid.id);
         showNotification(`Shortlisted ${selectedEval.bid.vendor_name} for Stage 2.`);
-      } else if (decision === "partial") {
-        await markTenderBidPartialConformity(selectedEval.bid.id, reason);
-        showNotification(`Marked ${selectedEval.bid.vendor_name} as revision required.`);
       } else {
         await rejectTenderBid(selectedEval.bid.id, reason);
         showNotification(`Rejected ${selectedEval.bid.vendor_name} for this tender.`);
@@ -17390,7 +17448,7 @@ const TACView = ({ mode }: { mode: "technical" | "financial" }) => {
                   <h3 className="text-lg font-bold text-slate-900">Review Outcome</h3>
                   <textarea
                     className="input-field mt-4 min-h-[140px]"
-                    placeholder="Add required feedback for partial conformity or rejection."
+                    placeholder="Add feedback (required for rejection)."
                     value={selectedEval.comments}
                     onChange={(e) => setSelectedEval({ ...selectedEval, comments: e.target.value })}
                   />
@@ -17403,14 +17461,6 @@ const TACView = ({ mode }: { mode: "technical" | "financial" }) => {
                         className="btn-primary disabled:opacity-60"
                       >
                         {isStageOneDecisionSubmitting ? "Saving..." : "Shortlist"}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void handleStageOneDecision("partial")}
-                        disabled={isStageOneDecisionSubmitting}
-                        className="btn-secondary border-orange-200 text-orange-700 disabled:opacity-60"
-                      >
-                        Partial Conformity
                       </button>
                       <button
                         type="button"
