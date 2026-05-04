@@ -88,10 +88,19 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
-            cd /opt/renewable-lesotho-rbf-platform
-            BRANCH=$(echo "${{ github.ref }}" | sed 's|refs/heads/||')
-            git pull origin $BRANCH
-            docker compose -f docker-compose.prod.yml --env-file .env.prod pull
-            docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --remove-orphans
+            set -euo pipefail
+            APP_DIR="/opt/renewable-lesotho-rbf-platform/renewable-lesotho-rbf-platform-1"
+            BRANCH="${{ github.ref_name }}"
+
+            cd "$APP_DIR"
+            echo "Deploying branch: $BRANCH in $(pwd)"
+
+            git fetch origin "$BRANCH"
+            git checkout "$BRANCH"
+            git pull origin "$BRANCH"
+
+            docker compose -f docker-compose.prod.yml --env-file .env.prod down
+            docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build --remove-orphans
             docker compose -f docker-compose.prod.yml --env-file .env.prod exec backend python manage.py migrate --noinput
+            docker compose -f docker-compose.prod.yml --env-file .env.prod exec backend python manage.py collectstatic --noinput
             docker image prune -f
