@@ -942,6 +942,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
             project,
             {
                 'project_id': str(project.id),
+                'file_name': str(getattr(csv_file, 'name', '') or ''),
                 'rows_ingested': len(rows_created),
                 'rows_rejected': len(invalid_rows),
                 'anomaly_counts': anomaly_counts,

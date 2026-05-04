@@ -2758,7 +2758,7 @@ export async function fetchDisbursements(): Promise<Disbursement[]> {
 
 export async function fetchAuditLogs(projectId?: string): Promise<AuditLog[]> {
   const query = projectId
-    ? `?record_type=project&record_id=${encodeURIComponent(projectId)}`
+    ? `?record_id=${encodeURIComponent(projectId)}`
     : "";
   const data = await http<any>(`/api/projects/audit-logs/${query}`);
   return unwrapListResponse<any>(data).map(mapAuditLogFromApi);
