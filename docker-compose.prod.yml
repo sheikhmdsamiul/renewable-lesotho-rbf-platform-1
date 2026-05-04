@@ -21,6 +21,9 @@ services:
     restart: unless-stopped
 
   backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
     image: ghcr.io/sheikh-samiul/renewable-lesotho-rbf-platform-1-backend:latest
     container_name: rbf_web_prod
     environment:
@@ -72,6 +75,9 @@ services:
     restart: unless-stopped
 
   nginx:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
     image: ghcr.io/sheikh-samiul/renewable-lesotho-rbf-platform-1-frontend:latest
     container_name: rbf_nginx_prod
     volumes:
