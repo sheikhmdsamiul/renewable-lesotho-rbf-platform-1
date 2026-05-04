@@ -26,6 +26,8 @@ services:
       dockerfile: backend/Dockerfile
     image: ghcr.io/sheikh-samiul/renewable-lesotho-rbf-platform-1-backend:latest
     container_name: rbf_web_prod
+    env_file:
+      - .env.prod
     environment:
       DJANGO_SETTINGS_MODULE: core.settings
       DJANGO_DEBUG: 0
