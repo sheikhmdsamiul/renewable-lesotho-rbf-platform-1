@@ -4,7 +4,7 @@ import logging
 import time
 from decimal import Decimal
 from concurrent.futures import ThreadPoolExecutor
-from datetime import timedelta, timezone as dt_timezone
+from datetime import date, timedelta, timezone as dt_timezone
 from typing import Any
 from socket import timeout as SocketTimeout
 from urllib.error import HTTPError, URLError
@@ -15,7 +15,15 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
-from .models import InstallationReport, InstallationStatus, Project, ProspectSyncLog, ProspectSyncStatus, SmartMeterReading
+from .models import (
+    InstallationReport,
+    InstallationStatus,
+    Project,
+    ProjectStatus,
+    ProspectSyncLog,
+    ProspectSyncStatus,
+    SmartMeterReading,
+)
 from rbf.users.models import User
 
 
@@ -305,17 +313,39 @@ class ProspectService:
     def pushReport(self, data: list[dict[str, Any]]) -> dict[str, Any]:
         return self._post_records('pushReport', self.WRITE_ENDPOINTS['pushReport'], data)
 
-    def getInstallations(self, size: int = 100, page: int = 1, filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    def getInstallations(self, size: int = 100, page: int = 1, filters: dict[str, Any] | None = None) -> dict[str, Any]:
         query = {'size': size, 'page': page}
         if filters:
             query.update(filters)
-        return self._get_records('getInstallations', self.READ_ENDPOINTS['getInstallations'], query=query)
+        self._ensure_configured()
+        token = self._token_for_read('getInstallations')
+        response = self._request(
+            'GET',
+            self.READ_ENDPOINTS['getInstallations'],
+            query=query,
+            token=token,
+        )
+        return {
+            'total': response.get('total', 0),
+            'data': response.get('data', []) or response.get('results', []),
+        }
 
-    def getTargets(self, size: int = 100, page: int = 1, filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    def getTargets(self, size: int = 100, page: int = 1, filters: dict[str, Any] | None = None) -> dict[str, Any]:
         query = {'size': size, 'page': page}
         if filters:
             query.update(filters)
-        return self._get_records('getTargets', self.READ_ENDPOINTS['getTargets'], query=query)
+        self._ensure_configured()
+        token = self._token_for_read('getTargets')
+        response = self._request(
+            'GET',
+            self.READ_ENDPOINTS['getTargets'],
+            query=query,
+            token=token,
+        )
+        return {
+            'total': response.get('total', 0),
+            'data': response.get('data', []) or response.get('results', []),
+        }
 
 
 def sanitize_for_json(data: Any) -> Any:
@@ -539,21 +569,109 @@ def queue_project_completion_report_sync(project_id: str):
     project = Project.objects.filter(id=project_id).first()
     if not project:
         return
+    queue_project_report_sync(
+        str(project.id),
+        report_start=month_start(timezone.localdate()),
+        report_end=timezone.localdate(),
+        period_type='monthly',
+    )
 
-    verified_installations = InstallationReport.objects.filter(
+
+def month_start(day: date) -> date:
+    return day.replace(day=1)
+
+
+def month_end(day: date) -> date:
+    next_month = (day.replace(day=28) + timedelta(days=4)).replace(day=1)
+    return next_month - timedelta(days=1)
+
+
+def previous_month_period(anchor: date) -> tuple[date, date]:
+    current_month_first = month_start(anchor)
+    prev_month_last = current_month_first - timedelta(days=1)
+    return month_start(prev_month_last), prev_month_last
+
+
+def previous_quarter_period(anchor: date) -> tuple[date, date]:
+    quarter_start_month = ((anchor.month - 1) // 3) * 3 + 1
+    current_quarter_start = date(anchor.year, quarter_start_month, 1)
+    previous_quarter_end = current_quarter_start - timedelta(days=1)
+    previous_quarter_start_month = ((previous_quarter_end.month - 1) // 3) * 3 + 1
+    previous_quarter_start = date(previous_quarter_end.year, previous_quarter_start_month, 1)
+    return previous_quarter_start, previous_quarter_end
+
+
+def quarter_number(day: date) -> int:
+    return ((day.month - 1) // 3) + 1
+
+
+def build_project_report_payload(project: Project, *, report_start: date, report_end: date, period_type: str = 'monthly') -> dict[str, Any]:
+    verified_qs = InstallationReport.objects.filter(
         project=project,
         status=InstallationStatus.VERIFIED,
-    ).count()
-    total_installations = InstallationReport.objects.filter(project=project).count()
-    paid_claims = project.payment_claims.filter(status='Paid').count()
-    payload = {
+        submitted_at__date__lte=report_end,
+    )
+    verified_count = verified_qs.count()
+    female_count = verified_qs.filter(household_type__iexact='female_headed').count()
+    female_pct = (female_count / verified_count * 100) if verified_count else 0.0
+    gender_flag = 'F' if female_pct >= 50 else 'M'
+    tech_type = normalize_project_technology(project.tech_type or project.technology_type or '') or 'SHS'
+
+    if period_type == 'quarterly':
+        external_id = f"report_{project.id}_{report_start.year}_Q{quarter_number(report_start)}"
+    else:
+        external_id = f"report_{project.id}_{report_start.strftime('%Y_%m')}"
+
+    return {
         'data': [{
-            'external_id': f'report_{project.id}_{timezone.now().year}_{timezone.now().month:02d}',
+            'external_id': external_id,
             'country': 'LS',
             'reporting_phase': f'PRJ-{project.id}',
+            'report_start': report_start.isoformat(),
+            'report_end': report_end.isoformat(),
+            'category': 'connections',
+            'unit_of_measurement': 'number',
+            'breakdown': {
+                'type': tech_type,
+                'end_user_type': 'residential',
+                'primary_responsible_person_gender': gender_flag,
+            },
+            'value': verified_count,
+            'reported_source': 'RBF Platform',
+            'program': 'RBF Lesotho',
         }]
     }
+
+
+def queue_project_report_sync(project_id: str, *, report_start: date, report_end: date, period_type: str = 'monthly') -> bool:
+    project = Project.objects.filter(id=project_id).first()
+    if not project:
+        return False
+    payload = build_project_report_payload(
+        project,
+        report_start=report_start,
+        report_end=report_end,
+        period_type=period_type,
+    )
     SyncToProspectJob.dispatch_async('pushReport', payload, record_id=int(project.id), record_type='project')
+    return True
+
+
+def queue_periodic_project_reports(*, period_type: str = 'monthly', report_start: date, report_end: date) -> int:
+    eligible_projects = Project.objects.filter(
+        status__in=[ProjectStatus.ACTIVE, ProjectStatus.COMPLETED, ProjectStatus.LEGACY_COMPLETED],
+        created_at__date__lte=report_end,
+    ).order_by('id')
+    queued = 0
+    for project in eligible_projects:
+        if queue_project_report_sync(
+            str(project.id),
+            report_start=report_start,
+            report_end=report_end,
+            period_type=period_type,
+        ):
+            queued += 1
+    return queued
 
 
 def build_project_timeseries_payload(project: Project) -> dict[str, Any]:

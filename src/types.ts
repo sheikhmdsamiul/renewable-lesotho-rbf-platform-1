@@ -297,6 +297,7 @@ export interface TenderBid {
   om_plan_document?: string;
   reporting_templates_file?: string;
   distribution_map_file?: string;
+  tender_security_file?: string;
   female_target_pct?: number;
   gender_inclusion_target?: number;
   vulnerable_target_pct?: number;
@@ -531,6 +532,7 @@ export interface PortfolioKpiSummary {
   projects_completed: number;
   total_paid_amount?: number;
   pending_claims?: number;
+  national_main_program_budget?: number;
   projects: Array<{
     project_id: string;
     project_reference: string;
@@ -604,6 +606,7 @@ export interface PlatformConfiguration {
   countryCode: string;
   countryName: string;
   defaultCurrency: string;
+  nationalMainProgramBudget: number;
   timezone: string;
   femaleTargetMinimum: number;
   vulnerableTargetMinimum: number;

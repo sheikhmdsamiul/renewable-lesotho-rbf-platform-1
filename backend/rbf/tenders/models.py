@@ -147,6 +147,7 @@ class TenderBid(models.Model):
     om_plan_file = models.FileField(upload_to='tender_bids/', null=True, blank=True)
     reporting_templates_file = models.FileField(upload_to='tender_bids/', null=True, blank=True)
     distribution_map_file = models.FileField(upload_to='tender_bids/', null=True, blank=True)
+    tender_security_file = models.FileField(upload_to='tender_bids/', null=True, blank=True)
     female_target_pct = models.PositiveIntegerField(default=50)
     vulnerable_target_pct = models.PositiveIntegerField(default=30)
     low_income_target_pct = models.PositiveIntegerField(default=60)

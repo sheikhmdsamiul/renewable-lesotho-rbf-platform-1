@@ -1038,6 +1038,23 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
                     <label className="block text-sm font-medium text-slate-700 mb-1">Timezone</label>
                     <input className="input-field" value={configuration.timezone} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, timezone: e.target.value } : prev)} placeholder="Africa/Maseru" />
                   </div>
+                  <div className="col-span-2">
+                    <label className="block text-sm font-medium text-slate-700 mb-1">National/Main Program Budget</label>
+                    <input
+                      className="input-field"
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={configuration.nationalMainProgramBudget}
+                      onChange={(e) =>
+                        setConfiguration((prev) =>
+                          prev ? { ...prev, nationalMainProgramBudget: Number(e.target.value || 0) } : prev,
+                        )
+                      }
+                      placeholder="Enter total program budget"
+                    />
+                    <p className="text-xs text-slate-500 mt-1">This budget is the national payment pool for all program disbursements.</p>
+                  </div>
                 </div>
               </div>
             </div>

@@ -573,6 +573,7 @@ function mapPlatformConfigurationFromApi(api: any): PlatformConfiguration {
     countryCode: api.country_code ?? "",
     countryName: api.country_name ?? "",
     defaultCurrency: api.default_currency ?? "",
+    nationalMainProgramBudget: Number(api.national_main_program_budget ?? 0),
     timezone: api.timezone ?? "",
     femaleTargetMinimum: Number(api.female_target_minimum ?? 0),
     vulnerableTargetMinimum: Number(api.vulnerable_target_minimum ?? 0),
@@ -1136,6 +1137,7 @@ function mapTenderBidFromApi(api: any): TenderBid {
     om_plan_document: normalizeFileUrl(api.om_plan_document ?? api.om_plan_file ?? undefined),
     reporting_templates_file: normalizeFileUrl(api.reporting_templates_file ?? undefined),
     distribution_map_file: normalizeFileUrl(api.distribution_map_file ?? undefined),
+    tender_security_file: normalizeFileUrl(api.tender_security_file ?? undefined),
     female_target_pct: api.female_target_pct != null ? Number(api.female_target_pct) : undefined,
     gender_inclusion_target: api.gender_inclusion_target != null ? Number(api.gender_inclusion_target) : undefined,
     vulnerable_target_pct: api.vulnerable_target_pct != null ? Number(api.vulnerable_target_pct) : undefined,
@@ -1737,6 +1739,10 @@ export async function submitTenderBid(payload: Partial<TenderBid>): Promise<Tend
   if (distributionMapFile instanceof File) {
     form.append('distribution_map_file', distributionMapFile);
   }
+  const tenderSecurityFile = (payload as any).tender_security_file;
+  if (tenderSecurityFile instanceof File) {
+    form.append('tender_security_file', tenderSecurityFile);
+  }
 
   const data = await http<any>(`/api/tender-bids/`, {
     method: "POST",
@@ -1814,6 +1820,10 @@ export async function updateTenderBid(bidId: string, payload: Partial<TenderBid>
   const distributionMapFile = (payload as any).distribution_map_file;
   if (distributionMapFile instanceof File) {
     form.append('distribution_map_file', distributionMapFile);
+  }
+  const tenderSecurityFile = (payload as any).tender_security_file;
+  if (tenderSecurityFile instanceof File) {
+    form.append('tender_security_file', tenderSecurityFile);
   }
 
   const data = await http<any>(`/api/tender-bids/${bidId}/`, {
@@ -2047,6 +2057,30 @@ export async function triggerProjectProspectSync(
   return await http<any>(`/api/projects/${projectId}/prospect-sync/`, {
     method: "POST",
     body: JSON.stringify({ action }),
+  });
+}
+
+export async function triggerProspectReportSync(
+  payload: {
+    period: "monthly" | "quarterly";
+    mode: "all" | "project";
+    projectId?: string;
+  },
+): Promise<{
+  status: string;
+  period: "monthly" | "quarterly";
+  mode: "all" | "project";
+  report_start: string;
+  report_end: string;
+  queued_jobs: number;
+}> {
+  return await http<any>(`/api/projects/prospect-sync-reports/`, {
+    method: "POST",
+    body: JSON.stringify({
+      period: payload.period,
+      mode: payload.mode,
+      project_id: payload.projectId,
+    }),
   });
 }
 
@@ -3278,6 +3312,7 @@ export async function updatePlatformConfiguration(payload: Partial<PlatformConfi
       country_code: payload.countryCode,
       country_name: payload.countryName,
       default_currency: payload.defaultCurrency,
+      national_main_program_budget: payload.nationalMainProgramBudget,
       timezone: payload.timezone,
       female_target_minimum: payload.femaleTargetMinimum,
       vulnerable_target_minimum: payload.vulnerableTargetMinimum,

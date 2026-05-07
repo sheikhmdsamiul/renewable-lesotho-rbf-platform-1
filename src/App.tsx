@@ -115,6 +115,7 @@ import {
   verifyTender,
   publishTender,
   awardTender,
+  closeTender,
   fetchNotifications,
   loginUser,
   logoutUser,
@@ -1663,8 +1664,8 @@ const Tenders = ({
       'addressForDocument','addressForSecurity','placeForOpening',
       'biddersEligibility','invitedBy','biddingCurrency','timeForCompletion',
       'instruction','contactDetails','category','targetSiteType',
-      'lastDateSecurity','dateOpening',
-      ...(!isAccessWindow ? ['lastDateSubmission'] : [])
+      'dateOpening',
+      ...(!isAccessWindow ? ['lastDateSecurity','lastDateSubmission'] : [])
     ];
     const missing = requiredFields.filter(f => !payload[f] || payload[f]?.length === 0);
     if (missing.length) {
@@ -1963,10 +1964,9 @@ const Tenders = ({
                 className="input-field"
               >
                 <option value="">Select Method</option>
-                <option>Open Tendering</option>
-                <option>Restricted Tendering</option>
-                <option>Request for Proposals</option>
-              </select>
+                 <option>Open Tendering</option>
+                 <option>Restricted Tendering</option>
+               </select>
             </div>
             <div className="space-y-2">
               <label className="text-sm font-bold text-slate-700">Bidding Currency *</label>
@@ -2085,21 +2085,40 @@ const Tenders = ({
                       const currentTime = formData.lastDateSecurity?.split('T')[1] || '09:00';
                       setFormData(prev => ({ ...prev, lastDateSecurity: `${e.target.value}T${currentTime}` }));
                     }}
-                    className="input-field pl-10" 
+                    className="input-field pl-10 pr-10" 
                   />
+                  {formData.lastDateSecurity && (
+                    <button
+                      type="button"
+                      onClick={() => setFormData(prev => ({ ...prev, lastDateSecurity: "" }))}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                    >
+                      <X size={16} />
+                    </button>
+                  )}
                 </div>
                 <div className="relative">
                   <Clock className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
                   <input 
                     type="time" 
                     placeholder="Time"
-                    value={formData.lastDateSecurity ? formData.lastDateSecurity.split('T')[1] : '09:00'}
+                    value={formData.lastDateSecurity ? formData.lastDateSecurity.split('T')[1] : ''}
+                    disabled={!formData.lastDateSecurity}
                     onChange={(e) => {
                       const currentDate = formData.lastDateSecurity?.split('T')[0] || new Date().toISOString().split('T')[0];
                       setFormData(prev => ({ ...prev, lastDateSecurity: `${currentDate}T${e.target.value}` }));
                     }}
-                    className="input-field pl-10" 
+                    className="input-field pl-10 pr-10" 
                   />
+                  {formData.lastDateSecurity && (
+                    <button
+                      type="button"
+                      onClick={() => setFormData(prev => ({ ...prev, lastDateSecurity: "" }))}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                    >
+                      <X size={16} />
+                    </button>
+                  )}
                 </div>
               </div>
             </div>
@@ -2123,21 +2142,40 @@ const Tenders = ({
                       const currentTime = formData.lastDateSubmission?.split('T')[1] || '14:00';
                       setFormData(prev => ({ ...prev, lastDateSubmission: `${e.target.value}T${currentTime}` }));
                     }}
-                    className="input-field pl-10" 
+                    className="input-field pl-10 pr-10" 
                   />
+                  {formData.lastDateSubmission && (
+                    <button
+                      type="button"
+                      onClick={() => setFormData(prev => ({ ...prev, lastDateSubmission: "" }))}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                    >
+                      <X size={16} />
+                    </button>
+                  )}
                 </div>
                 <div className="relative">
                   <Clock className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
                   <input 
                     type="time" 
                     placeholder="Time"
-                    value={formData.lastDateSubmission ? formData.lastDateSubmission.split('T')[1] : '14:00'}
+                    value={formData.lastDateSubmission ? formData.lastDateSubmission.split('T')[1] : ''}
+                    disabled={!formData.lastDateSubmission}
                     onChange={(e) => {
                       const currentDate = formData.lastDateSubmission?.split('T')[0] || new Date().toISOString().split('T')[0];
                       setFormData(prev => ({ ...prev, lastDateSubmission: `${currentDate}T${e.target.value}` }));
                     }}
-                    className="input-field pl-10" 
+                    className="input-field pl-10 pr-10" 
                   />
+                  {formData.lastDateSubmission && (
+                    <button
+                      type="button"
+                      onClick={() => setFormData(prev => ({ ...prev, lastDateSubmission: "" }))}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                    >
+                      <X size={16} />
+                    </button>
+                  )}
                 </div>
               </div>
             </div>
@@ -2156,21 +2194,40 @@ const Tenders = ({
                       const currentTime = formData.dateOpening?.split('T')[1] || '10:00';
                       setFormData(prev => ({ ...prev, dateOpening: `${e.target.value}T${currentTime}` }));
                     }}
-                    className="input-field pl-10" 
+                    className="input-field pl-10 pr-10" 
                   />
+                  {formData.dateOpening && (
+                    <button
+                      type="button"
+                      onClick={() => setFormData(prev => ({ ...prev, dateOpening: "" }))}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                    >
+                      <X size={16} />
+                    </button>
+                  )}
                 </div>
                 <div className="relative">
                   <Clock className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
                   <input 
                     type="time" 
                     placeholder="Time"
-                    value={formData.dateOpening ? formData.dateOpening.split('T')[1] : '10:00'}
+                    value={formData.dateOpening ? formData.dateOpening.split('T')[1] : ''}
+                    disabled={!formData.dateOpening}
                     onChange={(e) => {
                       const currentDate = formData.dateOpening?.split('T')[0] || new Date().toISOString().split('T')[0];
                       setFormData(prev => ({ ...prev, dateOpening: `${currentDate}T${e.target.value}` }));
                     }}
-                    className="input-field pl-10" 
+                    className="input-field pl-10 pr-10" 
                   />
+                  {formData.dateOpening && (
+                    <button
+                      type="button"
+                      onClick={() => setFormData(prev => ({ ...prev, dateOpening: "" }))}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                    >
+                      <X size={16} />
+                    </button>
+                  )}
                 </div>
               </div>
             </div>
@@ -13124,17 +13181,17 @@ const ProjectsHub = ({
   const [windowFilter, setWindowFilter] = useState("All");
   const [dateRangeFilter, setDateRangeFilter] = useState("All");
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
-  const [projectTab, setProjectTab] = useState<"overview" | "kpi" | "map" | "milestones" | "planning" | "payments" | "documents" | "updates" | "fieldwork" | "device_readings" | "installations" | "verifications" | "anomaly_flags" | "prospect_sync" | "audit_trail" | "summary" | "milestone_payments" | "compliance">(() => {
-    const validTabs = ["overview", "kpi", "map", "milestones", "planning", "payments", "documents", "updates", "fieldwork", "device_readings", "installations", "verifications", "anomaly_flags", "prospect_sync", "audit_trail", "summary", "milestone_payments", "compliance"];
+  const [projectTab, setProjectTab] = useState<"overview" | "kpi" | "map" | "milestones" | "planning" | "payments" | "documents" | "updates" | "fieldwork" | "device_readings" | "installations" | "anomaly_flags" | "prospect_sync" | "audit_trail" | "summary" | "milestone_payments" | "compliance">(() => {
+    const validTabs = ["overview", "kpi", "map", "milestones", "planning", "payments", "documents", "updates", "fieldwork", "device_readings", "installations", "anomaly_flags", "prospect_sync", "audit_trail", "summary", "milestone_payments", "compliance"];
     if (externalProjectTab && validTabs.includes(externalProjectTab)) {
-      return externalProjectTab as "overview" | "kpi" | "map" | "milestones" | "planning" | "payments" | "documents" | "updates" | "fieldwork" | "device_readings" | "installations" | "verifications" | "anomaly_flags" | "prospect_sync" | "audit_trail" | "summary" | "milestone_payments" | "compliance";
+      return externalProjectTab as "overview" | "kpi" | "map" | "milestones" | "planning" | "payments" | "documents" | "updates" | "fieldwork" | "device_readings" | "installations" | "anomaly_flags" | "prospect_sync" | "audit_trail" | "summary" | "milestone_payments" | "compliance";
     }
     return "overview";
   });
   React.useEffect(() => {
-    const validTabs = ["overview", "kpi", "map", "milestones", "planning", "payments", "documents", "updates", "fieldwork", "device_readings", "installations", "verifications", "anomaly_flags", "prospect_sync", "audit_trail", "summary", "milestone_payments", "compliance"];
+    const validTabs = ["overview", "kpi", "map", "milestones", "planning", "payments", "documents", "updates", "fieldwork", "device_readings", "installations", "anomaly_flags", "prospect_sync", "audit_trail", "summary", "milestone_payments", "compliance"];
     if (externalProjectTab && validTabs.includes(externalProjectTab)) {
-      setProjectTab(externalProjectTab as "overview" | "kpi" | "map" | "milestones" | "planning" | "payments" | "documents" | "updates" | "fieldwork" | "device_readings" | "installations" | "verifications" | "anomaly_flags" | "prospect_sync" | "audit_trail" | "summary" | "milestone_payments" | "compliance");
+      setProjectTab(externalProjectTab as "overview" | "kpi" | "map" | "milestones" | "planning" | "payments" | "documents" | "updates" | "fieldwork" | "device_readings" | "installations" | "anomaly_flags" | "prospect_sync" | "audit_trail" | "summary" | "milestone_payments" | "compliance");
     }
   }, [externalProjectTab]);
   React.useEffect(() => {
@@ -14501,21 +14558,21 @@ const ProjectsHub = ({
     const canAccessProspectSync = isRbfPortal || isAuditorPortal;
     const canAccessAuditTrail = isRbfPortal || isAuditorPortal;
     const canAccessPayments = isRbfPortal || isPscPortal || isAuditorPortal;
-    const canAccessVerifications = !isPscPortal && !isUndpPortal;
     const canAccessInstallations = !isPscPortal && !isUndpPortal;
+    const canAccessDeviceReadings = !isVendorPortal;
     const canAccessAnomalyFlags = !isPscPortal && !isUndpPortal;
     const canAccessDocuments = !isUndpPortal;
     const canAddTechnicalComment = isTacPortal;
     const canFlagConcern = isDoePortal;
     const detailTabs = isPscPortal
-      ? ["summary", "milestone_payments", "kpi", "compliance"] as const
+      ? ["summary", "milestone_payments", "kpi", "compliance", "device_readings"] as const
       : isUndpPortal
         ? ["summary", "kpi", "compliance"] as const
         : [
             "overview",
             "milestones",
             ...(canAccessInstallations ? ["installations"] as const : []),
-            ...(canAccessVerifications ? ["verifications"] as const : []),
+            ...(canAccessDeviceReadings ? ["device_readings"] as const : []),
             "kpi",
             ...(canAccessPayments ? ["payments"] as const : []),
             ...(canAccessAnomalyFlags ? ["anomaly_flags"] as const : []),
@@ -14547,8 +14604,8 @@ const ProjectsHub = ({
           return "Compliance Record";
         case "installations":
           return "Installations";
-        case "verifications":
-          return "Verifications";
+        case "device_readings":
+          return "Device Readings";
         case "anomaly_flags":
           return "Anomaly Flags";
         case "prospect_sync":
@@ -14826,44 +14883,629 @@ const ProjectsHub = ({
             </div>
           )}
 
-          {activeTab === "verifications" && (
+          {activeTab === "device_readings" && (
             <div className="space-y-6">
-              <div className="grid gap-3 md:grid-cols-3">
-                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-xs text-slate-500">Total verifications</p><p className="mt-1 text-lg font-semibold text-slate-900">{projectVerifications.length}</p></div>
-                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-xs text-slate-500">GPS match</p><p className="mt-1 text-lg font-semibold text-slate-900">{projectVerifications.filter(task => Number(task.gpsDistanceMeters || 0) <= 50).length}</p></div>
-                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-xs text-slate-500">GPS mismatch</p><p className="mt-1 text-lg font-semibold text-slate-900">{projectVerifications.filter(task => Number(task.gpsDistanceMeters || 0) > 50).length}</p></div>
-              </div>
-              <div className="overflow-x-auto rounded-2xl border border-slate-200">
-                <table className="min-w-full divide-y divide-slate-200 text-sm">
-                  <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
-                    <tr>
-                      <th className="px-4 py-3">Survey ID</th>
-                      <th className="px-4 py-3">Installation</th>
-                      <th className="px-4 py-3">Field Officer</th>
-                      <th className="px-4 py-3">Outcome</th>
-                      <th className="px-4 py-3">GPS Match</th>
-                      <th className="px-4 py-3">Date</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100 bg-white">
-                    {projectVerifications.map(task => {
-                      const gpsDistance = Number(task.gpsDistanceMeters || 0);
-                      const mismatch = gpsDistance > 50;
-                      return (
-                        <tr key={task.id} className={mismatch ? "bg-rose-50" : ""}>
-                          <td className="px-4 py-3 text-slate-700">{task.id}</td>
-                          <td className="px-4 py-3 text-slate-700">{task.installationReportId || "N/A"}</td>
-                          <td className="px-4 py-3 text-slate-700">{task.assignedToUsername || task.reviewerUsername || "N/A"}</td>
-                          <td className="px-4 py-3 text-slate-700">{task.status || "Pending"}</td>
-                          <td className="px-4 py-3 text-slate-700">{gpsDistance ? `${gpsDistance}m` : "N/A"} {mismatch ? "Mismatch" : "OK"}</td>
-                          <td className="px-4 py-3 text-slate-700">{task.completedAt ? new Date(task.completedAt).toLocaleDateString() : "N/A"}</td>
-                        </tr>
-                      );
-                    })}
-                    {projectVerifications.length === 0 && <tr><td colSpan={6} className="px-4 py-6 text-center text-sm text-slate-500">No verification records yet.</td></tr>}
-                  </tbody>
-                </table>
-              </div>
+              {(() => {
+                const now = new Date();
+                const rangeDays = deviceDateFilter === "7d" ? 7 : deviceDateFilter === "90d" ? 90 : 30;
+                const rangeStartMs = now.getTime() - rangeDays * 24 * 60 * 60 * 1000;
+                const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+                const projectReadings = smartReadingsForProject(project.id).filter((reading) => {
+                  const recorded = new Date(reading.recordedAt).getTime();
+                  return Number.isFinite(recorded) && recorded >= rangeStartMs;
+                });
+
+                const readingGroups = new Map<string, SmartMeterReading[]>();
+                projectReadings.forEach((reading) => {
+                  const key = `${reading.installationId || "unknown"}::${reading.meterId || "unknown"}`;
+                  const list = readingGroups.get(key) || [];
+                  list.push(reading);
+                  readingGroups.set(key, list);
+                });
+
+                const rows = Array.from(readingGroups.entries()).map(([key, readings]) => {
+                  const [installationId, meterIdRaw] = key.split("::");
+                  const meterId = meterIdRaw || "N/A";
+                  const sorted = readings.slice().sort((a, b) => (b.recordedAt || "").localeCompare(a.recordedAt || ""));
+                  const last = sorted[0];
+                  const uptimeValues = readings
+                    .map((r) => Number(r.uptimePct))
+                    .filter((v) => Number.isFinite(v));
+                  const avgUptime = uptimeValues.length ? uptimeValues.reduce((sum, v) => sum + v, 0) / uptimeValues.length : 0;
+                  const totalKwh = readings.reduce((sum, r) => sum + Number(r.kwh || 0), 0);
+                  const lastReadingMs = last?.recordedAt ? new Date(last.recordedAt).getTime() : Number.NaN;
+                  const hoursSince = Number.isFinite(lastReadingMs) ? (now.getTime() - lastReadingMs) / (1000 * 60 * 60) : Number.POSITIVE_INFINITY;
+
+                  let status: "good" | "low" | "offline" = "good";
+                  let issueReason = "";
+                  if (avgUptime === 0 || hoursSince > 72) {
+                    status = "offline";
+                    issueReason = avgUptime === 0 ? "Uptime is 0%" : `No data for ${Math.floor(hoursSince / 24)} day(s)`;
+                  } else if ((avgUptime >= 80 && avgUptime < 99) || (hoursSince > 48 && hoursSince <= 72)) {
+                    status = "low";
+                    issueReason = avgUptime < 99 ? `Low uptime ${avgUptime.toFixed(1)}%` : "Data gap between 48-72 hours";
+                  }
+
+                  const installation = projectReports.find((report) => report.id === installationId);
+                  const installationLabel = installation?.serialNumber ? `INS-${installation.serialNumber}` : `INS-${installationId}`;
+                  return {
+                    installationId,
+                    installationLabel,
+                    meterId,
+                    lastReadingAt: last?.recordedAt,
+                    avgUptime,
+                    totalKwh,
+                    readingCount: readings.length,
+                    status,
+                    issueReason,
+                  };
+                });
+
+                const installationOptions = Array.from(
+                  new Set(rows.map((row) => row.installationId).filter((value) => value && value !== "unknown"))
+                );
+                const filteredRows = rows.filter((row) => {
+                  if (deviceInstallationFilter !== "all" && row.installationId !== deviceInstallationFilter) return false;
+                  if (deviceStatusFilter !== "all" && row.status !== deviceStatusFilter) return false;
+                  return true;
+                });
+
+                const devicesReporting = rows.filter((row) => row.readingCount > 0).length;
+                const verifiedDevices = projectReports.filter((report) => (report.verificationStatus || report.status) === "Verified").length;
+                const avgUptime30 = rows.length ? rows.reduce((sum, row) => sum + row.avgUptime, 0) / rows.length : 0;
+                const totalEnergyThisMonth = smartReadingsForProject(project.id)
+                  .filter((reading) => {
+                    const recorded = new Date(reading.recordedAt).getTime();
+                    return Number.isFinite(recorded) && recorded >= thisMonthStart;
+                  })
+                  .reduce((sum, reading) => sum + Number(reading.kwh || 0), 0);
+                const devicesWithIssues = rows.filter((row) => row.status !== "good");
+
+                const statusPill = (status: "good" | "low" | "offline") => {
+                  if (status === "good") return "bg-emerald-100 text-emerald-700";
+                  if (status === "low") return "bg-amber-100 text-amber-700";
+                  return "bg-rose-100 text-rose-700";
+                };
+                const statusLabel = (status: "good" | "low" | "offline") => {
+                  if (status === "good") return "Good";
+                  if (status === "low") return "Low";
+                  return "Offline";
+                };
+                const formatLastReading = (value?: string) => {
+                  if (!value) return "N/A";
+                  const timestamp = new Date(value).getTime();
+                  if (!Number.isFinite(timestamp)) return "N/A";
+                  const diffHours = Math.max(0, (now.getTime() - timestamp) / (1000 * 60 * 60));
+                  if (diffHours < 1) return "Just now";
+                  if (diffHours < 24) return `${Math.round(diffHours)}hr ago`;
+                  return `${Math.round(diffHours / 24)} day(s)`;
+                };
+
+                return (
+                  <>
+                    <div>
+                      <h4 className="text-sm font-semibold text-slate-800">Device Readings Overview</h4>
+                      <p className="text-xs text-slate-500">Monitor meter reporting health, uptime, and energy output from uploaded CSV telemetry.</p>
+                    </div>
+
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                      <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
+                        <select className="input-field" value={deviceInstallationFilterDraft} onChange={(e) => setDeviceInstallationFilterDraft(e.target.value)}>
+                          <option value="all">Installation: All</option>
+                          {installationOptions.map((installationId) => (
+                            <option key={installationId} value={installationId}>{installationId}</option>
+                          ))}
+                        </select>
+                        <select className="input-field" value={deviceDateFilterDraft} onChange={(e) => setDeviceDateFilterDraft(e.target.value as "30d" | "7d" | "90d")}>
+                          <option value="30d">Date: Last 30 days</option>
+                          <option value="7d">Date: Last 7 days</option>
+                          <option value="90d">Date: Last 90 days</option>
+                        </select>
+                        <select className="input-field" value={deviceStatusFilterDraft} onChange={(e) => setDeviceStatusFilterDraft(e.target.value as "all" | "good" | "low" | "offline")}>
+                          <option value="all">Status: All</option>
+                          <option value="good">Status: Good</option>
+                          <option value="low">Status: Low</option>
+                          <option value="offline">Status: Offline</option>
+                        </select>
+                        <div className="md:col-span-2">
+                          <button
+                            onClick={() => {
+                              setDeviceInstallationFilter(deviceInstallationFilterDraft);
+                              setDeviceDateFilter(deviceDateFilterDraft);
+                              setDeviceStatusFilter(deviceStatusFilterDraft);
+                            }}
+                            className="btn-primary text-xs"
+                          >
+                            Apply
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
+                      <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                        <p className="text-[11px] uppercase tracking-wide text-slate-500">Devices Reporting</p>
+                        <p className="mt-1 text-xl font-semibold text-slate-900">{devicesReporting}</p>
+                        <p className="text-xs text-slate-500">of {verifiedDevices} verified</p>
+                      </div>
+                      <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                        <p className="text-[11px] uppercase tracking-wide text-slate-500">Avg Uptime ({rangeDays} days)</p>
+                        <p className="mt-1 text-xl font-semibold text-slate-900">{avgUptime30.toFixed(1)}%</p>
+                        <p className={`text-xs ${avgUptime30 >= 99 ? "text-emerald-700" : "text-amber-700"}`}>{avgUptime30 >= 99 ? ">=99% target met" : "Below 99% target"}</p>
+                      </div>
+                      <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                        <p className="text-[11px] uppercase tracking-wide text-slate-500">Total Energy This Month</p>
+                        <p className="mt-1 text-xl font-semibold text-slate-900">{totalEnergyThisMonth.toLocaleString(undefined, { maximumFractionDigits: 1 })} kWh</p>
+                      </div>
+                      <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                        <p className="text-[11px] uppercase tracking-wide text-slate-500">Devices With Issues</p>
+                        <p className="mt-1 text-xl font-semibold text-rose-700">{devicesWithIssues.length}</p>
+                        <p className="text-xs text-rose-600">See attention list below</p>
+                      </div>
+                    </div>
+
+                    <div className="overflow-x-auto rounded-2xl border border-slate-200">
+                      <table className="min-w-full divide-y divide-slate-200 text-sm">
+                        <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
+                          <tr>
+                            <th className="px-4 py-3">Installation ID</th>
+                            <th className="px-4 py-3">Device Serial (meter_id)</th>
+                            <th className="px-4 py-3">Last Reading</th>
+                            <th className="px-4 py-3">Avg Uptime %</th>
+                            <th className="px-4 py-3">Total kWh</th>
+                            <th className="px-4 py-3">Readings Count</th>
+                            <th className="px-4 py-3">Status</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 bg-white">
+                          {filteredRows.map((row) => (
+                            <tr key={`${row.installationId}-${row.meterId}`} className="cursor-pointer hover:bg-slate-50" onClick={() => setSelectedDeviceReading(row)}>
+                              <td className="px-4 py-3 text-slate-700">{row.installationLabel}</td>
+                              <td className="px-4 py-3 text-slate-700">{row.meterId}</td>
+                              <td className="px-4 py-3 text-slate-700">{formatLastReading(row.lastReadingAt)}</td>
+                              <td className="px-4 py-3 text-slate-700">{row.avgUptime.toFixed(1)}%</td>
+                              <td className="px-4 py-3 text-slate-700">{row.totalKwh.toFixed(1)}</td>
+                              <td className="px-4 py-3 text-slate-700">{row.readingCount}</td>
+                              <td className="px-4 py-3">
+                                <span className={`rounded-full px-3 py-1 text-xs font-semibold ${statusPill(row.status)}`}>
+                                  {statusLabel(row.status)}
+                                </span>
+                              </td>
+                            </tr>
+                          ))}
+                          {filteredRows.length === 0 && (
+                            <tr>
+                              <td colSpan={7} className="px-4 py-6 text-center text-sm text-slate-500">No device readings found for the current filters.</td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
+                );
+              })()}
+            </div>
+          )}
+
+          {activeTab === "device_readings" && (
+            <div className="space-y-6">
+              {(() => {
+                const now = new Date();
+                const rangeDays = deviceDateFilter === "7d" ? 7 : deviceDateFilter === "90d" ? 90 : 30;
+                const rangeStartMs = now.getTime() - rangeDays * 24 * 60 * 60 * 1000;
+                const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+                const projectReadings = smartReadingsForProject(project.id).filter((reading) => {
+                  const recorded = new Date(reading.recordedAt).getTime();
+                  return Number.isFinite(recorded) && recorded >= rangeStartMs;
+                });
+
+                const readingGroups = new Map<string, SmartMeterReading[]>();
+                projectReadings.forEach((reading) => {
+                  const key = `${reading.installationId || "unknown"}::${reading.meterId || "unknown"}`;
+                  const list = readingGroups.get(key) || [];
+                  list.push(reading);
+                  readingGroups.set(key, list);
+                });
+
+                const rows = Array.from(readingGroups.entries()).map(([key, readings]) => {
+                  const [installationId, meterIdRaw] = key.split("::");
+                  const meterId = meterIdRaw || "N/A";
+                  const sorted = readings.slice().sort((a, b) => (b.recordedAt || "").localeCompare(a.recordedAt || ""));
+                  const last = sorted[0];
+                  const uptimeValues = readings
+                    .map((r) => Number(r.uptimePct))
+                    .filter((v) => Number.isFinite(v));
+                  const avgUptime = uptimeValues.length ? uptimeValues.reduce((sum, v) => sum + v, 0) / uptimeValues.length : 0;
+                  const totalKwh = readings.reduce((sum, r) => sum + Number(r.kwh || 0), 0);
+                  const lastReadingMs = last?.recordedAt ? new Date(last.recordedAt).getTime() : Number.NaN;
+                  const hoursSince = Number.isFinite(lastReadingMs) ? (now.getTime() - lastReadingMs) / (1000 * 60 * 60) : Number.POSITIVE_INFINITY;
+
+                  let status: "good" | "low" | "offline" = "good";
+                  let issueReason = "";
+                  if (avgUptime === 0 || hoursSince > 72) {
+                    status = "offline";
+                    issueReason = avgUptime === 0 ? "Uptime is 0%" : `No data for ${Math.floor(hoursSince / 24)} day(s)`;
+                  } else if ((avgUptime >= 80 && avgUptime < 99) || (hoursSince > 48 && hoursSince <= 72)) {
+                    status = "low";
+                    issueReason = avgUptime < 99 ? `Low uptime ${avgUptime.toFixed(1)}%` : "Data gap between 48-72 hours";
+                  }
+
+                  const installation = projectReports.find((report) => report.id === installationId);
+                  const installationLabel = installation?.serialNumber ? `INS-${installation.serialNumber}` : `INS-${installationId}`;
+                  return {
+                    installationId,
+                    installationLabel,
+                    meterId,
+                    lastReadingAt: last?.recordedAt,
+                    avgUptime,
+                    totalKwh,
+                    readingCount: readings.length,
+                    status,
+                    issueReason,
+                  };
+                });
+
+                const installationOptions = Array.from(
+                  new Set(rows.map((row) => row.installationId).filter((value) => value && value !== "unknown"))
+                );
+                const filteredRows = rows.filter((row) => {
+                  if (deviceInstallationFilter !== "all" && row.installationId !== deviceInstallationFilter) return false;
+                  if (deviceStatusFilter !== "all" && row.status !== deviceStatusFilter) return false;
+                  return true;
+                });
+
+                const devicesReporting = rows.filter((row) => row.readingCount > 0).length;
+                const verifiedDevices = projectReports.filter((report) => (report.verificationStatus || report.status) === "Verified").length;
+                const avgUptime30 = rows.length ? rows.reduce((sum, row) => sum + row.avgUptime, 0) / rows.length : 0;
+                const totalEnergyThisMonth = smartReadingsForProject(project.id)
+                  .filter((reading) => {
+                    const recorded = new Date(reading.recordedAt).getTime();
+                    return Number.isFinite(recorded) && recorded >= thisMonthStart;
+                  })
+                  .reduce((sum, reading) => sum + Number(reading.kwh || 0), 0);
+                const devicesWithIssues = rows.filter((row) => row.status !== "good");
+
+                const statusPill = (status: "good" | "low" | "offline") => {
+                  if (status === "good") return "bg-emerald-100 text-emerald-700";
+                  if (status === "low") return "bg-amber-100 text-amber-700";
+                  return "bg-rose-100 text-rose-700";
+                };
+                const statusLabel = (status: "good" | "low" | "offline") => {
+                  if (status === "good") return "Good";
+                  if (status === "low") return "Low";
+                  return "Offline";
+                };
+                const formatLastReading = (value?: string) => {
+                  if (!value) return "N/A";
+                  const timestamp = new Date(value).getTime();
+                  if (!Number.isFinite(timestamp)) return "N/A";
+                  const diffHours = Math.max(0, (now.getTime() - timestamp) / (1000 * 60 * 60));
+                  if (diffHours < 1) return "Just now";
+                  if (diffHours < 24) return `${Math.round(diffHours)}hr ago`;
+                  return `${Math.round(diffHours / 24)} day(s)`;
+                };
+
+                return (
+                  <>
+                    <div>
+                      <h4 className="text-sm font-semibold text-slate-800">Device Readings Overview</h4>
+                      <p className="text-xs text-slate-500">Monitor meter reporting health, uptime, and energy output from uploaded CSV telemetry.</p>
+                    </div>
+
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                      <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
+                        <select className="input-field" value={deviceInstallationFilterDraft} onChange={(e) => setDeviceInstallationFilterDraft(e.target.value)}>
+                          <option value="all">Installation: All</option>
+                          {installationOptions.map((installationId) => (
+                            <option key={installationId} value={installationId}>{installationId}</option>
+                          ))}
+                        </select>
+                        <select className="input-field" value={deviceDateFilterDraft} onChange={(e) => setDeviceDateFilterDraft(e.target.value as "30d" | "7d" | "90d")}>
+                          <option value="30d">Date: Last 30 days</option>
+                          <option value="7d">Date: Last 7 days</option>
+                          <option value="90d">Date: Last 90 days</option>
+                        </select>
+                        <select className="input-field" value={deviceStatusFilterDraft} onChange={(e) => setDeviceStatusFilterDraft(e.target.value as "all" | "good" | "low" | "offline")}>
+                          <option value="all">Status: All</option>
+                          <option value="good">Status: Good</option>
+                          <option value="low">Status: Low</option>
+                          <option value="offline">Status: Offline</option>
+                        </select>
+                        <div className="md:col-span-2">
+                          <button
+                            onClick={() => {
+                              setDeviceInstallationFilter(deviceInstallationFilterDraft);
+                              setDeviceDateFilter(deviceDateFilterDraft);
+                              setDeviceStatusFilter(deviceStatusFilterDraft);
+                            }}
+                            className="btn-primary text-xs"
+                          >
+                            Apply
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
+                      <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                        <p className="text-[11px] uppercase tracking-wide text-slate-500">Devices Reporting</p>
+                        <p className="mt-1 text-xl font-semibold text-slate-900">{devicesReporting}</p>
+                        <p className="text-xs text-slate-500">of {verifiedDevices} verified</p>
+                      </div>
+                      <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                        <p className="text-[11px] uppercase tracking-wide text-slate-500">Avg Uptime ({rangeDays} days)</p>
+                        <p className="mt-1 text-xl font-semibold text-slate-900">{avgUptime30.toFixed(1)}%</p>
+                        <p className={`text-xs ${avgUptime30 >= 99 ? "text-emerald-700" : "text-amber-700"}`}>{avgUptime30 >= 99 ? ">=99% target met" : "Below 99% target"}</p>
+                      </div>
+                      <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                        <p className="text-[11px] uppercase tracking-wide text-slate-500">Total Energy This Month</p>
+                        <p className="mt-1 text-xl font-semibold text-slate-900">{totalEnergyThisMonth.toLocaleString(undefined, { maximumFractionDigits: 1 })} kWh</p>
+                      </div>
+                      <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                        <p className="text-[11px] uppercase tracking-wide text-slate-500">Devices With Issues</p>
+                        <p className="mt-1 text-xl font-semibold text-rose-700">{devicesWithIssues.length}</p>
+                        <p className="text-xs text-rose-600">See attention list below</p>
+                      </div>
+                    </div>
+
+                    <div className="overflow-x-auto rounded-2xl border border-slate-200">
+                      <table className="min-w-full divide-y divide-slate-200 text-sm">
+                        <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
+                          <tr>
+                            <th className="px-4 py-3">Installation ID</th>
+                            <th className="px-4 py-3">Device Serial (meter_id)</th>
+                            <th className="px-4 py-3">Last Reading</th>
+                            <th className="px-4 py-3">Avg Uptime %</th>
+                            <th className="px-4 py-3">Total kWh</th>
+                            <th className="px-4 py-3">Readings Count</th>
+                            <th className="px-4 py-3">Status</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 bg-white">
+                          {filteredRows.map((row) => (
+                            <tr key={`${row.installationId}-${row.meterId}`} className="cursor-pointer hover:bg-slate-50" onClick={() => setSelectedDeviceReading(row)}>
+                              <td className="px-4 py-3 text-slate-700">{row.installationLabel}</td>
+                              <td className="px-4 py-3 text-slate-700">{row.meterId}</td>
+                              <td className="px-4 py-3 text-slate-700">{formatLastReading(row.lastReadingAt)}</td>
+                              <td className="px-4 py-3 text-slate-700">{row.avgUptime.toFixed(1)}%</td>
+                              <td className="px-4 py-3 text-slate-700">{row.totalKwh.toFixed(1)}</td>
+                              <td className="px-4 py-3 text-slate-700">{row.readingCount}</td>
+                              <td className="px-4 py-3">
+                                <span className={`rounded-full px-3 py-1 text-xs font-semibold ${statusPill(row.status)}`}>
+                                  {statusLabel(row.status)}
+                                </span>
+                              </td>
+                            </tr>
+                          ))}
+                          {filteredRows.length === 0 && (
+                            <tr>
+                              <td colSpan={7} className="px-4 py-6 text-center text-sm text-slate-500">No device readings found for the current filters.</td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    <AnimatePresence>
+                      {selectedDeviceReading && (
+                        <motion.div
+                          initial={{ opacity: 0 }}
+                          animate={{ opacity: 1 }}
+                          exit={{ opacity: 0 }}
+                          className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/40 p-4"
+                          onClick={() => setSelectedDeviceReading(null)}
+                        >
+                          <motion.div
+                            initial={{ scale: 0.96, opacity: 0 }}
+                            animate={{ scale: 1, opacity: 1 }}
+                            exit={{ scale: 0.96, opacity: 0 }}
+                            onClick={(e) => e.stopPropagation()}
+                            className="max-h-[92vh] w-full max-w-6xl overflow-y-auto rounded-2xl bg-white p-6 shadow-2xl"
+                          >
+                            {(() => {
+                              const selectedReport = projectReports.find((report) => report.id === selectedDeviceReading.installationId);
+                              const deviceReadings = smartReadingsForProject(project.id)
+                                .filter((reading) =>
+                                  String(reading.installationId || "") === selectedDeviceReading.installationId &&
+                                  String(reading.meterId || "") === selectedDeviceReading.meterId
+                                )
+                                .sort((a, b) => (b.recordedAt || "").localeCompare(a.recordedAt || ""));
+                              const nowMs = Date.now();
+                              const chartDays = deviceDetailChartRange === "7d" ? 7 : deviceDetailChartRange === "90d" ? 90 : 30;
+                              const chartStartMs = nowMs - chartDays * 24 * 60 * 60 * 1000;
+                              const chartReadings = deviceReadings.filter((reading) => {
+                                const ts = new Date(reading.recordedAt).getTime();
+                                return Number.isFinite(ts) && ts >= chartStartMs;
+                              });
+                              const groupedDaily = new Map<string, { date: string; totalKwh: number; uptimeSum: number; count: number }>();
+                              chartReadings.forEach((reading) => {
+                                const ts = new Date(reading.recordedAt);
+                                if (!Number.isFinite(ts.getTime())) return;
+                                const key = ts.toISOString().slice(0, 10);
+                                const item = groupedDaily.get(key) || { date: key, totalKwh: 0, uptimeSum: 0, count: 0 };
+                                item.totalKwh += Number(reading.kwh || 0);
+                                const uptime = Number(reading.uptimePct);
+                                if (Number.isFinite(uptime)) item.uptimeSum += uptime;
+                                item.count += 1;
+                                groupedDaily.set(key, item);
+                              });
+                              const dailyData = Array.from(groupedDaily.values())
+                                .sort((a, b) => a.date.localeCompare(b.date))
+                                .map((item) => ({
+                                  ...item,
+                                  uptimeAvg: item.count ? item.uptimeSum / item.count : 0,
+                                  dateLabel: new Date(item.date).toLocaleDateString("en-GB", { day: "2-digit", month: "short" }),
+                                }));
+                              const uptimeValues = chartReadings
+                                .map((reading) => Number(reading.uptimePct))
+                                .filter((value) => Number.isFinite(value));
+                              const avgUptime = uptimeValues.length ? uptimeValues.reduce((sum, value) => sum + value, 0) / uptimeValues.length : 0;
+                              const monthlyTotal = deviceReadings
+                                .filter((reading) => {
+                                  const ts = new Date(reading.recordedAt).getTime();
+                                  return Number.isFinite(ts) && ts >= nowMs - 30 * 24 * 60 * 60 * 1000;
+                                })
+                                .reduce((sum, reading) => sum + Number(reading.kwh || 0), 0);
+                              const avgDailyOutput = dailyData.length
+                                ? dailyData.reduce((sum, item) => sum + item.totalKwh, 0) / dailyData.length
+                                : 0;
+
+                              const tableRangeStart = deviceDetailTableRange === "all"
+                                ? Number.NEGATIVE_INFINITY
+                                : nowMs - (deviceDetailTableRange === "7d" ? 7 : deviceDetailTableRange === "90d" ? 90 : 30) * 24 * 60 * 60 * 1000;
+                              const tableRows = deviceReadings.filter((reading) => {
+                                const ts = new Date(reading.recordedAt).getTime();
+                                return Number.isFinite(ts) && ts >= tableRangeStart;
+                              });
+                              const totalPages = Math.max(1, Math.ceil(tableRows.length / 50));
+                              const currentPage = Math.min(deviceDetailPage, totalPages);
+                              const pageRows = tableRows.slice((currentPage - 1) * 50, currentPage * 50);
+                              const exportRows = tableRows
+                                .map((reading) => `${reading.recordedAt},${Number(reading.kwh || 0)},${Number(reading.uptimePct || 0)},CSV`)
+                                .join("\n");
+                              const deviceTier = project.projectSetup?.techTier || project.deviceTechTier || "Level 3";
+
+                              return (
+                                <>
+                                  <div className="border-b border-slate-200 pb-4">
+                                    <h4 className="text-xl font-bold text-slate-900">
+                                      METER READINGS - {selectedDeviceReading.installationLabel} / {selectedDeviceReading.meterId}
+                                    </h4>
+                                    <p className="mt-1 text-sm text-slate-600">
+                                      {selectedReport?.beneficiaryName || "Unknown Beneficiary"} | {selectedReport?.householdType || "N/A"} | {project.district || project.region}
+                                    </p>
+                                  </div>
+
+                                  <div className="mt-5 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm">
+                                    <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Device Info (read-only)</p>
+                                    <div className="mt-3 grid gap-2 md:grid-cols-2">
+                                      <p><span className="font-semibold text-slate-900">Installation ID:</span> {selectedDeviceReading.installationLabel}</p>
+                                      <p><span className="font-semibold text-slate-900">Device Serial:</span> {selectedDeviceReading.meterId}</p>
+                                      <p><span className="font-semibold text-slate-900">Technology:</span> {project.techType || "SHS"} - {deviceTier}</p>
+                                      <p><span className="font-semibold text-slate-900">Manufacturer:</span> {project.projectSetup?.deviceBrand || project.deviceBrand || "N/A"}</p>
+                                      <p><span className="font-semibold text-slate-900">Model:</span> {project.projectSetup?.deviceModel || project.deviceModel || "N/A"}</p>
+                                      <p><span className="font-semibold text-slate-900">Installed:</span> {selectedReport?.submittedAt ? new Date(selectedReport.submittedAt).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "N/A"}</p>
+                                      <p><span className="font-semibold text-slate-900">Verification:</span> {(selectedReport?.verificationStatus || selectedReport?.status) === "Verified" ? "Verified" : "Pending"}</p>
+                                    </div>
+                                  </div>
+
+                                  <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-4">
+                                    <div className="rounded-2xl border border-slate-200 bg-white p-4"><p className="text-xs text-slate-500">Avg Daily Output</p><p className="mt-1 text-lg font-semibold text-slate-900">{avgDailyOutput.toFixed(2)} kWh</p></div>
+                                    <div className="rounded-2xl border border-slate-200 bg-white p-4"><p className="text-xs text-slate-500">Monthly Total</p><p className="mt-1 text-lg font-semibold text-slate-900">{monthlyTotal.toFixed(1)} kWh</p></div>
+                                    <div className="rounded-2xl border border-slate-200 bg-white p-4"><p className="text-xs text-slate-500">Avg Uptime</p><p className="mt-1 text-lg font-semibold text-slate-900">{avgUptime.toFixed(1)}%</p></div>
+                                    <div className="rounded-2xl border border-slate-200 bg-white p-4"><p className="text-xs text-slate-500">Total Readings</p><p className="mt-1 text-lg font-semibold text-slate-900">{deviceReadings.length}</p></div>
+                                  </div>
+
+                                  <div className="mt-5 grid grid-cols-1 gap-4 lg:grid-cols-2">
+                                    <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                                      <p className="text-sm font-semibold text-slate-900">Energy Chart (daily output)</p>
+                                      <div className="mt-3 h-64">
+                                        <ResponsiveContainer width="100%" height="100%">
+                                          <LineChart data={dailyData}>
+                                            <CartesianGrid strokeDasharray="3 3" />
+                                            <XAxis dataKey="dateLabel" />
+                                            <YAxis />
+                                            <Tooltip />
+                                            <Line type="monotone" dataKey="totalKwh" stroke="#2563eb" strokeWidth={2} dot={false} />
+                                          </LineChart>
+                                        </ResponsiveContainer>
+                                      </div>
+                                    </div>
+                                    <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                                      <p className="text-sm font-semibold text-slate-900">Uptime Chart (daily uptime %)</p>
+                                      <div className="mt-3 h-64">
+                                        <ResponsiveContainer width="100%" height="100%">
+                                          <BarChart data={dailyData}>
+                                            <CartesianGrid strokeDasharray="3 3" />
+                                            <XAxis dataKey="dateLabel" />
+                                            <YAxis domain={[0, 100]} />
+                                            <Tooltip />
+                                            <Bar dataKey="uptimeAvg">
+                                              {dailyData.map((entry, idx) => (
+                                                <Cell key={`${entry.date}-uptime-${idx}`} fill={entry.uptimeAvg >= 99 ? "#16a34a" : entry.uptimeAvg >= 80 ? "#d97706" : "#dc2626"} />
+                                              ))}
+                                            </Bar>
+                                          </BarChart>
+                                        </ResponsiveContainer>
+                                      </div>
+                                    </div>
+                                  </div>
+
+                                  <div className="mt-3 flex flex-wrap gap-2">
+                                    <button onClick={() => setDeviceDetailChartRange("7d")} className={`rounded-full px-3 py-1 text-xs font-semibold ${deviceDetailChartRange === "7d" ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-700"}`}>7 days</button>
+                                    <button onClick={() => setDeviceDetailChartRange("30d")} className={`rounded-full px-3 py-1 text-xs font-semibold ${deviceDetailChartRange === "30d" ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-700"}`}>30 days</button>
+                                    <button onClick={() => setDeviceDetailChartRange("90d")} className={`rounded-full px-3 py-1 text-xs font-semibold ${deviceDetailChartRange === "90d" ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-700"}`}>3 months</button>
+                                  </div>
+
+                                  <div className="mt-5 rounded-2xl border border-slate-200 bg-white p-4">
+                                    <div className="flex flex-wrap items-center justify-between gap-2">
+                                      <select
+                                        className="input-field max-w-xs text-sm"
+                                        value={deviceDetailTableRange}
+                                        onChange={(e) => {
+                                          setDeviceDetailTableRange(e.target.value as "all" | "7d" | "30d" | "90d");
+                                          setDeviceDetailPage(1);
+                                        }}
+                                      >
+                                        <option value="all">Filter: Date range - All</option>
+                                        <option value="7d">Filter: Last 7 days</option>
+                                        <option value="30d">Filter: Last 30 days</option>
+                                        <option value="90d">Filter: Last 90 days</option>
+                                      </select>
+                                      <button
+                                        onClick={() => triggerDownload(
+                                          `${selectedDeviceReading.installationLabel}_${selectedDeviceReading.meterId}_readings.csv`,
+                                          `reading_datetime,kwh_generated,uptime_pct,source\n${exportRows}`,
+                                          "text/csv;charset=utf-8"
+                                        )}
+                                        className="btn-secondary text-xs"
+                                      >
+                                        Export CSV
+                                      </button>
+                                    </div>
+                                    <div className="mt-3 overflow-x-auto">
+                                      <table className="min-w-full divide-y divide-slate-200 text-sm">
+                                        <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
+                                          <tr>
+                                            <th className="px-3 py-2">Reading DateTime</th>
+                                            <th className="px-3 py-2">kWh Generated</th>
+                                            <th className="px-3 py-2">Uptime %</th>
+                                            <th className="px-3 py-2">Source</th>
+                                          </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-slate-100">
+                                          {pageRows.map((reading) => (
+                                            <tr key={reading.id}>
+                                              <td className="px-3 py-2">{reading.recordedAt}</td>
+                                              <td className="px-3 py-2">{Number(reading.kwh || 0).toFixed(2)}</td>
+                                              <td className="px-3 py-2">{Number(reading.uptimePct || 0).toFixed(1)}%</td>
+                                              <td className="px-3 py-2">CSV</td>
+                                            </tr>
+                                          ))}
+                                          {pageRows.length === 0 && (
+                                            <tr><td colSpan={4} className="px-3 py-4 text-center text-xs text-slate-500">No readings available for selected date range.</td></tr>
+                                          )}
+                                        </tbody>
+                                      </table>
+                                    </div>
+                                    <div className="mt-3 flex items-center justify-between text-xs text-slate-600">
+                                      <span>Page {currentPage} of {totalPages}</span>
+                                      <div className="flex gap-2">
+                                        <button onClick={() => setDeviceDetailPage(page => Math.max(1, page - 1))} className="btn-secondary text-xs" disabled={currentPage === 1}>Previous</button>
+                                        <button onClick={() => setDeviceDetailPage(page => Math.min(totalPages, page + 1))} className="btn-secondary text-xs" disabled={currentPage === totalPages}>Next</button>
+                                      </div>
+                                    </div>
+                                  </div>
+                                </>
+                              );
+                            })()}
+                          </motion.div>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </>
+                );
+              })()}
             </div>
           )}
 
@@ -14985,34 +15627,15 @@ const ProjectsHub = ({
           )}
 
           {activeTab === "documents" && (
-            <div className="space-y-6">
-              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                <div>
-                  <h4 className="text-sm font-semibold text-slate-800">Documents</h4>
-                  <p className="text-xs text-slate-500">Download project, contract, and implementation records.</p>
-                </div>
-                {isRbfPortal && <button onClick={() => setDocumentTitle("")} className="btn-secondary text-xs">Upload Document</button>}
-              </div>
+             <div className="space-y-6">
+               <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                 <div>
+                   <h4 className="text-sm font-semibold text-slate-800">Documents</h4>
+                   <p className="text-xs text-slate-500">Download project, contract, and implementation records.</p>
+                 </div>
+               </div>
 
-              {isRbfPortal && <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4 space-y-3">
-                <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-                  <select className="input-field" value={documentType} onChange={(e) => setDocumentType(e.target.value)}>
-                    {["Signed Contract", "Permit", "Insurance", "Team Roster", "Equipment Plan", "Other"].map(option => (
-                      <option key={option} value={option}>{option}</option>
-                    ))}
-                  </select>
-                  <input className="input-field" placeholder="Document title (optional)" value={documentTitle} onChange={(e) => setDocumentTitle(e.target.value)} />
-                  <input className="input-field" type="file" onChange={(e) => setDocumentFile(e.target.files?.[0] || null)} />
-                </div>
-                <div className="flex items-center gap-3">
-                  <button onClick={handleUploadDocument} className="btn-primary text-xs" disabled={documentUploading}>
-                    {documentUploading ? "Uploading..." : "Upload Document"}
-                  </button>
-                  {documentMessage && <span className="text-xs text-slate-500">{documentMessage}</span>}
-                </div>
-              </div>}
-
-              <div className="overflow-x-auto rounded-2xl border border-slate-200">
+               <div className="overflow-x-auto rounded-2xl border border-slate-200">
                 <table className="min-w-full divide-y divide-slate-200 text-sm">
                   <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
                     <tr>
@@ -15230,7 +15853,7 @@ const ProjectsHub = ({
     const paginatedReports = projectReports.slice((safePage - 1) * installationPageSize, safePage * installationPageSize);
     const canVendorManage = isVendorPortal;
     const visibleProjectTabs = projectTabs;
-    const canUploadDocs = isVendorPortal || isRbfPortal;
+    const canUploadDocs = isVendorPortal;
     const canSeeFinancials = !(isTacPortal || isDoePortal || isUndpPortal);
     const canSeeVendorName = !isUndpPortal;
     const canResolveFlags = isRbfPortal;
@@ -15239,6 +15862,7 @@ const ProjectsHub = ({
     const canAccessPayments = isVendorPortal || isRbfPortal || isPscPortal || isAuditorPortal;
     const canAccessVerifications = !isPscPortal && !isUndpPortal;
     const canAccessInstallations = !isPscPortal && !isUndpPortal;
+    const canAccessDeviceReadings = !isVendorPortal;
     const canAccessAnomalyFlags = !isPscPortal && !isUndpPortal;
     const canAccessDocuments = !isUndpPortal;
     const canAddTechnicalComment = isTacPortal;
@@ -15246,12 +15870,12 @@ const ProjectsHub = ({
     const detailTabs = isVendorPortal
       ? projectTabs
       : isPscPortal
-        ? ["summary", "milestone_payments", "kpi", "compliance"] as const
+        ? ["summary", "milestone_payments", "kpi", "compliance", "device_readings"] as const
         : [
             "overview",
             "milestones",
             ...(canAccessInstallations ? ["installations"] as const : []),
-            ...(canAccessVerifications ? ["verifications"] as const : []),
+            ...(canAccessDeviceReadings ? ["device_readings"] as const : []),
             "kpi",
             ...(canAccessPayments ? ["payments"] as const : []),
             ...(canAccessAnomalyFlags ? ["anomaly_flags"] as const : []),

@@ -13,7 +13,7 @@ from django.utils import timezone
 
 from rbf.notifications.models import Notification, NotificationChannel, NotificationStatus
 from rbf.tenders.models import ContractStatus, TenderContract
-from rbf.users.models import User, UserRole
+from rbf.users.models import PlatformConfiguration, User, UserRole
 
 from .audit import log_audit
 from .models import (
@@ -670,6 +670,8 @@ class KpiService:
 
         overall_progress_pct = (total_verified / total_target * 100.0) if total_target else 0.0
         overall_female_pct = (female_numerator / female_denominator * 100.0) if female_denominator else 0.0
+        config = PlatformConfiguration.objects.order_by("id").first()
+        national_main_program_budget = float(getattr(config, "national_main_program_budget", 0) or 0)
         return {
             "scope_label": scope_label,
             "total_projects": len(rows),
@@ -684,6 +686,7 @@ class KpiService:
             "projects_completed": projects_completed,
             "total_paid_amount": _round(total_paid_amount, 2),
             "pending_claims": pending_claims,
+            "national_main_program_budget": _round(national_main_program_budget, 2),
             "projects": rows,
         }
 

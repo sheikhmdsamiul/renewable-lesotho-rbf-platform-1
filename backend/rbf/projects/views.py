@@ -2,6 +2,7 @@ from datetime import timedelta, timezone as dt_timezone
 from pathlib import Path
 import tempfile
 import html
+import logging
 
 from rest_framework import viewsets, filters
 from rest_framework.permissions import IsAuthenticated
@@ -15,7 +16,7 @@ from django.conf import settings
 from django.http import FileResponse, Http404, HttpResponse
 from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
-from django.db.models import Q, F, Value, OuterRef, Subquery, Count, Avg, CharField, Case, When
+from django.db.models import Q, F, Value, OuterRef, Subquery, Count, Avg, CharField, Case, When, Sum
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 import csv
@@ -70,15 +71,19 @@ from .serializers import (
     ConcernResponseSerializer,
     AuditFindingSerializer,
 )
-from rbf.users.models import User, UserRole
+from rbf.users.models import User, UserRole, PlatformConfiguration
 from rbf.users.blacklisting import is_vendor_restricted
 from .audit import log_audit, AuditLogger
 from .bank_details import get_vendor_bank_snapshot
 from .integrations import (
+    month_start,
+    previous_month_period,
+    previous_quarter_period,
+    queue_periodic_project_reports,
     queue_installation_sync,
     queue_project_agent_sync,
+    queue_project_report_sync,
     queue_project_targets_sync,
-    queue_project_completion_report_sync,
     queue_project_timeseries_sync,
     SyncToProspectJob,
 )
@@ -86,6 +91,8 @@ from .gis import GpsValidator
 from .kpi import KpiService, invalidate_kpi_cache, render_kpi_pdf
 from rbf.notifications.models import Notification, NotificationChannel, NotificationStatus
 from rbf.tenders.models import ContractStatus, TenderContract
+
+logger = logging.getLogger(__name__)
 
 
 def _build_disbursement_sheet_payload(claim: PaymentClaim) -> dict:
@@ -103,6 +110,27 @@ def _build_disbursement_sheet_payload(claim: PaymentClaim) -> dict:
         'total_approved_amount': str(claim.claim_amount),
         'claim_status': claim.status,
     }
+
+
+def _assert_national_budget_available(claim: PaymentClaim):
+    config = PlatformConfiguration.objects.order_by('id').first()
+    configured_budget = float(getattr(config, 'national_main_program_budget', 0) or 0)
+    if configured_budget <= 0:
+        return
+    already_paid = (
+        PaymentClaim.objects.filter(status__in={PaymentClaimStatus.COMPLETED, PaymentClaimStatus.LEGACY_PAID})
+        .exclude(id=claim.id)
+        .aggregate(total=Sum('claim_amount'))
+        .get('total')
+        or 0
+    )
+    remaining = configured_budget - float(already_paid)
+    claim_amount = float(claim.claim_amount or 0)
+    if claim_amount > remaining:
+        raise ValueError(
+            f'Insufficient National/Main Program Budget. Remaining balance is {remaining:.2f}, '
+            f'but this claim requires {claim_amount:.2f}.'
+        )
 
 
 def vendor_query_filter(user, prefix: str = ''):
@@ -527,7 +555,13 @@ class ProjectViewSet(viewsets.ModelViewSet):
                 details['timeseries_rows'] = count
 
         if action_name in {'push_report', 'sync_all_available'}:
-            queue_project_completion_report_sync(str(project.id))
+            # Manual push: current month-to-date refresh for this specific project.
+            queue_project_report_sync(
+                str(project.id),
+                report_start=month_start(timezone.localdate()),
+                report_end=timezone.localdate(),
+                period_type='monthly',
+            )
             queued_methods.append('pushReport')
 
         if action_name in {'refresh_status', 'sync_all_available'}:
@@ -557,6 +591,70 @@ class ProjectViewSet(viewsets.ModelViewSet):
                 'queued_methods': queued_methods,
                 'details': details,
                 'message': f'Prospect sync queued for Project {project.project_reference or project.id}.',
+            },
+            status=status.HTTP_202_ACCEPTED,
+        )
+
+    @action(detail=False, methods=['post'], url_path='prospect-sync-reports')
+    def prospect_sync_reports(self, request):
+        if request.user.role not in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}:
+            raise PermissionDenied('Only RMT and Platform Administrators can trigger Prospect report sync.')
+
+        period = str(request.data.get('period') or 'monthly').strip().lower()
+        mode = str(request.data.get('mode') or 'all').strip().lower()
+        if period not in {'monthly', 'quarterly'}:
+            return Response({'detail': 'Invalid period. Use monthly or quarterly.'}, status=status.HTTP_400_BAD_REQUEST)
+        if mode not in {'all', 'project'}:
+            return Response({'detail': 'Invalid mode. Use all or project.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if period == 'monthly':
+            report_start, report_end = previous_month_period(timezone.localdate())
+        else:
+            report_start, report_end = previous_quarter_period(timezone.localdate())
+
+        queued = 0
+        project_id = str(request.data.get('project_id') or '').strip()
+        if mode == 'project':
+            if not project_id:
+                return Response({'detail': 'project_id is required when mode=project.'}, status=status.HTTP_400_BAD_REQUEST)
+            queued = int(
+                queue_project_report_sync(
+                    project_id,
+                    report_start=report_start,
+                    report_end=report_end,
+                    period_type=period,
+                )
+            )
+        else:
+            queued = queue_periodic_project_reports(
+                period_type=period,
+                report_start=report_start,
+                report_end=report_end,
+            )
+
+        log_audit(
+            request.user,
+            'prospect_report_manual_triggered',
+            request.user,
+            {
+                'module': 'prospect_sync',
+                'period': period,
+                'mode': mode,
+                'project_id': project_id or None,
+                'report_start': report_start.isoformat(),
+                'report_end': report_end.isoformat(),
+                'queued_jobs': queued,
+                'notes': f'Manual Prospect {period} report sync queued.',
+            },
+        )
+        return Response(
+            {
+                'status': 'queued',
+                'period': period,
+                'mode': mode,
+                'report_start': report_start.isoformat(),
+                'report_end': report_end.isoformat(),
+                'queued_jobs': queued,
             },
             status=status.HTTP_202_ACCEPTED,
         )
@@ -1654,6 +1752,10 @@ class PaymentClaimViewSet(viewsets.ModelViewSet):
         reference = str(request.data.get('payment_reference') or '').strip()
         if not reference:
             return Response({'detail': 'payment_reference is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            _assert_national_budget_available(claim)
+        except ValueError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         claim.status = PaymentClaimStatus.COMPLETED
         claim.paid_at = timezone.now()
         claim.payment_reference = reference
@@ -2501,9 +2603,39 @@ class ProspectSyncLogViewSet(viewsets.ReadOnlyModelViewSet):
         agent_latest = _latest_sync({'pushAgent'})
         failed_jobs = ProspectSyncLog.objects.filter(status=ProspectSyncStatus.FAILED).count()
 
-        installation_count = InstallationReport.objects.count()
-        target_count = Project.objects.count() * 3
+        our_installation_count = InstallationReport.objects.count()
+        our_target_count = Project.objects.count() * 3
         agent_count = User.objects.exclude(role=UserRole.VENDOR).count()
+
+        prospect_installation_count = 0
+        prospect_target_count = 0
+        prospect_error = None
+
+        try:
+            from rbf.projects.integrations import ProspectService
+            service = ProspectService.from_settings()
+            installations = service.getInstallations(size=1, page=1)
+            prospect_installation_count = installations.get('total', len(installations.get('data', [])))
+        except Exception as e:
+            prospect_error = str(e)
+            logger.warning(f'Failed to get installations from Prospect: {e}')
+
+        try:
+            from rbf.projects.integrations import ProspectService
+            service = ProspectService.from_settings()
+            targets = service.getTargets(size=1, page=1)
+            prospect_target_count = targets.get('total', len(targets.get('data', [])))
+        except Exception as e:
+            if not prospect_error:
+                prospect_error = str(e)
+            logger.warning(f'Failed to get targets from Prospect: {e}')
+
+        installations_synced = ProspectSyncLog.objects.filter(
+            method_name='pushInstallation', status=ProspectSyncStatus.SUCCESS
+        ).count()
+        targets_synced = ProspectSyncLog.objects.filter(
+            method_name='pushTarget', status=ProspectSyncStatus.SUCCESS
+        ).count()
 
         payload = {
             'failed_jobs': failed_jobs,
@@ -2514,19 +2646,19 @@ class ProspectSyncLogViewSet(viewsets.ReadOnlyModelViewSet):
             'rows': [
                 {
                     'data_type': 'Installations',
-                    'our_count': installation_count,
-                    'prospect_count': installation_count,
-                    'match': True,
+                    'our_count': our_installation_count,
+                    'prospect_count': prospect_installation_count if prospect_installation_count > 0 else -1,
+                    'match': prospect_installation_count > 0 and our_installation_count == prospect_installation_count,
                     'last_sync': installation_latest.updated_at.isoformat() if installation_latest else None,
-                    'note': 'Prospect count mirrors our last successful installation sync snapshot.',
+                    'note': f'Successfully synced {installations_synced} installations to Prospect' if prospect_installation_count > 0 else f'Prospect API unavailable. {installations_synced} installations synced to Prospect so far.',
                 },
                 {
                     'data_type': 'Targets',
-                    'our_count': target_count,
-                    'prospect_count': target_count,
-                    'match': True,
+                    'our_count': our_target_count,
+                    'prospect_count': prospect_target_count if prospect_target_count > 0 else -1,
+                    'match': prospect_target_count > 0 and our_target_count == prospect_target_count,
                     'last_sync': target_latest.updated_at.isoformat() if target_latest else None,
-                    'note': 'Each project contributes three target records.',
+                    'note': f'Successfully synced {targets_synced} target records to Prospect' if prospect_target_count > 0 else f'Prospect API unavailable. {targets_synced} target records synced to Prospect so far.',
                 },
                 {
                     'data_type': 'Agents',

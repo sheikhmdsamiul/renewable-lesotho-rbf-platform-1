@@ -333,6 +333,7 @@ class PlatformConfiguration(models.Model):
     country_code = models.CharField(max_length=8, default='LS')
     country_name = models.CharField(max_length=64, default='Lesotho')
     default_currency = models.CharField(max_length=8, default='LSL')
+    national_main_program_budget = models.DecimalField(max_digits=16, decimal_places=2, default=0)
     timezone = models.CharField(max_length=64, default='Africa/Maseru')
     female_target_minimum = models.PositiveIntegerField(default=50)
     vulnerable_target_minimum = models.PositiveIntegerField(default=30)

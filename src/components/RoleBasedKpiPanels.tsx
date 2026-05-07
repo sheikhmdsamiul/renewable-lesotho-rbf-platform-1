@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -303,46 +303,47 @@ export function MacroKpiPortal({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  const loadMacroDashboard = useCallback(async (showLoader = false) => {
+    if (showLoader) setLoading(true);
+    if (showLoader) setError(null);
+    try {
+      const results = await Promise.all([
+        fetchPortfolioKpiSummary(),
+        fetchProjects(),
+        fetchMapInstallations(),
+        fetchSmartMeterReadings(),
+        ...(portalType === "rbf" ? [fetchTenders()] : []),
+      ]);
+      const [portfolioSummary, projectRows, mapData, readings] = results;
+      setPortfolio(portfolioSummary);
+      setProjects(projectRows);
+      setInstallations(mapData.installations);
+      setMeterReadings(readings);
+
+      if (portalType === "rbf" && results.length > 4) {
+        const tenderData = results[4] as Tender[];
+        setTenders(tenderData);
+      }
+
+      const summaries = await Promise.all(projectRows.map((project) => fetchProjectKpiSummary(project.id).catch(() => null)));
+      setProjectSummaries(summaries.filter(Boolean) as ProjectKpiSummary[]);
+    } catch (err: any) {
+      if (showLoader) setError(String(err?.message || "Unable to load macro KPI dashboard."));
+    } finally {
+      if (showLoader) setLoading(false);
+    }
+  }, [portalType]);
+
   useEffect(() => {
-    let active = true;
-    setLoading(true);
-    setError(null);
+    void loadMacroDashboard(true);
+  }, [loadMacroDashboard]);
 
-    Promise.all([
-      fetchPortfolioKpiSummary(),
-      fetchProjects(),
-      fetchMapInstallations(),
-      fetchSmartMeterReadings(),
-      ...(portalType === "rbf" ? [fetchTenders()] : []),
-    ])
-      .then(async (results) => {
-        if (!active) return;
-        const [portfolioSummary, projectRows, mapData, readings] = results;
-        setPortfolio(portfolioSummary);
-        setProjects(projectRows);
-        setInstallations(mapData.installations);
-        setMeterReadings(readings);
-
-        if (portalType === "rbf" && results.length > 4) {
-          const tenderData = results[4] as Tender[];
-          setTenders(tenderData);
-        }
-
-        const summaries = await Promise.all(projectRows.map((project) => fetchProjectKpiSummary(project.id).catch(() => null)));
-        if (!active) return;
-        setProjectSummaries(summaries.filter(Boolean) as ProjectKpiSummary[]);
-      })
-      .catch((err: any) => {
-        if (active) setError(String(err?.message || "Unable to load macro KPI dashboard."));
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
-
-    return () => {
-      active = false;
-    };
-  }, []);
+  useEffect(() => {
+    const intervalId = setInterval(() => {
+      void loadMacroDashboard(false);
+    }, 20000);
+    return () => clearInterval(intervalId);
+  }, [loadMacroDashboard]);
 
   const projectsById = useMemo(() => new Map(projects.map((project) => [project.id, project])), [projects]);
   const summariesById = useMemo(() => new Map(projectSummaries.map((summary) => [summary.project.id, summary])), [projectSummaries]);
@@ -393,11 +394,19 @@ export function MacroKpiPortal({
 
   const budgetSummary = useMemo(() => {
     const totalBudget = projects.reduce((sum, project) => sum + Number(project.budget || project.contractValue || project.milestoneTotalAmount || 0), 0);
-    const paidAmount = Number(portfolio?.total_paid_amount || 0);
+    const paidFromPortfolio = Number(portfolio?.total_paid_amount || 0);
+    const paidFromSummaries = projectSummaries.reduce((sum, summary) => sum + Number(summary.payments_data?.summary?.total_disbursed || 0), 0);
+    const paidAmount = paidFromPortfolio > 0 ? paidFromPortfolio : paidFromSummaries;
     const progressPct = Number(portfolio?.overall_progress_pct || 0);
     const paidPct = totalBudget > 0 ? (paidAmount / totalBudget) * 100 : 0;
-    const totalContracted = 5400000;
-    const pendingAmount = 225000;
+    const pendingFromSummaries = projectSummaries.reduce((sum, summary) => sum + Number(summary.payments_data?.summary?.total_pending || 0), 0);
+    const pendingAmount = pendingFromSummaries > 0 ? pendingFromSummaries : Math.max(0, totalBudget - paidAmount);
+    const configuredProgramBudget = Number(portfolio?.national_main_program_budget || 0);
+    const totalContracted = configuredProgramBudget > 0 ? configuredProgramBudget : totalBudget;
+    const pendingCount = projectSummaries.reduce((count, summary) => {
+      const claims = summary.payments_data?.claims || [];
+      return count + claims.filter((claim) => !["Completed", "Paid", "Rejected"].includes(claim.status)).length;
+    }, 0);
     return {
       totalBudget,
       paidAmount,
@@ -406,13 +415,13 @@ export function MacroKpiPortal({
       gapPct: Number((progressPct - paidPct).toFixed(1)),
       totalContracted,
       pendingAmount,
-      pendingCount: 3,
+      pendingCount,
       chartRows: [
         { name: "Work Completed", value: Number(progressPct.toFixed(1)), fill: "#1D9E75" },
         { name: "Budget Paid", value: Number(paidPct.toFixed(1)), fill: "#1d4ed8" },
       ],
     };
-  }, [portfolio, projects]);
+  }, [portfolio, projectSummaries, projects]);
 
   const latestMeterByProject = useMemo(() => {
     const latest = new Map<string, Date>();
@@ -515,11 +524,11 @@ export function MacroKpiPortal({
             />
             <KpiCard
               label="Total Paid Out"
-              value={formatCurrency(projectSummaries.reduce((sum, s) => sum + (s.payments_data?.summary?.total_disbursed || 0), 0))}
+              value={formatCurrency(budgetSummary.paidAmount)}
               hint="Across all projects"
               icon={Wallet}
               tone="blue"
-              status={`${formatPercent(portfolio?.overall_progress_pct || 0, 1)} of contracted value`}
+              status={`${formatPercent(budgetSummary.totalContracted > 0 ? (budgetSummary.paidAmount / budgetSummary.totalContracted) * 100 : 0, 1)} of contracted value`}
             />
             <KpiCard
               label="Disbursement Tracker"

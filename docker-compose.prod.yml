@@ -76,6 +76,36 @@ services:
         condition: service_started
     restart: unless-stopped
 
+  scheduler:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: ghcr.io/sheikh-samiul/renewable-lesotho-rbf-platform-1-backend:latest
+    container_name: rbf_scheduler_prod
+    env_file:
+      - .env.prod
+    environment:
+      DJANGO_SETTINGS_MODULE: core.settings
+      DJANGO_DEBUG: 0
+      SECRET_KEY: ${SECRET_KEY}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS},localhost,127.0.0.1
+      API_REQUIRE_AUTH: ${API_REQUIRE_AUTH:-1}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-rbf_user}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-rbf}
+      REDIS_URL: redis://redis:6379/0
+      DB_CONN_MAX_AGE: ${DB_CONN_MAX_AGE:-60}
+      API_PAGE_SIZE: ${API_PAGE_SIZE:-50}
+      API_THROTTLE_ANON: ${API_THROTTLE_ANON:-120/hour}
+      API_THROTTLE_USER: ${API_THROTTLE_USER:-600/hour}
+    command: >
+      sh -c "python manage.py migrate --noinput && python manage.py run_report_scheduler --interval 60"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    restart: unless-stopped
+
   nginx:
     build:
       context: .

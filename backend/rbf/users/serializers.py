@@ -439,6 +439,13 @@ class PlatformConfigurationSerializer(serializers.ModelSerializer):
             return [item.strip().upper() for item in value.split('/') if item.strip()]
         return [str(item).strip().upper() for item in value if str(item).strip()]
 
+    def validate_national_main_program_budget(self, value):
+        if value is None:
+            return value
+        if value < 0:
+            raise serializers.ValidationError('National/Main Program Budget cannot be negative.')
+        return value
+
 
 class ChangePasswordSerializer(serializers.Serializer):
     current_password = serializers.CharField(write_only=True, required=False, allow_blank=True)

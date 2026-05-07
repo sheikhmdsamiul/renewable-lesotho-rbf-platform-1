@@ -304,6 +304,7 @@ class TenderBidSerializer(serializers.ModelSerializer):
             'system_configuration', 'boq_items', 'boq_details', 'device_brand_model', 'tech_tier', 'energy_target_kwh_month',
             'technical_proposal_file', 'financial_proposal_file', 'boq_file',
             'gender_action_plan_file', 'implementation_plan_file', 'om_plan_file', 'reporting_templates_file', 'distribution_map_file',
+            'tender_security_file',
             'female_target_pct', 'vulnerable_target_pct', 'low_income_target_pct',
             'inclusion_commitment_confirmed',
             'om_strategy_summary', 'local_technicians_to_be_trained', 'warranty_period_months',
@@ -1035,7 +1036,8 @@ class TenderListSerializer(serializers.ModelSerializer):
             'id', 'reference_number', 'name', 'department', 'category',
             'status', 'deadline', 'budget', 'published_at', 'is_verified',
             'awarded_vendor_name', 'bid_count', 'created_at',
-            'technology_types', 'target_districts', 'procurement_method'
+            'technology_types', 'target_districts', 'procurement_method',
+            'application_type', 'tender_security_required',
         ]
 
 
@@ -1107,11 +1109,18 @@ class TenderSerializer(serializers.ModelSerializer):
     def to_internal_value(self, data):
         payload = data.copy() if hasattr(data, 'copy') else dict(data)
 
+        application_type = payload.get('application_type', '') or ''
+        is_access_window = application_type.lower() == 'access window'
+
         for field in self.OPTIONAL_TEXT_FIELDS:
             if payload.get(field) is None:
                 payload[field] = ''
 
-        for field in self.OPTIONAL_DATE_FIELDS:
+        optional_date_fields = list(self.OPTIONAL_DATE_FIELDS)
+        if is_access_window:
+            optional_date_fields = [f for f in optional_date_fields if f not in {'last_date_submission', 'last_date_security'}]
+        
+        for field in optional_date_fields:
             if payload.get(field) in ('', None):
                 payload[field] = None
 
@@ -1132,10 +1141,17 @@ class TenderSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         errors = {}
         instance = getattr(self, 'instance', None)
+        application_type = attrs.get('application_type') or (instance.application_type if instance else '')
+        is_access_window = application_type.lower() == 'access window'
+        
+        access_window_exempt_fields = {'last_date_submission', 'last_date_security', 'date_opening'}
+        
         for field in self.REQUIRED_FIELDS:
             value = attrs.get(field)
             if value is None and instance is not None:
                 value = getattr(instance, field, None)
+            if is_access_window and field in access_window_exempt_fields:
+                continue
             if value in (None, '', []):
                 errors[field] = 'This field is required.'
 
@@ -1204,7 +1220,15 @@ class TenderSerializer(serializers.ModelSerializer):
             role = getattr(request.user, 'role', None)
             if role not in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}:
                 raise serializers.ValidationError('Only the RBF Management Team or Platform Administrators can create tenders.')
-        # Auto-generate reference number if missing
+        
+        application_type = validated_data.get('application_type', '') or ''
+        is_access_window = application_type.lower() == 'access window'
+        
+        if is_access_window:
+            validated_data['deadline'] = None
+            validated_data['last_date_submission'] = None
+            validated_data['last_date_security'] = None
+        
         if not validated_data.get('reference_number'):
             last_id = Tender.objects.order_by('-id').values_list('id', flat=True).first() or 0
             validated_data['reference_number'] = f"TND-{last_id + 1:06d}"
