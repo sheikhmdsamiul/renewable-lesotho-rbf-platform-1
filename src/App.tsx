@@ -1236,7 +1236,7 @@ const Tenders = ({
     techType: "SHS",
     energyOutput: 20000,
     districts: ["Maseru"],
-    verificationMethod: "Manual",
+    verificationMethod: "manual",
     targetFemalePct: 50,
     targetVulnerablePct: 30,
     targetLowIncomePct: 60,
@@ -1576,7 +1576,7 @@ const Tenders = ({
           techType: full.technologyTypes?.[0] || full.category || "SHS",
           energyOutput: 20000,
           districts: full.targetDistricts?.length ? full.targetDistricts : ["Maseru"],
-          verificationMethod: "Manual",
+          verificationMethod: "manual",
           targetFemalePct: 50,
           targetVulnerablePct: 30,
           targetLowIncomePct: 60,
@@ -1933,6 +1933,11 @@ const Tenders = ({
       const normalizedStatus = String(contractToProcess?.status || "").toLowerCase();
       if (normalizedStatus !== "approved") {
         await approveTenderContract(contractId, { sendEmail: true });
+        // After approval, refresh contracts to ensure we have latest data (signed_file etc)
+        if (selectedTender) {
+          const refreshed = await fetchTenderContracts({ tenderId: selectedTender.id });
+          setTenderContracts(refreshed);
+        }
       }
       const updated: any = await assignTenderContract(contractId, {
         projectDurationMonths: contractAssignmentDraft.projectDurationMonths,
