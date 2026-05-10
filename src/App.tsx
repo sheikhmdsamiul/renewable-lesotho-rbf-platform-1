@@ -1347,15 +1347,33 @@ const Tenders = ({
 
   useEffect(() => {
     const isAccessWindow = String(formData.applicationType || "").toLowerCase() === "access window";
-    if (isAccessWindow && formData.tenderSecurityRequired && formData.dateOpening) {
-      const openingDate = formData.dateOpening;
-      const openingTime = openingDate.split('T')[1] || '10:00';
-      const datePart = openingDate.split('T')[0];
-      setFormData(prev => ({
-        ...prev,
-        lastDateSecurity: `${datePart}T${openingTime}`,
-        lastDateSubmission: `${datePart}T${openingTime}`
-      }));
+    const dateOpening = formData.dateOpening;
+    
+    if (isAccessWindow) {
+      setFormData(prev => {
+        const updates: any = {};
+        const datePart = dateOpening ? dateOpening.split('T')[0] : "";
+        const openingTime = dateOpening ? (dateOpening.split('T')[1] || '10:00') : "";
+
+        if (dateOpening) {
+          // Auto-set lastDateSubmission if not provided, matching opening date
+          if (!prev.lastDateSubmission) {
+            updates.lastDateSubmission = `${datePart}T${openingTime}`;
+          }
+        } else {
+          // If no opening date, but it's an access window, we want a long gap for submission if it's empty
+          if (!prev.lastDateSubmission) {
+            const farFuture = new Date();
+            farFuture.setFullYear(farFuture.getFullYear() + 5);
+            updates.lastDateSubmission = farFuture.toISOString().split('.')[0].slice(0, 16); // YYYY-MM-DDTHH:mm
+          }
+        }
+        
+        if (Object.keys(updates).length > 0) {
+          return { ...prev, ...updates };
+        }
+        return prev;
+      });
     }
   }, [formData.applicationType, formData.tenderSecurityRequired, formData.dateOpening]);
 
@@ -1690,22 +1708,28 @@ const Tenders = ({
     const hasMilestoneSchedule =
       Boolean(milestonePaymentScheduleFile) || Boolean(selectedTender?.milestonePaymentScheduleFile);
 
-      // Application Window uses hard deadline; Access Window uses lastDateSubmission for deadline if provided, else a far-future date.
+      // Application Window: strictly requires and maps deadline to lastDateSubmission.
+      // Access Window: auto-sets fallback deadline if submission deadline is missing.
       if (isAccessWindow) {
-        const fallbackDeadline = payload.dateOpening || new Date(new Date().setFullYear(new Date().getFullYear() + 10)).toISOString();
-        payload.deadline = payload.lastDateSubmission || fallbackDeadline;
+        if (payload.lastDateSubmission) {
+          payload.deadline = payload.lastDateSubmission;
+        } else {
+          // Rolling deadline: 5 years in future to keep the tender active
+          const rollingDate = new Date();
+          rollingDate.setFullYear(rollingDate.getFullYear() + 5);
+          payload.deadline = rollingDate.toISOString();
+        }
       } else {
+        // Strict mapping for Application Window - Must be intentionally provided via lastDateSubmission
         payload.deadline = payload.lastDateSubmission;
       }
-
       const requiredFields = [
         'name','department','applicationType','procurementMethod',
         'addressForDocument','addressForSecurity','placeForOpening',
         'biddersEligibility','invitedBy','biddingCurrency','timeForCompletion',
         'instruction','contactDetails','category','targetSiteType',
-        'dateOpening',
-        ...(!isAccessWindow ? ['lastDateSecurity','lastDateSubmission'] : []),
-        ...(formData.tenderSecurityRequired ? ['lastDateSecurity'] : [])
+        ...(payload.tenderSecurityRequired ? ['lastDateSecurity'] : []),
+        ...(!isAccessWindow ? ['dateOpening', 'lastDateSubmission'] : [])
       ];
      const missing = requiredFields.filter(f => !payload[f] || payload[f]?.length === 0);
      if (missing.length) {
@@ -2164,6 +2188,7 @@ const Tenders = ({
                   <input 
                     type="date" 
                     placeholder="Date"
+                    required={formData.tenderSecurityRequired}
                     value={formData.lastDateSecurity ? formData.lastDateSecurity.split('T')[0] : ""}
                     onChange={(e) => {
                       const currentTime = formData.lastDateSecurity?.split('T')[1] || '09:00';
@@ -2186,6 +2211,7 @@ const Tenders = ({
                   <input 
                     type="time" 
                     placeholder="Time"
+                    required={formData.tenderSecurityRequired}
                     value={formData.lastDateSecurity ? formData.lastDateSecurity.split('T')[1] : ''}
                     disabled={!formData.lastDateSecurity}
                     onChange={(e) => {
@@ -2210,7 +2236,7 @@ const Tenders = ({
             {/* Document Submission Deadline */}
             <div>
               <label className="text-sm font-bold text-slate-700 mb-2">
-                Document Submission Deadline *
+                Document Submission Deadline {formData.applicationType !== "Access Window" && "*"}
               </label>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <div className="relative">
@@ -2218,6 +2244,7 @@ const Tenders = ({
                   <input 
                     type="date" 
                     placeholder="Date"
+                    required={formData.applicationType !== "Access Window"}
                     value={formData.lastDateSubmission ? formData.lastDateSubmission.split('T')[0] : ""}
                     onChange={(e) => {
                       const currentTime = formData.lastDateSubmission?.split('T')[1] || '14:00';
@@ -2240,6 +2267,7 @@ const Tenders = ({
                   <input 
                     type="time" 
                     placeholder="Time"
+                    required={formData.applicationType !== "Access Window"}
                     value={formData.lastDateSubmission ? formData.lastDateSubmission.split('T')[1] : ''}
                     disabled={!formData.lastDateSubmission}
                     onChange={(e) => {

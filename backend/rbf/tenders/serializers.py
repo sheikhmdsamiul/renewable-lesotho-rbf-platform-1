@@ -1073,6 +1073,7 @@ class TenderSerializer(serializers.ModelSerializer):
         'minimum_service_tier',
     )
     OPTIONAL_DATE_FIELDS = (
+        'deadline',
         'last_date_security',
         'last_date_submission',
         'date_opening',
@@ -1105,10 +1106,6 @@ class TenderSerializer(serializers.ModelSerializer):
         'instruction',
         'contact_details',
         'target_site_type',
-        'deadline',
-        'last_date_security',
-        'last_date_submission',
-        'date_opening',
     ]
 
     def to_internal_value(self, data):
@@ -1148,15 +1145,34 @@ class TenderSerializer(serializers.ModelSerializer):
         instance = getattr(self, 'instance', None)
         application_type = attrs.get('application_type') or (instance.application_type if instance else '')
         is_access_window = application_type.lower() == 'access window'
+        tender_security_required = attrs.get('tender_security_required', instance.tender_security_required if instance else False)
+
+        # 1. Define required fields for both types
+        required_fields = [
+            'name', 'department', 'category', 'application_type', 'procurement_method',
+            'address_for_document', 'address_for_security', 'place_for_opening',
+            'bidders_eligibility', 'time_for_completion', 'invited_by',
+            'bidding_currency', 'instruction', 'contact_details', 'target_site_type',
+        ]
+
+        # 2. Type-specific requirement logic
+        if not is_access_window:
+            # Application Window requirements: Submission and Opening dates are mandatory
+            if not attrs.get('last_date_submission') and not (instance and instance.last_date_submission):
+                errors['last_date_submission'] = 'Document Submission Deadline is required for Application Window tenders.'
+            if not attrs.get('date_opening') and not (instance and instance.date_opening):
+                errors['date_opening'] = 'Tender Opening Date is required for Application Window tenders.'
         
-        access_window_exempt_fields = {'last_date_submission', 'last_date_security', 'date_opening'}
-        
-        for field in self.REQUIRED_FIELDS:
+        # 3. Tender Security requirement logic
+        if tender_security_required:
+            if not attrs.get('last_date_security') and not (instance and instance.last_date_security):
+                errors['last_date_security'] = 'Security Submission Deadline is required when Tender Security is enabled.'
+
+        # 4. Standard required fields check
+        for field in required_fields:
             value = attrs.get(field)
             if value is None and instance is not None:
                 value = getattr(instance, field, None)
-            if is_access_window and field in access_window_exempt_fields:
-                continue
             if value in (None, '', []):
                 errors[field] = 'This field is required.'
 
@@ -1166,6 +1182,16 @@ class TenderSerializer(serializers.ModelSerializer):
         target_districts = attrs.get('target_districts', instance.target_districts if instance else [])
         if not target_districts:
             errors['target_districts'] = 'Select at least one target district.'
+
+        # 5. Handle Deadline mapping
+        # For Application Window: must map to submission deadline
+        # For Access Window: map to submission deadline if provided, else handled in create()
+        if attrs.get('last_date_submission'):
+            attrs['deadline'] = attrs['last_date_submission']
+        elif not is_access_window:
+            # Fallback for Application Window if missing (though validate should catch it)
+            if instance and instance.last_date_submission:
+                 attrs['deadline'] = instance.last_date_submission
 
         def validate_file(field_name, max_size_mb=10, allowed_ext=None):
             file_obj = attrs.get(field_name)
@@ -1229,10 +1255,14 @@ class TenderSerializer(serializers.ModelSerializer):
         application_type = validated_data.get('application_type', '') or ''
         is_access_window = application_type.lower() == 'access window'
         
-        if is_access_window:
-            validated_data['deadline'] = None
-            validated_data['last_date_submission'] = None
-            validated_data['last_date_security'] = None
+        # Final safety for deadline before saving (Database NOT NULL constraint)
+        if not validated_data.get('deadline'):
+            if is_access_window:
+                # 5-year rolling window for Access Window tenders
+                validated_data['deadline'] = timezone.now() + timedelta(days=365 * 5)
+            else:
+                # Should have been caught by validate() but as fallback use submission date
+                validated_data['deadline'] = validated_data.get('last_date_submission') or timezone.now()
         
         if not validated_data.get('reference_number'):
             last_id = Tender.objects.order_by('-id').values_list('id', flat=True).first() or 0
