@@ -1200,9 +1200,15 @@ const Tenders = ({
   const [awardBids, setAwardBids] = useState<TenderBid[]>([]);
   const [awardBidId, setAwardBidId] = useState("");
   const [awardBidLoading, setAwardBidLoading] = useState(false);
+  const [awardConfirmOpen, setAwardConfirmOpen] = useState(false);
+  const [finalAwardConfirmOpen, setFinalAwardConfirmOpen] = useState(false);
   const [awardRankingRows, setAwardRankingRows] = useState<TenderAwardRankingRow[]>([]);
   const [tenderBids, setTenderBids] = useState<TenderBid[]>([]);
   const [bidsLoading, setBidsLoading] = useState(false);
+  const [extendDeadlineOpen, setExtendDeadlineOpen] = useState(false);
+  const [newDeadline, setNewDeadline] = useState("");
+  const [newSecurityDeadline, setNewSecurityDeadline] = useState("");
+  const [isExtending, setIsExtending] = useState(false);
 
   useEffect(() => {
     if (view === "details" && selectedTender?.id) {
@@ -1327,6 +1333,20 @@ const Tenders = ({
     const { name, value } = e.target;
     setFormData(prev => ({ ...prev, [name]: value }));
   };
+
+  useEffect(() => {
+    const isAccessWindow = String(formData.applicationType || "").toLowerCase() === "access window";
+    if (isAccessWindow && formData.tenderSecurityRequired && formData.dateOpening) {
+      const openingDate = formData.dateOpening;
+      const openingTime = openingDate.split('T')[1] || '10:00';
+      const datePart = openingDate.split('T')[0];
+      setFormData(prev => ({
+        ...prev,
+        lastDateSecurity: `${datePart}T${openingTime}`,
+        lastDateSubmission: `${datePart}T${openingTime}`
+      }));
+    }
+  }, [formData.applicationType, formData.tenderSecurityRequired, formData.dateOpening]);
 
   const handleTechToggle = (tech: string) => {
     setFormData(prev => {
@@ -1659,27 +1679,28 @@ const Tenders = ({
     const hasMilestoneSchedule =
       Boolean(milestonePaymentScheduleFile) || Boolean(selectedTender?.milestonePaymentScheduleFile);
 
-    const requiredFields = [
-      'name','department','applicationType','procurementMethod',
-      'addressForDocument','addressForSecurity','placeForOpening',
-      'biddersEligibility','invitedBy','biddingCurrency','timeForCompletion',
-      'instruction','contactDetails','category','targetSiteType',
-      'dateOpening',
-      ...(!isAccessWindow ? ['lastDateSecurity','lastDateSubmission'] : [])
-    ];
-    const missing = requiredFields.filter(f => !payload[f] || payload[f]?.length === 0);
-    if (missing.length) {
-      setTenderError(`Fill required fields: ${missing.join(', ')}`);
-      return;
-    }
-    // Application Window uses hard deadline; Access Window stays open until RMT closes bidding.
-    if (isAccessWindow) {
-      const fallbackDeadline = payload.dateOpening || new Date(new Date().setFullYear(new Date().getFullYear() + 10)).toISOString();
-      payload.deadline = payload.lastDateSubmission || fallbackDeadline;
-      payload.lastDateSubmission = payload.lastDateSubmission || "";
-    } else {
-      payload.deadline = payload.lastDateSubmission;
-    }
+      // Application Window uses hard deadline; Access Window uses lastDateSubmission for deadline if provided, else a far-future date.
+      if (isAccessWindow) {
+        const fallbackDeadline = payload.dateOpening || new Date(new Date().setFullYear(new Date().getFullYear() + 10)).toISOString();
+        payload.deadline = payload.lastDateSubmission || fallbackDeadline;
+      } else {
+        payload.deadline = payload.lastDateSubmission;
+      }
+
+      const requiredFields = [
+        'name','department','applicationType','procurementMethod',
+        'addressForDocument','addressForSecurity','placeForOpening',
+        'biddersEligibility','invitedBy','biddingCurrency','timeForCompletion',
+        'instruction','contactDetails','category','targetSiteType',
+        'dateOpening',
+        ...(!isAccessWindow ? ['lastDateSecurity','lastDateSubmission'] : []),
+        ...(formData.tenderSecurityRequired ? ['lastDateSecurity'] : [])
+      ];
+     const missing = requiredFields.filter(f => !payload[f] || payload[f]?.length === 0);
+     if (missing.length) {
+       setTenderError(`Fill required fields: ${missing.join(', ')}`);
+       return;
+     }
     if (!payload.technologyTypes || payload.technologyTypes.length === 0) {
       setTenderError("Select at least one Technology Type.");
       return;
@@ -1761,6 +1782,36 @@ const Tenders = ({
     }
   };
 
+  const handleExtendDeadline = async () => {
+    if (!selectedTender || !newDeadline) {
+      showNotification("Please select a new deadline.");
+      return;
+    }
+    try {
+      setIsExtending(true);
+      const securityDeadline = selectedTender.tenderSecurityRequired 
+        ? (newSecurityDeadline || newDeadline)
+        : selectedTender.lastDateSecurity;
+      
+      const payload = {
+        ...selectedTender,
+        lastDateSubmission: newDeadline,
+        lastDateSecurity: securityDeadline,
+      };
+      const updated = await updateTender(selectedTender.id, payload as Partial<Tender> & { scheduleFile?: File | null });
+      upsertTender(updated);
+      setSelectedTender(updated);
+      setExtendDeadlineOpen(false);
+      setNewDeadline("");
+      setNewSecurityDeadline("");
+      showNotification("Deadline extended successfully.");
+    } catch (err: any) {
+      showNotification(toActionError(err, "Failed to extend deadline."));
+    } finally {
+      setIsExtending(false);
+    }
+  };
+
   const handleAward = async (tenderId: string) => {
     if (!awardBidId.trim()) {
       showNotification("Select a submitted bid to issue the award.");
@@ -1770,11 +1821,14 @@ const Tenders = ({
       showNotification("Winning Vendor Name and Vendor ID are required to issue the award.");
       return;
     }
+    setAwardConfirmOpen(true);
+  };
+
+  const confirmAward = async () => {
+    const tenderId = selectedTender?.id;
+    if (!tenderId) return;
+    setAwardConfirmOpen(false);
     const tenderLabel = selectedTender?.name || "this tender";
-    const confirmationMessage = `Award "${tenderLabel}" (Tender ID: ${tenderId}) to "${awardWinner}" (Vendor ID: ${awardWinnerId})?`;
-    if (!window.confirm(confirmationMessage)) {
-      return;
-    }
     try {
       setIsActioning(true);
       setContractMessage(null);
@@ -1804,11 +1858,19 @@ const Tenders = ({
     }
   };
 
+  const closeAwardConfirm = () => {
+    setAwardConfirmOpen(false);
+  };
+
   const handleConfirmFinalAward = async (tenderId: string) => {
+    setFinalAwardConfirmOpen(true);
+  };
+
+  const confirmFinalAward = async () => {
+    const tenderId = selectedTender?.id;
+    if (!tenderId) return;
+    setFinalAwardConfirmOpen(false);
     const tenderLabel = selectedTender?.name || "this tender";
-    if (!window.confirm(`Confirm final award for "${tenderLabel}" now? This will generate the PBA and open Contracting for vendor signature.`)) {
-      return;
-    }
     try {
       setIsActioning(true);
       setContractMessage(null);
@@ -1847,6 +1909,10 @@ const Tenders = ({
     } finally {
       setIsActioning(false);
     }
+  };
+
+  const closeFinalAwardConfirm = () => {
+    setFinalAwardConfirmOpen(false);
   };
 
   const handleApproveContract = async (contractId: string) => {
@@ -2073,7 +2139,9 @@ const Tenders = ({
           <div className="space-y-6">
             {/* Security Submission Deadline */}
             <div>
-              <label className="text-sm font-bold text-slate-700 mb-2">Security Submission Deadline *</label>
+              <label className="text-sm font-bold text-slate-700 mb-2">
+                  Security Submission Deadline {formData.tenderSecurityRequired && '*'}
+                </label>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <div className="relative">
                   <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
@@ -2126,11 +2194,8 @@ const Tenders = ({
             {/* Document Submission Deadline */}
             <div>
               <label className="text-sm font-bold text-slate-700 mb-2">
-                Document Submission Deadline {String(formData.applicationType || "").toLowerCase() === "access window" ? "(Optional for Access Window)" : "*"}
+                Document Submission Deadline *
               </label>
-              {String(formData.applicationType || "").toLowerCase() === "access window" && (
-                <p className="mb-2 text-xs text-slate-500">Access Window has no hard cutoff. Bidding stays open until RMT manually closes the tender.</p>
-              )}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <div className="relative">
                   <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
@@ -2351,24 +2416,15 @@ const Tenders = ({
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div className="space-y-4">
-              <label className="flex items-center gap-3 cursor-pointer">
-                <input 
-                  type="checkbox" 
-                  className="w-5 h-5 rounded border-slate-300 text-emerald-600" 
-                  checked={formData.tenderSecurityRequired}
-                  onChange={(e) => setFormData(prev => ({ ...prev, tenderSecurityRequired: e.target.checked }))}
-                />
-                <span className="text-sm font-medium text-slate-700">Bidders Schedule Purchase Required</span>
-              </label>
-              <label className="flex items-center gap-3 cursor-pointer">
-                <input 
-                  type="checkbox" 
-                  className="w-5 h-5 rounded border-slate-300 text-emerald-600" 
-                  checked={formData.biddersSchedulePurchase}
-                  onChange={(e) => setFormData(prev => ({ ...prev, biddersSchedulePurchase: e.target.checked }))}
-                />
-                <span className="text-sm font-medium text-slate-700">Tender Security Required</span>
-              </label>
+                <label className="flex items-center gap-3 cursor-pointer">
+                  <input 
+                    type="checkbox" 
+                    className="w-5 h-5 rounded border-slate-300 text-emerald-600" 
+                    checked={formData.tenderSecurityRequired}
+                    onChange={(e) => setFormData(prev => ({ ...prev, tenderSecurityRequired: e.target.checked }))}
+                  />
+                  <span className="text-sm font-medium text-slate-700">Tender Security Required</span>
+                </label>
             </div>
             <div className="space-y-2">
               <label className="text-sm font-bold text-slate-700">Contact Details *</label>
@@ -2600,22 +2656,18 @@ const Tenders = ({
                 <div className="space-y-4">
                   <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Financials & Security</h3>
                   <div className="grid grid-cols-2 gap-4 text-sm">
-                    <div className="space-y-1">
-                      <p className="text-xs font-bold text-slate-500">Budget Estimate</p>
-                      <p className="text-lg font-bold text-slate-900">M {selectedTender.budget?.toLocaleString() ?? "N/A"}</p>
-                    </div>
-                    <div className="space-y-1">
-                      <p className="text-xs font-bold text-slate-500">Bidding Currency</p>
-                      <p className="font-medium">{selectedTender.biddingCurrency || "LSL (Maloti)"}</p>
-                    </div>
-                    <div className="space-y-1">
-                      <p className="text-xs font-bold text-slate-500">Schedule Purchase</p>
-                      <p className="font-medium">{selectedTender.biddersSchedulePurchase ? "Required" : "Not Required"}</p>
-                    </div>
-                    <div className="space-y-1">
-                      <p className="text-xs font-bold text-slate-500">Tender Security</p>
-                      <p className="font-medium">{selectedTender.tenderSecurityRequired ? "Required" : "Not Required"}</p>
-                    </div>
+                     <div className="space-y-1">
+                       <p className="text-xs font-bold text-slate-500">Budget Estimate</p>
+                       <p className="text-lg font-bold text-slate-900">M {selectedTender.budget?.toLocaleString() ?? "N/A"}</p>
+                     </div>
+                     <div className="space-y-1">
+                       <p className="text-xs font-bold text-slate-500">Bidding Currency</p>
+                       <p className="font-medium">{selectedTender.biddingCurrency || "LSL (Maloti)"}</p>
+                     </div>
+                     <div className="space-y-1">
+                       <p className="text-xs font-bold text-slate-500">Tender Security</p>
+                       <p className="font-medium">{selectedTender.tenderSecurityRequired ? "Required" : "Not Required"}</p>
+                     </div>
                   </div>
                 </div>
               </div>
@@ -2676,14 +2728,10 @@ const Tenders = ({
                     <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Eligibility</p>
                     <p className="text-slate-700">{selectedTender.biddersEligibility || "Not specified"}</p>
                   </div>
-                  <div className="p-3 bg-slate-50 rounded-lg border border-slate-100">
-                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Instructions</p>
-                    <p className="text-slate-700">{selectedTender.instruction || "Not specified"}</p>
-                  </div>
-                  <div className="p-3 bg-slate-50 rounded-lg border border-slate-100 md:col-span-2">
-                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Pre‑Tender Meeting</p>
-                    <p className="text-slate-700">{selectedTender.preTenderMeetingInfo || "Not specified"}</p>
-                  </div>
+                   <div className="p-3 bg-slate-50 rounded-lg border border-slate-100">
+                     <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Instructions</p>
+                     <p className="text-slate-700">{selectedTender.instruction || "Not specified"}</p>
+                   </div>
                 </div>
               </div>
 
@@ -2778,6 +2826,18 @@ const Tenders = ({
                     {isActioning ? "Closing..." : "Close Bidding"}
                   </button>
                 )}
+                {String(selectedTender.applicationType || "").toLowerCase() === "application window" && selectedTender.status === TenderStatus.PUBLISHED && (
+                  <button
+                    onClick={() => {
+                      setNewDeadline(selectedTender.lastDateSubmission || selectedTender.deadline || "");
+                      setNewSecurityDeadline(selectedTender.lastDateSecurity || "");
+                      setExtendDeadlineOpen(true);
+                    }}
+                    className="btn-secondary w-full border-amber-200 text-amber-700 hover:bg-amber-50"
+                  >
+                    Extend Deadline
+                  </button>
+                )}
                 {(selectedTender.status === TenderStatus.EVALUATION || selectedTender.status === TenderStatus.PUBLISHED) && (
                   <button onClick={() => setView("award")} className="btn-primary w-full bg-purple-600 hover:bg-purple-700">
                     Issue Award
@@ -2787,6 +2847,56 @@ const Tenders = ({
             </div>
           </div>
         </div>
+
+      {extendDeadlineOpen && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-2xl p-6 w-full max-w-md shadow-2xl">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-slate-900">Extend Deadline</h3>
+              <button onClick={() => setExtendDeadlineOpen(false)} className="p-1 hover:bg-slate-100 rounded-lg">
+                <X size={20} className="text-slate-500" />
+              </button>
+            </div>
+            <div className="space-y-4">
+              <div>
+                <label className="text-sm font-bold text-slate-700 mb-2 block">New Submission Deadline *</label>
+                <input
+                  type="datetime-local"
+                  value={newDeadline}
+                  onChange={(e) => setNewDeadline(e.target.value)}
+                  className="input-field"
+                />
+              </div>
+              {selectedTender.tenderSecurityRequired && (
+                <div>
+                  <label className="text-sm font-bold text-slate-700 mb-2 block">New Security Deadline</label>
+                  <input
+                    type="datetime-local"
+                    value={newSecurityDeadline}
+                    onChange={(e) => setNewSecurityDeadline(e.target.value)}
+                    className="input-field"
+                  />
+                </div>
+              )}
+              <div className="flex gap-3 pt-2">
+                <button
+                  onClick={() => setExtendDeadlineOpen(false)}
+                  className="btn-secondary flex-1"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleExtendDeadline}
+                  disabled={isExtending || !newDeadline}
+                  className="btn-primary flex-1 disabled:opacity-60"
+                >
+                  {isExtending ? "Extending..." : "Extend"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       </div>
     );
@@ -3696,6 +3806,118 @@ const Tenders = ({
           </motion.div>
         )}
       </AnimatePresence>
+
+      {awardConfirmOpen && selectedTender && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[110]">
+          <div className="bg-white rounded-2xl p-6 w-full max-w-lg shadow-2xl">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-slate-900">Confirm Intent to Award</h3>
+              <button onClick={closeAwardConfirm} className="p-1 hover:bg-slate-100 rounded-lg">
+                <X size={20} className="text-slate-500" />
+              </button>
+            </div>
+            <div className="space-y-4">
+              <div className="p-4 bg-amber-50 rounded-xl border border-amber-100">
+                <p className="text-sm text-amber-800 font-medium">You are about to issue an Intent to Award for this tender.</p>
+              </div>
+              <div className="space-y-3 text-sm">
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Tender:</span>
+                  <span className="font-medium text-slate-900">{selectedTender.name}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Reference:</span>
+                  <span className="font-medium text-slate-900">{selectedTender.referenceNumber}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Winning Vendor:</span>
+                  <span className="font-medium text-slate-900">{awardWinner}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Vendor ID:</span>
+                  <span className="font-medium text-slate-900">{awardWinnerId || "N/A"}</span>
+                </div>
+                {selectedTender.coolingOffDays && (
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">Cooling-off Period:</span>
+                    <span className="font-medium text-slate-900">{selectedTender.coolingOffDays} days</span>
+                  </div>
+                )}
+              </div>
+              <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
+                <p className="text-xs text-slate-600">
+                  After issuing, vendors will be notified and the cooling-off period will begin. The final award can only be confirmed after the cooling-off period ends.
+                </p>
+              </div>
+              <div className="flex gap-3 pt-2">
+                <button onClick={closeAwardConfirm} className="btn-secondary flex-1">
+                  Cancel
+                </button>
+                <button
+                  onClick={() => void confirmAward()}
+                  disabled={isActioning}
+                  className="btn-primary flex-1 bg-purple-600 hover:bg-purple-700 disabled:opacity-60"
+                >
+                  {isActioning ? "Submitting..." : "Confirm & Issue"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {finalAwardConfirmOpen && selectedTender && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[110]">
+          <div className="bg-white rounded-2xl p-6 w-full max-w-lg shadow-2xl">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-slate-900">Confirm Final Award</h3>
+              <button onClick={closeFinalAwardConfirm} className="p-1 hover:bg-slate-100 rounded-lg">
+                <X size={20} className="text-slate-500" />
+              </button>
+            </div>
+            <div className="space-y-4">
+              <div className="p-4 bg-rose-50 rounded-xl border border-rose-100">
+                <p className="text-sm text-rose-800 font-medium">Warning: This action will finalize the award and generate the Performance-Based Agreement (PBA).</p>
+              </div>
+              <div className="space-y-3 text-sm">
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Tender:</span>
+                  <span className="font-medium text-slate-900">{selectedTender.name}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Reference:</span>
+                  <span className="font-medium text-slate-900">{selectedTender.referenceNumber}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Winning Vendor:</span>
+                  <span className="font-medium text-slate-900">{awardWinner}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Vendor ID:</span>
+                  <span className="font-medium text-slate-900">{awardWinnerId || "N/A"}</span>
+                </div>
+              </div>
+              <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
+                <p className="text-xs text-slate-600">
+                  After confirming, the PBA will be generated and the vendor will be able to view, download, sign, and upload the contract under Contracting.
+                </p>
+              </div>
+              <div className="flex gap-3 pt-2">
+                <button onClick={closeFinalAwardConfirm} className="btn-secondary flex-1">
+                  Cancel
+                </button>
+                <button
+                  onClick={() => void confirmFinalAward()}
+                  disabled={isActioning}
+                  className="btn-primary flex-1 bg-purple-600 hover:bg-purple-700 disabled:opacity-60"
+                >
+                  {isActioning ? "Confirming..." : "Confirm Final Award"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
@@ -8374,23 +8596,19 @@ const VendorTenders = ({ onSubmitTender }: { onSubmitTender?: (tenderId: string)
                 </div>
               </div>
 
-              <div className="space-y-4 pt-6 border-t border-slate-100">
-                <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Bid Decision Aids</h3>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
-                  <div className="p-3 bg-slate-50 rounded-lg border border-slate-100">
-                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Eligibility</p>
-                    <p className="text-slate-700">{selectedTender.biddersEligibility || "Not specified"}</p>
-                  </div>
-                  <div className="p-3 bg-slate-50 rounded-lg border border-slate-100">
-                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Instructions</p>
-                    <p className="text-slate-700">{selectedTender.instruction || "Not specified"}</p>
-                  </div>
-                  <div className="p-3 bg-slate-50 rounded-lg border border-slate-100">
-                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Pre‑Tender Meeting</p>
-                    <p className="text-slate-700">{selectedTender.preTenderMeetingInfo || "Not specified"}</p>
-                  </div>
-                </div>
-              </div>
+               <div className="space-y-4 pt-6 border-t border-slate-100">
+                 <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Bid Decision Aids</h3>
+                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+                   <div className="p-3 bg-slate-50 rounded-lg border border-slate-100">
+                     <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Eligibility</p>
+                     <p className="text-slate-700">{selectedTender.biddersEligibility || "Not specified"}</p>
+                   </div>
+                   <div className="p-3 bg-slate-50 rounded-lg border border-slate-100">
+                     <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Instructions</p>
+                     <p className="text-slate-700">{selectedTender.instruction || "Not specified"}</p>
+                   </div>
+                 </div>
+               </div>
 
               <div className="space-y-4 pt-6 border-t border-slate-100">
                 <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Required Documents</h3>
@@ -8447,10 +8665,7 @@ const VendorTenders = ({ onSubmitTender }: { onSubmitTender?: (tenderId: string)
                   <span className="text-slate-500">Time for Completion</span>
                   <span className="text-slate-700 font-medium">{selectedTender.timeForCompletion || "N/A"}</span>
                 </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-500">Schedule Purchase</span>
-                  <span className="text-slate-700 font-medium">{selectedTender.biddersSchedulePurchase ? "Required" : "Not Required"}</span>
-                </div>
+
                 <div className="flex items-center justify-between">
                   <span className="text-slate-500">Tender Security</span>
                   <span className="text-slate-700 font-medium">{selectedTender.tenderSecurityRequired ? "Required" : "Not Required"}</span>
@@ -8777,6 +8992,7 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
   const [viewBid, setViewBid] = useState<TenderBid | null>(null);
   const [viewBidVersions, setViewBidVersions] = useState<TenderBid[]>([]);
   const [viewBidLoading, setViewBidLoading] = useState(false);
+  const [viewBidTenderSecurityRequired, setViewBidTenderSecurityRequired] = useState(false);
 
   const loadBids = React.useCallback(async () => {
     setLoading(true);
@@ -8879,7 +9095,7 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
       rejected ? "Check the bid details for the outcome and any rejection reason." :
       "Complete the remaining bid information before submission.";
 
-    const canProceed = Boolean(editableDraft?.stage_two_unlocked || display.status === BidStatus.DRAFT);
+    const canProceed = Boolean(editableDraft?.stage_two_unlocked || display.status === BidStatus.DRAFT) && !(display.stage_key === "site_specific" && latestSubmitted?.status === BidStatus.SUBMITTED);
     const proceedAllowed = canProceed || display.status === BidStatus.REVISION_REQUIRED;
     const proceedLabel =
       editableDraft?.stage_two_unlocked ? "Proceed to Stage 2" :
@@ -9040,9 +9256,16 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
     setViewBid(bid);
     setViewBidVersions([]);
     setViewBidLoading(true);
+    setViewBidTenderSecurityRequired(false);
     try {
       const versions = await fetchTenderBids(bid.tender);
       setViewBidVersions(versions.sort((a, b) => (b.version_number || 0) - (a.version_number || 0)));
+      try {
+        const tender = await fetchTender(bid.tender);
+        setViewBidTenderSecurityRequired(tender.tenderSecurityRequired ?? false);
+      } catch {
+        setViewBidTenderSecurityRequired(false);
+      }
     } catch {
       setViewBidVersions([]);
     } finally {
@@ -9192,7 +9415,7 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
                   </div>
                   <div className="flex flex-col sm:flex-row xl:flex-col gap-3 xl:min-w-[180px]">
                     <button onClick={() => openViewBid(display)} className="btn-secondary text-xs">View</button>
-                    {(progress.canProceed || display.status === BidStatus.SUBMITTED) && (
+                    {progress.canProceed && (
                       <button onClick={() => onOpenBid(display)} className="btn-primary text-xs">
                         {progress.proceedLabel || getBidActionLabel(display, editableDraft)}
                       </button>
@@ -9240,7 +9463,7 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
                 </button>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
                 <div className="card p-4">
                   <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Status</p>
                   <p className="text-base font-bold text-slate-900 mt-2">{viewBid.status}</p>
@@ -9251,7 +9474,14 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
                   <p className="text-base font-bold text-slate-900 mt-2">
                     {viewBid.bid_amount != null ? `M ${Number(viewBid.bid_amount).toLocaleString()}` : "N/A"}
                   </p>
-                  <p className="text-xs text-slate-500 mt-1">Submitted amount</p>
+                  <p className="text-xs text-slate-500 mt-1">Total project cost</p>
+                </div>
+                <div className="card p-4">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Subsidy Requested</p>
+                  <p className="text-base font-bold text-slate-900 mt-2">
+                    {viewBid.subsidy_requested != null ? `M ${Number(viewBid.subsidy_requested).toLocaleString()}` : "N/A"}
+                  </p>
+                  <p className="text-xs text-slate-500 mt-1">Requested subsidy</p>
                 </div>
                 <div className="card p-4">
                   <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Version</p>
@@ -9327,6 +9557,64 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
                           <p className="text-xs font-bold text-slate-500">Reviewed</p>
                           <p className="text-sm font-medium">{viewBid.reviewed_at ? new Date(viewBid.reviewed_at).toLocaleString() : "Pending"}</p>
                         </div>
+                        <div>
+                          <p className="text-xs font-bold text-slate-500">Tech Tier</p>
+                          <p className="text-sm font-medium">{viewBid.tech_tier || viewBid.service_tier || "N/A"}</p>
+                        </div>
+                        <div>
+                          <p className="text-xs font-bold text-slate-500">Energy Target</p>
+                          <p className="text-sm font-medium">{viewBid.energy_target ? `${viewBid.energy_target} kWh/month` : viewBid.energy_target_kwh_month ? `${viewBid.energy_target_kwh_month} kWh/month` : "N/A"}</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    {viewBid.system_configuration && (
+                      <div className="space-y-3 pt-4 border-t border-slate-100">
+                        <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">System Configuration</h3>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+                          <div>
+                            <p className="text-xs font-bold text-slate-500">Technology Type</p>
+                            <p className="text-sm font-medium">{viewBid.system_configuration?.technology_type || viewBid.technology_type || "N/A"}</p>
+                          </div>
+                          <div>
+                            <p className="text-xs font-bold text-slate-500">Co-financing Amount</p>
+                            <p className="text-sm font-medium">{viewBid.system_configuration?.co_financing_amount_lsl ? `M ${Number(viewBid.system_configuration.co_financing_amount_lsl).toLocaleString()}` : viewBid.co_financing_amount ? `M ${Number(viewBid.co_financing_amount).toLocaleString()}` : "N/A"}</p>
+                          </div>
+                          <div>
+                            <p className="text-xs font-bold text-slate-500">Device Brand</p>
+                            <p className="text-sm font-medium">{viewBid.system_configuration?.device_brand || viewBid.device_brand || "N/A"}</p>
+                          </div>
+                          <div>
+                            <p className="text-xs font-bold text-slate-500">Device Model</p>
+                            <p className="text-sm font-medium">{viewBid.system_configuration?.device_model || viewBid.device_model || "N/A"}</p>
+                          </div>
+                          <div>
+                            <p className="text-xs font-bold text-slate-500">System Capacity</p>
+                            <p className="text-sm font-medium">{viewBid.system_configuration?.system_capacity ? `${viewBid.system_configuration.system_capacity} ${viewBid.system_configuration.system_capacity_unit || ""}` : "N/A"}</p>
+                          </div>
+                          <div>
+                            <p className="text-xs font-bold text-slate-500">Rated Power</p>
+                            <p className="text-sm font-medium">{viewBid.system_configuration?.rated_power_w ? `${viewBid.system_configuration.rated_power_w} W` : "N/A"}</p>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="space-y-3 pt-4 border-t border-slate-100">
+                      <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Inclusion Targets</h3>
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
+                        <div>
+                          <p className="text-xs font-bold text-slate-500">Female-headed Households</p>
+                          <p className="text-sm font-medium">{viewBid.female_target_pct != null ? `${viewBid.female_target_pct}%` : viewBid.gender_inclusion_target != null ? `${viewBid.gender_inclusion_target}%` : "N/A"}</p>
+                        </div>
+                        <div>
+                          <p className="text-xs font-bold text-slate-500">Vulnerable Groups</p>
+                          <p className="text-sm font-medium">{viewBid.vulnerable_target_pct != null ? `${viewBid.vulnerable_target_pct}%` : viewBid.vulnerable_group_target != null ? `${viewBid.vulnerable_group_target}%` : "N/A"}</p>
+                        </div>
+                        <div>
+                          <p className="text-xs font-bold text-slate-500">Low-income Households</p>
+                          <p className="text-sm font-medium">{viewBid.low_income_target_pct != null ? `${viewBid.low_income_target_pct}%` : viewBid.low_income_target != null ? `${viewBid.low_income_target}%` : "N/A"}</p>
+                        </div>
                       </div>
                     </div>
 
@@ -9336,16 +9624,97 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
                         <p className="text-sm text-slate-500">No sites provided for this bid.</p>
                       )}
                       {(viewBid.sites || []).length > 0 && (
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm text-slate-600">
+                        <div className="space-y-2 text-sm text-slate-600">
                           {(viewBid.sites || []).map((site, idx) => (
                             <div key={`${site.siteName}-${idx}`} className="rounded-lg border border-slate-100 bg-white px-3 py-2">
-                              <p className="font-medium text-slate-900">{site.siteName}</p>
-                              <p className="text-xs text-slate-500">{site.district || "District N/A"}</p>
+                              <div className="flex justify-between items-start">
+                                <div>
+                                  <p className="font-medium text-slate-900">{site.siteName}</p>
+                                  <p className="text-xs text-slate-500">{site.district || "District N/A"} • {site.villageSubDistrict || "Sub-district N/A"}</p>
+                                </div>
+                                <div className="text-right">
+                                  <p className="text-xs font-medium text-slate-700">{site.estimatedHouseholds || site.numberOfHouseholds || 0} households</p>
+                                  <p className="text-[10px] text-slate-500">{site.targetBeneficiaryType || "Beneficiary type N/A"}</p>
+                                </div>
+                              </div>
                             </div>
                           ))}
                         </div>
                       )}
                     </div>
+
+                    {(viewBid.om_strategy_summary || viewBid.aftersales_description || viewBid.warranty_period || viewBid.local_technicians_to_be_trained) && (
+                      <div className="space-y-3 pt-4 border-t border-slate-100">
+                        <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Additional Details</h3>
+                        <div className="space-y-3 text-sm">
+                          {viewBid.om_strategy_summary && (
+                            <div>
+                              <p className="text-xs font-bold text-slate-500">O&M Strategy Summary</p>
+                              <p className="text-sm text-slate-700 whitespace-pre-wrap">{viewBid.om_strategy_summary}</p>
+                            </div>
+                          )}
+                          {viewBid.aftersales_description && (
+                            <div>
+                              <p className="text-xs font-bold text-slate-500">After-sales Description</p>
+                              <p className="text-sm text-slate-700 whitespace-pre-wrap">{viewBid.aftersales_description}</p>
+                            </div>
+                          )}
+                          {viewBid.warranty_period != null && (
+                            <div>
+                              <p className="text-xs font-bold text-slate-500">Warranty Period</p>
+                              <p className="text-sm text-slate-700">{viewBid.warranty_period} months</p>
+                            </div>
+                          )}
+                          {viewBid.local_technicians_to_be_trained != null && (
+                            <div>
+                              <p className="text-xs font-bold text-slate-500">Local Technicians to be Trained</p>
+                              <p className="text-sm text-slate-700">{viewBid.local_technicians_to_be_trained}</p>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {(viewBid.offer_paygo || viewBid.paygo_platform || viewBid.daily_payment_amount_lsl || viewBid.collection_method) && (
+                      <div className="space-y-3 pt-4 border-t border-slate-100">
+                        <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">PAYGO Details</h3>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+                          <div>
+                            <p className="text-xs font-bold text-slate-500">Offer PAYGO</p>
+                            <p className="text-sm font-medium">{viewBid.offer_paygo ? "Yes" : "No"}</p>
+                          </div>
+                          {viewBid.paygo_platform && (
+                            <div>
+                              <p className="text-xs font-bold text-slate-500">PAYGO Platform</p>
+                              <p className="text-sm font-medium">{viewBid.paygo_platform}</p>
+                            </div>
+                          )}
+                          {viewBid.daily_payment_amount_lsl != null && (
+                            <div>
+                              <p className="text-xs font-bold text-slate-500">Daily Payment Amount</p>
+                              <p className="text-sm font-medium">M {viewBid.daily_payment_amount_lsl}</p>
+                            </div>
+                          )}
+                          {viewBid.collection_method && (
+                            <div>
+                              <p className="text-xs font-bold text-slate-500">Collection Method</p>
+                              <p className="text-sm font-medium">{viewBid.collection_method}</p>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {viewBid.inclusion_commitment_confirmed !== undefined && (
+                      <div className="space-y-3 pt-4 border-t border-slate-100">
+                        <div className="flex items-center gap-2">
+                          <p className="text-xs font-bold text-slate-500">Inclusion Commitment Confirmed:</p>
+                          <span className={`badge ${viewBid.inclusion_commitment_confirmed ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700"}`}>
+                            {viewBid.inclusion_commitment_confirmed ? "Yes" : "No"}
+                          </span>
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   <div className="card p-6">
@@ -9403,17 +9772,18 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
                     </div>
                   </div>
 
-                  <div className="card p-6">
-                    <h3 className="text-sm font-bold text-slate-400 uppercase mb-4">Documents</h3>
-                    <div className="space-y-3">
-                      {[
-                        { label: "Technical Proposal", url: viewBid.technical_proposal_file },
-                        { label: "Financial Proposal", url: viewBid.financial_proposal_file },
-                        { label: "BOQ", url: viewBid.boq_file },
-                        { label: "Gender Action Plan", url: viewBid.gender_action_plan_file },
-                        { label: "Implementation Plan", url: viewBid.implementation_plan_file },
-                        { label: "Reporting Templates", url: viewBid.reporting_templates_file },
-                      ]
+                     <div className="card p-6">
+                     <h3 className="text-sm font-bold text-slate-400 uppercase mb-4">Documents</h3>
+                     <div className="space-y-3">
+                       {[
+                         { label: "Technical Proposal", url: viewBid.technical_proposal_file },
+                         { label: "Financial Proposal", url: viewBid.financial_proposal_file },
+                         { label: "BOQ", url: viewBid.boq_file },
+                         { label: "Gender Action Plan", url: viewBid.gender_action_plan_file },
+                         { label: "Implementation Plan", url: viewBid.implementation_plan_file },
+                         { label: "Reporting Templates", url: viewBid.reporting_templates_file },
+                         ...(viewBidTenderSecurityRequired ? [{ label: "Tender Security", url: viewBid.tender_security_file }] : []),
+                       ]
                         .filter(doc => Boolean(doc.url))
                         .map(doc => (
                           <a
@@ -9565,6 +9935,7 @@ const VendorDashboard = ({
     implementationPlan: File | null;
     omPlan: File | null;
     distributionMap: File | null;
+    tenderSecurity: File | null;
   }>({
     technicalProposal: null,
     financialProposal: null,
@@ -9573,6 +9944,7 @@ const VendorDashboard = ({
     implementationPlan: null,
     omPlan: null,
     distributionMap: null,
+    tenderSecurity: null,
   });
   const [bidConfirmOpen, setBidConfirmOpen] = useState(false);
   const [bidSubmissionConfirmed, setBidSubmissionConfirmed] = useState(false);
@@ -10107,23 +10479,25 @@ const VendorDashboard = ({
     if (hours > 0) return `${hours}h ${minutes}m remaining`;
     return `${minutes}m remaining`;
   }, [bidDeadlineLabel]);
-  const existingStageTwoDocuments = {
-    technicalProposal: currentEditingBidVersion?.technical_proposal_file,
-    financialProposal: currentEditingBidVersion?.financial_proposal_file,
-    boq: currentEditingBidVersion?.boq_file,
-    genderActionPlan: currentEditingBidVersion?.gender_action_plan_file,
-    implementationPlan: currentEditingBidVersion?.implementation_plan_file,
-    omPlan: currentEditingBidVersion?.om_plan_file || currentEditingBidVersion?.om_plan_document,
-    distributionMap: currentEditingBidVersion?.distribution_map_file,
-  };
-  const stageTwoDocuments = [
-    { key: "technicalProposal", label: "Technical Proposal", hint: "PDF/DOCX" },
-    { key: "financialProposal", label: "Financial Proposal", hint: "PDF/DOCX/XLSX" },
-    { key: "boq", label: "Bill of Quantities", hint: "PDF/DOCX/XLSX" },
-    { key: "genderActionPlan", label: "Gender Action Plan", hint: "PDF/DOCX/XLSX" },
-    { key: "implementationPlan", label: "Implementation Plan", hint: "PDF/DOCX/XLSX" },
-    { key: "omPlan", label: "O&M Plan", hint: "PDF/DOCX/XLSX" },
-  ] as const;
+   const existingStageTwoDocuments = {
+     technicalProposal: currentEditingBidVersion?.technical_proposal_file,
+     financialProposal: currentEditingBidVersion?.financial_proposal_file,
+     boq: currentEditingBidVersion?.boq_file,
+     genderActionPlan: currentEditingBidVersion?.gender_action_plan_file,
+     implementationPlan: currentEditingBidVersion?.implementation_plan_file,
+     omPlan: currentEditingBidVersion?.om_plan_file || currentEditingBidVersion?.om_plan_document,
+     distributionMap: currentEditingBidVersion?.distribution_map_file,
+     tenderSecurity: currentEditingBidVersion?.tender_security_file,
+   };
+   const stageTwoDocuments = [
+     { key: "technicalProposal", label: "Technical Proposal", hint: "PDF/DOCX" },
+     { key: "financialProposal", label: "Financial Proposal", hint: "PDF/DOCX/XLSX" },
+     { key: "boq", label: "Bill of Quantities", hint: "PDF/DOCX/XLSX" },
+     { key: "genderActionPlan", label: "Gender Action Plan", hint: "PDF/DOCX/XLSX" },
+     { key: "implementationPlan", label: "Implementation Plan", hint: "PDF/DOCX/XLSX" },
+     { key: "omPlan", label: "O&M Plan", hint: "PDF/DOCX/XLSX" },
+     ...(bidTender?.tenderSecurityRequired ? [{ key: "tenderSecurity", label: "Tender Security", hint: "PDF/DOCX" }] : []),
+   ] as const;
   const uploadedStageTwoDocumentCount = stageTwoDocuments.filter(doc => Boolean((bidFiles as any)[doc.key] || (existingStageTwoDocuments as any)[doc.key])).length;
   const bidSiteCount = bidForm.sites.filter(site => site.siteName.trim()).length;
   const requiredFemaleTarget = 50;
@@ -10323,6 +10697,10 @@ const VendorDashboard = ({
       setBidMessage("Submitted bids are locked. Open a draft version to make changes.");
       return;
     }
+    if (status === BidStatus.SUBMITTED && editingBidStatus === BidStatus.SUBMITTED) {
+      setBidMessage("This bid has already been submitted.");
+      return;
+    }
     if (!isPreQualified) {
       setBidMessage("Complete pre-qualification first");
       onGoToPrequal?.();
@@ -10504,6 +10882,7 @@ const VendorDashboard = ({
         boq_file: bidFiles.boq ?? undefined,
         gender_action_plan_file: bidFiles.genderActionPlan ?? undefined,
         implementation_plan_file: bidFiles.implementationPlan ?? undefined,
+        tender_security_file: bidFiles.tenderSecurity ?? undefined,
         gender_inclusion_target: Number(bidForm.femaleTargetPct),
         vulnerable_group_target: Number(bidForm.vulnerableTargetPct),
         low_income_target: Number(bidForm.lowIncomeTargetPct),
@@ -12173,7 +12552,7 @@ const VendorDashboard = ({
 
                     <div className="mt-4 flex items-center justify-between gap-3">
                       <p className="text-xs text-slate-500">
-                        {usesHardDeadline ? `Deadline: ${deadline || "N/A"}` : "Access Window: no hard deadline (RMT closes manually)"}
+                        {usesHardDeadline ? `Deadline: ${deadline || "N/A"}` : `Deadline: ${deadline || "N/A"}`}
                       </p>
                       <button
                         onClick={() => openBidForm(tender)}
@@ -17732,6 +18111,7 @@ const TACView = ({ mode }: { mode: "technical" | "financial" }) => {
   const [bidQueue, setBidQueue] = useState<TenderBid[]>([]);
   const [evaluations, setEvaluations] = useState<TenderBidEvaluation[]>([]);
   const [tenderThresholds, setTenderThresholds] = useState<Record<string, number>>({});
+  const [tenderSecurityRequired, setTenderSecurityRequired] = useState<Record<string, boolean>>({});
   const [isLoading, setIsLoading] = useState(false);
   const [notification, setNotification] = useState<string | null>(null);
   const [isStageOneDecisionSubmitting, setIsStageOneDecisionSubmitting] = useState(false);
@@ -17771,6 +18151,7 @@ const TACView = ({ mode }: { mode: "technical" | "financial" }) => {
         fetchTenders(),
       ]);
       setTenderThresholds(Object.fromEntries(tenderRows.map((item) => [item.id, item.technicalThreshold ?? 70])));
+      setTenderSecurityRequired(Object.fromEntries(tenderRows.map((item) => [item.id, item.tenderSecurityRequired ?? false])));
       setBidQueue(bids.filter(b => b.status !== BidStatus.DRAFT));
       setEvaluations(evals);
     } finally {
@@ -17974,6 +18355,7 @@ const TACView = ({ mode }: { mode: "technical" | "financial" }) => {
       { label: "Gender Action Plan", url: selectedEval.bid.gender_action_plan_file },
       { label: "Implementation Plan", url: selectedEval.bid.implementation_plan_file },
       { label: "O&M Plan", url: selectedEval.bid.om_plan_file },
+      ...(tenderSecurityRequired[selectedEval.bid.tender] ? [{ label: "Tender Security", url: selectedEval.bid.tender_security_file }] : []),
     ].filter(doc => Boolean(doc.url));
     const financialDocumentLinks = technicalDocumentLinks;
     const proposedTechTier = selectedEval.bid.tech_tier || selectedEval.bid.service_tier || "Not provided";
@@ -18296,17 +18678,6 @@ const TACView = ({ mode }: { mode: "technical" | "financial" }) => {
                 <div className="flex justify-end gap-3 pt-6 border-t border-slate-100">
                   <button onClick={() => setView("list")} className="btn-secondary">Cancel</button>
                   <button onClick={handleSaveScore} className="btn-primary">Save Score</button>
-                  {isFinancialEvaluationMode && (
-                    <button
-                      onClick={() => {
-                        void handleSaveScore();
-                        showNotification("Score saved. Use the award ranking panel to confirm the recommended winner.");
-                      }}
-                      className="btn-secondary"
-                    >
-                      Recommend for Award
-                    </button>
-                  )}
                 </div>
               </div>
             </div>
@@ -18396,6 +18767,7 @@ const TACView = ({ mode }: { mode: "technical" | "financial" }) => {
       { label: "O&M Plan", url: bid.implementation_plan_file },
       { label: "Reporting Templates", url: bid.reporting_templates_file },
       { label: "Distribution Map", url: bid.distribution_map_file },
+      ...(tenderSecurityRequired[bid.tender] ? [{ label: "Tender Security", url: bid.tender_security_file }] : []),
     ].filter(doc => Boolean(doc.url));
 
     return (
