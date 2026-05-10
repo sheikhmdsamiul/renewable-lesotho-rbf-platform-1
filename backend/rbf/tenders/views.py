@@ -199,13 +199,19 @@ def _assignment_defaults(contract: TenderContract):
     assignment_districts = []
     if bid_preferred_district:
         assignment_districts = [bid_preferred_district]
-    elif tender_target_districts:
-        assignment_districts = tender_target_districts
-    elif bid:
-        for site in bid.sites.all():
-            district = str(getattr(site, 'district', '') or '').strip()
-            if district and district not in assignment_districts:
-                assignment_districts.append(district)
+    
+    # Even if bid has preferred, we might want to include tender targets as fallback or options?
+    # But requirement says "District should get the value of the selected primary district of the Bid"
+    
+    if not assignment_districts:
+        if tender_target_districts:
+            assignment_districts = tender_target_districts
+        elif bid:
+            for site in bid.sites.all():
+                district = str(getattr(site, 'district', '') or '').strip()
+                if district and district not in assignment_districts:
+                    assignment_districts.append(district)
+    
     if not assignment_districts and vendor:
         fallback_district = (
             (vendor.verification_zone if vendor and vendor.verification_zone else '')
@@ -213,7 +219,8 @@ def _assignment_defaults(contract: TenderContract):
         )
         if str(fallback_district or '').strip():
             assignment_districts = [str(fallback_district).strip()]
-    installation_target = len(list(bid.sites.all())) if bid else 0
+    
+    installation_target = contract.tender.approximate_installation_target or (len(list(bid.sites.all())) if bid else 0)
     start_date = contract.tender.awarded_at.date() if contract.tender.awarded_at else timezone.now().date()
     contract_value = _contract_value(contract)
     return {
@@ -2148,8 +2155,8 @@ class TenderContractViewSet(viewsets.ModelViewSet):
                     'technology_type': technology_choices,
                     'technology_type_read_only': len(technology_choices) == 1,
                     'verification_method': [choice for choice, _label in Project._meta.get_field('verification_method').choices],
-                    'district_zone': LESOTHO_DISTRICTS,
-                    'district_zones': LESOTHO_DISTRICTS,
+                    'district_zone': contract.tender.target_districts if contract.tender.target_districts else LESOTHO_DISTRICTS,
+                    'district_zones': contract.tender.target_districts if contract.tender.target_districts else LESOTHO_DISTRICTS,
                 },
                 'disbursement_preview': defaults['disbursement_preview'],
             })

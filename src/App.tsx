@@ -1265,18 +1265,29 @@ const Tenders = ({
         if (cancelled) return;
         setAssignmentMeta(meta);
         const defaults = meta.assignment_defaults || {};
+        
+        const winningBid = awardBids.find(b => String(b.id) === String(awardBidId));
+        const tenderTechTypes = selectedTender?.technologyTypes || [];
+        const tenderTargetDistricts = selectedTender?.targetDistricts || [];
+        const tenderInstallationTarget = selectedTender?.approximateInstallationTarget;
+        
         const defaultDistricts = Array.isArray(defaults.district_zones)
           ? defaults.district_zones.map((value: string) => String(value || "").trim()).filter(Boolean)
           : String(defaults.district_zone || "")
               .split(",")
               .map((value: string) => value.trim())
               .filter(Boolean);
+        
+        const preferredDistrict = winningBid?.preferred_district || winningBid?.sites?.[0]?.district || defaultDistricts[0] || "Maseru";
+        const techTypeFromBid = winningBid?.technology_type || winningBid?.system_configuration?.technology_type || tenderTechTypes[0] || "SHS";
+        const installationTargetFromTender = tenderInstallationTarget || defaults.installation_target || 500;
+        
         setContractAssignmentDraft({
           projectDurationMonths: Number(defaults.project_duration_months ?? 12),
-          targetInstallations: Number(defaults.installation_target ?? 500),
-          techType: defaults.technology_type || activeContract.referenceNumber || "SHS",
+          targetInstallations: Number(installationTargetFromTender),
+          techType: techTypeFromBid,
           energyOutput: Number(defaults.energy_output_target_kwh ?? 20000),
-          districts: defaultDistricts.length ? defaultDistricts : ["Maseru"],
+          districts: defaultDistricts.length ? defaultDistricts : [preferredDistrict],
           verificationMethod: String(defaults.verification_method || "manual").toLowerCase(),
           targetFemalePct: Number(defaults.female_target_pct ?? 50),
           targetVulnerablePct: Number(defaults.vulnerable_target_pct ?? 30),
@@ -1561,7 +1572,7 @@ const Tenders = ({
         }
         setContractAssignmentDraft({
           projectDurationMonths: 12,
-          targetInstallations: 500,
+          targetInstallations: full.approximateInstallationTarget || 500,
           techType: full.technologyTypes?.[0] || full.category || "SHS",
           energyOutput: 20000,
           districts: full.targetDistricts?.length ? full.targetDistricts : ["Maseru"],
@@ -3619,32 +3630,21 @@ const Tenders = ({
                               <label className="text-xs font-semibold text-slate-600">
                                 District
                                 {assignmentMeta?.contract_details?.bid_preferred_district && (
-                                  <span className="ml-1 font-normal text-emerald-600">(Vendor's preferred - locked)</span>
+                                  <span className="ml-1 font-normal text-emerald-600">(Vendor's preferred)</span>
                                 )}
                               </label>
                               <div className="relative mt-1">
-                                {assignmentMeta?.contract_details?.bid_preferred_district ? (
-                                  <div className="input-field flex min-h-[46px] w-full items-center justify-between bg-emerald-50 border-emerald-200 cursor-not-allowed">
-                                    <span className="truncate pr-3 text-sm font-semibold text-emerald-700">
-                                      {contractAssignmentDraft.districts.join(", ")}
-                                    </span>
-                                    <span className="shrink-0 text-xs font-semibold text-emerald-600">
-                                      {contractAssignmentDraft.districts.length}
-                                    </span>
-                                  </div>
-                                ) : (
-                                  <>
-                                    <button
-                                      type="button"
-                                      disabled={Boolean(activeContract.projectId)}
-                                      onClick={() => setDistrictDropdownOpen((prev) => !prev)}
-                                      className="input-field flex min-h-[46px] w-full items-center justify-between text-left disabled:cursor-not-allowed disabled:bg-slate-50"
-                                    >
-                                      <span className="truncate pr-3 text-sm text-slate-700">
-                                        {contractAssignmentDraft.districts.length > 0
-                                          ? contractAssignmentDraft.districts.join(", ")
-                                          : "Select one or more districts"}
-                                      </span>
+                                <button
+                                  type="button"
+                                  disabled={Boolean(activeContract.projectId)}
+                                  onClick={() => setDistrictDropdownOpen((prev) => !prev)}
+                                  className="input-field flex min-h-[46px] w-full items-center justify-between text-left disabled:cursor-not-allowed disabled:bg-slate-50"
+                                >
+                                  <span className="truncate pr-3 text-sm text-slate-700">
+                                    {contractAssignmentDraft.districts.length > 0
+                                      ? contractAssignmentDraft.districts.join(", ")
+                                      : "Select one or more districts"}
+                                  </span>
                                   <span className="shrink-0 text-xs font-semibold text-slate-500">
                                     {contractAssignmentDraft.districts.length}
                                   </span>
@@ -3681,9 +3681,7 @@ const Tenders = ({
                                     </div>
                                   </div>
                                 )}
-                              </>
-                            )}
-                            </div>
+                              </div>
                             </div>
                             <div>
                               <label className="text-xs font-semibold text-slate-600">Verification method</label>

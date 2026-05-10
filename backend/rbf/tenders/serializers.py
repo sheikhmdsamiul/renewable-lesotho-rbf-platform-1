@@ -628,6 +628,11 @@ class TenderBidSerializer(serializers.ModelSerializer):
         )
 
     def get_technology_type(self, obj):
+        # Prefer the technology type selected in the bid system configuration
+        if isinstance(obj.system_configuration, dict) and obj.system_configuration.get('technology_type'):
+            return normalize_technology_type(obj.system_configuration['technology_type'])
+        
+        # Fallback to tender's first technology type
         technology_types = obj.tender.technology_types if obj.tender_id else []
         if not technology_types:
             return None
