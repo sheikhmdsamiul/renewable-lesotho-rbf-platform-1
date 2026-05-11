@@ -927,6 +927,15 @@ export enum NoticeCategory {
 export enum NoticeStatus {
   DRAFT = "draft",
   PUBLISHED = "published",
+  SCHEDULED = "scheduled",
+}
+
+export interface NoticeAttachment {
+  id?: string;
+  name: string;
+  url?: string;
+  size?: number;
+  type?: string;
 }
 
 export interface Notice {
@@ -940,10 +949,14 @@ export interface Notice {
   tender_reference?: string | null;
   tender_name?: string | null;
   is_pinned: boolean;
+  send_email_notification?: boolean;
   show_countdown: boolean;
   countdown_date?: string | null;
+  attachments?: NoticeAttachment[];
   status: NoticeStatus;
   published_at?: string | null;
+  publish_date?: string | null;
+  schedule_publish?: boolean;
   created_at: string;
   updated_at: string;
 }

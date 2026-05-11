@@ -3597,21 +3597,33 @@ export async function respondAuditFinding(findingId: string, response: {
 // ======================== NOTICE API FUNCTIONS ========================
 
 function mapNoticeFromApi(data: any): Notice {
+  const attachments: NoticeAttachment[] = (data.attachments || []).map((a: any) => ({
+    id: a.id,
+    name: a.name || a.file_name || 'Document',
+    url: a.file || a.url,
+    size: a.size,
+    type: a.type || a.content_type,
+  }));
+
   return {
     id: data.id,
     notice_id: data.notice_id,
     title: data.title,
     category: data.category as NoticeCategory,
-    summary: data.summary || "",
-    content: data.content || "",
+    summary: data.summary,
+    content: data.content,
     linked_tender: data.linked_tender || null,
     tender_reference: data.tender_reference || null,
     tender_name: data.tender_name || null,
     is_pinned: data.is_pinned || false,
+    send_email_notification: data.send_email_notification || false,
     show_countdown: data.show_countdown || false,
     countdown_date: data.countdown_date || null,
+    attachments: attachments,
     status: data.status as NoticeStatus,
     published_at: data.published_at || null,
+    publish_date: data.publish_date || null,
+    schedule_publish: data.schedule_publish || false,
     created_at: data.created_at,
     updated_at: data.updated_at,
   };
@@ -3625,9 +3637,16 @@ function mapNoticeToApi(notice: Partial<Notice>): any {
   if (notice.content !== undefined) data.content = notice.content;
   if (notice.linked_tender !== undefined) data.linked_tender = notice.linked_tender;
   if (notice.is_pinned !== undefined) data.is_pinned = notice.is_pinned;
+  if (notice.send_email_notification !== undefined) data.send_email_notification = notice.send_email_notification;
   if (notice.show_countdown !== undefined) data.show_countdown = notice.show_countdown;
   if (notice.countdown_date !== undefined) data.countdown_date = notice.countdown_date;
   if (notice.status !== undefined) data.status = notice.status;
+  if (notice.published_at !== undefined) data.published_at = notice.published_at;
+  if (notice.publish_date !== undefined) data.publish_date = notice.publish_date;
+  if (notice.schedule_publish !== undefined) data.schedule_publish = notice.schedule_publish;
+  if (notice.tender_reference !== undefined) data.tender_reference = notice.tender_reference;
+  if (notice.tender_name !== undefined) data.tender_name = notice.tender_name;
+  if (notice.attachments !== undefined) data.attachments = notice.attachments;
   return data;
 }
 

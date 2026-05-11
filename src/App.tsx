@@ -54,21 +54,23 @@ import {
   Building2,
   Gavel,
   FolderKanban,
-  RefreshCw
+  RefreshCw,
+  Printer,
+  Paperclip
 } from "lucide-react";
-import { 
-  LineChart, 
-  Line, 
-  XAxis, 
-  YAxis, 
-  CartesianGrid, 
-  Tooltip, 
-  ResponsiveContainer, 
-  BarChart, 
-  Bar, 
-  PieChart, 
-  Pie, 
-  Cell 
+import {
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+  BarChart,
+  Bar,
+  PieChart,
+  Pie,
+  Cell,
 } from "recharts";
 import { motion, AnimatePresence } from "motion/react";
 import {
@@ -155,6 +157,7 @@ import {
   rejectPaymentClaim,
   confirmPaymentClaim,
   flagProjectIssue,
+  fetchNotices,
   fetchProjects,
   createProjectUpdate,
   triggerProjectProspectSync,
@@ -213,6 +216,7 @@ import { FieldOperationalKpiPanel, MacroKpiPortal, VendorKpiPanel } from "./comp
 import SuperAdminPortal from "./components/SuperAdminPortal";
 import { DoeDashboard, DoeRegionalMap, DoeReports } from "./components/DoePortal";
 import RmtIssuesFindings from "./components/RmtIssuesFindings";
+import RmtNoticeManagement from "./components/RmtNoticeManagement";
 import { PscReports, PscDashboard, default as PscIssuesView } from "./components/PscPortal";
 import { TacReports } from "./components/TacPortal";
 import { ReportsHub } from "./components/ReportsHub";
@@ -20806,119 +20810,374 @@ const DoEOfficerView = () => {
 
 const NoticeBoardSection = ({ tenders }: { tenders: Tender[] }) => {
   const effectiveTenders = tenders.length > 0 ? tenders : MOCK_TENDERS;
+  const [selectedCategory, setSelectedCategory] = useState("all");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [expandedNotice, setExpandedNotice] = useState<string | null>(null);
+  const [showSubscribeModal, setShowSubscribeModal] = useState(false);
+  const [subscribeEmail, setSubscribeEmail] = useState("");
+  const [subscribeSuccess, setSubscribeSuccess] = useState(false);
+  const [apiNotices, setApiNotices] = useState<any[]>([]);
+  const [loadingNotices, setLoadingNotices] = useState(true);
+  const [noticePage, setNoticePage] = useState(1);
+  const noticePerPage = 5;
 
-  const formatDate = (raw: string) => {
-    return new Date(raw).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+  React.useEffect(() => {
+    const loadNotices = async () => {
+      setLoadingNotices(true);
+      try {
+        const notices = await fetchNotices({ status: "published" });
+        const mapped = notices.map((n: any) => ({
+          id: n.id,
+          ref: n.notice_id || n.id,
+          category: (n.category || "general").toLowerCase(),
+          title: n.title,
+          posted: n.published_at ? formatDateFull(n.published_at) : formatDateFull(n.created_at),
+          summary: n.summary,
+          content: n.content,
+          full_content: n.content,
+          pinned: n.is_pinned,
+          show_countdown: n.show_countdown,
+          deadline_date: n.countdown_date || null,
+          linked_tender: n.tender_reference ? { ref: n.tender_reference, name: n.tender_name } : null,
+          attachments: (n.attachments || []).map((a: any) => ({ name: a.name || a.file_name || 'Document', url: a.url || a.file, type: a.type || a.content_type || a.name?.split(".").pop() })),
+        }));
+        setApiNotices(mapped);
+      } catch (err) {
+        console.warn("Could not load notices from API:", err);
+        setApiNotices([]);
+      } finally {
+        setLoadingNotices(false);
+      }
+    };
+    loadNotices();
+  }, []);
+
+  const formatDateFull = (raw: string) => new Date(raw).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+
+  const categoryColors: Record<string, { dot: string; badgeBg: string; badgeText: string }> = {
+    tender: { dot: "#185FA5", badgeBg: "#E6F1FB", badgeText: "#0C447C" },
+    deadline: { dot: "#BA7517", badgeBg: "#FAEEDA", badgeText: "#633806" },
+    award: { dot: "#3B6D11", badgeBg: "#EAF3DE", badgeText: "#27500A" },
+    clarification: { dot: "#854F0B", badgeBg: "#FAEEDA", badgeText: "#633806" },
+    training: { dot: "#534AB7", badgeBg: "#EEEDFE", badgeText: "#3C3489" },
+    general: { dot: "#888780", badgeBg: "#F1EFE8", badgeText: "#444441" },
   };
 
-  const notices = React.useMemo(() => {
-    const items: Array<{ id: string; category: "tender_update" | "award_notice" | "urgent_alert" | "success_story"; headline: string; date: string; summary: string; actionLabel: string }> = [];
+  const mockNotices = React.useMemo(() => {
+    const items: any[] = [];
 
     effectiveTenders.forEach((t) => {
       const pubDate = t.createdAt || t.publishedAt || t.updatedAt;
       if (t.status === "Published" && pubDate) {
-        items.push({ id: `tp-${t.id}`, category: "tender_update", headline: `Extension of Bid Submission Deadline: ${t.referenceNumber}`, date: formatDate(pubDate), summary: `Please note that the tender for "${t.name}" has been published by the ${t.department}. Eligible vendors are invited to review the scope and submit proposals before the deadline.`, actionLabel: "View Tender Details" });
+        items.push({
+          id: `tender-${t.id}`,
+          ref: t.referenceNumber,
+          category: "tender",
+          title: `New tender open — ${t.referenceNumber}`,
+          posted: formatDateFull(pubDate),
+          summary: `A new Call for Proposals has been published for ${t.name} in ${(t.targetDistricts || []).join(", ") || "all districts"}.`,
+          content: `A new Call for Proposals has been published for ${t.name} (${t.referenceNumber}).\n\nDepartment: ${t.department || "N/A"}\nTechnology: ${(t.technologyTypes || []).join(", ") || "N/A"}\nDistricts: ${(t.targetDistricts || []).join(", ") || "All districts"}\nBudget: M ${(t.budget || 0).toLocaleString()}\nSubmission Deadline: ${t.deadline ? new Date(t.deadline).toLocaleDateString() : "N/A"}\n\n${t.instruction || ""}`,
+          pinned: true,
+          show_countdown: false,
+          deadline_date: t.deadline || null,
+          linked_tender: { ref: t.referenceNumber, name: t.name },
+          attachments: [],
+        });
       }
-      if (t.awardedAt && t.awardedVendorName) {
-        items.push({ id: `ta-${t.id}`, category: "award_notice", headline: `Award Notification: ${t.name}`, date: formatDate(t.awardedAt), summary: `Following the technical and financial evaluation by the TAC, ${t.awardedVendorName} has been awarded the contract for ${t.category} installations.`, actionLabel: "View Award Details" });
+      if (t.awardedAt) {
+        items.push({
+          id: `award-${t.id}`,
+          ref: t.referenceNumber,
+          category: "award",
+          title: `Contract award — ${t.referenceNumber}`,
+          posted: formatDateFull(t.awardedAt),
+          summary: `Following the evaluation by the RBF Management Team, the contract has been awarded for ${t.name}.`,
+          content: `The RBF Management Team has completed evaluation and is pleased to announce the award of contract for ${t.name} (${t.referenceNumber}).\n\nTechnology: ${(t.technologyTypes || []).join(", ") || "N/A"}\nDistrict: ${(t.targetDistricts || []).join(", ") || "N/A"}\nTarget: ${t.approximateInstallationTarget || "N/A"} households\n\nAll applicants have been notified of the outcome via email. Unsuccessful applicants may request feedback by contacting: rbf@energy.gov.ls`,
+          pinned: false,
+          show_countdown: false,
+          deadline_date: null,
+          linked_tender: { ref: t.referenceNumber, name: t.name },
+          attachments: [],
+        });
       }
     });
 
     items.push(
-      { id: "ua-001", category: "urgent_alert", headline: "Scheduled System Maintenance: Vendor Portal Offline", date: "May 01, 2026", summary: "The Vendor Portal will undergo scheduled database optimization on Sunday, May 4th, from 02:00 to 06:00 AM. Please ensure all draft bids are saved before this window.", actionLabel: "Check System Status" },
-      { id: "ss-001", category: "success_story", headline: "Milestone Reached: 5,000 Clean Cookstoves Verified in Berea", date: "April 20, 2026", summary: "We are proud to announce that over 5,000 low-income households in Berea now have access to improved cookstoves, reducing local biomass consumption by an estimated 30%.", actionLabel: "Read Full Impact Report" },
-      { id: "ss-002", category: "success_story", headline: "1,200 SHS Units Deployed in Qacha's Nek District", date: "April 15, 2026", summary: "The Phase 1 solar home system deployment in Qacha's Nek has been completed ahead of schedule, bringing clean energy to 1,200 households in remote mountainous areas.", actionLabel: "View Deployment Map" },
-      { id: "ua-002", category: "urgent_alert", headline: "Policy Update: Revised Gender Inclusion Targets for 2026", date: "April 10, 2026", summary: "The RBF Management Team has updated the minimum gender inclusion threshold. All active contracts now require a minimum of 55% female-headed household beneficiaries.", actionLabel: "Read Policy Brief" }
+      { id: "ntc-001", ref: "NTC-2026-001", category: "deadline", title: "Submission deadline approaching — TND-000024", posted: "01 Apr 2026", summary: "Stage 2 proposals for SHS Deployment Phase 9 are due on 11 Jun 2026 at 14:00.", content: "Stage 2 (Site-Specific) proposals are due on 11 Jun 2026 at 14:00. Vendors who were shortlisted in Stage 1 must submit their complete technical and financial proposals before this deadline.\n\nLate submissions will not be accepted under any circumstances.", pinned: true, show_countdown: true, deadline_date: "2026-06-11", linked_tender: { ref: "TND-000024", name: "SHS Deployment Phase 9" }, attachments: [] },
+      { id: "ntc-002", ref: "NTC-2026-002", category: "training", title: "Pre-bid meeting — TND-000026", posted: "01 Apr 2026", summary: "A mandatory pre-bid meeting will be held for all vendors intending to submit proposals for TND-000026.", content: "A mandatory pre-bid clarification meeting will be held for all vendors interested in submitting proposals for TND-000026.\n\nDate: Monday, 20 April 2026\nTime: 10:00 — 12:00 SAST\nFormat: Virtual — Zoom Webinar\n\nTo register: Email rbf@energy.gov.ls by 15 Apr 2026 with subject line: Pre-Bid Meeting Registration TND-000026", pinned: false, show_countdown: false, deadline_date: null, linked_tender: { ref: "TND-000026", name: "Community Solar Mini-Grid Phase 11" }, attachments: [{ name: "TND-000026 Tender Schedule.pdf", type: "pdf" }, { name: "Mini-Grid Technical Guidelines.pdf", type: "pdf" }] },
+      { id: "ntc-003", ref: "NTC-2026-003", category: "clarification", title: "Addendum 1 — TND-000024", posted: "25 Mar 2026", summary: "Following questions received during the pre-bid meeting, clarifications are issued and form part of the tender documents.", content: "Following questions received during the pre-bid meeting, the following clarifications are issued:\n\nQ1: Can vendors from outside Lesotho apply?\nA1: No. All vendors must be registered in Lesotho.\n\nQ2: Is co-financing mandatory?\nA2: Co-financing is not mandatory but will attract additional evaluation points.", pinned: false, show_countdown: false, deadline_date: null, linked_tender: { ref: "TND-000024", name: "SHS Deployment Phase 9" }, attachments: [{ name: "TND-000024 Addendum 1.pdf", type: "pdf" }] },
+      { id: "ntc-004", ref: "NTC-2026-004", category: "training", title: "RBF platform training — All registered vendors", posted: "15 Mar 2026", summary: "Free online training session on how to use the RBF Digital Platform for pre-qualification, bid submission, and payment claims.", content: "The RBF Management Team will conduct a free online training session.\n\nTopics covered:\n- Pre-qualification process\n- Bid submission workflow\n- Installation reporting\n- Payment claims\n\nDate: 25 Mar 2026\nTime: 14:00 — 16:00 SAST\nFormat: Zoom webinar\n\nRegistration is required.", pinned: false, show_countdown: false, deadline_date: null, linked_tender: null, attachments: [] },
+      { id: "ntc-005", ref: "NTC-2026-005", category: "general", title: "Programme update — Q4 2025 results", posted: "20 Feb 2026", summary: "The Renewable Lesotho programme achieved significant results in Q4 2025.", content: "The Renewable Lesotho programme achieved the following results in Q4 2025:\n\n- 1,600 new households with clean energy\n- 52% female-headed households served\n- 8 districts now with active installations\n- LSL 850,000 disbursed to vendors\n\nFull quarterly report available on request. Contact: rbf@energy.gov.ls", pinned: false, show_countdown: false, deadline_date: null, linked_tender: null, attachments: [] },
+      { id: "ntc-006", ref: "NTC-2026-006", category: "clarification", title: "Deadline extension — TND-000023", posted: "10 Feb 2026", summary: "Due to the public holiday on 11 Feb 2026, the submission deadline has been extended by 3 working days.", content: "Due to the public holiday on 11 Feb 2026, the submission deadline for TND-000023 has been extended by 3 working days.\n\nORIGINAL DEADLINE: 11 Feb 2026, 14:00\nNEW DEADLINE: 16 Feb 2026, 14:00\n\nAll other tender conditions remain unchanged.", pinned: false, show_countdown: false, deadline_date: null, linked_tender: { ref: "TND-000023", name: "SHS Deployment Phase 8" }, attachments: [] },
     );
 
-    items.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-    return items.slice(0, 12);
+    items.sort((a, b) => new Date(b.posted).getTime() - new Date(a.posted).getTime());
+    return items;
   }, [effectiveTenders]);
 
-  return (
-    <div>
-      <div className="flex items-center justify-between mb-8">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-emerald-600 flex items-center justify-center"><Bell className="text-white" size={20} /></div>
-          <div>
-            <h3 className="text-2xl font-bold text-slate-900">Notice Board</h3>
-            <p className="text-sm text-slate-500">Official announcements from the RBF programme</p>
+  const allNotices = React.useMemo(() => {
+    const merged = [...mockNotices, ...apiNotices];
+    const unique = merged.reduce((acc: any[], notice) => {
+      if (!acc.find(n => n.id === notice.id)) {
+        acc.push(notice);
+      }
+      return acc;
+    }, []);
+    return unique.sort((a, b) => new Date(b.posted).getTime() - new Date(a.posted).getTime());
+  }, [mockNotices, apiNotices]);
+
+  const categories = ["all", "tender", "deadline", "award", "clarification", "training", "general"];
+
+  const normalizeCategory = (cat: string) => (cat || "general").toLowerCase().trim();
+
+  const getDaysRemaining = (deadline: string) => {
+    const diff = new Date(deadline).getTime() - Date.now();
+    return Math.max(0, Math.ceil(diff / (1000 * 60 * 60 * 24)));
+  };
+
+  const filteredNotices = React.useMemo(() => {
+    return allNotices.filter(n => {
+      if (selectedCategory !== "all" && normalizeCategory(n.category) !== selectedCategory) return false;
+      if (searchQuery) {
+        const q = searchQuery.toLowerCase();
+        if (!n.title.toLowerCase().includes(q) && !n.summary.toLowerCase().includes(q) && !n.ref?.toLowerCase().includes(q)) return false;
+      }
+      return true;
+    });
+  }, [allNotices, selectedCategory, searchQuery]);
+
+  const pinnedNotices = filteredNotices.filter(n => n.pinned);
+  const unpinnedNotices = filteredNotices.filter(n => !n.pinned);
+
+  const handleSubscribe = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (subscribeEmail) {
+      setSubscribeSuccess(true);
+      setTimeout(() => {
+        setSubscribeSuccess(false);
+        setShowSubscribeModal(false);
+        setSubscribeEmail("");
+      }, 2000);
+    }
+  };
+
+  const toggleExpand = (id: string) => {
+    setExpandedNotice(prev => prev === id ? null : id);
+  };
+
+  const getCategoryLabel = (cat: string) => {
+    const labels: Record<string, string> = {
+      tender: "Tender", deadline: "Deadline", award: "Award",
+      clarification: "Clarification", training: "Training", general: "General"
+    };
+    return labels[cat] || cat;
+  };
+
+  const renderNoticeCard = (notice: any) => {
+    const cat = normalizeCategory(notice.category);
+    const colors = categoryColors[cat] || categoryColors.general;
+    const isExpanded = expandedNotice === notice.id;
+    const daysRemaining = notice.deadline_date ? getDaysRemaining(notice.deadline_date) : null;
+
+    return (
+      <div
+        key={notice.id}
+        onClick={() => toggleExpand(notice.id)}
+        className={`bg-white rounded-xl overflow-hidden transition-all cursor-pointer ${notice.pinned ? 'border-l-[3px] border-l-[#534AB7]' : 'border border-[#d1d5db]'}`}
+        style={{ borderColor: notice.pinned ? undefined : (isExpanded ? '#9ca3af' : '#d1d5db') }}
+      >
+        <div className="px-4 py-3">
+          <div className="flex items-start gap-2 overflow-hidden min-w-0">
+            <div className="w-2 h-2 rounded-full mt-1.5 flex-shrink-0" style={{ backgroundColor: colors.dot }} />
+            <div className="flex-1 min-w-0 overflow-hidden">
+              <div className="flex flex-wrap items-center gap-2 mb-0.5 min-w-0">
+                <span className="text-[11px] px-2 py-0.5 rounded-full font-medium flex-shrink-0" style={{ backgroundColor: colors.badgeBg, color: colors.badgeText }}>
+                  {getCategoryLabel(cat)}
+                </span>
+                {notice.pinned && (
+                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-purple-100 text-purple-700 font-medium flex-shrink-0">Pinned</span>
+                )}
+                <h4 className="text-[14px] font-medium text-slate-900 flex-1 min-w-0 break-words">{notice.title}</h4>
+              </div>
+              <p className="text-[11px] text-slate-400 mb-1.5">{notice.ref} · Posted {notice.posted}</p>
+              <p className="text-[13px] text-slate-500 leading-relaxed line-clamp-2 break-words">{notice.summary}</p>
+              <div className="flex flex-wrap items-center gap-2 mt-2">
+                {notice.deadline_date && (
+                  <span className="text-[11px] text-slate-400 flex items-center gap-1 flex-shrink-0">
+                    <Calendar size={12} /> Closes {formatDateFull(notice.deadline_date)}
+                  </span>
+                )}
+                {notice.attachments?.length > 0 && (
+                  <span className="text-[11px] text-slate-400 flex items-center gap-1 flex-shrink-0">
+                    <Paperclip size={12} /> {notice.attachments.length} attachment{notice.attachments.length > 1 ? 's' : ''}
+                  </span>
+                )}
+                {daysRemaining !== null && notice.show_countdown && (
+                  <span className="text-[11px] px-2 py-0.5 rounded-full font-medium flex-shrink-0" style={{ backgroundColor: '#FCEBEB', color: '#A32D2D' }}>
+                    <Clock size={10} className="inline mr-1" />{daysRemaining} days remaining
+                  </span>
+                )}
+                <button
+                  onClick={(e) => { e.stopPropagation(); toggleExpand(notice.id); }}
+                  className="ml-auto text-[12px] px-2 py-1 rounded-lg border transition-all"
+                  style={{ borderColor: '#d1d5db', color: '#6b7280' }}
+                >
+                  Details {isExpanded ? '▲' : '▼'}
+                </button>
+              </div>
+            </div>
           </div>
+        </div>
+
+        {isExpanded && (
+          <div className="border-t" style={{ borderColor: '#d1d5db' }}>
+            <div className="px-4 py-4">
+              <div className="text-[13px] text-slate-600 leading-relaxed whitespace-pre-wrap" style={{ lineHeight: 1.7 }}>{notice.content}</div>
+
+              {notice.attachments?.length > 0 && (
+                <div className="mt-4 flex flex-wrap gap-2">
+                  {notice.attachments.map((att: any, i: number) => (
+                    <span key={i} className="text-[12px] px-3 py-1.5 rounded-lg flex items-center gap-1.5" style={{ backgroundColor: '#f3f4f6', border: '0.5px solid #d1d5db', color: '#374151' }}>
+                      <FileText size={14} /> {att.name}
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              {notice.linked_tender && (
+                <div className="mt-4 px-3 py-2.5 rounded-lg flex items-center justify-between" style={{ backgroundColor: '#f3f4f6', border: '0.5px solid #d1d5db' }}>
+                  <div className="flex items-center gap-2 text-[13px]" style={{ color: '#374151' }}>
+                    <FileText size={16} style={{ color: colors.badgeText }} />
+                    <span>Linked tender: {notice.linked_tender.ref} — {notice.linked_tender.name}</span>
+                  </div>
+                  <button className="text-[12px] font-medium" style={{ color: colors.badgeText }}>View tender →</button>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ backgroundColor: '#dcfce7' }}>
+            <Bell size={20} style={{ color: '#15803d' }} />
+          </div>
+          <div>
+            <h3 className="text-[16px] font-semibold text-slate-900">Public Notices</h3>
+            <p className="text-[12px] text-slate-500">Latest updates and announcements</p>
+          </div>
+        </div>
+        <div className="relative">
+          <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+          <input
+            type="text"
+            placeholder="Search notices..."
+            value={searchQuery}
+            onChange={e => setSearchQuery(e.target.value)}
+            className="pl-10 pr-4 py-2 rounded-lg border text-[13px] w-64 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-200 outline-none transition"
+            style={{ borderColor: '#d1d5db' }}
+          />
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {notices.map((n) => {
-          const isTenderUpdate = n.category === "tender_update";
-          const isAward = n.category === "award_notice";
-          const isUrgent = n.category === "urgent_alert";
-          const isSuccess = n.category === "success_story";
+      <div className="flex flex-wrap gap-2">
+        {categories.map(cat => (
+          <button
+            key={cat}
+            onClick={() => { setSelectedCategory(cat); setNoticePage(1); }}
+            className="px-3 py-1.5 rounded-lg text-[12px] font-medium transition-all"
+            style={{
+              backgroundColor: selectedCategory === cat ? '#fef3c7' : 'transparent',
+              border: `0.5px solid ${selectedCategory === cat ? '#92400e' : '#d1d5db'}`,
+              color: selectedCategory === cat ? '#92400e' : '#6b7280',
+            }}
+          >
+            {cat === 'all' ? 'All' : getCategoryLabel(cat)}
+          </button>
+        ))}
+      </div>
 
-          return (
-            <div key={n.id} className="bg-white rounded-2xl border border-slate-200 p-6 hover:shadow-lg transition-all duration-300">
-              {isTenderUpdate && (
-                <>
-                  <div className="inline-flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-1.5 mb-4">
-                    <span className="text-xs">🔵</span>
-                    <span className="text-xs font-bold text-blue-700 uppercase tracking-wider">Tender Update</span>
+      {loadingNotices ? (
+        <div className="text-center py-12 text-slate-400 text-[13px]">Loading notices...</div>
+      ) : filteredNotices.length === 0 ? (
+        <div className="text-center py-12">
+          <p className="text-slate-500 text-[13px]">No notices found matching your filters.</p>
+          <button onClick={() => { setSelectedCategory("all"); setSearchQuery(""); setNoticePage(1); }} className="text-emerald-600 font-medium text-[13px] mt-2">Clear filters</button>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {pinnedNotices.length > 0 && (
+            <div>
+              <p className="text-[11px] font-medium uppercase tracking-wider mb-3" style={{ color: '#9ca3af', letterSpacing: '0.06em' }}>Pinned</p>
+              <div className="space-y-2">
+                {pinnedNotices.map(n => renderNoticeCard(n))}
+              </div>
+            </div>
+          )}
+          {unpinnedNotices.length > 0 && (
+            <div>
+              <p className="text-[11px] font-medium uppercase tracking-wider mb-3" style={{ color: '#9ca3af', letterSpacing: '0.06em' }}>Latest notices</p>
+              <div className="space-y-2">
+                {unpinnedNotices.slice((noticePage - 1) * noticePerPage, noticePage * noticePerPage).map(n => renderNoticeCard(n))}
+              </div>
+              {Math.ceil(unpinnedNotices.length / noticePerPage) > 1 && (
+                <div className="flex items-center justify-between mt-4 pt-4 border-t" style={{ borderColor: '#e5e7eb' }}>
+                  <span className="text-[12px] text-slate-500">Showing {((noticePage - 1) * noticePerPage) + 1}–{Math.min(noticePage * noticePerPage, unpinnedNotices.length)} of {unpinnedNotices.length}</span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setNoticePage(p => Math.max(1, p - 1))}
+                      disabled={noticePage === 1}
+                      className="px-3 py-1.5 text-[12px] rounded-lg border transition-all disabled:opacity-40"
+                      style={{ borderColor: '#d1d5db', color: '#6b7280' }}
+                    >Previous</button>
+                    <span className="text-[12px] text-slate-500">Page {noticePage} of {Math.ceil(unpinnedNotices.length / noticePerPage)}</span>
+                    <button
+                      onClick={() => setNoticePage(p => Math.min(Math.ceil(unpinnedNotices.length / noticePerPage), p + 1))}
+                      disabled={noticePage >= Math.ceil(unpinnedNotices.length / noticePerPage)}
+                      className="px-3 py-1.5 text-[12px] rounded-lg border transition-all disabled:opacity-40"
+                      style={{ borderColor: '#d1d5db', color: '#6b7280' }}
+                    >Next</button>
                   </div>
-                  <h4 className="text-base font-bold text-slate-900 leading-snug mb-2">{n.headline}</h4>
-                  <p className="text-xs font-semibold text-slate-400 mb-3">Published: {n.date}</p>
-                  <p className="text-sm text-slate-600 leading-relaxed line-clamp-2 mb-4">{n.summary}</p>
-                  <div className="border-t border-blue-100 pt-4">
-                    <button className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-2 text-xs font-bold text-blue-700 transition-colors hover:bg-blue-100">{n.actionLabel}</button>
-                  </div>
-                </>
-              )}
-
-              {isAward && (
-                <>
-                  <div className="inline-flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 mb-4">
-                    <span className="text-xs">🟢</span>
-                    <span className="text-xs font-bold text-emerald-700 uppercase tracking-wider">Award Notice</span>
-                  </div>
-                  <h4 className="text-base font-bold text-slate-900 leading-snug mb-2">{n.headline}</h4>
-                  <p className="text-xs font-semibold text-slate-400 mb-3">Published: {n.date}</p>
-                  <p className="text-sm text-slate-600 leading-relaxed line-clamp-2 mb-4">{n.summary}</p>
-                  <div className="border-t border-emerald-100 pt-4">
-                    <button className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2 text-xs font-bold text-emerald-700 transition-colors hover:bg-emerald-100">{n.actionLabel}</button>
-                  </div>
-                </>
-              )}
-
-              {isUrgent && (
-                <>
-                  <div className="inline-flex items-center gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 mb-4">
-                    <span className="text-xs">🔴</span>
-                    <span className="text-xs font-bold text-rose-700 uppercase tracking-wider">Urgent Alert</span>
-                  </div>
-                  <h4 className="text-base font-bold text-slate-900 leading-snug mb-2">{n.headline}</h4>
-                  <p className="text-xs font-semibold text-slate-400 mb-3">Published: {n.date}</p>
-                  <p className="text-sm text-slate-600 leading-relaxed line-clamp-2 mb-4">{n.summary}</p>
-                  <div className="border-t border-rose-100 pt-4">
-                    <button className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-2 text-xs font-bold text-rose-700 transition-colors hover:bg-rose-100">{n.actionLabel}</button>
-                  </div>
-                </>
-              )}
-
-              {isSuccess && (
-                <>
-                  <div className="inline-flex items-center gap-2 rounded-lg border border-purple-200 bg-purple-50 px-3 py-1.5 mb-4">
-                    <span className="text-xs">🟣</span>
-                    <span className="text-xs font-bold text-purple-700 uppercase tracking-wider">Success Story</span>
-                  </div>
-                  <h4 className="text-base font-bold text-slate-900 leading-snug mb-2">{n.headline}</h4>
-                  <p className="text-xs font-semibold text-slate-400 mb-3">Published: {n.date}</p>
-                  <p className="text-sm text-slate-600 leading-relaxed line-clamp-2 mb-4">{n.summary}</p>
-                  <div className="border-t border-purple-100 pt-4">
-                    <button className="rounded-lg border border-purple-200 bg-purple-50 px-4 py-2 text-xs font-bold text-purple-700 transition-colors hover:bg-purple-100">{n.actionLabel}</button>
-                  </div>
-                </>
+                </div>
               )}
             </div>
-          );
-        })}
-      </div>
+          )}
+        </div>
+      )}
+
+      {showSubscribeModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setShowSubscribeModal(false)}>
+          <div className="bg-white rounded-xl max-w-md w-full" onClick={e => e.stopPropagation()}>
+            <div className="p-5 border-b flex items-center justify-between" style={{ borderColor: '#d1d5db' }}>
+              <h4 className="font-medium text-slate-900">Subscribe to email notifications</h4>
+              <button onClick={() => setShowSubscribeModal(false)} className="text-slate-400 hover:text-slate-600"><X size={20} /></button>
+            </div>
+            <form onSubmit={handleSubscribe} className="p-5 space-y-4">
+              <p className="text-[13px] text-slate-600">Get email alerts when new notices are posted.</p>
+              <input
+                type="email"
+                required
+                placeholder="Enter your email"
+                value={subscribeEmail}
+                onChange={e => setSubscribeEmail(e.target.value)}
+                className="w-full px-4 py-2.5 rounded-lg border text-[13px] focus:border-emerald-500 outline-none"
+                style={{ borderColor: '#d1d5db' }}
+              />
+              {subscribeSuccess && (
+                <div className="rounded-lg bg-emerald-50 border border-emerald-200 p-3 text-[13px] text-emerald-700 font-medium">
+                  Successfully subscribed!
+                </div>
+              )}
+              <button type="submit" className="w-full py-2.5 rounded-lg bg-emerald-600 text-white font-medium text-[13px] hover:bg-emerald-700 transition">Subscribe</button>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
@@ -22570,6 +22829,7 @@ case "dashboard":
           onTenderOpened={() => setPendingTenderId(null)}
         />
       );
+      case "notice_board": return <RmtNoticeManagement currentUser={currentUser} />;
       case "prequal": return <PreQualification />;
       case "rbf_projects": return <ProjectsHub mode="rbf" externalProjectId={selectedProjectId} externalProjectTab={selectedProjectTab} />;
       case "blacklisting": return <Blacklisting currentUser={currentUser} />;
@@ -22686,6 +22946,7 @@ case "dashboard":
       ...common,
       { id: "all_vendors", icon: Users, label: "All Vendors" },
       { id: "tenders", icon: FileText, label: "Tender Management" },
+      { id: "notice_board", icon: Bell, label: "Notice Board" },
       { id: "evaluations", icon: ClipboardCheck, label: "Financial Evaluation" },
       { id: "prequal", icon: ClipboardCheck, label: "Pre-Qualification" },
       { id: "rbf_projects", icon: FolderKanban, label: "Projects Hub" },
