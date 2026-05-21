@@ -1296,17 +1296,76 @@ class NoticeSerializer(serializers.ModelSerializer):
     def get_tender_name(self, obj):
         return obj.linked_tender.name if obj.linked_tender else None
 
+    def validate(self, data):
+        category = data.get('category')
+        if category in ['tender', 'deadline']:
+            if not data.get('linked_tender'):
+                raise serializers.ValidationError({"linked_tender": "Linked tender is required for tender and deadline notices."})
+            if not data.get('countdown_date'):
+                raise serializers.ValidationError({"countdown_date": "Countdown date is required for tender and deadline notices."})
+        return data
+
     def to_internal_value(self, data):
-        ret = super().to_internal_value(data)
-        if ret.get('linked_tender') == '':
-            ret['linked_tender'] = None
-        return ret
+        # Handle cases where linked_tender might be sent as empty string or "null" string (common in FormData)
+        if 'linked_tender' in data and (data['linked_tender'] == '' or data['linked_tender'] == 'null'):
+            data = data.copy()
+            data['linked_tender'] = None
+        return super().to_internal_value(data)
+
+    def _handle_attachments(self, notice, request):
+        if not request:
+            return
+
+        attachments = notice.attachments or []
+        files = request.FILES
+        
+        # In multipart/form-data, files are sent with keys like attachments-0, attachments-1
+        attachment_keys = [k for k in files.keys() if k.startswith('attachments-')]
+        
+        if attachment_keys:
+            from django.core.files.storage import default_storage
+            import os
+            
+            for key in attachment_keys:
+                file_obj = files[key]
+                path = default_storage.save(
+                    os.path.join('notices', 'attachments', file_obj.name),
+                    file_obj
+                )
+                attachments.append({
+                    'name': file_obj.name,
+                    'url': default_storage.url(path)
+                })
+            
+            notice.attachments = attachments
+            notice.save(update_fields=['attachments'])
 
     def create(self, validated_data):
         last_notice = Notice.objects.order_by('-id').first()
         next_id = (last_notice.id + 1) if last_notice else 1
         validated_data['notice_id'] = f"NTC-{next_id:04d}"
-        return super().create(validated_data)
+        
+        # Pop attachments if they are in validated_data (though they shouldn't be as they are handled manually)
+        validated_data.pop('attachments', None)
+        
+        instance = super().create(validated_data)
+        self._handle_attachments(instance, self.context.get('request'))
+        return instance
+
+    def update(self, instance, validated_data):
+        # Handle attachments separately
+        attachments_data = validated_data.pop('attachments', None)
+        
+        updated_instance = super().update(instance, validated_data)
+        
+        # If attachments were provided in the JSON payload (existing ones), we use them
+        if attachments_data is not None:
+            updated_instance.attachments = attachments_data
+            updated_instance.save(update_fields=['attachments'])
+            
+        # Then handle new file uploads
+        self._handle_attachments(updated_instance, self.context.get('request'))
+        return updated_instance
 
     class Meta:
         model = Notice
@@ -1325,4 +1384,4 @@ class NoticeListSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Notice
-        fields = ['id', 'notice_id', 'title', 'category', 'summary', 'content', 'linked_tender', 'tender_reference', 'tender_name', 'is_pinned', 'show_countdown', 'countdown_date', 'status', 'published_at', 'created_at']
+        fields = ['id', 'notice_id', 'title', 'category', 'summary', 'content', 'linked_tender', 'tender_reference', 'tender_name', 'is_pinned', 'show_countdown', 'countdown_date', 'attachments', 'status', 'published_at', 'created_at']

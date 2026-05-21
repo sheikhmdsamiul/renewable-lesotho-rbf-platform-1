@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useMemo, useEffect } from "react";
+import React, { useState, useMemo, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { 
   LayoutDashboard, 
@@ -1213,6 +1213,7 @@ const Tenders = ({
   const [newDeadline, setNewDeadline] = useState("");
   const [newSecurityDeadline, setNewSecurityDeadline] = useState("");
   const [isExtending, setIsExtending] = useState(false);
+  const [formStep, setFormStep] = useState(1);
 
   useEffect(() => {
     if (view === "details" && selectedTender?.id) {
@@ -1343,6 +1344,9 @@ const Tenders = ({
   const [scheduleFile, setScheduleFile] = useState<File | null>(null);
   const [rfpDocumentsFile, setRfpDocumentsFile] = useState<File | null>(null);
   const [milestonePaymentScheduleFile, setMilestonePaymentScheduleFile] = useState<File | null>(null);
+  const scheduleFileRef = useRef<File | null>(null);
+  const rfpDocumentsFileRef = useRef<File | null>(null);
+  const milestonePaymentScheduleFileRef = useRef<File | null>(null);
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
     const { name, value } = e.target;
@@ -1481,8 +1485,11 @@ const Tenders = ({
       setSelectedTender(null);
       setFormData(defaultFormData);
       setScheduleFile(null);
+      scheduleFileRef.current = null;
       setRfpDocumentsFile(null);
+      rfpDocumentsFileRef.current = null;
       setMilestonePaymentScheduleFile(null);
+      milestonePaymentScheduleFileRef.current = null;
       setTenderError(null);
     }
   }, [initialView]);
@@ -1527,8 +1534,11 @@ const Tenders = ({
     setSelectedTender(null);
     setFormData(defaultFormData);
     setScheduleFile(null);
+    scheduleFileRef.current = null;
     setRfpDocumentsFile(null);
+    rfpDocumentsFileRef.current = null;
     setMilestonePaymentScheduleFile(null);
+    milestonePaymentScheduleFileRef.current = null;
     setTenderError(null);
     setView("create");
   };
@@ -1541,8 +1551,11 @@ const Tenders = ({
       if (nextView === "edit") {
         setFormData(toFormDataFromTender(full));
         setScheduleFile(null);
+        scheduleFileRef.current = null;
         setRfpDocumentsFile(null);
+        rfpDocumentsFileRef.current = null;
         setMilestonePaymentScheduleFile(null);
+        milestonePaymentScheduleFileRef.current = null;
       }
       if (nextView === "award") {
         const contracts = await fetchTenderContracts({ tenderId });
@@ -1708,9 +1721,7 @@ const Tenders = ({
     const isAccessWindow = String(payload.applicationType || "").toLowerCase() === "access window";
     const isEditing = view === "edit" && Boolean(selectedTender);
     const hasExistingSchedule = Boolean(selectedTender?.scheduleFile);
-    const hasRfp = Boolean(rfpDocumentsFile) || Boolean(selectedTender?.rfpDocumentsFile);
-    const hasMilestoneSchedule =
-      Boolean(milestonePaymentScheduleFile) || Boolean(selectedTender?.milestonePaymentScheduleFile);
+
 
       // Application Window: strictly requires and maps deadline to lastDateSubmission.
       // Access Window: auto-sets fallback deadline if submission deadline is missing.
@@ -1748,11 +1759,14 @@ const Tenders = ({
       setTenderError("Select at least one Target District.");
       return;
     }
-    if (!payload.scheduleFile && !(isEditing && hasExistingSchedule)) {
+    const currentScheduleFile = scheduleFileRef.current;
+    const currentRfpFile = rfpDocumentsFileRef.current;
+    const currentMilestoneFile = milestonePaymentScheduleFileRef.current;
+    if (!currentScheduleFile && !(isEditing && hasExistingSchedule)) {
       setTenderError("Upload the tender schedule (PDF/DOC/DOCX).");
       return;
     }
-    if (!hasRfp || !hasMilestoneSchedule) {
+    if (!((currentRfpFile || selectedTender?.rfpDocumentsFile) && (currentMilestoneFile || selectedTender?.milestonePaymentScheduleFile))) {
       setTenderError("Upload the RFP/Subsidy Framework and the Milestone Payment Schedule.");
       return;
     }
@@ -1763,16 +1777,18 @@ const Tenders = ({
         const updated = await updateTender(selectedTender.id, {
           ...payload,
           status: selectedTender.status,
-          rfpDocumentsFile,
-          milestonePaymentScheduleFile,
+          scheduleFile: currentScheduleFile,
+          rfpDocumentsFile: currentRfpFile,
+          milestonePaymentScheduleFile: currentMilestoneFile,
         });
         upsertTender(updated);
       } else {
         const created = await createTender({
           ...payload,
           status: TenderStatus.DRAFT,
-          rfpDocumentsFile,
-          milestonePaymentScheduleFile,
+          scheduleFile: currentScheduleFile,
+          rfpDocumentsFile: currentRfpFile,
+          milestonePaymentScheduleFile: currentMilestoneFile,
         });
         setTenders([created, ...tenders]);
       }
@@ -2021,331 +2037,202 @@ const Tenders = ({
             {isEditing ? `Edit Tender: ${selectedTender?.name ?? ""}` : "Add New Tender"}
           </h1>
         </div>
-        {tenderError && (
-          <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 font-medium">
-            {tenderError}
-          </div>
-        )}
+
 
         <div className="card p-8 space-y-8">
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            <div className="space-y-2">
-              <label className="text-sm font-bold text-slate-700">Name of the Tender *</label>
-              <input 
-                type="text" 
-                name="name"
-                value={formData.name}
-                onChange={handleInputChange}
-                placeholder="Tender Name" 
-                className="input-field" 
-              />
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-bold text-slate-700">Department Entity *</label>
-              <select 
-                name="department"
-                value={formData.department}
-                onChange={handleInputChange}
-                className="input-field"
-              >
-                <option value="">Select Department</option>
-                <option>Department of Energy</option>
-                <option>UNDP Lesotho</option>
-              </select>
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-bold text-slate-700">Application Type *</label>
-              <select 
-                name="applicationType"
-                value={formData.applicationType}
-                onChange={handleInputChange}
-                className="input-field"
-              >
-                <option>Access Window</option>
-                <option>Application Window</option>
-              </select>
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-bold text-slate-700">Procurement Method *</label>
-              <select 
-                name="procurementMethod"
-                value={formData.procurementMethod}
-                onChange={handleInputChange}
-                className="input-field"
-              >
-                <option value="">Select Method</option>
-                 <option>Open Tendering</option>
-                 <option>Restricted Tendering</option>
-               </select>
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-bold text-slate-700">Bidding Currency *</label>
-              <select 
-                name="biddingCurrency"
-                value={formData.biddingCurrency}
-                onChange={handleInputChange}
-                className="input-field"
-              >
-                <option>LSL (Maloti)</option>
-                <option>USD</option>
-                <option>ZAR</option>
-              </select>
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-bold text-slate-700">Budget Estimate *</label>
-              <input
-                type="number"
-                name="budget"
-                value={formData.budget ?? 0}
-                onChange={handleInputChange}
-                className="input-field"
-                placeholder="Enter budget estimate"
-              />
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-bold text-slate-700">Funding Source (Optional)</label>
-              <select 
-                name="fundingSource"
-                value={formData.fundingSource}
-                onChange={handleInputChange}
-                className="input-field"
-              >
-                <option value="">Select Funding Source</option>
-                <option>Government Budget</option>
-                <option>UNDP Grant</option>
-                <option>World Bank Loan</option>
-                <option>Private Investment</option>
-                <option>Other</option>
-              </select>
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-bold text-slate-700">Cooling-Off Period (Days)</label>
-              <input
-                type="number"
-                name="coolingOffDays"
-                min={0}
-                max={14}
-                value={formData.coolingOffDays ?? 7}
-                onChange={handleInputChange}
-                className="input-field"
-              />
-              <p className="text-[10px] text-slate-400">Set between 0 and 14 days. Use 0 for instant testing.</p>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div className="space-y-2">
-              <label className="text-sm font-bold text-slate-700">Name & Address for Tender Document *</label>
-              <input 
-                type="text" 
-                name="addressForDocument"
-                value={formData.addressForDocument}
-                onChange={handleInputChange}
-                placeholder="Address" 
-                className="input-field" 
-              />
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-bold text-slate-700">Name & Address for Tender Security *</label>
-              <input 
-                type="text" 
-                name="addressForSecurity"
-                value={formData.addressForSecurity}
-                onChange={handleInputChange}
-                placeholder="Address" 
-                className="input-field" 
-              />
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-bold text-slate-700">Place for Tender Opening *</label>
-              <input 
-                type="text" 
-                name="placeForOpening"
-                value={formData.placeForOpening}
-                onChange={handleInputChange}
-                placeholder="Opening Location" 
-                className="input-field" 
-              />
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-bold text-slate-700">Tender Invited By *</label>
-              <input 
-                type="text" 
-                name="invitedBy"
-                value={formData.invitedBy}
-                onChange={handleInputChange}
-                placeholder="Official Name" 
-                className="input-field" 
-              />
-            </div>
-          </div>
-
-          <div className="space-y-6">
-            {/* Security Submission Deadline */}
-            <div>
-              <label className="text-sm font-bold text-slate-700 mb-2">
-                  Security Submission Deadline {formData.tenderSecurityRequired && '*'}
-                </label>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <div className="relative">
-                  <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-                  <input 
-                    type="date" 
-                    placeholder="Date"
-                    required={formData.tenderSecurityRequired}
-                    value={formData.lastDateSecurity ? formData.lastDateSecurity.split('T')[0] : ""}
-                    onChange={(e) => {
-                      const currentTime = formData.lastDateSecurity?.split('T')[1] || '09:00';
-                      setFormData(prev => ({ ...prev, lastDateSecurity: `${e.target.value}T${currentTime}` }));
-                    }}
-                    className="input-field pl-10 pr-10" 
-                  />
-                  {formData.lastDateSecurity && (
-                    <button
-                      type="button"
-                      onClick={() => setFormData(prev => ({ ...prev, lastDateSecurity: "" }))}
-                      className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
-                    >
-                      <X size={16} />
-                    </button>
-                  )}
+          {/* Step Progress Bar */}
+          <div className="flex items-center gap-2 mb-2">
+            {["General Info", "Timeline & Address", "Technical Details", "Documents & Save"].map((label, idx) => {
+              const stepNum = idx + 1;
+              const isActive = formStep === stepNum;
+              const isDone = formStep > stepNum;
+              return (
+                <div key={label} className="flex items-center gap-2 flex-1 min-w-0">
+                  <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold shrink-0 ${isActive ? "bg-emerald-600 text-white shadow-lg shadow-emerald-600/20" : isDone ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-400"}`}>
+                    {isDone ? <Check size={16} /> : stepNum}
+                  </div>
+                  <span className={`text-[11px] font-semibold leading-tight ${isActive ? "text-emerald-700" : isDone ? "text-emerald-600" : "text-slate-400"}`}>{label}</span>
+                  {idx < 3 && <div className={`flex-1 h-0.5 ${isDone ? "bg-emerald-400" : "bg-slate-200"}`} />}
                 </div>
-                <div className="relative">
-                  <Clock className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-                  <input 
-                    type="time" 
-                    placeholder="Time"
-                    required={formData.tenderSecurityRequired}
-                    value={formData.lastDateSecurity ? formData.lastDateSecurity.split('T')[1] : ''}
-                    disabled={!formData.lastDateSecurity}
-                    onChange={(e) => {
-                      const currentDate = formData.lastDateSecurity?.split('T')[0] || new Date().toISOString().split('T')[0];
-                      setFormData(prev => ({ ...prev, lastDateSecurity: `${currentDate}T${e.target.value}` }));
-                    }}
-                    className="input-field pl-10 pr-10" 
-                  />
-                  {formData.lastDateSecurity && (
-                    <button
-                      type="button"
-                      onClick={() => setFormData(prev => ({ ...prev, lastDateSecurity: "" }))}
-                      className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
-                    >
-                      <X size={16} />
-                    </button>
-                  )}
+              );
+            })}
+          </div>
+
+          {/* Step 1: General Info */}
+          {formStep === 1 && (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+              <div className="space-y-2">
+                <label className="text-sm font-bold text-slate-700">Name of the Tender *</label>
+                <input type="text" name="name" value={formData.name} onChange={handleInputChange} placeholder="Tender Name" className="input-field" />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-bold text-slate-700">Department Entity *</label>
+                <select name="department" value={formData.department} onChange={handleInputChange} className="input-field">
+                  <option value="">Select Department</option>
+                  <option>Department of Energy</option>
+                  <option>UNDP Lesotho</option>
+                </select>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-bold text-slate-700">Application Type *</label>
+                <select name="applicationType" value={formData.applicationType} onChange={handleInputChange} className="input-field">
+                  <option>Access Window</option>
+                  <option>Application Window</option>
+                </select>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-bold text-slate-700">Procurement Method *</label>
+                <select name="procurementMethod" value={formData.procurementMethod} onChange={handleInputChange} className="input-field">
+                  <option value="">Select Method</option>
+                  <option>Open Tendering</option>
+                  <option>Restricted Tendering</option>
+                </select>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-bold text-slate-700">Bidding Currency *</label>
+                <select name="biddingCurrency" value={formData.biddingCurrency} onChange={handleInputChange} className="input-field">
+                  <option>LSL (Maloti)</option>
+                  <option>USD</option>
+                  <option>ZAR</option>
+                </select>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-bold text-slate-700">Budget Estimate *</label>
+                <input type="number" name="budget" value={formData.budget ?? 0} onChange={handleInputChange} className="input-field" placeholder="Enter budget estimate" />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-bold text-slate-700">Funding Source (Optional)</label>
+                <select name="fundingSource" value={formData.fundingSource} onChange={handleInputChange} className="input-field">
+                  <option value="">Select Funding Source</option>
+                  <option>Government Budget</option>
+                  <option>UNDP Grant</option>
+                  <option>World Bank Loan</option>
+                  <option>Private Investment</option>
+                  <option>Other</option>
+                </select>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-bold text-slate-700">Cooling-Off Period (Days)</label>
+                <input type="number" name="coolingOffDays" min={0} max={14} value={formData.coolingOffDays ?? 7} onChange={handleInputChange} className="input-field" />
+                <p className="text-[10px] text-slate-400">Set between 0 and 14 days. Use 0 for instant testing.</p>
+              </div>
+            </div>
+          )}
+
+          {/* Step 2: Timeline & Address */}
+          {formStep === 2 && (
+            <div className="space-y-6">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="space-y-2">
+                  <label className="text-sm font-bold text-slate-700">Name & Address for Tender Document *</label>
+                  <input type="text" name="addressForDocument" value={formData.addressForDocument} onChange={handleInputChange} placeholder="Address" className="input-field" />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-bold text-slate-700">Name & Address for Tender Security *</label>
+                  <input type="text" name="addressForSecurity" value={formData.addressForSecurity} onChange={handleInputChange} placeholder="Address" className="input-field" />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-bold text-slate-700">Place for Tender Opening *</label>
+                  <input type="text" name="placeForOpening" value={formData.placeForOpening} onChange={handleInputChange} placeholder="Opening Location" className="input-field" />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-bold text-slate-700">Tender Invited By *</label>
+                  <input type="text" name="invitedBy" value={formData.invitedBy} onChange={handleInputChange} placeholder="Official Name" className="input-field" />
+                </div>
+              </div>
+
+              {/* Security Submission Deadline */}
+              <div>
+                <label className="text-sm font-bold text-slate-700 mb-2">Security Submission Deadline {formData.tenderSecurityRequired && '*'}</label>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div className="relative">
+                    <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+                    <input type="date" placeholder="Date" required={formData.tenderSecurityRequired}
+                      value={formData.lastDateSecurity ? formData.lastDateSecurity.split('T')[0] : ""}
+                      onChange={(e) => { const currentTime = formData.lastDateSecurity?.split('T')[1] || '09:00'; setFormData(prev => ({ ...prev, lastDateSecurity: `${e.target.value}T${currentTime}` })); }}
+                      className="input-field pl-10 pr-10" />
+                    {formData.lastDateSecurity && (
+                      <button type="button" onClick={() => setFormData(prev => ({ ...prev, lastDateSecurity: "" }))}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"><X size={16} /></button>
+                    )}
+                  </div>
+                  <div className="relative">
+                    <Clock className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+                    <input type="time" placeholder="Time" required={formData.tenderSecurityRequired}
+                      value={formData.lastDateSecurity ? formData.lastDateSecurity.split('T')[1] : ''} disabled={!formData.lastDateSecurity}
+                      onChange={(e) => { const currentDate = formData.lastDateSecurity?.split('T')[0] || new Date().toISOString().split('T')[0]; setFormData(prev => ({ ...prev, lastDateSecurity: `${currentDate}T${e.target.value}` })); }}
+                      className="input-field pl-10 pr-10" />
+                    {formData.lastDateSecurity && (
+                      <button type="button" onClick={() => setFormData(prev => ({ ...prev, lastDateSecurity: "" }))}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"><X size={16} /></button>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Document Submission Deadline */}
+              <div>
+                <label className="text-sm font-bold text-slate-700 mb-2">Document Submission Deadline {formData.applicationType !== "Access Window" && "*"}</label>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div className="relative">
+                    <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+                    <input type="date" placeholder="Date" required={formData.applicationType !== "Access Window"}
+                      value={formData.lastDateSubmission ? formData.lastDateSubmission.split('T')[0] : ""}
+                      onChange={(e) => { const currentTime = formData.lastDateSubmission?.split('T')[1] || '14:00'; setFormData(prev => ({ ...prev, lastDateSubmission: `${e.target.value}T${currentTime}` })); }}
+                      className="input-field pl-10 pr-10" />
+                    {formData.lastDateSubmission && (
+                      <button type="button" onClick={() => setFormData(prev => ({ ...prev, lastDateSubmission: "" }))}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"><X size={16} /></button>
+                    )}
+                  </div>
+                  <div className="relative">
+                    <Clock className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+                    <input type="time" placeholder="Time" required={formData.applicationType !== "Access Window"}
+                      value={formData.lastDateSubmission ? formData.lastDateSubmission.split('T')[1] : ''} disabled={!formData.lastDateSubmission}
+                      onChange={(e) => { const currentDate = formData.lastDateSubmission?.split('T')[0] || new Date().toISOString().split('T')[0]; setFormData(prev => ({ ...prev, lastDateSubmission: `${currentDate}T${e.target.value}` })); }}
+                      className="input-field pl-10 pr-10" />
+                    {formData.lastDateSubmission && (
+                      <button type="button" onClick={() => setFormData(prev => ({ ...prev, lastDateSubmission: "" }))}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"><X size={16} /></button>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Tender Opening Date & Time */}
+              <div>
+                <label className="text-sm font-bold text-slate-700 mb-2">Tender Opening Date & Time *</label>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div className="relative">
+                    <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+                    <input type="date" placeholder="Date"
+                      value={formData.dateOpening ? formData.dateOpening.split('T')[0] : ""}
+                      onChange={(e) => { const currentTime = formData.dateOpening?.split('T')[1] || '10:00'; setFormData(prev => ({ ...prev, dateOpening: `${e.target.value}T${currentTime}` })); }}
+                      className="input-field pl-10 pr-10" />
+                    {formData.dateOpening && (
+                      <button type="button" onClick={() => setFormData(prev => ({ ...prev, dateOpening: "" }))}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"><X size={16} /></button>
+                    )}
+                  </div>
+                  <div className="relative">
+                    <Clock className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+                    <input type="time" placeholder="Time"
+                      value={formData.dateOpening ? formData.dateOpening.split('T')[1] : ''} disabled={!formData.dateOpening}
+                      onChange={(e) => { const currentDate = formData.dateOpening?.split('T')[0] || new Date().toISOString().split('T')[0]; setFormData(prev => ({ ...prev, dateOpening: `${currentDate}T${e.target.value}` })); }}
+                      className="input-field pl-10 pr-10" />
+                    {formData.dateOpening && (
+                      <button type="button" onClick={() => setFormData(prev => ({ ...prev, dateOpening: "" }))}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"><X size={16} /></button>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>
+          )}
 
-            {/* Document Submission Deadline */}
-            <div>
-              <label className="text-sm font-bold text-slate-700 mb-2">
-                Document Submission Deadline {formData.applicationType !== "Access Window" && "*"}
-              </label>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <div className="relative">
-                  <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-                  <input 
-                    type="date" 
-                    placeholder="Date"
-                    required={formData.applicationType !== "Access Window"}
-                    value={formData.lastDateSubmission ? formData.lastDateSubmission.split('T')[0] : ""}
-                    onChange={(e) => {
-                      const currentTime = formData.lastDateSubmission?.split('T')[1] || '14:00';
-                      setFormData(prev => ({ ...prev, lastDateSubmission: `${e.target.value}T${currentTime}` }));
-                    }}
-                    className="input-field pl-10 pr-10" 
-                  />
-                  {formData.lastDateSubmission && (
-                    <button
-                      type="button"
-                      onClick={() => setFormData(prev => ({ ...prev, lastDateSubmission: "" }))}
-                      className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
-                    >
-                      <X size={16} />
-                    </button>
-                  )}
-                </div>
-                <div className="relative">
-                  <Clock className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-                  <input 
-                    type="time" 
-                    placeholder="Time"
-                    required={formData.applicationType !== "Access Window"}
-                    value={formData.lastDateSubmission ? formData.lastDateSubmission.split('T')[1] : ''}
-                    disabled={!formData.lastDateSubmission}
-                    onChange={(e) => {
-                      const currentDate = formData.lastDateSubmission?.split('T')[0] || new Date().toISOString().split('T')[0];
-                      setFormData(prev => ({ ...prev, lastDateSubmission: `${currentDate}T${e.target.value}` }));
-                    }}
-                    className="input-field pl-10 pr-10" 
-                  />
-                  {formData.lastDateSubmission && (
-                    <button
-                      type="button"
-                      onClick={() => setFormData(prev => ({ ...prev, lastDateSubmission: "" }))}
-                      className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
-                    >
-                      <X size={16} />
-                    </button>
-                  )}
-                </div>
-              </div>
-            </div>
-
-            {/* Tender Opening Date & Time */}
-            <div>
-              <label className="text-sm font-bold text-slate-700 mb-2">Tender Opening Date & Time *</label>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <div className="relative">
-                  <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-                  <input 
-                    type="date" 
-                    placeholder="Date"
-                    value={formData.dateOpening ? formData.dateOpening.split('T')[0] : ""}
-                    onChange={(e) => {
-                      const currentTime = formData.dateOpening?.split('T')[1] || '10:00';
-                      setFormData(prev => ({ ...prev, dateOpening: `${e.target.value}T${currentTime}` }));
-                    }}
-                    className="input-field pl-10 pr-10" 
-                  />
-                  {formData.dateOpening && (
-                    <button
-                      type="button"
-                      onClick={() => setFormData(prev => ({ ...prev, dateOpening: "" }))}
-                      className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
-                    >
-                      <X size={16} />
-                    </button>
-                  )}
-                </div>
-                <div className="relative">
-                  <Clock className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-                  <input 
-                    type="time" 
-                    placeholder="Time"
-                    value={formData.dateOpening ? formData.dateOpening.split('T')[1] : ''}
-                    disabled={!formData.dateOpening}
-                    onChange={(e) => {
-                      const currentDate = formData.dateOpening?.split('T')[0] || new Date().toISOString().split('T')[0];
-                      setFormData(prev => ({ ...prev, dateOpening: `${currentDate}T${e.target.value}` }));
-                    }}
-                    className="input-field pl-10 pr-10" 
-                  />
-                  {formData.dateOpening && (
-                    <button
-                      type="button"
-                      onClick={() => setFormData(prev => ({ ...prev, dateOpening: "" }))}
-                      className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
-                    >
-                      <X size={16} />
-                    </button>
-                  )}
-                </div>
-              </div>
-            </div>
-          </div>
-
+          {/* Step 3: Technical Details & Eligibility */}
+          {formStep === 3 && (
+            <div className="space-y-6">
           <div className="space-y-4">
             <h3 className="font-bold text-slate-900 border-b pb-2">Technical Mapping</h3>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -2461,7 +2348,9 @@ const Tenders = ({
               className="input-field"
             />
           </div>
-
+            </div>) /* end Step 3 */}
+          {formStep === 4 && (
+            <div className="space-y-6">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div className="space-y-4">
                 <label className="flex items-center gap-3 cursor-pointer">
@@ -2485,113 +2374,186 @@ const Tenders = ({
                 className="input-field" 
               />
             </div>
-          </div>
-
-          <div className="space-y-4">
-            <label className="text-sm font-bold text-slate-700">Governing Documents *</label>
-            <p className="text-xs text-slate-500">Upload the core tender documents that define rules, eligibility, and payment terms.</p>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              {[
-                {
-                  label: "Tender Schedule",
-                  hint: "Key dates and procurement timeline",
-                  file: scheduleFile,
-                  existing: selectedTender?.scheduleFile,
-                  setter: setScheduleFile,
-                },
-                {
-                  label: "RFP / Subsidy Framework",
-                  hint: "Eligibility, evaluation criteria, technical standards",
-                  file: rfpDocumentsFile,
-                  existing: selectedTender?.rfpDocumentsFile,
-                  setter: setRfpDocumentsFile,
-                },
-                {
-                  label: "Milestone Payment Schedule",
-                  hint: "Payment terms for this window",
-                  file: milestonePaymentScheduleFile,
-                  existing: selectedTender?.milestonePaymentScheduleFile,
-                  setter: setMilestonePaymentScheduleFile,
-                },
-              ].map((doc, idx) => (
-                <div key={doc.label} className="p-4 border-2 border-dashed border-slate-200 rounded-xl text-center bg-slate-50">
-                  <label htmlFor={`docUpload-${idx}`} className="cursor-pointer block">
-                    <FileText size={22} className="mx-auto text-slate-400 mb-2" />
-                    <p className="text-xs font-bold text-slate-700">{doc.label}</p>
-                    <p className="text-[10px] text-slate-400 mt-1">{doc.hint}</p>
-                    <p className="text-[10px] text-slate-400 mt-1">
-                      {doc.file
-                        ? doc.file.name
-                        : doc.existing
-                          ? "Existing file attached (upload to replace)"
-                          : "Click to upload"}
-                    </p>
-                  </label>
-                  <input
-                    id={`docUpload-${idx}`}
-                    type="file"
-                    accept=".pdf,.doc,.docx,.xls,.xlsx"
-                    className="hidden"
-                    onChange={(e) => {
-                      const file = e.target.files?.[0];
-                      doc.setter(file || null);
-                    }}
-                  />
-                </div>
-              ))}
             </div>
-          </div>
+            <div className="space-y-4">
+              <label className="text-sm font-bold text-slate-700">Governing Documents *</label>
+              <p className="text-xs text-slate-500">Upload the core tender documents that define rules, eligibility, and payment terms.</p>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {[
+                  {
+                    label: "Tender Schedule",
+                    hint: "Key dates and procurement timeline",
+                    file: scheduleFile,
+                    existing: selectedTender?.scheduleFile,
+                    setter: setScheduleFile,
+                    ref: scheduleFileRef,
+                  },
+                  {
+                    label: "RFP / Subsidy Framework",
+                    hint: "Eligibility, evaluation criteria, technical standards",
+                    file: rfpDocumentsFile,
+                    existing: selectedTender?.rfpDocumentsFile,
+                    setter: setRfpDocumentsFile,
+                    ref: rfpDocumentsFileRef,
+                  },
+                  {
+                    label: "Milestone Payment Schedule",
+                    hint: "Payment terms for this window",
+                    file: milestonePaymentScheduleFile,
+                    existing: selectedTender?.milestonePaymentScheduleFile,
+                    setter: setMilestonePaymentScheduleFile,
+                    ref: milestonePaymentScheduleFileRef,
+                  },
+              ].map((doc, idx) => (
+                <div key={doc.label} className={`relative p-4 border-2 rounded-xl text-center cursor-pointer ${doc.file || doc.existing ? 'border-emerald-400 bg-emerald-50 ring-2 ring-emerald-200/50' : 'border-dashed border-slate-200 bg-slate-50'}`}>
+                    <input
+                      id={`docUpload-${idx}`}
+                      type="file"
+                      accept=".pdf,.doc,.docx,.xls,.xlsx"
+                      className="hidden"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        doc.setter(file || null);
+                        doc.ref.current = file || null;
+                        e.target.value = "";
+                      }}
+                    />
+                    {(doc.file || doc.existing) && (
+                      <div className="absolute -top-2 -right-2 w-6 h-6 bg-emerald-500 rounded-full flex items-center justify-center shadow">
+                        <Check size={14} className="text-white" />
+                      </div>
+                    )}
+                    <div onClick={() => document.getElementById(`docUpload-${idx}`)?.click()} className="block">
+                      {doc.file || doc.existing ? (
+                        <CheckCircle2 size={22} className="mx-auto text-emerald-500 mb-2" />
+                      ) : (
+                        <FileText size={22} className="mx-auto text-slate-400 mb-2" />
+                      )}
+                      <p className="text-xs font-bold text-slate-700">{doc.label}</p>
+                      <p className="text-[10px] text-slate-400 mt-1">{doc.hint}</p>
+                      <p className={`text-[10px] mt-1 font-medium ${doc.file || doc.existing ? 'text-emerald-600' : 'text-slate-400'}`}>
+                        {doc.file
+                          ? doc.file.name
+                          : doc.existing
+                            ? "Existing file attached (upload to replace)"
+                            : "Click to upload"}
+                      </p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
 
-          <div className="flex justify-end gap-3 pt-6 border-t border-slate-100">
-            <button onClick={() => setView("list")} className="btn-secondary">Cancel</button>
-            {isEditing ? (
-              <button
-                onClick={() =>
-                  handleSaveTender({
-                    ...formData,
-                    scheduleFile,
-                    rfpDocumentsFile,
-                    milestonePaymentScheduleFile,
-                  })
-                }
-                className="btn-primary disabled:opacity-60"
-                disabled={isSaving}
-              >
-                {isSaving ? "Saving..." : "Save Changes"}
-              </button>
-            ) : (
-              <>
-                <button
-                  onClick={() =>
-                    handleSaveTender({
-                      ...formData,
-                      scheduleFile,
-                      rfpDocumentsFile,
-                      milestonePaymentScheduleFile,
-                    })
-                  }
-                  className="btn-secondary border-emerald-200 text-emerald-700 hover:bg-emerald-50 disabled:opacity-60"
-                  disabled={isSaving}
-                >
-                  {isSaving ? "Saving..." : "Save as Draft"}
-                </button>
-                <button
-                  onClick={() =>
-                    handleSaveTender({
-                      ...formData,
-                      scheduleFile,
-                      rfpDocumentsFile,
-                      milestonePaymentScheduleFile,
-                    })
-                  }
-                  className="btn-primary disabled:opacity-60"
-                  disabled={isSaving}
-                >
-                  {isSaving ? "Saving..." : "Save Tender"}
-                </button>
-              </>
+            {/* Save buttons (step 4) */}
+            {formStep === 4 && (
+              <div className="flex justify-end gap-3 pt-6 border-t border-slate-100">
+                <button onClick={() => setView("list")} className="btn-secondary">Cancel</button>
+                {isEditing ? (
+                  <button
+                    onClick={() =>
+                      handleSaveTender({
+                        ...formData,
+                        scheduleFile,
+                        rfpDocumentsFile,
+                        milestonePaymentScheduleFile,
+                      })
+                    }
+                    className="btn-primary disabled:opacity-60"
+                    disabled={isSaving}
+                  >
+                    {isSaving ? "Saving..." : "Save Changes"}
+                  </button>
+                ) : (
+                  <>
+                    <button
+                      onClick={() =>
+                        handleSaveTender({
+                          ...formData,
+                          scheduleFile,
+                          rfpDocumentsFile,
+                          milestonePaymentScheduleFile,
+                        })
+                      }
+                      className="btn-secondary border-emerald-200 text-emerald-700 hover:bg-emerald-50 disabled:opacity-60"
+                      disabled={isSaving}
+                    >
+                      {isSaving ? "Saving..." : "Save as Draft"}
+                    </button>
+                    <button
+                      onClick={() =>
+                        handleSaveTender({
+                          ...formData,
+                          scheduleFile,
+                          rfpDocumentsFile,
+                          milestonePaymentScheduleFile,
+                        })
+                      }
+                      className="btn-primary disabled:opacity-60"
+                      disabled={isSaving}
+                    >
+                      {isSaving ? "Saving..." : "Save Tender"}
+                    </button>
+                  </>
+                )}
+              </div>
             )}
-          </div>
+          </div>) /* end Step 4 */}
+
+          {/* Step navigation (steps 1-3) - outside step conditionals */}
+          {formStep < 4 && (
+            <div className="flex justify-end gap-3 pt-6 border-t border-slate-100">
+              {formStep > 1 && (
+                <button onClick={() => setFormStep(prev => prev - 1)} className="btn-secondary">
+                  Previous
+                </button>
+              )}
+              <button onClick={() => {
+                setTenderError("");
+                let isValid = true;
+                if (formStep === 1) {
+                  const labels: Record<string, string> = { name: "Name of the Tender", department: "Department Entity", applicationType: "Application Type", procurementMethod: "Procurement Method", biddingCurrency: "Bidding Currency", budget: "Budget Estimate" };
+                  const fields = ["name", "department", "applicationType", "procurementMethod", "biddingCurrency", "budget"];
+                  const missing = fields.filter(f => !formData[f as keyof typeof formData] || String(formData[f as keyof typeof formData]).trim() === "" || (f === "budget" && !formData.budget));
+                  if (missing.length) {
+                    setTenderError(`Missing required fields: ${missing.map(f => labels[f]).join(", ")}`);
+                    isValid = false;
+                  }
+                }
+                if (formStep === 2) {
+                  const labels: Record<string, string> = { addressForDocument: "Name & Address for Tender Document", addressForSecurity: "Name & Address for Tender Security", placeForOpening: "Place for Tender Opening", invitedBy: "Tender Invited By" };
+                  const fields = ["addressForDocument", "addressForSecurity", "placeForOpening", "invitedBy"];
+                  const missing = fields.filter(f => !formData[f as keyof typeof formData] || String(formData[f as keyof typeof formData]).trim() === "");
+                  if (missing.length) {
+                    setTenderError(`Missing required fields: ${missing.map(f => labels[f]).join(", ")}`);
+                    isValid = false;
+                  }
+                }
+                if (formStep === 3) {
+                  const labels: Record<string, string> = { technologyTypes: "Technology Type", targetDistricts: "Target Districts", biddersEligibility: "Bidders Eligibility", instruction: "Instructions", timeForCompletion: "Time for Completion" };
+                  const missing: string[] = [];
+                  if (!formData.technologyTypes?.length) missing.push("technologyTypes");
+                  if (!formData.targetDistricts?.length) missing.push("targetDistricts");
+                  if (!formData.biddersEligibility) missing.push("biddersEligibility");
+                  if (!formData.instruction) missing.push("instruction");
+                  if (!formData.timeForCompletion) missing.push("timeForCompletion");
+                  if (missing.length) {
+                    setTenderError(`Missing required fields: ${missing.map(f => labels[f]).join(", ")}`);
+                    isValid = false;
+                  }
+                }
+                if (isValid) setFormStep(prev => prev + 1);
+              }} className="btn-primary">
+                Next
+              </button>
+            </div>
+          )}
+
+          {/* Error display below buttons */}
+          {tenderError && (
+            <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 font-medium">
+              {tenderError}
+            </div>
+          )}
         </div>
       </div>
     );
@@ -20865,51 +20827,7 @@ const NoticeBoardSection = ({ tenders }: { tenders: Tender[] }) => {
 
   const mockNotices = React.useMemo(() => {
     const items: any[] = [];
-
-    effectiveTenders.forEach((t) => {
-      const pubDate = t.createdAt || t.publishedAt || t.updatedAt;
-      if (t.status === "Published" && pubDate) {
-        items.push({
-          id: `tender-${t.id}`,
-          ref: t.referenceNumber,
-          category: "tender",
-          title: `New tender open — ${t.referenceNumber}`,
-          posted: formatDateFull(pubDate),
-          summary: `A new Call for Proposals has been published for ${t.name} in ${(t.targetDistricts || []).join(", ") || "all districts"}.`,
-          content: `A new Call for Proposals has been published for ${t.name} (${t.referenceNumber}).\n\nDepartment: ${t.department || "N/A"}\nTechnology: ${(t.technologyTypes || []).join(", ") || "N/A"}\nDistricts: ${(t.targetDistricts || []).join(", ") || "All districts"}\nBudget: M ${(t.budget || 0).toLocaleString()}\nSubmission Deadline: ${t.deadline ? new Date(t.deadline).toLocaleDateString() : "N/A"}\n\n${t.instruction || ""}`,
-          pinned: true,
-          show_countdown: false,
-          deadline_date: t.deadline || null,
-          linked_tender: { ref: t.referenceNumber, name: t.name },
-          attachments: [],
-        });
-      }
-      if (t.awardedAt) {
-        items.push({
-          id: `award-${t.id}`,
-          ref: t.referenceNumber,
-          category: "award",
-          title: `Contract award — ${t.referenceNumber}`,
-          posted: formatDateFull(t.awardedAt),
-          summary: `Following the evaluation by the RBF Management Team, the contract has been awarded for ${t.name}.`,
-          content: `The RBF Management Team has completed evaluation and is pleased to announce the award of contract for ${t.name} (${t.referenceNumber}).\n\nTechnology: ${(t.technologyTypes || []).join(", ") || "N/A"}\nDistrict: ${(t.targetDistricts || []).join(", ") || "N/A"}\nTarget: ${t.approximateInstallationTarget || "N/A"} households\n\nAll applicants have been notified of the outcome via email. Unsuccessful applicants may request feedback by contacting: rbf@energy.gov.ls`,
-          pinned: false,
-          show_countdown: false,
-          deadline_date: null,
-          linked_tender: { ref: t.referenceNumber, name: t.name },
-          attachments: [],
-        });
-      }
-    });
-
-    items.push(
-      { id: "ntc-001", ref: "NTC-2026-001", category: "deadline", title: "Submission deadline approaching — TND-000024", posted: "01 Apr 2026", summary: "Stage 2 proposals for SHS Deployment Phase 9 are due on 11 Jun 2026 at 14:00.", content: "Stage 2 (Site-Specific) proposals are due on 11 Jun 2026 at 14:00. Vendors who were shortlisted in Stage 1 must submit their complete technical and financial proposals before this deadline.\n\nLate submissions will not be accepted under any circumstances.", pinned: true, show_countdown: true, deadline_date: "2026-06-11", linked_tender: { ref: "TND-000024", name: "SHS Deployment Phase 9" }, attachments: [] },
-      { id: "ntc-002", ref: "NTC-2026-002", category: "training", title: "Pre-bid meeting — TND-000026", posted: "01 Apr 2026", summary: "A mandatory pre-bid meeting will be held for all vendors intending to submit proposals for TND-000026.", content: "A mandatory pre-bid clarification meeting will be held for all vendors interested in submitting proposals for TND-000026.\n\nDate: Monday, 20 April 2026\nTime: 10:00 — 12:00 SAST\nFormat: Virtual — Zoom Webinar\n\nTo register: Email rbf@energy.gov.ls by 15 Apr 2026 with subject line: Pre-Bid Meeting Registration TND-000026", pinned: false, show_countdown: false, deadline_date: null, linked_tender: { ref: "TND-000026", name: "Community Solar Mini-Grid Phase 11" }, attachments: [{ name: "TND-000026 Tender Schedule.pdf", type: "pdf" }, { name: "Mini-Grid Technical Guidelines.pdf", type: "pdf" }] },
-      { id: "ntc-003", ref: "NTC-2026-003", category: "clarification", title: "Addendum 1 — TND-000024", posted: "25 Mar 2026", summary: "Following questions received during the pre-bid meeting, clarifications are issued and form part of the tender documents.", content: "Following questions received during the pre-bid meeting, the following clarifications are issued:\n\nQ1: Can vendors from outside Lesotho apply?\nA1: No. All vendors must be registered in Lesotho.\n\nQ2: Is co-financing mandatory?\nA2: Co-financing is not mandatory but will attract additional evaluation points.", pinned: false, show_countdown: false, deadline_date: null, linked_tender: { ref: "TND-000024", name: "SHS Deployment Phase 9" }, attachments: [{ name: "TND-000024 Addendum 1.pdf", type: "pdf" }] },
-      { id: "ntc-004", ref: "NTC-2026-004", category: "training", title: "RBF platform training — All registered vendors", posted: "15 Mar 2026", summary: "Free online training session on how to use the RBF Digital Platform for pre-qualification, bid submission, and payment claims.", content: "The RBF Management Team will conduct a free online training session.\n\nTopics covered:\n- Pre-qualification process\n- Bid submission workflow\n- Installation reporting\n- Payment claims\n\nDate: 25 Mar 2026\nTime: 14:00 — 16:00 SAST\nFormat: Zoom webinar\n\nRegistration is required.", pinned: false, show_countdown: false, deadline_date: null, linked_tender: null, attachments: [] },
-      { id: "ntc-005", ref: "NTC-2026-005", category: "general", title: "Programme update — Q4 2025 results", posted: "20 Feb 2026", summary: "The Renewable Lesotho programme achieved significant results in Q4 2025.", content: "The Renewable Lesotho programme achieved the following results in Q4 2025:\n\n- 1,600 new households with clean energy\n- 52% female-headed households served\n- 8 districts now with active installations\n- LSL 850,000 disbursed to vendors\n\nFull quarterly report available on request. Contact: rbf@energy.gov.ls", pinned: false, show_countdown: false, deadline_date: null, linked_tender: null, attachments: [] },
-      { id: "ntc-006", ref: "NTC-2026-006", category: "clarification", title: "Deadline extension — TND-000023", posted: "10 Feb 2026", summary: "Due to the public holiday on 11 Feb 2026, the submission deadline has been extended by 3 working days.", content: "Due to the public holiday on 11 Feb 2026, the submission deadline for TND-000023 has been extended by 3 working days.\n\nORIGINAL DEADLINE: 11 Feb 2026, 14:00\nNEW DEADLINE: 16 Feb 2026, 14:00\n\nAll other tender conditions remain unchanged.", pinned: false, show_countdown: false, deadline_date: null, linked_tender: { ref: "TND-000023", name: "SHS Deployment Phase 8" }, attachments: [] },
-    );
+    return items;
 
     items.sort((a, b) => new Date(b.posted).getTime() - new Date(a.posted).getTime());
     return items;
@@ -21037,9 +20955,9 @@ const NoticeBoardSection = ({ tenders }: { tenders: Tender[] }) => {
               {notice.attachments?.length > 0 && (
                 <div className="mt-4 flex flex-wrap gap-2">
                   {notice.attachments.map((att: any, i: number) => (
-                    <span key={i} className="text-[12px] px-3 py-1.5 rounded-lg flex items-center gap-1.5" style={{ backgroundColor: '#f3f4f6', border: '0.5px solid #d1d5db', color: '#374151' }}>
+                    <a key={i} href={att.url} target="_blank" rel="noopener noreferrer" className="text-[12px] px-3 py-1.5 rounded-lg flex items-center gap-1.5 bg-[#f3f4f6] border border-[#d1d5db] text-[#374151] hover:bg-[#e5e7eb] transition">
                       <FileText size={14} /> {att.name}
-                    </span>
+                    </a>
                   ))}
                 </div>
               )}

@@ -99,7 +99,7 @@ export default function RmtNoticeManagement({ currentUser }: { currentUser?: any
     linked_tender: "" as string | null,
     is_pinned: false,
     send_email_notification: false,
-    show_countdown: false,
+    show_countdown: true,
     countdown_date: "" as string,
     publish_date: "" as string,
     schedule_publish: false,
@@ -138,16 +138,19 @@ export default function RmtNoticeManagement({ currentUser }: { currentUser?: any
     if (formData.linked_tender && viewMode === "create") {
       const selectedTender = tenders.find((t) => t.id === formData.linked_tender);
       if (selectedTender?.deadline) {
-        const tenderDeadline = new Date(selectedTender.deadline);
-        if (!formData.countdown_date || new Date(formData.countdown_date) < tenderDeadline) {
-          handleInputChange("countdown_date", selectedTender.deadline.split("T")[0]);
+        // Convert ISO date to YYYY-MM-DDTHH:mm for datetime-local
+        const deadlineDate = new Date(selectedTender.deadline);
+        const formattedDate = deadlineDate.toISOString().slice(0, 16);
+        
+        if (!formData.countdown_date) {
+          handleInputChange("countdown_date", formattedDate);
         }
         if (!formData.show_countdown) {
           handleInputChange("show_countdown", true);
         }
       }
     }
-  }, [formData.linked_tender]);
+  }, [formData.linked_tender, viewMode, tenders]);
 
   const filteredNotices = useMemo(() => {
     let filtered = notices;
@@ -174,7 +177,18 @@ export default function RmtNoticeManagement({ currentUser }: { currentUser?: any
   }, [notices, filterStatus, filterCategory, searchTerm]);
 
   const handleInputChange = (field: string, value: any) => {
-    setFormData((prev) => ({ ...prev, [field]: value }));
+    setFormData((prev) => {
+      const next = { ...prev, [field]: value };
+      if (field === "category") {
+        if (value === "tender" || value === "deadline") {
+          next.show_countdown = true;
+        } else {
+          next.show_countdown = false;
+          next.countdown_date = "";
+        }
+      }
+      return next;
+    });
   };
 
   const resetForm = () => {
@@ -186,7 +200,7 @@ export default function RmtNoticeManagement({ currentUser }: { currentUser?: any
       linked_tender: null,
       is_pinned: false,
       send_email_notification: false,
-      show_countdown: false,
+      show_countdown: true,
       countdown_date: "",
       publish_date: "",
       schedule_publish: false,
@@ -215,12 +229,14 @@ export default function RmtNoticeManagement({ currentUser }: { currentUser?: any
       publish_date: notice.publish_date ? new Date(notice.publish_date).toISOString().slice(0, 16) : "",
       schedule_publish: notice.schedule_publish || false,
     });
+    setExistingAttachments(notice.attachments || []);
     setViewMode("edit");
   };
 
   const handlePreview = (notice?: Notice) => {
     if (notice) {
       setSelectedNotice(notice);
+      setExistingAttachments(notice.attachments || []);
     } else {
       setSelectedNotice({
         id: "",
@@ -233,6 +249,7 @@ export default function RmtNoticeManagement({ currentUser }: { currentUser?: any
         is_pinned: formData.is_pinned,
         show_countdown: formData.show_countdown,
         countdown_date: formData.countdown_date || null,
+        attachments: [], // Placeholder for preview
         status: NoticeStatus.DRAFT,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
@@ -255,8 +272,30 @@ export default function RmtNoticeManagement({ currentUser }: { currentUser?: any
       return;
     }
 
+    // Validate deadline for Tender/Deadline categories
+    const isTenderOrDeadline = formData.category === 'tender' || formData.category === 'deadline';
+    if (isTenderOrDeadline) {
+      if (!formData.countdown_date) {
+        addToast("error", "Deadline is required for Tender and Deadline notices.");
+        return;
+      }
+      if (!formData.linked_tender) {
+        addToast("error", "Linked Tender is required for Tender and Deadline notices.");
+        return;
+      }
+    }
+
     setSubmitting(true);
     try {
+      // Format countdown date to full ISO 8601 format
+      let formattedCountdownDate = null;
+      if (formData.show_countdown && formData.countdown_date) {
+        const dateObj = new Date(formData.countdown_date);
+        if (!isNaN(dateObj.getTime())) {
+          formattedCountdownDate = dateObj.toISOString();
+        }
+      }
+
       const payload: any = {
         title: formData.title.trim(),
         category: formData.category,
@@ -266,9 +305,15 @@ export default function RmtNoticeManagement({ currentUser }: { currentUser?: any
         is_pinned: formData.is_pinned,
         send_email_notification: formData.send_email_notification,
         show_countdown: formData.show_countdown,
-        countdown_date: formData.show_countdown && formData.countdown_date ? new Date(formData.countdown_date).toISOString() : null,
         status: publishImmediately ? NoticeStatus.PUBLISHED : NoticeStatus.DRAFT,
       };
+
+      if (formData.show_countdown && formData.countdown_date && formData.countdown_date.trim() !== "") {
+        payload.countdown_date = formattedCountdownDate;
+      }
+
+
+
 
       if (formData.linked_tender) {
         const linkedTender = tenders.find(t => t.id === formData.linked_tender);
@@ -292,11 +337,12 @@ export default function RmtNoticeManagement({ currentUser }: { currentUser?: any
 
       let result: Notice;
       if (viewMode === "create") {
-        result = await createNotice(payload);
+        result = await createNotice(payload, attachments);
         setNotices((prev) => [result, ...prev]);
         addToast("success", "Notice created successfully.");
       } else if (viewMode === "edit" && selectedNotice) {
-        result = await updateNotice(selectedNotice.id, payload);
+        const allAttachments = existingAttachments.length > 0 ? [] : attachments;
+        result = await updateNotice(selectedNotice.id, payload, allAttachments);
         setNotices((prev) => prev.map((n) => (n.id === result.id ? result : n)));
         addToast("success", "Notice updated successfully.");
       }
@@ -401,6 +447,144 @@ export default function RmtNoticeManagement({ currentUser }: { currentUser?: any
     } else {
       setAttachments(prev => prev.filter((_, i) => i !== index));
     }
+  };
+
+  const renderNoticeCard = (notice: Notice) => {
+    const catConfig = categoryConfig[notice.category] || categoryConfig[NoticeCategory.GENERAL];
+    const isExpanded = selectedNotice?.id === notice.id && viewMode === "detail";
+
+    return (
+      <div
+        key={notice.id}
+        className={`bg-white rounded-xl border border-slate-200 overflow-hidden hover:shadow-lg transition-all group ${isExpanded ? 'ring-2 ring-emerald-500' : ''}`}
+      >
+        <div 
+          className="p-5 cursor-pointer"
+          onClick={() => {
+            if (isExpanded) {
+              setViewMode("list");
+              setSelectedNotice(null);
+            } else {
+              setSelectedNotice(notice);
+              setViewMode("detail");
+            }
+          }}
+        >
+          <div className="flex items-start justify-between gap-3 mb-3">
+            <span className={`px-2.5 py-1 rounded-lg text-xs font-bold ${catConfig.color}`}>
+              {catConfig.label.toUpperCase()}
+            </span>
+            {notice.is_pinned && (
+              <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-700 text-[10px] font-bold uppercase tracking-wider">
+                PINNED
+              </span>
+            )}
+          </div>
+
+          <p className="text-xs font-mono text-slate-400 mb-2">{notice.notice_id}</p>
+          <h4 className="font-bold text-slate-900 mb-2 line-clamp-2">{notice.title}</h4>
+          <p className="text-sm text-slate-500 line-clamp-2 mb-4">{notice.summary}</p>
+
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-slate-400">
+                {formatDate(notice.published_at || notice.created_at)}
+              </span>
+              {notice.attachments && notice.attachments.length > 0 && (
+                <span className="flex items-center gap-1 text-[10px] text-slate-400 bg-slate-50 px-1.5 py-0.5 rounded border border-slate-100">
+                  <FileText size={10} /> {notice.attachments.length}
+                </span>
+              )}
+            </div>
+            {notice.status === NoticeStatus.PUBLISHED ? (
+              <span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-700 text-[10px] font-bold uppercase">
+                LIVE
+              </span>
+            ) : notice.status === NoticeStatus.SCHEDULED ? (
+              <span className="px-2 py-0.5 rounded bg-blue-100 text-blue-700 text-[10px] font-bold uppercase">
+                SCHEDULED
+              </span>
+            ) : (
+              <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-600 text-[10px] font-bold uppercase">
+                DRAFT
+              </span>
+            )}
+          </div>
+        </div>
+
+        {isExpanded && (
+          <div className="px-5 py-5 border-t border-slate-100 bg-slate-50/50">
+            <div className="prose prose-sm max-w-none text-slate-600 mb-6 whitespace-pre-wrap">
+              {notice.content}
+            </div>
+
+            {notice.attachments && notice.attachments.length > 0 && (
+              <div className="space-y-2">
+                <h5 className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Attachments</h5>
+                {notice.attachments.map((att: any, i: number) => (
+                  <a 
+                    key={i} 
+                    href={att.url} 
+                    target="_blank" 
+                    rel="noopener noreferrer"
+                    className="flex items-center gap-3 p-3 bg-white rounded-lg border border-slate-200 hover:border-emerald-500 hover:shadow-sm transition group/att"
+                  >
+                    <FileText size={18} className="text-slate-400 group-hover/att:text-emerald-600" />
+                    <span className="text-sm text-slate-700 flex-1 truncate">{att.name}</span>
+                    <Download size={14} className="text-slate-400 group-hover/att:text-emerald-600" />
+                  </a>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="px-5 py-3 bg-slate-50 border-t border-slate-100 flex items-center justify-between">
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => handlePreview(notice)}
+              className="p-2 rounded-lg text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 transition"
+              title="Preview"
+            >
+              <Eye size={16} />
+            </button>
+            <button
+              onClick={() => handleEdit(notice)}
+              className="p-2 rounded-lg text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition"
+              title="Edit"
+            >
+              <Edit size={16} />
+            </button>
+            {notice.status === NoticeStatus.DRAFT ? (
+              <button
+                onClick={() => handlePublish(notice)}
+                disabled={actionLoading === notice.id}
+                className="p-2 rounded-lg text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 transition disabled:opacity-50"
+                title="Publish"
+              >
+                {actionLoading === notice.id ? <RefreshCw size={16} className="animate-spin" /> : <Send size={16} />}
+              </button>
+            ) : (
+              <button
+                onClick={() => handleUnpublish(notice)}
+                disabled={actionLoading === notice.id}
+                className="p-2 rounded-lg text-slate-400 hover:text-amber-600 hover:bg-amber-50 transition disabled:opacity-50"
+                title="Unpublish"
+              >
+                <EyeOff size={16} />
+              </button>
+            )}
+          </div>
+          <button
+            onClick={() => setConfirmDelete(notice.id)}
+            className="p-2 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition"
+            title="Delete"
+          >
+            <Trash2 size={16} />
+          </button>
+        </div>
+      </div>
+    );
   };
 
   if (loading) {
@@ -614,11 +798,14 @@ export default function RmtNoticeManagement({ currentUser }: { currentUser?: any
 
               <div>
                 <label className="block text-sm font-bold text-slate-700 mb-2">
-                  Linked Tender (optional)
+                  Linked Tender {(formData.category === 'tender' || formData.category === 'deadline') ? <span className="text-rose-500">*</span> : "(optional)"}
                 </label>
                 <select
                   value={formData.linked_tender || ""}
-                  onChange={(e) => handleInputChange("linked_tender", e.target.value || null)}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    handleInputChange("linked_tender", val === "" ? null : parseInt(val, 10));
+                  }}
                   className="w-full px-4 py-3 rounded-xl border border-slate-300 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-200 outline-none transition bg-white"
                 >
                   <option value="">Select a tender...</option>
@@ -629,6 +816,21 @@ export default function RmtNoticeManagement({ currentUser }: { currentUser?: any
                   ))}
                 </select>
               </div>
+
+              {(formData.category === 'tender' || formData.category === 'deadline') && (
+                <div>
+                  <label className="block text-sm font-bold text-slate-700 mb-2">
+                    Deadline / Countdown Date <span className="text-rose-500">*</span>
+                  </label>
+                  <input
+                    type="datetime-local"
+                    value={formData.countdown_date}
+                    onChange={(e) => handleInputChange("countdown_date", e.target.value)}
+                    className="w-full px-4 py-3 rounded-xl border border-slate-300 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-200 outline-none transition"
+                  />
+                  <p className="text-xs text-slate-500 mt-1">Required for Tender and Deadline notices. This will show a countdown to the vendors.</p>
+                </div>
+              )}
 
               <div>
                 <label className="block text-sm font-bold text-slate-700 mb-2">
@@ -746,31 +948,6 @@ export default function RmtNoticeManagement({ currentUser }: { currentUser?: any
                       <p className="text-xs text-slate-500">Notify all registered vendors</p>
                     </div>
                   </label>
-                </div>
-
-                <div>
-                  <label className="flex items-center gap-3 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={formData.show_countdown}
-                      onChange={(e) => handleInputChange("show_countdown", e.target.checked)}
-                      className="w-4 h-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
-                    />
-                    <div>
-                      <span className="text-sm font-medium text-slate-700">Show countdown</span>
-                      <p className="text-xs text-slate-500">Display days remaining</p>
-                    </div>
-                  </label>
-                  {formData.show_countdown && (
-                    <div className="mt-2 ml-7">
-                      <input
-                        type="datetime-local"
-                        value={formData.countdown_date}
-                        onChange={(e) => handleInputChange("countdown_date", e.target.value)}
-                        className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm focus:border-emerald-500 outline-none"
-                      />
-                    </div>
-                  )}
                 </div>
               </div>
 
@@ -965,96 +1142,7 @@ export default function RmtNoticeManagement({ currentUser }: { currentUser?: any
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {filteredNotices.map((notice) => {
-            const catConfig = categoryConfig[notice.category] || categoryConfig[NoticeCategory.GENERAL];
-            return (
-              <div
-                key={notice.id}
-                className="bg-white rounded-xl border border-slate-200 overflow-hidden hover:shadow-lg hover:border-slate-300 transition-all group"
-              >
-                <div className="p-5">
-                  <div className="flex items-start justify-between gap-3 mb-3">
-                    <span className={`px-2.5 py-1 rounded-lg text-xs font-bold ${catConfig.color}`}>
-                      {catConfig.label.toUpperCase()}
-                    </span>
-                    {notice.is_pinned && (
-                      <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-700 text-[10px] font-bold uppercase tracking-wider">
-                        PINNED
-                      </span>
-                    )}
-                  </div>
-
-                  <p className="text-xs font-mono text-slate-400 mb-2">{notice.notice_id}</p>
-                  <h4 className="font-bold text-slate-900 mb-2 line-clamp-2">{notice.title}</h4>
-                  <p className="text-sm text-slate-500 line-clamp-2 mb-4">{notice.summary}</p>
-
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs text-slate-400">
-                      {formatDate(notice.published_at || notice.created_at)}
-                    </span>
-                    {notice.status === NoticeStatus.PUBLISHED ? (
-                      <span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-700 text-[10px] font-bold uppercase">
-                        LIVE
-                      </span>
-                    ) : notice.status === NoticeStatus.SCHEDULED ? (
-                      <span className="px-2 py-0.5 rounded bg-blue-100 text-blue-700 text-[10px] font-bold uppercase">
-                        SCHEDULED
-                      </span>
-                    ) : (
-                      <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-600 text-[10px] font-bold uppercase">
-                        DRAFT
-                      </span>
-                    )}
-                  </div>
-                </div>
-
-                <div className="px-5 py-3 bg-slate-50 border-t border-slate-100 flex items-center justify-between">
-                  <div className="flex items-center gap-1">
-                    <button
-                      onClick={() => handlePreview(notice)}
-                      className="p-2 rounded-lg text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 transition"
-                      title="Preview"
-                    >
-                      <Eye size={16} />
-                    </button>
-                    <button
-                      onClick={() => handleEdit(notice)}
-                      className="p-2 rounded-lg text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition"
-                      title="Edit"
-                    >
-                      <Edit size={16} />
-                    </button>
-                    {notice.status === NoticeStatus.DRAFT ? (
-                      <button
-                        onClick={() => handlePublish(notice)}
-                        disabled={actionLoading === notice.id}
-                        className="p-2 rounded-lg text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 transition disabled:opacity-50"
-                        title="Publish"
-                      >
-                        {actionLoading === notice.id ? <RefreshCw size={16} className="animate-spin" /> : <Send size={16} />}
-                      </button>
-                    ) : (
-                      <button
-                        onClick={() => handleUnpublish(notice)}
-                        disabled={actionLoading === notice.id}
-                        className="p-2 rounded-lg text-slate-400 hover:text-amber-600 hover:bg-amber-50 transition disabled:opacity-50"
-                        title="Unpublish"
-                      >
-                        <EyeOff size={16} />
-                      </button>
-                    )}
-                  </div>
-                  <button
-                    onClick={() => setConfirmDelete(notice.id)}
-                    className="p-2 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition"
-                    title="Delete"
-                  >
-                    <Trash2 size={16} />
-                  </button>
-                </div>
-              </div>
-            );
-          })}
+          {filteredNotices.map(renderNoticeCard)}
         </div>
       )}
 

@@ -3639,7 +3639,7 @@ function mapNoticeToApi(notice: Partial<Notice>): any {
   if (notice.is_pinned !== undefined) data.is_pinned = notice.is_pinned;
   if (notice.send_email_notification !== undefined) data.send_email_notification = notice.send_email_notification;
   if (notice.show_countdown !== undefined) data.show_countdown = notice.show_countdown;
-  if (notice.countdown_date !== undefined) data.countdown_date = notice.countdown_date;
+  if (notice.countdown_date !== undefined && notice.countdown_date !== null) data.countdown_date = notice.countdown_date;
   if (notice.status !== undefined) data.status = notice.status;
   if (notice.published_at !== undefined) data.published_at = notice.published_at;
   if (notice.publish_date !== undefined) data.publish_date = notice.publish_date;
@@ -3668,20 +3668,68 @@ export async function fetchNotice(noticeId: string): Promise<Notice> {
   return mapNoticeFromApi(data);
 }
 
-export async function createNotice(notice: Partial<Notice>): Promise<Notice> {
-  const data = await http<any>(`/api/notices/`, {
-    method: "POST",
-    body: JSON.stringify(mapNoticeToApi(notice)),
-  });
-  return mapNoticeFromApi(data);
+export async function createNotice(notice: Partial<Notice>, attachments?: File[]): Promise<Notice> {
+  const mapped = mapNoticeToApi(notice);
+  if (attachments && attachments.length > 0) {
+    const form = new FormData();
+    
+    // Append mapped fields
+    Object.keys(mapped).forEach(key => {
+      if (key !== 'attachments' && mapped[key] !== undefined && mapped[key] !== null) {
+        form.append(key, String(mapped[key]));
+      } else if (mapped[key] === null) {
+        form.append(key, ""); // Send empty string for null to be handled by backend
+      }
+    });
+    
+    attachments.forEach((file, idx) => {
+      form.append(`attachments-${idx}`, file);
+    });
+    
+    const data = await http<any>(`/api/notices/`, {
+      method: "POST",
+      body: form,
+    });
+    return mapNoticeFromApi(data);
+  } else {
+    const data = await http<any>(`/api/notices/`, {
+      method: "POST",
+      body: JSON.stringify(mapped),
+    });
+    return mapNoticeFromApi(data);
+  }
 }
 
-export async function updateNotice(noticeId: string, notice: Partial<Notice>): Promise<Notice> {
-  const data = await http<any>(`/api/notices/${noticeId}/`, {
-    method: "PATCH",
-    body: JSON.stringify(mapNoticeToApi(notice)),
-  });
-  return mapNoticeFromApi(data);
+export async function updateNotice(noticeId: string, notice: Partial<Notice>, attachments?: File[]): Promise<Notice> {
+  const mapped = mapNoticeToApi(notice);
+  if (attachments && attachments.length > 0) {
+    const form = new FormData();
+    
+    // Append mapped fields
+    Object.keys(mapped).forEach(key => {
+      if (key !== 'attachments' && mapped[key] !== undefined && mapped[key] !== null) {
+        form.append(key, String(mapped[key]));
+      } else if (mapped[key] === null) {
+        form.append(key, ""); // Send empty string for null
+      }
+    });
+    
+    attachments.forEach((file, idx) => {
+      form.append(`attachments-${idx}`, file);
+    });
+    
+    const data = await http<any>(`/api/notices/${noticeId}/`, {
+      method: "PATCH",
+      body: form,
+    });
+    return mapNoticeFromApi(data);
+  } else {
+    const data = await http<any>(`/api/notices/${noticeId}/`, {
+      method: "PATCH",
+      body: JSON.stringify(mapped),
+    });
+    return mapNoticeFromApi(data);
+  }
 }
 
 export async function deleteNotice(noticeId: string): Promise<void> {
