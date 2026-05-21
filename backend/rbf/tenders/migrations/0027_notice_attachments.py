@@ -10,9 +10,19 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.AddField(
-            model_name='notice',
-            name='attachments',
-            field=models.JSONField(blank=True, default=list),
+        migrations.SeparateDatabaseAndState(
+            state_operations=[
+                migrations.AddField(
+                    model_name='notice',
+                    name='attachments',
+                    field=models.JSONField(blank=True, default=list),
+                ),
+            ],
+            database_operations=[
+                migrations.RunSQL(
+                    "ALTER TABLE tenders_notice ADD COLUMN IF NOT EXISTS attachments JSONB DEFAULT '[]'::jsonb NOT NULL",
+                    reverse_sql="ALTER TABLE tenders_notice DROP COLUMN attachments",
+                ),
+            ],
         ),
     ]
