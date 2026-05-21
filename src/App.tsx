@@ -1182,12 +1182,15 @@ const Tenders = ({
   initialView = "list",
   initialTenderId,
   onTenderOpened,
+  onNavigate,
 }: {
-  initialView?: "list" | "create" | "details" | "verify" | "publish" | "award" | "security" | "edit";
+  initialView?: "list" | "create" | "details" | "verify" | "publish" | "award" | "edit";
   initialTenderId?: string | null;
   onTenderOpened?: () => void;
+  onNavigate?: (action: string, id?: string) => void;
 }) => {
-  const [view, setView] = useState<"list" | "create" | "details" | "verify" | "publish" | "award" | "security" | "edit">(initialView);
+  const [view, setView] = useState<"list" | "create" | "details" | "verify" | "publish" | "award" | "edit">(initialView);
+  const navigateView = (newView: typeof view, id?: string | null) => { setView(newView); onNavigate?.(newView, id ?? undefined); };
   const [selectedTender, setSelectedTender] = useState<Tender | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [tenders, setTenders] = useState<Tender[]>([]);
@@ -1496,10 +1499,11 @@ const Tenders = ({
 
   React.useEffect(() => {
     if (!initialTenderId) return;
-    void openTenderView(initialTenderId, "details")
+    const targetView = initialView === "list" ? "details" : initialView;
+    void openTenderView(initialTenderId, targetView, false)
       .catch(() => null)
       .finally(() => onTenderOpened?.());
-  }, [initialTenderId]);
+  }, [initialTenderId, initialView]);
 
   const showNotification = (msg: string) => {
     setNotification(msg);
@@ -1540,10 +1544,10 @@ const Tenders = ({
     setMilestonePaymentScheduleFile(null);
     milestonePaymentScheduleFileRef.current = null;
     setTenderError(null);
-    setView("create");
+    navigateView("create");
   };
 
-  const openTenderView = async (tenderId: string, nextView: typeof view) => {
+  const openTenderView = async (tenderId: string, nextView: typeof view, syncUrl = true) => {
     try {
       setIsActioning(true);
       const full = await fetchTender(tenderId);
@@ -1618,7 +1622,11 @@ const Tenders = ({
         });
         setDistrictDropdownOpen(false);
       }
-      setView(nextView);
+      if (syncUrl) {
+        navigateView(nextView, tenderId);
+      } else {
+        setView(nextView);
+      }
     } catch (err: any) {
       showNotification(toActionError(err, "Failed to load tender details."));
     } finally {
@@ -1666,14 +1674,6 @@ const Tenders = ({
     showNotification(`Search complete. ${filteredTenders.length} tender(s) matched.`);
   };
 
-  const runSecuritySearch = () => {
-    showNotification("Security verification search executed.");
-  };
-
-  const verifySecurityTender = (tenderId: string) => {
-    showNotification(`Security money verified for ${tenderId}.`);
-  };
-
   const upsertTender = (updatedTender: Tender) => {
     setTenders(prev => prev.map(t => t.id === updatedTender.id ? updatedTender : t));
     setSelectedTender(prev => (prev && prev.id === updatedTender.id ? updatedTender : prev));
@@ -1708,7 +1708,7 @@ const Tenders = ({
       } else {
         showNotification("Tender published and bidders notified successfully!");
       }
-      setView("list");
+      navigateView("list");
     } catch (err: any) {
       showNotification(toActionError(err, "Failed to publish tender."));
     } finally {
@@ -1794,7 +1794,7 @@ const Tenders = ({
       }
       await loadTenders();
       showNotification(isEditing ? "Tender updated successfully." : "Tender saved successfully.");
-      setView("list");
+      navigateView("list");
     } catch (e: any) {
       const raw = String(e?.message || e);
       setTenderError(toFriendlyApiMessage(raw) || "Failed to save tender. Please review fields and try again.");
@@ -1810,7 +1810,7 @@ const Tenders = ({
       upsertTender(updated);
       await loadTenders();
       showNotification("Tender information verified successfully.");
-      setView("list");
+      navigateView("list");
     } catch (err: any) {
       showNotification(toActionError(err, "Failed to verify tender."));
     } finally {
@@ -1829,7 +1829,7 @@ const Tenders = ({
       upsertTender(updated);
       await loadTenders();
       showNotification(`Bidding closed for ${tenderLabel}.`);
-      setView("list");
+      navigateView("list");
     } catch (err: any) {
       showNotification(toActionError(err, "Failed to close bidding."));
     } finally {
@@ -2030,7 +2030,7 @@ const Tenders = ({
       <div className="space-y-6 max-w-5xl mx-auto">
         <NotificationToast />
         <div className="flex items-center gap-4 mb-8">
-          <button onClick={() => setView("list")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
+          <button onClick={() => navigateView("list")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
             <X size={20} />
           </button>
           <h1 className="text-2xl font-bold text-slate-900">
@@ -2447,7 +2447,7 @@ const Tenders = ({
             {/* Save buttons (step 4) */}
             {formStep === 4 && (
               <div className="flex justify-end gap-3 pt-6 border-t border-slate-100">
-                <button onClick={() => setView("list")} className="btn-secondary">Cancel</button>
+                <button onClick={() => navigateView("list")} className="btn-secondary">Cancel</button>
                 {isEditing ? (
                   <button
                     onClick={() =>
@@ -2574,7 +2574,7 @@ const Tenders = ({
         <NotificationToast />
         <div className="flex items-center justify-between mb-8">
           <div className="flex items-center gap-4">
-            <button onClick={() => setView("list")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
+            <button onClick={() => navigateView("list")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
               <ChevronRight className="rotate-180" size={20} />
             </button>
             <div>
@@ -2590,7 +2590,7 @@ const Tenders = ({
             )}
             {!selectedTender.isVerified && (
               <button 
-                onClick={() => setView("verify")}
+                onClick={() => navigateView("verify")}
                 className="btn-primary bg-blue-600 hover:bg-blue-700 flex items-center gap-2"
               >
                 <ShieldCheck size={18} /> Verify
@@ -2598,7 +2598,7 @@ const Tenders = ({
             )}
             {selectedTender.isVerified && selectedTender.status === TenderStatus.DRAFT && (
               <button 
-                onClick={() => setView("publish")}
+                onClick={() => navigateView("publish")}
                 className="btn-primary flex items-center gap-2"
               >
                 <Zap size={18} /> Publish
@@ -2849,7 +2849,7 @@ const Tenders = ({
                   </button>
                 )}
                 {(selectedTender.status === TenderStatus.EVALUATION || selectedTender.status === TenderStatus.PUBLISHED) && (
-                  <button onClick={() => setView("award")} className="btn-primary w-full bg-purple-600 hover:bg-purple-700">
+                  <button onClick={() => navigateView("award")} className="btn-primary w-full bg-purple-600 hover:bg-purple-700">
                     Issue Award
                   </button>
                 )}
@@ -2916,11 +2916,11 @@ const Tenders = ({
     return (
       <div className="space-y-6 max-w-2xl mx-auto">
         <NotificationToast />
-        <div className="flex items-center gap-4 mb-8">
-          <button onClick={() => setView("list")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
-            <ChevronRight className="rotate-180" size={20} />
-          </button>
-          <h1 className="text-2xl font-bold text-slate-900">Publish Tender & Notify Bidders</h1>
+          <div className="flex items-center gap-4 mb-8">
+            <button onClick={() => navigateView("list")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
+              <ChevronRight className="rotate-180" size={20} />
+            </button>
+            <h1 className="text-2xl font-bold text-slate-900">Publish Tender & Notify Bidders</h1>
         </div>
 
         <div className="card p-8 space-y-8">
@@ -2953,7 +2953,7 @@ const Tenders = ({
           </div>
 
           <div className="flex justify-end gap-3 pt-6 border-t border-slate-100">
-            <button onClick={() => setView("list")} className="btn-secondary">Cancel</button>
+            <button onClick={() => navigateView("list")} className="btn-secondary">Cancel</button>
             <button onClick={() => handlePublish(selectedTender.id)} disabled={isActioning} className="btn-primary disabled:opacity-60">
               {isActioning ? "Publishing..." : "Publish Now"}
             </button>
@@ -2967,11 +2967,11 @@ const Tenders = ({
     return (
       <div className="space-y-6 max-w-5xl mx-auto">
         <NotificationToast />
-        <div className="flex items-center gap-4 mb-8">
-          <button onClick={() => setView("list")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
-            <ChevronRight className="rotate-180" size={20} />
-          </button>
-          <h1 className="text-2xl font-bold text-slate-900">Verify Tender Details</h1>
+          <div className="flex items-center gap-4 mb-8">
+            <button onClick={() => navigateView("list")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
+              <ChevronRight className="rotate-180" size={20} />
+            </button>
+            <h1 className="text-2xl font-bold text-slate-900">Verify Tender Details</h1>
         </div>
 
         <div className="card p-8 space-y-8">
@@ -3065,7 +3065,7 @@ const Tenders = ({
           </div>
 
           <div className="flex justify-end gap-3 pt-6 border-t border-slate-100">
-            <button onClick={() => setView("list")} className="btn-secondary">Cancel</button>
+            <button onClick={() => navigateView("list")} className="btn-secondary">Cancel</button>
             <button onClick={() => handleVerify(selectedTender.id)} disabled={isActioning} className="btn-primary bg-blue-600 hover:bg-blue-700 flex items-center gap-2 disabled:opacity-60">
               <ShieldCheck size={18} /> Confirm Verification
             </button>
@@ -3075,80 +3075,6 @@ const Tenders = ({
     );
   }
 
-  if (view === "security") {
-    return (
-      <div className="space-y-6">
-        <NotificationToast />
-        <div className="flex items-center gap-4">
-          <button onClick={() => setView("list")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
-            <ChevronRight className="rotate-180" size={20} />
-          </button>
-          <h1 className="text-2xl font-bold text-slate-900">Verify Security Money</h1>
-        </div>
-
-        <div className="card p-6 flex flex-wrap gap-4 items-center">
-          <div className="flex-1 grid grid-cols-1 md:grid-cols-4 gap-4">
-            <div className="space-y-1">
-              <label className="text-[10px] font-bold text-slate-400 uppercase">Search By</label>
-              <select className="input-field py-1.5 text-sm">
-                <option>Tender ID</option>
-                <option>Vendor Name</option>
-              </select>
-            </div>
-            <div className="space-y-1">
-              <label className="text-[10px] font-bold text-slate-400 uppercase">Search Key</label>
-              <input type="text" placeholder="Enter ID..." className="input-field py-1.5 text-sm" />
-            </div>
-            <div className="space-y-1">
-              <label className="text-[10px] font-bold text-slate-400 uppercase">Award Date</label>
-              <input type="date" className="input-field py-1.5 text-sm" />
-            </div>
-            <div className="flex items-end">
-              <button onClick={runSecuritySearch} className="btn-primary w-full py-2 flex items-center justify-center gap-2">
-                <Search size={16} /> Search
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <div className="card overflow-hidden">
-          <table className="w-full text-left">
-            <thead>
-              <tr className="bg-slate-50 border-b border-slate-100">
-                <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">ID</th>
-                <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Tender ID</th>
-                <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Vendor</th>
-                <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Amount</th>
-                <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Status</th>
-                <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase text-right">Action</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {[
-                { id: "T-001", vendor: "SolarLease Ltd", amount: "M 25,000", status: "Pending" },
-                { id: "T-002", vendor: "EcoGrid Solutions", amount: "M 60,000", status: "Verified" },
-              ].map((item, i) => (
-                <tr key={i} className="hover:bg-slate-50">
-                  <td className="px-6 py-4 font-mono text-xs text-slate-500">{`SEC-${String(i + 1).padStart(3, "0")}`}</td>
-                  <td className="px-6 py-4 font-mono text-sm">{item.id}</td>
-                  <td className="px-6 py-4 text-sm font-medium">{item.vendor}</td>
-                  <td className="px-6 py-4 text-sm font-bold">{item.amount}</td>
-                  <td className="px-6 py-4">
-                    <span className={`badge ${item.status === 'Verified' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
-                      {item.status}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4 text-right">
-                    <button onClick={() => verifySecurityTender(item.id)} className="btn-secondary py-1 px-3 text-xs">Verify Tender</button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div className="space-y-6">
@@ -3160,9 +3086,6 @@ const Tenders = ({
           <span className="text-xs font-bold text-slate-400 uppercase tracking-widest">Stage 1 & 2</span>
         </div>
         <div className="flex gap-3">
-          <button onClick={() => setView("security")} className="btn-secondary flex items-center gap-2">
-            <ShieldCheck size={18} /> Verify Security
-          </button>
           <button onClick={startCreateTender} className="btn-primary flex items-center gap-2">
             <Plus size={18} /> Add Tender
           </button>
@@ -3334,7 +3257,7 @@ const Tenders = ({
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             className="fixed inset-0 z-[100] bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4"
-            onClick={() => setView("list")}
+            onClick={() => navigateView("list")}
           >
             <motion.div 
               initial={{ scale: 0.95, opacity: 0 }}
@@ -3783,7 +3706,7 @@ const Tenders = ({
               </div>
 
               <div className="flex flex-col gap-3 border-t border-slate-100 pt-4 sm:flex-row">
-                <button onClick={() => setView("list")} className="btn-secondary flex-1">Cancel</button>
+                <button onClick={() => navigateView("list")} className="btn-secondary flex-1">Cancel</button>
                 {selectedTender.status !== TenderStatus.AWARDED && !selectedTender.intentToAwardAt && (
                   <button onClick={() => handleAward(selectedTender.id)} disabled={isActioning} className="btn-primary flex-1 bg-purple-600 hover:bg-purple-700 disabled:opacity-60">
                     {isActioning ? "Submitting..." : "Issue Intent to Award"}
@@ -3929,644 +3852,9 @@ const GISMap = () => (
   </div>
 );
 
-const Monitoring = () => {
-  const [activeTab, setActiveTab] = useState<"dashboard" | "api" | "fallback" | "gis" | "reports" | "field">("dashboard");
-  const [selectedAudit, setSelectedAudit] = useState<any>(null);
-  const [view, setView] = useState<"list" | "review">("list");
-  const [actionMessage, setActionMessage] = useState<string | null>(null);
 
-  const verificationQueue = [
-    { 
-      id: "AUD-1025", 
-      site: "Ha-Ramabanta School", 
-      district: "Maseru", 
-      tech: "SHS", 
-      verifier: "Verifier_Maseru", 
-      date: "2025-05-20", 
-      status: "Submitted",
-      photos: 4,
-      notes: "System installed and operational. Beneficiary trained on maintenance.",
-      coordinates: "-29.635, 27.912",
-      gender: "Female",
-      householdId: "HH-4421"
-    },
-    { 
-      id: "AUD-1026", 
-      site: "Mokhotlong Clinic", 
-      district: "Mokhotlong", 
-      tech: "Mini-grid", 
-      verifier: "Verifier_Mokhotlong", 
-      date: "2025-05-21", 
-      status: "Submitted",
-      photos: 12,
-      notes: "Mini-grid connection verified for 12 households and clinic. Smart meter syncing correctly.",
-      coordinates: "-29.283, 29.067",
-      gender: "Other",
-      householdId: "HH-9901"
-    },
-    { 
-      id: "AUD-1027", 
-      site: "Semonkong Community", 
-      district: "Maseru", 
-      tech: "ICS", 
-      verifier: "Verifier_Maseru", 
-      date: "2025-05-22", 
-      status: "Flagged",
-      photos: 2,
-      notes: "Discrepancy in serial numbers. Requires follow-up with vendor.",
-      coordinates: "-29.833, 28.050",
-      gender: "Male",
-      householdId: "HH-1120"
-    },
-  ];
 
-  const [smartMeterData, setSmartMeterData] = useState([
-    { id: "MTR-8821", project: "T-001", vendor: "SolarLease Ltd", kwh: 450.2, uptime: 99.9, status: "Online", lastSync: "2025-05-23T10:00:00Z" },
-    { id: "MTR-8822", project: "T-001", vendor: "SolarLease Ltd", kwh: 380.5, uptime: 99.8, status: "Online", lastSync: "2025-05-23T10:05:00Z" },
-    { id: "MTR-9901", project: "T-002", vendor: "EcoGrid Solutions", kwh: 1250.0, uptime: 94.5, status: "Warning", lastSync: "2025-05-23T09:45:00Z", alert: "Low Battery Voltage" },
-    { id: "MTR-7712", project: "T-003", vendor: "SolarLease Ltd", kwh: 0.0, uptime: 0.0, status: "Offline", lastSync: "2025-05-22T18:30:00Z", alert: "Communication Failure" },
-  ]);
 
-  const vendorReports = [
-    { vendor: "SolarLease Ltd", totalKwh: 15420, avgUptime: 98.2, sites: 45, ranking: 1 },
-    { vendor: "EcoGrid Solutions", totalKwh: 12800, avgUptime: 96.5, sites: 12, ranking: 2 },
-    { vendor: "Mountain Power", totalKwh: 8900, avgUptime: 92.1, sites: 28, ranking: 3 },
-  ];
-
-  const showActionMessage = (message: string) => {
-    setActionMessage(message);
-    setTimeout(() => setActionMessage(null), 2500);
-  };
-
-  const handleRegisterDevice = () => {
-    const nextId = `MTR-${Math.floor(1000 + Math.random() * 9000)}`;
-    setSmartMeterData(prev => [
-      {
-        id: nextId,
-        project: "T-NEW",
-        vendor: "New Vendor",
-        kwh: 0,
-        uptime: 0,
-        status: "Online",
-        lastSync: new Date().toISOString(),
-      } as any,
-      ...prev,
-    ]);
-    showActionMessage(`Device ${nextId} registered.`);
-  };
-
-  const downloadFallbackTemplate = () => {
-    const csv = [
-      "meter_id,project,vendor,lat,long,timestamp_kat",
-      "MTR-0001,T-001,SolarLease Ltd,-29.635,27.912,2026-03-09T00:00:00Z",
-    ].join("\n");
-    triggerDownload("meter_template.csv", csv, "text/csv;charset=utf-8");
-    showActionMessage("Template downloaded.");
-  };
-
-  const handleFallbackUpload = () => {
-    showActionMessage("CSV uploaded and queued for validation.");
-  };
-
-  const exportVendorPdf = () => {
-    const content = [
-      "Vendor Performance Report (Mock Export)",
-      `Generated: ${new Date().toISOString()}`,
-      "",
-      ...vendorReports.map((row) => `${row.ranking}. ${row.vendor} | ${row.totalKwh} kWh | ${row.avgUptime}% uptime`),
-    ].join("\n");
-    triggerDownload("vendor_performance_report.txt", content);
-    showActionMessage("Vendor performance report exported.");
-  };
-
-  const exportMonitoringSummary = () => {
-    const content = [
-      "Monitoring Summary",
-      `Generated: ${new Date().toISOString()}`,
-      "",
-      ...smartMeterData.map((meter) => `${meter.id} | ${meter.project} | ${meter.vendor} | ${meter.status}`),
-    ].join("\n");
-    triggerDownload("monitoring_summary.txt", content);
-    showActionMessage("Monitoring summary exported.");
-  };
-
-  const renderDashboard = () => (
-    <div className="space-y-6">
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <StatCard label="Total Energy Generated" value="37,120 kWh" trend="+12%" icon={Zap} color="bg-emerald-500" />
-        <StatCard label="Average Uptime" value="96.8%" trend="+0.5%" icon={Activity} color="bg-blue-500" />
-        <StatCard label="Active Installations" value="1,245" trend="+45" icon={Database} color="bg-indigo-500" />
-        <StatCard label="Anomalies Detected" value="8" trend="-2" icon={AlertCircle} color="bg-rose-500" />
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2 card p-6">
-          <div className="flex items-center justify-between mb-6">
-            <h3 className="text-lg font-bold">Energy Generation Trend</h3>
-            <select className="text-xs font-bold border-none bg-slate-100 rounded-lg px-2 py-1">
-              <option>Last 7 Days</option>
-              <option>Last 30 Days</option>
-            </select>
-          </div>
-          <div className="h-[300px]">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={[
-                { name: 'Mon', value: 4200 },
-                { name: 'Tue', value: 4500 },
-                { name: 'Wed', value: 4100 },
-                { name: 'Thu', value: 4800 },
-                { name: 'Fri', value: 5200 },
-                { name: 'Sat', value: 4900 },
-                { name: 'Sun', value: 4600 },
-              ]}>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fontSize: 12, fill: '#64748b'}} />
-                <YAxis axisLine={false} tickLine={false} tick={{fontSize: 12, fill: '#64748b'}} />
-                <Tooltip 
-                  contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
-                />
-                <Line type="monotone" dataKey="value" stroke="#10b981" strokeWidth={3} dot={{ r: 4, fill: '#10b981' }} activeDot={{ r: 6 }} />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
-
-        <div className="card p-6">
-          <h3 className="text-lg font-bold mb-6">Status Alerts</h3>
-          <div className="space-y-4">
-            {smartMeterData.filter(m => m.status !== "Online").map(m => (
-              <div key={m.id} className="flex gap-4 p-3 rounded-xl bg-slate-50 border border-slate-100">
-                <div className={`p-2 rounded-lg ${m.status === 'Offline' ? 'bg-rose-100 text-rose-600' : 'bg-amber-100 text-amber-600'}`}>
-                  <AlertCircle size={20} />
-                </div>
-                <div>
-                  <p className="text-sm font-bold text-slate-900">{m.alert}</p>
-                  <p className="text-xs text-slate-500">Meter: {m.id} • {m.vendor}</p>
-                </div>
-              </div>
-            ))}
-          </div>
-          <button onClick={() => setActiveTab("field")} className="w-full mt-6 py-2 text-sm font-bold text-emerald-600 hover:text-emerald-700 transition-colors">
-            View All Alerts
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-
-  const renderMeterAPI = () => (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h3 className="text-lg font-bold">Smart Meter API Integration</h3>
-        <button onClick={handleRegisterDevice} className="btn-primary flex items-center gap-2 text-xs py-2">
-          <Plus size={16} /> Register New Device
-        </button>
-      </div>
-      <div className="card overflow-hidden">
-        <table className="w-full text-left">
-          <thead>
-            <tr className="bg-slate-50 border-b border-slate-100">
-              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">ID</th>
-              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Meter ID</th>
-              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Project / Vendor</th>
-              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">kWh Gen.</th>
-              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Uptime</th>
-              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Last Sync</th>
-              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Status</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
-            {smartMeterData.map((meter, idx) => (
-              <tr key={meter.id} className="hover:bg-slate-50 transition-colors">
-                <td className="px-6 py-4 font-mono text-xs text-slate-500">{`SM-${String(idx + 1).padStart(3, "0")}`}</td>
-                <td className="px-6 py-4 font-mono text-xs font-bold text-blue-600">{meter.id}</td>
-                <td className="px-6 py-4">
-                  <div className="text-sm font-bold text-slate-900">{meter.project}</div>
-                  <div className="text-xs text-slate-500">{meter.vendor}</div>
-                </td>
-                <td className="px-6 py-4 text-sm font-medium text-slate-700">{meter.kwh} kWh</td>
-                <td className="px-6 py-4 text-sm text-slate-600">{meter.uptime}%</td>
-                <td className="px-6 py-4 text-xs text-slate-500">{new Date(meter.lastSync).toLocaleString()}</td>
-                <td className="px-6 py-4">
-                  <span className={`badge ${
-                    meter.status === 'Online' ? 'bg-emerald-100 text-emerald-700' : 
-                    meter.status === 'Warning' ? 'bg-amber-100 text-amber-700' : 
-                    'bg-rose-100 text-rose-700'
-                  }`}>
-                    {meter.status}
-                  </span>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-
-  const renderFallback = () => (
-    <div className="max-w-2xl mx-auto space-y-8">
-      <div className="text-center space-y-2">
-        <h3 className="text-xl font-bold text-slate-900">Manual CSV Upload (Fallback)</h3>
-        <p className="text-slate-500">Upload data manually when smart meter API synchronization fails.</p>
-      </div>
-      
-      <div className="card p-8 space-y-6">
-        <div className="p-4 bg-blue-50 rounded-xl border border-blue-100 flex gap-4 items-start">
-          <div className="p-2 bg-blue-100 text-blue-600 rounded-lg">
-            <Download size={20} />
-          </div>
-          <div>
-            <p className="text-sm font-bold text-blue-900">Need the template?</p>
-            <p className="text-xs text-blue-700 mt-1">Download our standardized CSV template matching the Prospect schema.</p>
-            <button onClick={downloadFallbackTemplate} className="mt-2 text-xs font-bold text-blue-600 underline">Download Template.csv</button>
-          </div>
-        </div>
-
-        <div className="space-y-4">
-          <div className="border-2 border-dashed border-slate-200 rounded-2xl p-12 text-center hover:border-emerald-500 transition-colors cursor-pointer group">
-            <Upload className="mx-auto text-slate-400 mb-4 group-hover:text-emerald-500 transition-colors" size={48} />
-            <p className="text-sm font-bold text-slate-900">Click to upload or drag and drop</p>
-            <p className="text-xs text-slate-500 mt-1">Only .csv files under 5MB are supported</p>
-          </div>
-          
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-1">
-              <label className="text-xs font-bold text-slate-500 uppercase ml-1">Latitude *</label>
-              <input type="number" step="any" className="input-field" placeholder="-29.635" />
-            </div>
-            <div className="space-y-1">
-              <label className="text-xs font-bold text-slate-500 uppercase ml-1">Longitude *</label>
-              <input type="number" step="any" className="input-field" placeholder="27.912" />
-            </div>
-          </div>
-          
-          <div className="space-y-1">
-            <label className="text-xs font-bold text-slate-500 uppercase ml-1">Date & Time *</label>
-            <input type="datetime-local" className="input-field" />
-          </div>
-        </div>
-
-        <button onClick={handleFallbackUpload} className="btn-primary w-full py-3 rounded-xl">Upload and Validate Data</button>
-      </div>
-    </div>
-  );
-
-  const renderReports = () => (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h3 className="text-lg font-bold">Vendor Performance Reports</h3>
-        <div className="flex gap-2">
-          <select className="text-xs font-bold border border-slate-200 rounded-lg px-3 py-2">
-            <option>Daily Report</option>
-            <option>Weekly Report</option>
-            <option>Monthly Report</option>
-          </select>
-          <button onClick={exportVendorPdf} className="btn-secondary flex items-center gap-2 text-xs py-2">
-            <Download size={16} /> Export PDF
-          </button>
-        </div>
-      </div>
-      <div className="card overflow-hidden">
-        <table className="w-full text-left">
-          <thead>
-            <tr className="bg-slate-50 border-b border-slate-100">
-              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">ID</th>
-              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Ranking</th>
-              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Vendor</th>
-              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Total kWh</th>
-              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Avg Uptime</th>
-              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Sites</th>
-              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase text-right">Performance</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
-            {vendorReports.map((report, idx) => (
-              <tr key={report.vendor} className="hover:bg-slate-50 transition-colors">
-                <td className="px-6 py-4 font-mono text-xs text-slate-500">{`RPT-${String(idx + 1).padStart(3, "0")}`}</td>
-                <td className="px-6 py-4">
-                  <div className={`w-8 h-8 rounded-full flex items-center justify-center font-bold text-sm ${
-                    report.ranking === 1 ? 'bg-amber-100 text-amber-700' : 
-                    report.ranking === 2 ? 'bg-slate-200 text-slate-700' : 
-                    'bg-orange-100 text-orange-700'
-                  }`}>
-                    {report.ranking}
-                  </div>
-                </td>
-                <td className="px-6 py-4 font-bold text-slate-900">{report.vendor}</td>
-                <td className="px-6 py-4 text-sm text-slate-700">{report.totalKwh.toLocaleString()} kWh</td>
-                <td className="px-6 py-4 text-sm text-slate-600">{report.avgUptime}%</td>
-                <td className="px-6 py-4 text-sm text-slate-600">{report.sites}</td>
-                <td className="px-6 py-4 text-right">
-                  <div className="inline-flex items-center gap-1 text-emerald-600 font-bold text-xs">
-                    <TrendingUp size={14} />
-                    Top Performer
-                  </div>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-
-  const renderFieldVerification = () => {
-    if (view === "review" && selectedAudit) {
-      return (
-        <div className="space-y-6 max-w-5xl mx-auto">
-          <div className="flex items-center gap-4">
-            <button onClick={() => setView("list")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
-              <ChevronRight className="rotate-180" size={20} />
-            </button>
-            <div>
-              <h1 className="text-2xl font-bold text-slate-900">Review Field Survey</h1>
-              <p className="text-slate-500">Survey ID: {selectedAudit.id} • Household: {selectedAudit.householdId}</p>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            <div className="lg:col-span-2 space-y-6">
-              <div className="card p-6 space-y-6">
-                <div className="flex items-center justify-between border-b border-slate-100 pb-4">
-                  <h3 className="text-lg font-bold">Survey Evidence</h3>
-                  <span className="text-xs font-bold text-slate-400 uppercase tracking-widest">{selectedAudit.photos} Photos Attached</span>
-                </div>
-                
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                  {[1, 2, 3, 4].map(i => (
-                    <div key={i} className="aspect-square rounded-xl bg-slate-100 overflow-hidden relative group cursor-pointer">
-                      <img 
-                        src={`https://picsum.photos/seed/survey-${selectedAudit.id}-${i}/400/400`} 
-                        alt="Evidence" 
-                        className="w-full h-full object-cover group-hover:scale-110 transition-transform"
-                        referrerPolicy="no-referrer"
-                      />
-                    </div>
-                  ))}
-                </div>
-
-                <div className="grid grid-cols-2 gap-6">
-                  <div className="space-y-1">
-                    <p className="text-[10px] font-bold text-slate-400 uppercase">Beneficiary Gender</p>
-                    <p className="text-sm font-bold text-slate-900">{selectedAudit.gender}</p>
-                  </div>
-                  <div className="space-y-1">
-                    <p className="text-[10px] font-bold text-slate-400 uppercase">Survey Timestamp</p>
-                    <p className="text-sm font-bold text-slate-900">{selectedAudit.date}</p>
-                  </div>
-                </div>
-
-                <div className="space-y-4 pt-4">
-                  <h4 className="text-sm font-bold text-slate-900 uppercase tracking-widest">Field Officer Notes</h4>
-                  <div className="p-4 bg-slate-50 rounded-xl border border-slate-100 text-sm text-slate-600 italic">
-                    "{selectedAudit.notes}"
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className="space-y-6">
-              <div className="card p-6 bg-slate-900 text-white">
-                <h3 className="text-lg font-bold mb-4">GIS Validation</h3>
-                <div className="aspect-video bg-slate-800 rounded-xl mb-4 flex items-center justify-center overflow-hidden relative">
-                  <MapIcon size={48} className="text-slate-700" />
-                  <div className="absolute inset-0 bg-emerald-500/10" />
-                  <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2">
-                    <div className="w-4 h-4 bg-emerald-500 rounded-full animate-ping" />
-                    <div className="w-4 h-4 bg-emerald-500 rounded-full absolute top-0 border-2 border-white" />
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  <p className="text-xs text-slate-400 font-bold uppercase tracking-widest">Captured Coordinates</p>
-                  <p className="text-sm font-mono">{selectedAudit.coordinates}</p>
-                </div>
-              </div>
-
-              <div className="card p-6 space-y-4">
-                <h3 className="text-lg font-bold">Verification Decision</h3>
-                <div className="grid grid-cols-2 gap-3">
-                  <button onClick={() => setView("list")} className="btn-secondary border-rose-200 text-rose-600">Flag</button>
-                  <button onClick={() => setView("list")} className="btn-primary">Match</button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      );
-    }
-
-    return (
-      <div className="space-y-6">
-        <div className="flex items-center justify-between">
-          <h3 className="text-lg font-bold">Field Verification Queue (Kobo/ODK)</h3>
-          <button onClick={() => showActionMessage("Filters applied to current survey queue.")} className="btn-secondary flex items-center gap-2 text-xs py-2">
-            <Filter size={16} /> Filter Surveys
-          </button>
-        </div>
-        <div className="card overflow-hidden">
-          <table className="w-full text-left">
-            <thead>
-              <tr className="bg-slate-50 border-b border-slate-100">
-                <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">ID</th>
-                <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Survey ID</th>
-                <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Household / District</th>
-                <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Field Officer</th>
-                <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Status</th>
-                <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase text-right">Action</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {verificationQueue.map((audit, idx) => (
-                <tr key={audit.id} className="hover:bg-slate-50 transition-colors">
-                  <td className="px-6 py-4 font-mono text-xs text-slate-500">{`SVY-${String(idx + 1).padStart(3, "0")}`}</td>
-                  <td className="px-6 py-4 font-mono text-xs font-bold text-blue-600">{audit.id}</td>
-                  <td className="px-6 py-4">
-                    <div className="text-sm font-bold text-slate-900">{audit.householdId}</div>
-                    <div className="text-xs text-slate-500">{audit.district} • {audit.tech}</div>
-                  </td>
-                  <td className="px-6 py-4 text-sm text-slate-600">{audit.verifier}</td>
-                  <td className="px-6 py-4">
-                    <span className={`badge ${audit.status === 'Flagged' ? 'bg-rose-100 text-rose-700' : 'bg-amber-100 text-amber-700'}`}>
-                      {audit.status}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4 text-right">
-                    <button 
-                      onClick={() => { setSelectedAudit(audit); setView("review"); }}
-                      className="btn-secondary py-1.5 px-4 text-xs"
-                    >
-                      Verify Survey
-                    </button>
-                  </td>
-                </tr>
-              ))}
-</tbody>
-        </table>
-      </div>
-    </div>
-  );
-};
-
-  const renderGIS = () => (
-    <div className="space-y-6 h-full flex flex-col">
-      <div className="flex items-center justify-between">
-        <h3 className="text-lg font-bold">GIS Validation Dashboard</h3>
-        <div className="flex gap-4">
-          <div className="flex gap-2">
-            <span className="flex items-center gap-1 text-[10px] font-bold uppercase text-slate-400">
-              <div className="w-2 h-2 rounded-full bg-emerald-500" /> Online
-            </span>
-            <span className="flex items-center gap-1 text-[10px] font-bold uppercase text-slate-400">
-              <div className="w-2 h-2 rounded-full bg-amber-500" /> Warning
-            </span>
-            <span className="flex items-center gap-1 text-[10px] font-bold uppercase text-slate-400">
-              <div className="w-2 h-2 rounded-full bg-rose-500" /> Offline
-            </span>
-          </div>
-        </div>
-      </div>
-
-      <div className="flex-1 card relative bg-slate-200 overflow-hidden min-h-[500px]">
-        <div className="absolute inset-0 flex items-center justify-center">
-          <div className="text-center space-y-4">
-            <Globe size={64} className="mx-auto text-slate-400" />
-            <div>
-              <p className="text-lg font-bold text-slate-600">Lesotho GIS Infrastructure</p>
-              <p className="text-slate-500">Spatial Validation Engine Powered by Prospect</p>
-            </div>
-          </div>
-        </div>
-        
-        {/* Mock Pins */}
-        <div className="absolute top-1/4 left-1/3 w-6 h-6 rounded-full bg-emerald-500 border-4 border-white shadow-xl animate-pulse cursor-pointer group">
-          <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 p-4 bg-white rounded-2xl shadow-2xl opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10 border border-slate-100">
-            <div className="flex justify-between items-start mb-2">
-              <div>
-                <p className="text-xs font-bold text-slate-900">Meter: MTR-8821</p>
-                <p className="text-[10px] text-slate-500">Project: RL-2025-SHS-01</p>
-              </div>
-              <span className="px-2 py-0.5 rounded bg-emerald-100 text-[8px] font-bold text-emerald-700 uppercase">Verified</span>
-            </div>
-            <div className="grid grid-cols-2 gap-2 text-[10px] mb-2">
-              <div>
-                <p className="text-slate-400 uppercase font-bold">Vendor</p>
-                <p className="text-slate-700">SolarLease Ltd</p>
-              </div>
-              <div>
-                <p className="text-slate-400 uppercase font-bold">Accuracy</p>
-                <p className="text-slate-700">2.4 meters</p>
-              </div>
-              <div>
-                <p className="text-slate-400 uppercase font-bold">Lat/Long</p>
-                <p className="text-slate-700">-29.63, 27.91</p>
-              </div>
-              <div>
-                <p className="text-slate-400 uppercase font-bold">Validated By</p>
-                <p className="text-slate-700">Admin_01</p>
-              </div>
-            </div>
-            <div className="pt-2 border-t border-slate-100 flex justify-between items-center">
-              <span className="text-xs font-bold text-emerald-600">450.2 kWh Produced</span>
-              <span className="text-[8px] text-slate-400">2025-05-23</span>
-            </div>
-          </div>
-        </div>
-        <div className="absolute top-1/2 left-1/2 w-6 h-6 rounded-full bg-amber-500 border-4 border-white shadow-xl" />
-        <div className="absolute bottom-1/3 right-1/4 w-6 h-6 rounded-full bg-rose-500 border-4 border-white shadow-xl" />
-
-        <div className="absolute top-6 right-6">
-          <div className="card p-4 w-64 space-y-4">
-            <h4 className="font-bold text-xs uppercase tracking-widest text-slate-400">Filters</h4>
-            <div className="space-y-2">
-              <select className="input-field text-xs py-2">
-                <option>All Tenders</option>
-                <option>RL-2025-SHS-01</option>
-              </select>
-              <select className="input-field text-xs py-2">
-                <option>All Regions</option>
-                <option>Maseru</option>
-              </select>
-              <select className="input-field text-xs py-2">
-                <option>All Statuses</option>
-                <option>Online</option>
-              </select>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-
-  return (
-    <div className="space-y-6">
-      <AnimatePresence>
-        {actionMessage && (
-          <motion.div
-            initial={{ opacity: 0, y: -12 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -12 }}
-            className="fixed top-24 right-8 z-[300] bg-blue-600 text-white px-5 py-2.5 rounded-xl shadow-xl text-sm font-medium"
-          >
-            {actionMessage}
-          </motion.div>
-        )}
-      </AnimatePresence>
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900">Monitoring & Evaluation</h1>
-          <p className="text-slate-500">Real-time performance tracking powered by Prospect Integration</p>
-        </div>
-        <div className="flex gap-3">
-          <button onClick={exportMonitoringSummary} className="btn-secondary flex items-center gap-2">
-            <Download size={18} /> Export PDF
-          </button>
-        </div>
-      </div>
-
-      <div className="flex gap-2 p-1 bg-slate-100 rounded-2xl w-fit">
-        {[
-          { id: 'dashboard', label: 'Dashboard', icon: BarChart3 },
-          { id: 'api', label: 'Meter API', icon: Zap },
-          { id: 'fallback', label: 'Fallback', icon: Upload },
-          { id: 'gis', label: 'GIS Map', icon: Globe },
-          { id: 'reports', label: 'Reports', icon: FileText },
-          { id: 'field', label: 'Field Verification', icon: ClipboardCheck },
-        ].map((tab) => (
-          <button
-            key={tab.id}
-            onClick={() => setActiveTab(tab.id as any)}
-            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold transition-all ${
-              activeTab === tab.id 
-                ? "bg-white text-emerald-600 shadow-sm" 
-                : "text-slate-500 hover:text-slate-900"
-            }`}
-          >
-            <tab.icon size={18} />
-            {tab.label}
-          </button>
-        ))}
-      </div>
-
-      <AnimatePresence mode="wait">
-        <motion.div
-          key={activeTab}
-          initial={{ opacity: 0, y: 10 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: -10 }}
-          transition={{ duration: 0.2 }}
-        >
-          {activeTab === 'dashboard' && renderDashboard()}
-          {activeTab === 'api' && renderMeterAPI()}
-          {activeTab === 'fallback' && renderFallback()}
-          {activeTab === 'gis' && renderGIS()}
-          {activeTab === 'reports' && renderReports()}
-          {activeTab === 'field' && renderFieldVerification()}
-        </motion.div>
-      </AnimatePresence>
-    </div>
-  );
-};
 
 const PreQualification = () => {
   const [selectedVendor, setSelectedVendor] = useState<VendorPrequalification | null>(null);
@@ -7072,8 +6360,9 @@ const Disbursements = ({
   );
 };
 
-const Reports = ({ currentUser }: { currentUser: User | null }) => {
+const Reports = ({ currentUser, onNavigate }: { currentUser: User | null; onNavigate?: (action: string, id?: string) => void }) => {
   const [view, setView] = useState<'list' | 'analytics' | 'hub'>('hub');
+  const navigateView = (newView: typeof view, id?: string | null) => { setView(newView); onNavigate?.(newView, id ?? undefined); };
   const [dateRange, setDateRange] = useState('Last 30 Days');
   const [notification, setNotification] = useState<string | null>(null);
 
@@ -7127,7 +6416,7 @@ const Reports = ({ currentUser }: { currentUser: User | null }) => {
     return (
       <div className="p-6">
         <div className="flex items-center gap-4 mb-6">
-          <button onClick={() => setView('list')} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
+          <button onClick={() => navigateView('list')} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
             <ChevronRight className="rotate-180" size={20} />
           </button>
           <h1 className="text-2xl font-bold text-slate-900">Report Center</h1>
@@ -7154,7 +6443,7 @@ const Reports = ({ currentUser }: { currentUser: User | null }) => {
         </AnimatePresence>
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-4">
-            <button onClick={() => setView('list')} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
+            <button onClick={() => navigateView('list')} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
               <ChevronRight className="rotate-180" size={20} />
             </button>
             <div>
@@ -7309,7 +6598,7 @@ const Reports = ({ currentUser }: { currentUser: User | null }) => {
           <p className="text-sm text-slate-500">Generate and download verified program reports</p>
         </div>
         <div className="flex gap-3">
-          <button onClick={() => setView('analytics')} className="btn-secondary flex items-center gap-2">
+          <button onClick={() => navigateView('analytics')} className="btn-secondary flex items-center gap-2">
             <BarChart3 size={18} /> View Analytics Dashboard
           </button>
         </div>
@@ -8315,7 +7604,7 @@ const PreQualificationSubmission = () => {
   );
 };
 
-const VendorTenders = ({ onSubmitTender }: { onSubmitTender?: (tenderId: string) => void }) => {
+const VendorTenders = ({ onSubmitTender, onNavigate }: { onSubmitTender?: (tenderId: string) => void; onNavigate?: (action: string, id?: string) => void }) => {
   const [tenders, setTenders] = useState<Tender[]>([]);
   const [selectedTender, setSelectedTender] = useState<Tender | null>(null);
   const [loading, setLoading] = useState(true);
@@ -8410,6 +7699,7 @@ const VendorTenders = ({ onSubmitTender }: { onSubmitTender?: (tenderId: string)
       setDetailLoading(true);
       const full = await fetchTender(tender.id);
       setSelectedTender(full);
+      onNavigate?.("details", tender.id);
     } catch (err: any) {
       const raw = String(err?.message || "");
       setError(isConnectivityError(raw) ? `Cannot connect to backend (${API_BASE}).` : (toFriendlyApiMessage(raw) || "Failed to load tender details."));
@@ -8456,7 +7746,7 @@ const VendorTenders = ({ onSubmitTender }: { onSubmitTender?: (tenderId: string)
     return (
       <div className="space-y-6 max-w-5xl mx-auto pb-12">
         <div className="flex items-center gap-4 mb-6">
-          <button onClick={() => setSelectedTender(null)} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
+          <button onClick={() => { setSelectedTender(null); onNavigate?.("list"); }} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
             <ChevronRight className="rotate-180" size={20} />
           </button>
           <div>
@@ -9840,6 +9130,7 @@ const VendorDashboard = ({
   initialSection,
   showOnlyContracting,
   onViewProfile,
+  onNavigate,
 }: {
   currentUser?: User | null;
   onGoToPrequal?: () => void;
@@ -9849,8 +9140,10 @@ const VendorDashboard = ({
   initialSection?: "contracting" | null;
   showOnlyContracting?: boolean;
   onViewProfile?: () => void;
+  onNavigate?: (action: string, id?: string) => void;
 }) => {
   const [view, setView] = useState<"dashboard" | "new-application" | "new-claim" | "details" | "bid">("dashboard");
+  const navigateView = (newView: typeof view, id?: string | null) => { setView(newView); onNavigate?.(newView, id ?? undefined); };
   const [isPreQualified, setIsPreQualified] = useState(false);
   const [selectedMilestone, setSelectedMilestone] = useState<(Milestone & { projectName?: string }) | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -10210,7 +9503,7 @@ const VendorDashboard = ({
       alert("You must complete the Pre-Qualification process before submitting new applications.");
       return;
     }
-    setView("new-application");
+    navigateView("new-application");
     setApplicationStep(1);
   };
 
@@ -10224,7 +9517,7 @@ const VendorDashboard = ({
       actualFemaleBeneficiaries: "",
       notes: "",
     });
-    setView("new-claim");
+    navigateView("new-claim");
     setClaimStep(1);
   };
 
@@ -10298,7 +9591,7 @@ const VendorDashboard = ({
     setBidSubmissionConfirmed(false);
   };
 
-  const openBidForm = async (tender: Tender, selectedBidId?: string | null) => {
+  const openBidForm = async (tender: Tender, selectedBidId?: string | null, syncUrl = true) => {
     if (!isPreQualified || !latestApprovedPrequal) {
       setBidMessage("Complete pre-qualification first");
       onGoToPrequal?.();
@@ -10334,14 +9627,18 @@ const VendorDashboard = ({
     } catch {
       setBidVersions([]);
     }
-    setView("bid");
+    if (syncUrl) {
+      navigateView("bid", tender.id);
+    } else {
+      setView("bid");
+    }
   };
 
   React.useEffect(() => {
     if (!pendingBidTenderId) return;
     const match = activeTenders.find(t => t.id === pendingBidTenderId);
     if (match) {
-      void openBidForm(match, pendingBidId);
+      void openBidForm(match, pendingBidId, false);
       if (onBidOpened) onBidOpened();
     }
   }, [pendingBidTenderId, pendingBidId, activeTenders]);
@@ -10938,7 +10235,7 @@ const VendorDashboard = ({
     } else {
       // Final submission
       alert("Application submitted successfully! It is now pending review.");
-      setView("dashboard");
+      navigateView("dashboard");
     }
   };
 
@@ -10961,7 +10258,7 @@ const VendorDashboard = ({
       })
         .then(() => {
           alert(`Claim for ${selectedMilestone.name} submitted successfully! Field verification will be scheduled.`);
-          setView("dashboard");
+          navigateView("dashboard");
           setClaimStep(1);
         })
         .catch((err: any) => {
@@ -11009,7 +10306,7 @@ const VendorDashboard = ({
     return (
       <div className="space-y-6 max-w-6xl mx-auto pb-20">
         <div className="flex items-center gap-4 mb-6">
-          <button onClick={() => setView("dashboard")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
+          <button onClick={() => navigateView("dashboard")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
             <ChevronRight className="rotate-180" size={20} />
           </button>
           <div>
@@ -11886,7 +11183,7 @@ const VendorDashboard = ({
     return (
       <div className="space-y-6 max-w-4xl mx-auto pb-20">
         <div className="flex items-center gap-4 mb-8">
-          <button onClick={() => setView("dashboard")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
+          <button onClick={() => navigateView("dashboard")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
             <ChevronRight className="rotate-180" size={20} />
           </button>
           <div>
@@ -12010,7 +11307,7 @@ const VendorDashboard = ({
             <div className="flex justify-between pt-8 border-t border-slate-100">
               <button 
                 type="button" 
-                onClick={() => claimStep > 1 ? setClaimStep(claimStep - 1) : setView("dashboard")}
+                onClick={() => claimStep > 1 ? setClaimStep(claimStep - 1) : navigateView("dashboard")}
                 className="btn-secondary px-8"
               >
                 {claimStep === 1 ? "Cancel" : "Previous"}
@@ -12029,7 +11326,7 @@ const VendorDashboard = ({
     return (
       <div className="space-y-6 max-w-4xl mx-auto pb-20">
         <div className="flex items-center gap-4 mb-8">
-          <button onClick={() => setView("dashboard")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
+          <button onClick={() => navigateView("dashboard")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
             <ChevronRight className="rotate-180" size={20} />
           </button>
           <div>
@@ -12188,7 +11485,7 @@ const VendorDashboard = ({
             <div className="flex justify-between pt-8 border-t border-slate-100">
               <button 
                 type="button" 
-                onClick={() => applicationStep > 1 ? setApplicationStep(applicationStep - 1) : setView("dashboard")}
+                onClick={() => applicationStep > 1 ? setApplicationStep(applicationStep - 1) : navigateView("dashboard")}
                 className="btn-secondary px-8"
               >
                 {applicationStep === 1 ? "Cancel" : "Previous"}
@@ -18086,9 +17383,10 @@ const ProjectsHub = ({
   );
 };
 
-const TACView = ({ mode }: { mode: "technical" | "financial" }) => {
+const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavigate?: (action: string, id?: string) => void }) => {
   const isFinancialEvaluationMode = mode === "financial";
   const [view, setView] = useState<"list" | "evaluate">("list");
+  const navigateView = (newView: typeof view, id?: string | null) => { setView(newView); onNavigate?.(newView, id ?? undefined); };
   const [submittedBidOpen, setSubmittedBidOpen] = useState(false);
   const [selectedEval, setSelectedEval] = useState<{
     bid: TenderBid;
@@ -18247,7 +17545,7 @@ const TACView = ({ mode }: { mode: "technical" | "financial" }) => {
         inclusivity: 0,
       },
     });
-    setView("evaluate");
+    navigateView("evaluate");
   };
 
   const handleStageOneDecision = async (decision: "shortlist" | "reject") => {
@@ -18266,7 +17564,7 @@ const TACView = ({ mode }: { mode: "technical" | "financial" }) => {
         await rejectTenderBid(selectedEval.bid.id, reason);
         showNotification(`Rejected ${selectedEval.bid.vendor_name} for this tender.`);
       }
-      setView("list");
+      navigateView("list");
       setSelectedEval(null);
       await loadEvaluations();
       window.dispatchEvent(new Event("rbf-bid-updated"));
@@ -18310,7 +17608,7 @@ const TACView = ({ mode }: { mode: "technical" | "financial" }) => {
       });
       await loadEvaluations();
       window.dispatchEvent(new Event("rbf-bid-updated"));
-      setView("list");
+      navigateView("list");
       showNotification(`${isFinancialEvaluationMode ? "Financial" : "Technical"} evaluation saved for ${selectedEval.bid.vendor_name}.`);
     } catch (err: any) {
       const raw = String(err?.message || "");
@@ -18389,7 +17687,7 @@ const TACView = ({ mode }: { mode: "technical" | "financial" }) => {
           </AnimatePresence>
           <div className="space-y-6 max-w-5xl mx-auto">
             <div className="flex items-center gap-4 mb-8">
-              <button onClick={() => setView("list")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
+              <button onClick={() => navigateView("list")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
                 <X size={20} />
               </button>
               <div>
@@ -18490,13 +17788,13 @@ const TACView = ({ mode }: { mode: "technical" | "financial" }) => {
 
     return (
       <>
-        <div className="space-y-6 max-w-4xl mx-auto">
-          <div className="flex items-center gap-4 mb-8">
-            <button onClick={() => setView("list")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
-              <X size={20} />
-            </button>
-            <div>
-              <h1 className="text-2xl font-bold text-slate-900">{isFinancialEvaluationMode ? "Financial Evaluation" : "Technical Evaluation"}</h1>
+          <div className="space-y-6 max-w-4xl mx-auto">
+            <div className="flex items-center gap-4 mb-8">
+              <button onClick={() => navigateView("list")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
+                <X size={20} />
+              </button>
+              <div>
+                <h1 className="text-2xl font-bold text-slate-900">{isFinancialEvaluationMode ? "Financial Evaluation" : "Technical Evaluation"}</h1>
               <p className="text-slate-500">{selectedEval.bid.vendor_name} • {selectedEval.bid.tender}</p>
             </div>
             <div className="ml-auto">
@@ -18673,7 +17971,7 @@ const TACView = ({ mode }: { mode: "technical" | "financial" }) => {
                 </div>
 
                 <div className="flex justify-end gap-3 pt-6 border-t border-slate-100">
-                  <button onClick={() => setView("list")} className="btn-secondary">Cancel</button>
+                  <button onClick={() => navigateView("list")} className="btn-secondary">Cancel</button>
                   <button onClick={handleSaveScore} className="btn-primary">Save Score</button>
                 </div>
               </div>
@@ -19143,8 +18441,9 @@ const TACView = ({ mode }: { mode: "technical" | "financial" }) => {
   );
 };
 
-const FieldVerifierView = ({ mode = "dashboard" }: { mode?: "dashboard" | "inspections" | "gis" | "reports" }) => {
+const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboard" | "inspections" | "gis" | "reports"; onNavigate?: (action: string, id?: string) => void }) => {
   const [view, setView] = useState<"dashboard" | "inspect">("dashboard");
+  const navigateView = (newView: typeof view, id?: string | null) => { setView(newView); onNavigate?.(newView, id ?? undefined); };
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [inspectionStep, setInspectionStep] = useState(1);
@@ -19317,7 +18616,7 @@ const FieldVerifierView = ({ mode = "dashboard" }: { mode?: "dashboard" | "inspe
     });
     setMessage(null);
     setError(null);
-    setView("inspect");
+    navigateView("inspect");
   };
 
   const focusQueueItemOnGisMap = (item: (typeof queue)[number]) => {
@@ -19413,7 +18712,7 @@ const FieldVerifierView = ({ mode = "dashboard" }: { mode?: "dashboard" | "inspe
       setMessage(`Verification submitted for ${selectedQueueItem?.siteName || "the assigned site"} with status ${updatedTask.status}.`);
       await loadVerifierData(true);
       setSelectedTaskId(updatedTask.id);
-      setView("dashboard");
+      navigateView("dashboard");
     } catch (err: any) {
       const raw = String(err?.message || "");
       setError(toFriendlyApiMessage(raw) || "Unable to submit this verification.");
@@ -19516,12 +18815,12 @@ const FieldVerifierView = ({ mode = "dashboard" }: { mode?: "dashboard" | "inspe
 
     return (
       <div className="space-y-6 max-w-5xl mx-auto pb-20">
-        <div className="flex items-center gap-4 mb-8">
-          <button onClick={() => setView("dashboard")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
-            <ChevronRight className="rotate-180" size={20} />
-          </button>
-          <div>
-            <h1 className="text-2xl font-bold text-slate-900">Inspection Workspace</h1>
+          <div className="flex items-center gap-4 mb-8">
+            <button onClick={() => navigateView("dashboard")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
+              <ChevronRight className="rotate-180" size={20} />
+            </button>
+            <div>
+              <h1 className="text-2xl font-bold text-slate-900">Inspection Workspace</h1>
             <p className="text-slate-500">
               {selectedQueueItem?.siteName} • Task {selectedTask.id} • {selectedProject?.district || selectedProject?.region || assignedDistrict}
             </p>
@@ -19774,7 +19073,7 @@ const FieldVerifierView = ({ mode = "dashboard" }: { mode?: "dashboard" | "inspe
               <div className="flex justify-between pt-8 border-t border-slate-100">
                 <button
                   type="button"
-                  onClick={() => inspectionStep > 1 ? setInspectionStep(inspectionStep - 1) : setView("dashboard")}
+                  onClick={() => inspectionStep > 1 ? setInspectionStep(inspectionStep - 1) : navigateView("dashboard")}
                   className="btn-secondary px-8"
                 >
                   {inspectionStep === 1 ? "Back to Queue" : "Previous"}
@@ -21100,7 +20399,13 @@ const NoticeBoardSection = ({ tenders }: { tenders: Tender[] }) => {
   );
 };
 
-const PublicPortal = ({ onBack, onRegisterClick }: { onBack?: () => void; onRegisterClick?: () => void }) => {
+const PublicPortal = ({ onBack, onRegisterClick, publicSubView, publicTenderId, onSubViewChange }: {
+  onBack?: () => void;
+  onRegisterClick?: () => void;
+  publicSubView?: null | "faq" | "tender";
+  publicTenderId?: string | null;
+  onSubViewChange?: (view: null | "faq" | "tender", id?: string | null) => void;
+}) => {
   const [tenders, setTenders] = useState<Tender[]>([]);
   const [selected, setSelected] = useState<Tender | null>(null);
   const [page, setPage] = useState(1);
@@ -21129,6 +20434,20 @@ const PublicPortal = ({ onBack, onRegisterClick }: { onBack?: () => void; onRegi
     };
     loadKpi();
   }, []);
+
+  React.useEffect(() => {
+    if (publicSubView === "faq") {
+      setShowFaq(true);
+      setSelected(null);
+    } else if (publicSubView === "tender" && publicTenderId && tenders.length > 0) {
+      const t = tenders.find(t => t.id === publicTenderId);
+      if (t) setSelected(t);
+      setShowFaq(false);
+    } else if (!publicSubView) {
+      setSelected(null);
+      setShowFaq(false);
+    }
+  }, [publicSubView, publicTenderId, tenders]);
 
   const totalPages = Math.ceil(tenders.length / perPage);
   const paginatedTenders = tenders.slice((page - 1) * perPage, page * perPage);
@@ -21211,7 +20530,11 @@ const PublicPortal = ({ onBack, onRegisterClick }: { onBack?: () => void; onRegi
                     <span className="text-sm font-bold text-rose-600">Deadline: {t.deadline ? new Date(t.deadline).toLocaleDateString() : 'N/A'}</span>
                   </div>
                 </div>
-                <button onClick={() => setSelected(t)} className="btn-primary text-sm py-2">View</button>
+                <button onClick={() => {
+                  setSelected(t);
+                  onSubViewChange?.("tender", t.id);
+                  window.history.replaceState({ __app: "rbf-spa", showPublicPortal: true, publicView: "tender", publicViewId: t.id }, "", `/public/tender/${t.id}`);
+                }} className="btn-primary text-sm py-2">View</button>
               </div>
             ))}
           </div>}
@@ -21232,11 +20555,19 @@ const PublicPortal = ({ onBack, onRegisterClick }: { onBack?: () => void; onRegi
         {/* Notice Board */}
         <NoticeBoardSection tenders={tenders} />
 
-        {selected && <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setSelected(null)}>
+        {selected && <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => {
+  setSelected(null);
+  onSubViewChange?.(null);
+  window.history.replaceState({ __app: "rbf-spa", showPublicPortal: true }, "", "/public");
+}}>
           <div className="bg-white rounded-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
             <div className="sticky top-0 bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between">
               <h4 className="font-bold text-slate-900">Tender Details</h4>
-              <button onClick={() => setSelected(null)} className="text-slate-400 hover:text-slate-600">
+              <button onClick={() => {
+                setSelected(null);
+                onSubViewChange?.(null);
+                window.history.replaceState({ __app: "rbf-spa", showPublicPortal: true }, "", "/public");
+              }} className="text-slate-400 hover:text-slate-600">
                 <X size={20} />
               </button>
             </div>
@@ -21346,7 +20677,7 @@ const PublicPortal = ({ onBack, onRegisterClick }: { onBack?: () => void; onRegi
               <div className="bg-emerald-50 rounded-xl p-4 text-center border border-emerald-100">
                 <p className="font-medium text-emerald-800">Ready to submit a bid?</p>
                 <p className="text-sm text-emerald-600 mt-1">Login or register to access full tender details and submit your proposal</p>
-                <button onClick={() => { setSelected(null); alert("Redirect to login"); }} className="btn-primary mt-3">Login / Register</button>
+                <button onClick={() => { setSelected(null); onSubViewChange?.(null); window.history.replaceState({ __app: "rbf-spa", showPublicPortal: true }, "", "/public"); alert("Redirect to login"); }} className="btn-primary mt-3">Login / Register</button>
               </div>
             </div>
           </div>
@@ -21417,7 +20748,11 @@ const PublicPortal = ({ onBack, onRegisterClick }: { onBack?: () => void; onRegi
                   </div>
                 </div>
                 <div className="mt-6">
-                  <button onClick={() => setShowFaq(true)} className="text-emerald-600 font-medium text-sm hover:underline">View Frequently Asked Questions →</button>
+                  <button onClick={() => {
+                    setShowFaq(true);
+                    onSubViewChange?.("faq");
+                    window.history.replaceState({ __app: "rbf-spa", showPublicPortal: true, publicView: "faq" }, "", "/public/faq");
+                  }} className="text-emerald-600 font-medium text-sm hover:underline">View Frequently Asked Questions →</button>
                 </div>
               </div>
             </div>
@@ -21557,14 +20892,22 @@ const PublicPortal = ({ onBack, onRegisterClick }: { onBack?: () => void; onRegi
 
         {/* FAQ Modal */}
         {showFaq && (
-          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setShowFaq(false)}>
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => {
+            setShowFaq(false);
+            onSubViewChange?.(null);
+            window.history.replaceState({ __app: "rbf-spa", showPublicPortal: true }, "", "/public");
+          }}>
             <div className="bg-white rounded-2xl max-w-2xl w-full max-h-[90vh] overflow-hidden flex flex-col" onClick={e => e.stopPropagation()}>
               <div className="bg-emerald-600 text-white px-6 py-4 flex items-center justify-between flex-shrink-0">
                 <div>
                   <h3 className="text-lg font-bold">Frequently Asked Questions</h3>
                   <p className="text-emerald-100 text-xs mt-0.5">Everything you need to know about the RBF programme</p>
                 </div>
-                <button onClick={() => setShowFaq(false)} className="text-white/80 hover:text-white"><X size={24} /></button>
+                <button onClick={() => {
+                  setShowFaq(false);
+                  onSubViewChange?.(null);
+                  window.history.replaceState({ __app: "rbf-spa", showPublicPortal: true }, "", "/public");
+                }} className="text-white/80 hover:text-white"><X size={24} /></button>
               </div>
               <div className="overflow-y-auto flex-1 p-6 space-y-6">
                 {/* About the Programme */}
@@ -21662,7 +21005,11 @@ const PublicPortal = ({ onBack, onRegisterClick }: { onBack?: () => void; onRegi
                 </div>
               </div>
               <div className="px-6 py-4 border-t border-slate-200 flex justify-end flex-shrink-0">
-                <button onClick={() => setShowFaq(false)} className="btn-primary text-sm py-2">Close</button>
+                <button onClick={() => {
+                  setShowFaq(false);
+                  onSubViewChange?.(null);
+                  window.history.replaceState({ __app: "rbf-spa", showPublicPortal: true }, "", "/public");
+                }} className="btn-primary text-sm py-2">Close</button>
               </div>
             </div>
           </div>
@@ -22161,8 +21508,12 @@ interface SidebarItemType {
 export default function App() {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [showPublicPortal, setShowPublicPortal] = useState(false);
+  const [publicSubView, setPublicSubView] = useState<null | "faq" | "tender">(null);
+  const [publicTenderId, setPublicTenderId] = useState<string | null>(null);
   const [authView, setAuthView] = useState<"login" | "register">("login");
   const [activeTab, setActiveTab] = useState("dashboard");
+  const [routerAction, setRouterAction] = useState<string | undefined>(undefined);
+  const [routerId, setRouterId] = useState<string | undefined>(undefined);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedProjectTab, setSelectedProjectTab] = useState<string | undefined>(undefined);
   const [tenderView, setTenderView] = useState<"list" | "create" | "details">("list");
@@ -22179,13 +21530,51 @@ export default function App() {
   const [selectedProjectForConcern, setSelectedProjectForConcern] = useState<Project | null>(null);
   const [doeConcernType, setDoeConcernType] = useState("");
 
+  const navigateTo = (section: string, action?: string, id?: string) => {
+    setActiveTab(section);
+    setRouterAction(action);
+    setRouterId(id);
+    if (section !== "tenders") {
+      setTenderView("list");
+      setPendingTenderId(null);
+    }
+    const parts = [section, action, id].filter(Boolean);
+    const url = `/app/${parts.join("/")}`;
+    window.history.pushState({ __app: "rbf-spa", activeTab: section, action: action ?? null, id: id ?? null }, "", url);
+  };
+
   React.useEffect(() => {
     if (typeof window === "undefined") return;
+    const { pathname } = new URL(window.location.href);
     const params = new URLSearchParams(window.location.search);
-    const tab = params.get("tab");
+
+    // Parse path-based routes for clean URLs
+    if (pathname === "/register") {
+      setAuthView("register");
+    } else if (pathname === "/public/faq") {
+      setShowPublicPortal(true);
+      setPublicSubView("faq");
+    } else if (pathname.startsWith("/public/tender/")) {
+      setShowPublicPortal(true);
+      setPublicSubView("tender");
+      setPublicTenderId(pathname.replace("/public/tender/", ""));
+    } else if (pathname === "/public") {
+      setShowPublicPortal(true);
+    } else if (pathname.startsWith("/app/")) {
+      const parts = pathname.replace("/app/", "").split("/").filter(Boolean);
+      if (parts[0]) setActiveTab(parts[0]);
+      if (parts[1]) setRouterAction(parts[1]);
+      if (parts[2]) setRouterId(parts[2]);
+    }
+
+    // Parse query params (shared with legacy ?tab=... pattern)
+    const qTab = params.get("tab");
     const projectId = params.get("projectId");
     const projectTab = params.get("projectTab");
-    if (tab) setActiveTab(tab);
+    if (qTab) {
+      setActiveTab(qTab);
+      window.history.replaceState({ __app: "rbf-spa", activeTab: qTab }, "", `/app/${qTab}`);
+    }
     if (projectId) setSelectedProjectId(projectId);
     if (projectTab) setSelectedProjectTab(projectTab);
   }, []);
@@ -22193,36 +21582,6 @@ export default function App() {
   const [doeConcernDesc, setDoeConcernDesc] = useState("");
   const [doeConcernNotifyPsc, setDoeConcernNotifyPsc] = useState(false);
   const [doeConcernSubmitting, setDoeConcernSubmitting] = useState(false);
-  const isApplyingBrowserStateRef = React.useRef(false);
-  const lastBrowserStateKeyRef = React.useRef("");
-
-  const buildBrowserRouteState = React.useCallback(() => ({
-    __app: "rbf-spa",
-    hasUser: Boolean(currentUser),
-    showPublicPortal,
-    authView,
-    activeTab,
-    tenderView,
-    pendingTenderId,
-    pendingBidTenderId,
-    pendingBidId,
-  }), [currentUser, showPublicPortal, authView, activeTab, tenderView, pendingTenderId, pendingBidTenderId, pendingBidId]);
-
-  const applyBrowserRouteState = React.useCallback((state: any) => {
-    if (!state || state.__app !== "rbf-spa") return;
-    isApplyingBrowserStateRef.current = true;
-    setShowPublicPortal(Boolean(state.showPublicPortal));
-    setAuthView(state.authView === "register" ? "register" : "login");
-    setActiveTab(typeof state.activeTab === "string" && state.activeTab.trim() ? state.activeTab : "dashboard");
-    setTenderView(state.tenderView === "create" || state.tenderView === "details" ? state.tenderView : "list");
-    setPendingTenderId(typeof state.pendingTenderId === "string" ? state.pendingTenderId : null);
-    setPendingBidTenderId(typeof state.pendingBidTenderId === "string" ? state.pendingBidTenderId : null);
-    setPendingBidId(typeof state.pendingBidId === "string" ? state.pendingBidId : null);
-    window.setTimeout(() => {
-      isApplyingBrowserStateRef.current = false;
-    }, 0);
-  }, []);
-
   const loadNotifications = React.useCallback(async () => {
     if (!getStoredUser()) {
       setNotifications((prev) => (prev.length ? prev : MOCK_NOTIFICATIONS));
@@ -22292,31 +21651,32 @@ export default function App() {
     };
   }, [currentUser]);
 
+  // ── URL sync ──────────────────────────────────────────────────────────
+  // Listen for browser back/forward.
   React.useEffect(() => {
     if (typeof window === "undefined") return;
-    const initialState = buildBrowserRouteState();
-    const initialKey = JSON.stringify(initialState);
-    lastBrowserStateKeyRef.current = initialKey;
-    window.history.replaceState(initialState, "");
 
     const handlePopState = (event: PopStateEvent) => {
-      if (event.state?.__app === "rbf-spa") {
-        applyBrowserRouteState(event.state);
+      const s = event.state;
+      if (!s || s.__app !== "rbf-spa") {
+        setShowPublicPortal(false);
+        setPublicSubView(null);
+        setPublicTenderId(null);
+        return;
       }
+      if (s.showPublicPortal !== undefined) setShowPublicPortal(Boolean(s.showPublicPortal)); else setShowPublicPortal(false);
+      if (s.authView) setAuthView(s.authView === "register" ? "register" : "login");
+      if (s.activeTab) setActiveTab(typeof s.activeTab === "string" ? s.activeTab : "dashboard");
+      setRouterAction(s.action && typeof s.action === "string" ? s.action : undefined);
+      setRouterId(s.id && typeof s.id === "string" ? s.id : undefined);
+      if (s.publicView === "faq") { setPublicSubView("faq"); setPublicTenderId(null); }
+      else if (s.publicView === "tender" && s.publicViewId) { setPublicSubView("tender"); setPublicTenderId(s.publicViewId); }
+      else { setPublicSubView(null); setPublicTenderId(null); }
     };
 
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
-  }, [applyBrowserRouteState, buildBrowserRouteState]);
-
-  React.useEffect(() => {
-    if (typeof window === "undefined" || isApplyingBrowserStateRef.current) return;
-    const nextState = buildBrowserRouteState();
-    const nextKey = JSON.stringify(nextState);
-    if (nextKey === lastBrowserStateKeyRef.current) return;
-    lastBrowserStateKeyRef.current = nextKey;
-    window.history.pushState(nextState, "");
-  }, [buildBrowserRouteState]);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const role = currentUser?.role;
 
@@ -22324,7 +21684,7 @@ export default function App() {
     const { user } = await loginUser(username, password);
     setCurrentUser(user);
     setAuthMessage(null);
-    setActiveTab("dashboard");
+    navigateTo("dashboard");
   };
 
   const handleLogout = () => {
@@ -22336,11 +21696,13 @@ export default function App() {
     setPendingBidTenderId(null);
     setPendingBidId(null);
     setPendingTenderId(null);
+    window.history.replaceState({ __app: "rbf-spa" }, "", "/login");
   };
 
   const handleRegisterSuccess = (username: string) => {
     setAuthView("login");
     setAuthMessage(`Account created for "${username}". Log in now; complete pre-qualification before submitting applications.`);
+    window.history.replaceState({ __app: "rbf-spa" }, "", "/login");
   };
 
   const openProjectKpiView = React.useCallback((projectId: string) => {
@@ -22415,7 +21777,7 @@ export default function App() {
     if (role === UserRole.ADMIN || role === UserRole.RBF_OFFICIAL) {
       if (isTender && linkedId) return { tab: "tenders", tenderId: linkedId };
       if (isPrequal) return { tab: "prequal" };
-      if (isProject) return { tab: role === UserRole.RBF_OFFICIAL ? "rbf_projects" : "monitoring" };
+      if (isProject) return { tab: role === UserRole.RBF_OFFICIAL ? "rbf_projects" : "dashboard" };
       if (isReport) return { tab: "reports" };
       return { tab: "dashboard" };
     }
@@ -22447,11 +21809,12 @@ export default function App() {
     const nextTab = allowedTabs.has(target.tab) ? target.tab : (allowedTabs.has("notifications") ? "notifications" : "dashboard");
 
     setShowNotifications(false);
-    setActiveTab(nextTab);
-
     if (target.tenderId) {
+      navigateTo(nextTab, "details", target.tenderId);
       setTenderView("details");
       setPendingTenderId(target.tenderId);
+    } else {
+      navigateTo(nextTab);
     }
 
     if (target.pendingBidTenderId) {
@@ -22462,7 +21825,13 @@ export default function App() {
   };
 
   if (showPublicPortal) {
-    return <PublicPortal onBack={() => setShowPublicPortal(false)} onRegisterClick={() => { setShowPublicPortal(false); setAuthView("register"); }} />;
+    return <PublicPortal
+      publicSubView={publicSubView}
+      publicTenderId={publicTenderId}
+      onSubViewChange={(view, id) => { setPublicSubView(view); setPublicTenderId(id); }}
+      onBack={() => { setShowPublicPortal(false); setPublicSubView(null); setPublicTenderId(null); window.history.replaceState({ __app: "rbf-spa" }, "", "/login"); }}
+      onRegisterClick={() => { setShowPublicPortal(false); setAuthView("register"); window.history.replaceState({ __app: "rbf-spa" }, "", "/register"); }}
+    />;
   }
 
   if (!currentUser) {
@@ -22472,12 +21841,13 @@ export default function App() {
         onRegisterClick={() => {
           setAuthMessage(null);
           setAuthView("register");
+          window.history.replaceState({ __app: "rbf-spa" }, "", "/register");
         }} 
-        onViewPublic={() => setShowPublicPortal(true)}
+        onViewPublic={() => { setShowPublicPortal(true); window.history.pushState({ __app: "rbf-spa", showPublicPortal: true }, "", "/public"); }}
         infoMessage={authMessage}
       />
     ) : (
-      <Register onBackToLogin={() => setAuthView("login")} onRegisterSuccess={handleRegisterSuccess} />
+      <Register onBackToLogin={() => { setAuthView("login"); window.history.replaceState({ __app: "rbf-spa" }, "", "/login"); }} onRegisterSuccess={handleRegisterSuccess} />
     );
   }
 
@@ -22493,9 +21863,8 @@ export default function App() {
 
   const renderContent = () => {
     // Shared tabs across roles (if they have them in sidebar)
-    if (activeTab === "monitoring") return <Monitoring />;
     if (activeTab === "gis") return <GISMap />;
-    if (activeTab === "reports") return <Reports currentUser={currentUser} />;
+    if (activeTab === "reports") return <Reports currentUser={currentUser} onNavigate={(action, id) => navigateTo("reports", action, id)} />;
     if (activeTab === "notifications") return <NotificationLogs logs={notifications} onSelect={handleNotificationSelect} />;
 
     // Role-based content filtering
@@ -22511,6 +21880,7 @@ export default function App() {
               setPendingBidTenderId(null);
               setPendingBidId(null);
             }}
+            onNavigate={(action, id) => navigateTo("dashboard", action, id)}
           />
         );
         case "contracting": return (
@@ -22525,6 +21895,7 @@ export default function App() {
               setPendingBidTenderId(null);
               setPendingBidId(null);
             }}
+            onNavigate={(action, id) => navigateTo("dashboard", action, id)}
           />
         );
         case "prequal": return <PreQualificationSubmission />;
@@ -22534,8 +21905,9 @@ export default function App() {
             onSubmitTender={(tenderId) => {
               setPendingBidTenderId(tenderId);
               setPendingBidId(null);
-              setActiveTab("dashboard");
+              navigateTo("dashboard", "bid", tenderId);
             }}
+            onNavigate={(action, id) => navigateTo("tenders", action, id)}
           />
         );
         case "applications": return <PreQualificationSubmission />;
@@ -22544,7 +21916,7 @@ export default function App() {
             onOpenBid={(bid) => {
               setPendingBidTenderId(bid.tender);
               setPendingBidId(bid.id);
-              setActiveTab("dashboard");
+              navigateTo("dashboard", "bid", bid.tender);
             }}
           />
         );
@@ -22552,7 +21924,7 @@ export default function App() {
         case "claims": return <Disbursements onOpenProjectKpi={openProjectKpiView} onOpenProject={openProjectHubView} />;
         case "my_profile":
           return <VendorProfileView viewerRole={currentUser.role} useOwnProfile embedded />;
-        default: return <VendorDashboard />;
+        default: return <VendorDashboard onNavigate={(action, id) => navigateTo("dashboard", action, id)} />;
       }
     }
     if (role === UserRole.TAC) {
@@ -22569,22 +21941,22 @@ export default function App() {
           if (activeTab === "blacklisting") return <Blacklisting currentUser={currentUser} />;
           if (activeTab === "payments") return <Disbursements onOpenProjectKpi={openProjectKpiView} onOpenProject={openProjectHubView} />;
           if (activeTab === "reports") return <TacReports />;
-          return <TACView mode="technical" />;
+          return <TACView mode="technical" onNavigate={(action, id) => navigateTo("evaluations", action, id)} />;
         default:
-          return <TACView mode="technical" />;
+          return <TACView mode="technical" onNavigate={(action, id) => navigateTo("evaluations", action, id)} />;
       }
     }
     if (role === UserRole.FIELD_VERIFIER) {
       switch (activeTab) {
         case "dashboard":
-          return <FieldVerifierView mode="dashboard" />;
+          return <FieldVerifierView mode="dashboard" onNavigate={(action, id) => navigateTo("inspections", action, id)} />;
         case "inspections":
         case "sync":
-          return <FieldVerifierView mode="inspections" />;
+          return <FieldVerifierView mode="inspections" onNavigate={(action, id) => navigateTo("inspections", action, id)} />;
         case "gis":
-          return <FieldVerifierView mode="gis" />;
+          return <FieldVerifierView mode="gis" onNavigate={(action, id) => navigateTo("inspections", action, id)} />;
         case "reports":
-          return <FieldVerifierView mode="reports" />;
+          return <FieldVerifierView mode="reports" onNavigate={(action, id) => navigateTo("inspections", action, id)} />;
         case "notifications":
           return <NotificationLogs logs={notifications} onSelect={handleNotificationSelect} />;
         default:
@@ -22603,10 +21975,37 @@ export default function App() {
         case "reports":
         case "all_vendors":
           if (activeTab === "all_vendors") return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={setViewingVendorProfile} />;
-          if (activeTab === "reports") return <SuperAdminPortal section="reports" notifications={notifications} onNotificationSelect={handleNotificationSelect} />;
-          return <SuperAdminPortal section={activeTab as any} notifications={notifications} onNotificationSelect={handleNotificationSelect} />;
+          if (activeTab === "reports") return (
+            <SuperAdminPortal
+              section="reports"
+              notifications={notifications}
+              onNotificationSelect={handleNotificationSelect}
+              initialAction={routerAction}
+              initialId={routerId}
+              onNavigate={(action, id) => navigateTo(activeTab, action, id)}
+            />
+          );
+          return (
+            <SuperAdminPortal
+              section={activeTab as any}
+              notifications={notifications}
+              onNotificationSelect={handleNotificationSelect}
+              initialAction={routerAction}
+              initialId={routerId}
+              onNavigate={(action, id) => navigateTo(activeTab, action, id)}
+            />
+          );
         default:
-          return <SuperAdminPortal section="dashboard" notifications={notifications} onNotificationSelect={handleNotificationSelect} />;
+          return (
+            <SuperAdminPortal
+              section="dashboard"
+              notifications={notifications}
+              onNotificationSelect={handleNotificationSelect}
+              initialAction={routerAction}
+              initialId={routerId}
+              onNavigate={(action, id) => navigateTo(activeTab, action, id)}
+            />
+          );
       }
     }
      if (role === UserRole.DOE_OFFICER) {
@@ -22704,7 +22103,7 @@ case "dashboard":
           case "prospect_sync":
             return <AuditorProspectSyncLog />;
           case "reports":
-            return <Reports currentUser={currentUser} />;
+            return <Reports currentUser={currentUser} onNavigate={(action, id) => navigateTo("reports", action, id)} />;
           case "audit_findings":
             return <AuditorAuditFindings currentUser={currentUser} />;
         case "notifications":
@@ -22739,12 +22138,13 @@ case "dashboard":
             portalType="rbf"
           />
         );
-      case "evaluations": return <TACView mode="financial" />;
+      case "evaluations": return <TACView mode="financial" onNavigate={(action, id) => navigateTo("evaluations", action, id)} />;
       case "tenders": return (
         <Tenders
-          initialView={tenderView}
-          initialTenderId={pendingTenderId}
+          initialView={routerAction && ["list","create","details","verify","publish","award","edit"].includes(routerAction) ? routerAction as "list"|"create"|"details"|"verify"|"publish"|"award"|"edit" : "list"}
+          initialTenderId={routerId || pendingTenderId}
           onTenderOpened={() => setPendingTenderId(null)}
+          onNavigate={(action, id) => navigateTo("tenders", action, id)}
         />
       );
       case "notice_board": return <RmtNoticeManagement currentUser={currentUser} />;
@@ -22825,10 +22225,10 @@ case "dashboard":
          ...common,
          { id: "all_vendors", icon: Users, label: "All Vendors" },
          { id: "projects", icon: FolderKanban, label: "Regional Projects" },
-         { id: "regional", icon: MapIcon, label: "Regional Monitoring" },
-         { id: "kpis", icon: BarChart3, label: "KPI Review" },
-         { id: "blacklisting", icon: FileWarning, label: "Blacklisting" },
-       ];
+          { id: "regional", icon: MapIcon, label: "Regional Monitoring" },
+          { id: "kpis", icon: BarChart3, label: "KPI Review" },
+          { id: "blacklisting", icon: FileWarning, label: "Blacklisting" },
+        ];
      }
 
      if (role === UserRole.UNDP_DONOR) {
@@ -22869,7 +22269,6 @@ case "dashboard":
       { id: "prequal", icon: ClipboardCheck, label: "Pre-Qualification" },
       { id: "rbf_projects", icon: FolderKanban, label: "Projects Hub" },
       { id: "blacklisting", icon: FileWarning, label: "Blacklisting" },
-      { id: "monitoring", icon: Activity, label: "Monitoring" },
       { id: "gis", icon: MapIcon, label: "GIS Mapping" },
       { id: "payments", icon: CreditCard, label: "Disbursements" },
       { id: "reports", icon: BarChart3, label: "Reports" },
@@ -22907,7 +22306,7 @@ case "dashboard":
                 badge={item.badge}
                 active={activeTab === item.id} 
                 onClick={() => {
-                  setActiveTab(item.id);
+                  navigateTo(item.id);
                   if (item.id === "tenders") setTenderView("list");
                 }} 
               />

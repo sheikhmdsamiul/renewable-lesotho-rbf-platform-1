@@ -1,13 +1,13 @@
-import {StrictMode} from 'react';
 import {createRoot} from 'react-dom/client';
-import {HashRouter} from 'react-router-dom';
+import {MemoryRouter} from 'react-router-dom';
 import App from './App.tsx';
+import {initRuntimeConfig} from './api.ts';
 import './index.css';
 
+initRuntimeConfig();
+
 createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <HashRouter>
-      <App />
-    </HashRouter>
-  </StrictMode>,
+  <MemoryRouter>
+    <App />
+  </MemoryRouter>,
 );

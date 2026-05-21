@@ -56,8 +56,9 @@ import {
 } from "./types";
 
 const env = (import.meta as any)?.env ?? {};
-const configuredApiBase = (env?.VITE_API_URL as string | undefined)?.replace(/\/$/, "");
-const requestTimeoutMs = Number(env?.VITE_API_TIMEOUT_MS ?? 15000);
+const buildTimeApiBase = (env?.VITE_API_URL as string | undefined)?.replace(/\/$/, "");
+let configuredApiBase = buildTimeApiBase;
+let requestTimeoutMs = Number(env?.VITE_API_TIMEOUT_MS ?? 15000);
 const isDevMode = Boolean(env?.DEV);
 const ACCESS_TOKEN_KEY = "rbf_access_token";
 const REFRESH_TOKEN_KEY = "rbf_refresh_token";
@@ -99,6 +100,24 @@ function stripApiSuffix(base: string): string {
 function getBrowserOrigin(): string {
   if (typeof window === "undefined") return "";
   return window.location.origin.replace(/\/$/, "");
+}
+
+export async function initRuntimeConfig(): Promise<void> {
+  if (typeof window === "undefined") return;
+  try {
+    const res = await fetch("/config.json");
+    if (!res.ok) return;
+    const cfg = await res.json();
+    if (cfg.VITE_API_URL) {
+      configuredApiBase = String(cfg.VITE_API_URL).replace(/\/$/, "");
+    }
+    if (cfg.VITE_API_TIMEOUT_MS) {
+      requestTimeoutMs = Number(cfg.VITE_API_TIMEOUT_MS);
+    }
+    recomputeApiBase();
+  } catch {
+    // /config.json is optional; keep build-time defaults
+  }
 }
 
 function getConfiguredApiOrigin(): string {
@@ -234,12 +253,21 @@ function getApiBaseCandidates(): string[] {
   return uniq(bases);
 }
 
-const API_BASE_CANDIDATES = getApiBaseCandidates();
-export const API_BASE: string =
+let API_BASE_CANDIDATES = getApiBaseCandidates();
+export let API_BASE: string =
   getConfiguredApiOrigin() ||
   getBrowserOrigin() ||
   API_BASE_CANDIDATES.find((base) => Boolean(base)) ||
   "";
+
+function recomputeApiBase(): void {
+  API_BASE_CANDIDATES = getApiBaseCandidates();
+  API_BASE =
+    getConfiguredApiOrigin() ||
+    getBrowserOrigin() ||
+    API_BASE_CANDIDATES.find((base) => Boolean(base)) ||
+    "";
+}
 
 // ============ Mapping helpers ============
 

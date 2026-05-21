@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -161,9 +161,12 @@ type Props = {
   section: AdminSection;
   notifications: Notification[];
   onNotificationSelect?: (note: Notification) => void;
+  initialAction?: string;
+  initialId?: string;
+  onNavigate?: (action?: string, id?: string) => void;
 };
 
-export default function SuperAdminPortal({ section, notifications, onNotificationSelect }: Props) {
+export default function SuperAdminPortal({ section, notifications, onNotificationSelect, initialAction, initialId, onNavigate }: Props) {
   const [banner, setBanner] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -312,7 +315,16 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
   useEffect(() => {
     clearFlash();
     if (section === "dashboard") void loadDashboard();
-    if (section === "users") void loadUsers();
+    if (section === "users") {
+      void loadUsers();
+      if (initialAction === "create") {
+        resetUserForm();
+        setUserView("create");
+      } else if ((initialAction === "edit" || initialAction === "detail") && initialId) {
+        setUserView(initialAction as "edit" | "detail");
+        void openUserDetail(initialId, initialAction as "edit" | "detail");
+      }
+    }
     if (section === "organizations") void loadOrganizations();
     if (section === "system_configuration") void loadConfiguration();
     if (section === "prospect_sync") void loadProspect();
@@ -346,6 +358,7 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
   const openUserCreate = () => {
     resetUserForm();
     setUserView("create");
+    onNavigate?.("create");
   };
 
   const openUserDetail = async (userId: string, nextView: "detail" | "edit") => {
@@ -422,6 +435,7 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
         setBanner("User updated successfully.");
       }
       setUserView("list");
+      onNavigate?.("list");
       await loadUsers();
     } catch (err: any) {
       setError(String(err?.message || "Unable to save user."));
@@ -725,7 +739,7 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
           {(userView === "create" || userView === "edit") && (
             <div className="card p-6">
               <div className="mb-5 flex items-center gap-3">
-                <button onClick={() => setUserView("list")} className="rounded-lg p-2 text-slate-500 hover:bg-slate-100">
+                <button onClick={() => { setUserView("list"); onNavigate?.("list"); }} className="rounded-lg p-2 text-slate-500 hover:bg-slate-100">
                   <ChevronRight className="rotate-180" size={18} />
                 </button>
                 <div>
@@ -783,7 +797,7 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
                   </select>
                 )}
                 <div className="md:col-span-2 flex gap-3">
-                  <button type="button" onClick={() => setUserView("list")} className="btn-secondary">Cancel</button>
+                  <button type="button" onClick={() => { setUserView("list"); onNavigate?.("list"); }} className="btn-secondary">Cancel</button>
                   <button type="submit" disabled={userSubmitting} className="btn-primary flex items-center gap-2">
                     {userSubmitting ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
                     {userView === "create" ? "Create User" : "Save Changes"}
@@ -797,7 +811,7 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
             <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
               <div className="card p-6">
                 <div className="mb-4 flex items-center gap-3">
-                  <button onClick={() => setUserView("list")} className="rounded-lg p-2 text-slate-500 hover:bg-slate-100">
+                  <button onClick={() => { setUserView("list"); onNavigate?.("list"); }} className="rounded-lg p-2 text-slate-500 hover:bg-slate-100">
                     <ChevronRight className="rotate-180" size={18} />
                   </button>
                   <div>
@@ -812,7 +826,7 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
                   <p><strong>Last Login:</strong> {formatDateTime(selectedUser.lastLogin)}</p>
                 </div>
                 <div className="mt-5 flex flex-wrap gap-2">
-                  <button onClick={() => setUserView("edit")} className="btn-primary text-xs">Edit</button>
+                  <button onClick={() => { setUserView("edit"); onNavigate?.("edit", selectedUser?.id); }} className="btn-primary text-xs">Edit</button>
                   <button onClick={() => void resetPassword(selectedUser.id)} className="btn-secondary text-xs">Reset Password</button>
                   {(selectedUser.isActive !== false && selectedUser.status !== "Inactive") && (
                     <button onClick={() => void deactivateUser(selectedUser.id)} className="btn-secondary text-xs text-rose-700">Deactivate</button>
@@ -917,8 +931,8 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
                           <td className="px-6 py-4 text-sm text-slate-500">{formatDateTime(user.lastLogin)}</td>
                           <td className="px-6 py-4">
                             <div className="flex justify-end gap-3 text-xs font-semibold">
-                              <button onClick={() => void openUserDetail(user.id, "detail")} className="text-emerald-700">View</button>
-                              <button onClick={() => void openUserDetail(user.id, "edit")} className="text-slate-700">Edit</button>
+                              <button onClick={() => { onNavigate?.("detail", user.id); void openUserDetail(user.id, "detail"); }} className="text-emerald-700">View</button>
+                              <button onClick={() => { onNavigate?.("edit", user.id); void openUserDetail(user.id, "edit"); }} className="text-slate-700">Edit</button>
                               <button onClick={() => void resetPassword(user.id)} className="text-blue-700">Reset Password</button>
                             </div>
                           </td>
