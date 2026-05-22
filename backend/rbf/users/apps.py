@@ -1,5 +1,4 @@
 from django.apps import AppConfig
-from django.core.cache import cache
 
 
 class UsersConfig(AppConfig):
@@ -9,23 +8,3 @@ class UsersConfig(AppConfig):
     def ready(self):
         # Import signals
         from . import signals  # noqa: F401
-
-        # Load email config from DB into Django settings at startup
-        self._load_email_config()
-
-    def _load_email_config(self):
-        try:
-            from django.conf import settings
-            from .models import PlatformConfiguration
-            config = PlatformConfiguration.objects.order_by('id').first()
-            if config and config.email_host:
-                settings.EMAIL_HOST = config.email_host
-                settings.EMAIL_PORT = config.email_port
-                settings.EMAIL_USE_TLS = config.email_use_tls
-                settings.EMAIL_HOST_USER = config.email_host_user
-                if config.email_host_password:
-                    settings.EMAIL_HOST_PASSWORD = config.email_host_password
-                settings.DEFAULT_FROM_EMAIL = config.default_from_email or settings.DEFAULT_FROM_EMAIL
-                cache.set('email_config_version', str(config.updated_at.timestamp()), timeout=None)
-        except Exception:
-            pass
