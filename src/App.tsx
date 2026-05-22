@@ -21678,6 +21678,15 @@ export default function App() {
     return () => window.removeEventListener("popstate", handlePopState);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Deep-link: restore vendor profile from router state, clear when leaving all_vendors
+  React.useEffect(() => {
+    if (routerAction === "view" && routerId && activeTab === "all_vendors") {
+      setViewingVendorProfile(routerId);
+    } else if (activeTab !== "all_vendors") {
+      setViewingVendorProfile(null);
+    }
+  }, [activeTab, routerAction, routerId]);
+
   const role = currentUser?.role;
 
   const handleLogin = async (username: string, password: string) => {
@@ -21937,7 +21946,7 @@ export default function App() {
         case "blacklisting":
         case "all_vendors":
         case "reports":
-          if (activeTab === "all_vendors") return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={setViewingVendorProfile} />;
+          if (activeTab === "all_vendors") return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={(vendorId) => { setViewingVendorProfile(vendorId); navigateTo("all_vendors", "view", vendorId); }} />;
           if (activeTab === "blacklisting") return <Blacklisting currentUser={currentUser} />;
           if (activeTab === "payments") return <Disbursements onOpenProjectKpi={openProjectKpiView} onOpenProject={openProjectHubView} />;
           if (activeTab === "reports") return <TacReports />;
@@ -21974,7 +21983,7 @@ export default function App() {
         case "system_health":
         case "reports":
         case "all_vendors":
-          if (activeTab === "all_vendors") return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={setViewingVendorProfile} />;
+          if (activeTab === "all_vendors") return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={(vendorId) => { setViewingVendorProfile(vendorId); navigateTo("all_vendors", "view", vendorId); }} />;
           if (activeTab === "reports") return (
             <SuperAdminPortal
               section="reports"
@@ -22022,7 +22031,7 @@ case "regional":
           case "all_vendors":
           case "reports":
             if (activeTab === "all_vendors") {
-              return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={setViewingVendorProfile} />;
+              return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={(vendorId) => { setViewingVendorProfile(vendorId); navigateTo("all_vendors", "view", vendorId); }} />;
             }
 if (activeTab === "reports") {
               return <DoeReports currentUser={currentUser} />;
@@ -22062,7 +22071,7 @@ if (activeTab === "reports") {
         case "reports":
         case "issues":
           if (activeTab === "all_vendors") {
-            return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={setViewingVendorProfile} />;
+            return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={(vendorId) => { setViewingVendorProfile(vendorId); navigateTo("all_vendors", "view", vendorId); }} />;
           }
           if (activeTab === "reports") {
             return <PscReports currentUser={currentUser} />;
@@ -22109,7 +22118,7 @@ case "dashboard":
         case "notifications":
           return <NotificationLogs logs={notifications} onSelect={handleNotificationSelect} />;
         case "all_vendors":
-          return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={setViewingVendorProfile} />;
+          return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={(vendorId) => { setViewingVendorProfile(vendorId); navigateTo("all_vendors", "view", vendorId); }} />;
         default:
           return (
             <PortfolioMonitoringView
@@ -22152,7 +22161,7 @@ case "dashboard":
       case "rbf_projects": return <ProjectsHub mode="rbf" externalProjectId={selectedProjectId} externalProjectTab={selectedProjectTab} />;
       case "blacklisting": return <Blacklisting currentUser={currentUser} />;
       case "payments": return <Disbursements onOpenProjectKpi={openProjectKpiView} onOpenProject={openProjectHubView} />;
-      case "all_vendors": return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={setViewingVendorProfile} />;
+      case "all_vendors": return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={(vendorId) => { setViewingVendorProfile(vendorId); navigateTo("all_vendors", "view", vendorId); }} />;
       case "issues_findings": return <RmtIssuesFindings currentUser={currentUser} />;
       case "notifications": return <NotificationLogs logs={notifications} onSelect={handleNotificationSelect} />;
       default:
@@ -22417,7 +22426,7 @@ case "dashboard":
         <VendorProfileView
           vendorId={viewingVendorProfile}
           viewerRole={currentUser?.role || ""}
-          onClose={() => setViewingVendorProfile(null)}
+          onClose={() => { setViewingVendorProfile(null); navigateTo("all_vendors"); }}
         />
       )}
     </div>

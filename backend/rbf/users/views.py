@@ -8,6 +8,7 @@ import shutil
 
 from django.conf import settings
 from django.core.cache import cache
+from django.core.cache import cache
 from django.core.mail import send_mail
 from django.core.management import call_command
 from django.contrib.sessions.models import Session
@@ -614,35 +615,50 @@ class PlatformConfigurationView(APIView):
         if config is None:
             config = PlatformConfiguration.objects.create(
                 allowed_file_types=['PDF', 'DOCX', 'JPG', 'PNG', 'XLSX'],
+                email_host=settings.EMAIL_HOST,
+                email_port=settings.EMAIL_PORT,
+                email_use_tls=settings.EMAIL_USE_TLS,
+                email_host_user=settings.EMAIL_HOST_USER,
+                email_host_password=settings.EMAIL_HOST_PASSWORD,
+                default_from_email=settings.DEFAULT_FROM_EMAIL,
             )
         return config
 
-    def get(self, request):
-        self._assert_super_admin(request.user)
-        serializer = PlatformConfigurationSerializer(self._get_config())
-        boundary_path = Path(settings.BASE_DIR) / 'public' / 'geojson' / 'lesotho.geojson'
+    def _apply_email_settings(self, config):
+        settings.EMAIL_HOST = config.email_host or settings.EMAIL_HOST
+        settings.EMAIL_PORT = config.email_port or settings.EMAIL_PORT
+        settings.EMAIL_USE_TLS = config.email_use_tls
+        settings.EMAIL_HOST_USER = config.email_host_user or settings.EMAIL_HOST_USER
+        if config.email_host_password:
+            settings.EMAIL_HOST_PASSWORD = config.email_host_password
+        settings.DEFAULT_FROM_EMAIL = config.default_from_email or settings.DEFAULT_FROM_EMAIL
+
+    def _build_payload(self, serializer):
         payload = dict(serializer.data)
+        password_set = bool(payload.pop('email_host_password', None))
+        payload['email_host_password_set'] = password_set
+        boundary_path = Path(settings.BASE_DIR) / 'public' / 'geojson' / 'lesotho.geojson'
         payload['lesotho_boundary'] = {
             'path': str(boundary_path),
             'exists': boundary_path.exists(),
             'last_modified': datetime.utcfromtimestamp(boundary_path.stat().st_mtime).isoformat() + "+00:00" if boundary_path.exists() else None,
         }
-        return Response(payload, status=status.HTTP_200_OK)
+        return payload
+
+    def get(self, request):
+        self._assert_super_admin(request.user)
+        serializer = PlatformConfigurationSerializer(self._get_config())
+        return Response(self._build_payload(serializer), status=status.HTTP_200_OK)
 
     def patch(self, request):
         self._assert_super_admin(request.user)
         serializer = PlatformConfigurationSerializer(self._get_config(), data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()
+        self._apply_email_settings(serializer.instance)
+        cache.set('email_config_version', str(serializer.instance.updated_at.timestamp()), timeout=None)
         AuditLogger.log('platform_configuration_updated', 'configuration', serializer.instance.id, 'platform_configuration', notes='Platform configuration updated by Super Admin.')
-        boundary_path = Path(settings.BASE_DIR) / 'public' / 'geojson' / 'lesotho.geojson'
-        payload = dict(serializer.data)
-        payload['lesotho_boundary'] = {
-            'path': str(boundary_path),
-            'exists': boundary_path.exists(),
-            'last_modified': datetime.utcfromtimestamp(boundary_path.stat().st_mtime).isoformat() + "+00:00" if boundary_path.exists() else None,
-        }
-        return Response(payload, status=status.HTTP_200_OK)
+        return Response(self._build_payload(serializer), status=status.HTTP_200_OK)
 
 
 class PlatformConfigurationBoundaryRefreshView(APIView):

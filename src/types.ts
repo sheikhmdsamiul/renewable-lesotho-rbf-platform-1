@@ -602,12 +602,7 @@ export interface Organization {
 
 export interface PlatformConfiguration {
   id?: string;
-  platformName: string;
-  countryCode: string;
-  countryName: string;
-  defaultCurrency: string;
   nationalMainProgramBudget: number;
-  timezone: string;
   femaleTargetMinimum: number;
   vulnerableTargetMinimum: number;
   lowIncomeTargetMinimum: number;
@@ -619,6 +614,13 @@ export interface PlatformConfiguration {
   m3VerificationRequiredPct: number;
   emailNotificationsEnabled: boolean;
   smsNotificationsEnabled: boolean;
+  emailHost: string;
+  emailPort: number;
+  emailUseTls: boolean;
+  emailHostUser: string;
+  emailHostPassword: string;
+  emailHostPasswordSet: boolean;
+  defaultFromEmail: string;
   maxFileSizeMb: number;
   allowedFileTypes: string[];
   lesothoBoundary?: {

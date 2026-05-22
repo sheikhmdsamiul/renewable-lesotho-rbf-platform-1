@@ -175,7 +175,6 @@ class UserApiTests(APITestCase):
         self.assertEqual(health_response.status_code, status.HTTP_200_OK)
         self.assertEqual(orgs_response.status_code, status.HTTP_200_OK)
         self.assertGreaterEqual(dashboard_response.data["stats"]["total_users"], 1)
-        self.assertEqual(config_response.data["country_name"], "Lesotho")
         self.assertTrue(PlatformConfiguration.objects.exists())
         self.assertTrue(Organization.objects.exists())
         self.assertEqual(health_response.data["database"]["status"], "Connected")

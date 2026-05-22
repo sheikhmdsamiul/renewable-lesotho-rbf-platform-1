@@ -329,12 +329,7 @@ class Organization(models.Model):
 
 
 class PlatformConfiguration(models.Model):
-    platform_name = models.CharField(max_length=255, default='Renewable Lesotho RBF PLATFORM')
-    country_code = models.CharField(max_length=8, default='LS')
-    country_name = models.CharField(max_length=64, default='Lesotho')
-    default_currency = models.CharField(max_length=8, default='LSL')
     national_main_program_budget = models.DecimalField(max_digits=16, decimal_places=2, default=0)
-    timezone = models.CharField(max_length=64, default='Africa/Maseru')
     female_target_minimum = models.PositiveIntegerField(default=50)
     vulnerable_target_minimum = models.PositiveIntegerField(default=30)
     low_income_target_minimum = models.PositiveIntegerField(default=60)
@@ -346,6 +341,12 @@ class PlatformConfiguration(models.Model):
     m3_verification_required_pct = models.PositiveIntegerField(default=100)
     email_notifications_enabled = models.BooleanField(default=True)
     sms_notifications_enabled = models.BooleanField(default=False)
+    email_host = models.CharField(max_length=255, blank=True, default='')
+    email_port = models.PositiveIntegerField(default=587)
+    email_use_tls = models.BooleanField(default=True)
+    email_host_user = models.CharField(max_length=255, blank=True, default='')
+    email_host_password = models.CharField(max_length=255, blank=True, default='')
+    default_from_email = models.EmailField(max_length=255, blank=True, default='')
     max_file_size_mb = models.PositiveIntegerField(default=10)
     allowed_file_types = models.JSONField(default=list, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -356,4 +357,4 @@ class PlatformConfiguration(models.Model):
         verbose_name_plural = 'Platform Configuration'
 
     def __str__(self):
-        return self.platform_name
+        return f"Platform Configuration #{self.id}"

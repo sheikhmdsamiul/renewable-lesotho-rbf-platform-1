@@ -7,8 +7,10 @@ import {
   ChevronRight,
   Download,
   Eye,
+  HelpCircle,
   History,
   Loader2,
+  Mail,
   Map,
   Plus,
   RefreshCw,
@@ -191,6 +193,7 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
   const [configuration, setConfiguration] = useState<PlatformConfiguration | null>(null);
   const [configurationLoading, setConfigurationLoading] = useState(false);
   const [configurationSubmitting, setConfigurationSubmitting] = useState(false);
+  const [showEmailGuide, setShowEmailGuide] = useState(false);
 
   const [connectionStatus, setConnectionStatus] = useState<{ readTokenOk: boolean; writeTokenOk: boolean; baseUrl?: string } | null>(null);
   const [prospectSummary, setProspectSummary] = useState<Awaited<ReturnType<typeof fetchProspectSyncSummary>> | null>(null);
@@ -1023,7 +1026,7 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
       )}
 
       {section === "system_configuration" && configuration && (
-        <form onSubmit={saveConfiguration} className="space-y-6">
+        <><form onSubmit={saveConfiguration} className="space-y-6">
           <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
             <div className="card p-6 space-y-4">
               <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
@@ -1032,43 +1035,21 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
               </h3>
               <div className="space-y-3">
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Platform Name</label>
-                  <input className="input-field" value={configuration.platformName} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, platformName: e.target.value } : prev)} placeholder="Enter platform name" />
-                </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-1">Country</label>
-                    <input className="input-field" value={configuration.countryName} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, countryName: e.target.value } : prev)} placeholder="Country" />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-1">Country Code</label>
-                    <input className="input-field" value={configuration.countryCode} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, countryCode: e.target.value } : prev)} placeholder="LS" />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-1">Currency</label>
-                    <input className="input-field" value={configuration.defaultCurrency} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, defaultCurrency: e.target.value } : prev)} placeholder="LSL" />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-1">Timezone</label>
-                    <input className="input-field" value={configuration.timezone} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, timezone: e.target.value } : prev)} placeholder="Africa/Maseru" />
-                  </div>
-                  <div className="col-span-2">
-                    <label className="block text-sm font-medium text-slate-700 mb-1">National/Main Program Budget</label>
-                    <input
-                      className="input-field"
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={configuration.nationalMainProgramBudget}
-                      onChange={(e) =>
-                        setConfiguration((prev) =>
-                          prev ? { ...prev, nationalMainProgramBudget: Number(e.target.value || 0) } : prev,
-                        )
-                      }
-                      placeholder="Enter total program budget"
-                    />
-                    <p className="text-xs text-slate-500 mt-1">This budget is the national payment pool for all program disbursements.</p>
-                  </div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">National/Main Program Budget</label>
+                  <input
+                    className="input-field"
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={configuration.nationalMainProgramBudget}
+                    onChange={(e) =>
+                      setConfiguration((prev) =>
+                        prev ? { ...prev, nationalMainProgramBudget: Number(e.target.value || 0) } : prev,
+                      )
+                    }
+                    placeholder="Enter total program budget"
+                  />
+                  <p className="text-xs text-slate-500 mt-1">This budget is the national payment pool for all program disbursements.</p>
                 </div>
               </div>
             </div>
@@ -1116,6 +1097,49 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
                     <p className="text-xs text-slate-500 mt-1">Separate with commas</p>
                   </div>
                 </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="card p-6 space-y-4">
+            <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+              <Mail size={18} className="text-emerald-600" />
+              Email Configuration
+              <button type="button" onClick={() => setShowEmailGuide(true)} className="ml-auto text-slate-400 hover:text-emerald-600 transition-colors" title="Email setup guide">
+                <HelpCircle size={16} />
+              </button>
+            </h3>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">SMTP Host</label>
+                <input className="input-field" value={configuration.emailHost} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, emailHost: e.target.value } : prev)} placeholder="smtp.gmail.com" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">SMTP Port</label>
+                <input className="input-field" type="number" value={configuration.emailPort} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, emailPort: Number(e.target.value || 587) } : prev)} placeholder="587" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">SMTP Username</label>
+                <input className="input-field" value={configuration.emailHostUser} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, emailHostUser: e.target.value } : prev)} placeholder="user@gmail.com" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">SMTP Password</label>
+                <input className="input-field" type="password" value={configuration.emailHostPassword} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, emailHostPassword: e.target.value } : prev)} placeholder={configuration.emailHostPasswordSet ? "········" : "Enter SMTP password"} />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Default From Email</label>
+                <input className="input-field" value={configuration.defaultFromEmail} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, defaultFromEmail: e.target.value } : prev)} placeholder="no-reply@rbf.local" />
+              </div>
+              <div className="flex items-end pb-2">
+                <label className="flex items-center gap-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={configuration.emailUseTls}
+                    onChange={(e) => setConfiguration((prev) => prev ? { ...prev, emailUseTls: e.target.checked } : prev)}
+                    className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                  />
+                  <span className="text-sm font-medium text-slate-700">Use TLS</span>
+                </label>
               </div>
             </div>
           </div>
@@ -1188,6 +1212,86 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
             </button>
           </div>
         </form>
+
+        {showEmailGuide && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[9999] overflow-y-auto p-4" onClick={() => setShowEmailGuide(false)}>
+            <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full p-6 relative" onClick={(e) => e.stopPropagation()}>
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                  <HelpCircle size={18} className="text-emerald-600" />
+                  Email Configuration Guide
+                </h3>
+                <button type="button" onClick={() => setShowEmailGuide(false)} className="text-slate-400 hover:text-slate-600">
+                  {'\u00D7'}
+                </button>
+              </div>
+              <div className="space-y-4 text-sm text-slate-700">
+                <p>To set up the system email, configure an SMTP server. Below are the settings for common providers:</p>
+
+                <div className="rounded-xl border border-slate-200 overflow-hidden">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="bg-slate-50 text-left">
+                        <th className="px-3 py-2 font-semibold text-slate-700">Provider</th>
+                        <th className="px-3 py-2 font-semibold text-slate-700">SMTP Host</th>
+                        <th className="px-3 py-2 font-semibold text-slate-700">Port</th>
+                        <th className="px-3 py-2 font-semibold text-slate-700">TLS</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      <tr>
+                        <td className="px-3 py-2 font-medium">Gmail</td>
+                        <td className="px-3 py-2 text-slate-600">smtp.gmail.com</td>
+                        <td className="px-3 py-2 text-slate-600">587</td>
+                        <td className="px-3 py-2 text-slate-600">Yes</td>
+                      </tr>
+                      <tr>
+                        <td className="px-3 py-2 font-medium">Outlook / Office 365</td>
+                        <td className="px-3 py-2 text-slate-600">smtp.office365.com</td>
+                        <td className="px-3 py-2 text-slate-600">587</td>
+                        <td className="px-3 py-2 text-slate-600">Yes</td>
+                      </tr>
+                      <tr>
+                        <td className="px-3 py-2 font-medium">SendGrid</td>
+                        <td className="px-3 py-2 text-slate-600">smtp.sendgrid.net</td>
+                        <td className="px-3 py-2 text-slate-600">587</td>
+                        <td className="px-3 py-2 text-slate-600">Yes</td>
+                      </tr>
+                      <tr>
+                        <td className="px-3 py-2 font-medium">Mailgun</td>
+                        <td className="px-3 py-2 text-slate-600">smtp.mailgun.org</td>
+                        <td className="px-3 py-2 text-slate-600">587</td>
+                        <td className="px-3 py-2 text-slate-600">Yes</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="rounded-xl bg-amber-50 border border-amber-200 p-4">
+                  <p className="font-semibold text-amber-800 mb-1">Gmail requires an App Password</p>
+                  <p className="text-amber-700">
+                    If using Gmail, enable 2-Factor Authentication, then generate an
+                    App Password at{" "}
+                    <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener noreferrer" className="underline font-medium">myaccount.google.com/apppasswords</a>.
+                    Use that App Password as the SMTP Password — not your regular password.
+                  </p>
+                </div>
+
+                <div className="rounded-xl bg-blue-50 border border-blue-200 p-4">
+                  <p className="font-semibold text-blue-800 mb-1">Tips</p>
+                  <ul className="list-disc list-inside text-blue-700 space-y-1">
+                    <li>Port <strong>587</strong> with TLS is recommended for most providers.</li>
+                    <li>Port <strong>465</strong> with SSL is also supported (set Use TLS to No).</li>
+                    <li>The <strong>Default From Email</strong> should match the SMTP Username for delivery compliance.</li>
+                    <li><strong>SMTP Username</strong> is typically the full email address (e.g. <code className="bg-blue-100 px-1 rounded text-xs">user@gmail.com</code>).</li>
+                    <li>After saving, the system applies new email settings immediately.</li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+        </>
       )}
 
       {section === "prospect_sync" && (
