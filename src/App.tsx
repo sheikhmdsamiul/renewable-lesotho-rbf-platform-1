@@ -6925,7 +6925,7 @@ const PreQualificationSubmission = () => {
   const latestPrequal = getLatestPrequalification(prequals);
   const isResubmitMode = Boolean(
     latestPrequal &&
-    latestPrequal.status === "Partial (Resubmit)" &&
+    (latestPrequal.status === "Partial (Resubmit)" || latestPrequal.status === "Rejected") &&
     editingPrequalId === latestPrequal.id
   );
 
@@ -7244,11 +7244,7 @@ const PreQualificationSubmission = () => {
               If you would like to appeal this decision or have questions, please contact RBF support.
             </p>
             <button 
-              onClick={() => {
-                setPrequals([]);
-                setSubmitted(false);
-                setStep(1);
-              }}
+              onClick={() => startResubmission(latestPrequal)}
               className="btn-secondary"
             >
               Submit New Application

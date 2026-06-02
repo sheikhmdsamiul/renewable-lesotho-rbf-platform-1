@@ -529,8 +529,8 @@ class VendorPrequalificationSerializer(serializers.ModelSerializer):
         if self.instance is not None and request and request.user.role == UserRole.VENDOR:
             if self.instance.vendor_id != request.user.id:
                 raise serializers.ValidationError('You can only edit your own pre-qualification submission.')
-            if self.instance.status != PrequalificationStatus.CLARIFICATION_REQUESTED:
-                raise serializers.ValidationError('Only submissions marked Partial (Resubmit) can be edited by vendors.')
+            if self.instance.status not in (PrequalificationStatus.CLARIFICATION_REQUESTED, PrequalificationStatus.REJECTED):
+                raise serializers.ValidationError('Only submissions marked Partial (Resubmit) or Rejected can be edited by vendors.')
 
         if request and request.method == 'POST':
             if request.user.role != UserRole.VENDOR:

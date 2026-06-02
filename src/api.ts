@@ -2638,6 +2638,7 @@ export async function submitVendorPrequalification(
   const data = await http<any>(existingId ? `/api/users/prequalifications/${existingId}/` : `/api/users/prequalifications/`, {
     method: existingId ? "PATCH" : "POST",
     body: form,
+    timeoutMs: 300000,
   });
   return mapVendorPrequalificationFromApi(data);
 }

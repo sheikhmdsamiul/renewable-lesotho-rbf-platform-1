@@ -823,6 +823,25 @@ class VendorPrequalificationViewSet(viewsets.ModelViewSet):
     def create(self, request, *args, **kwargs):
         if request.user.role != UserRole.VENDOR:
             raise PermissionDenied('Only vendors can submit pre-qualification forms.')
+        existing = VendorPrequalification.objects.filter(
+            vendor=request.user,
+            status__in=[PrequalificationStatus.REJECTED, PrequalificationStatus.CLARIFICATION_REQUESTED],
+        ).order_by('-submitted_at').first()
+        if existing:
+            serializer = self.get_serializer(existing, data=request.data)
+            serializer.is_valid(raise_exception=True)
+            preq = serializer.save(
+                vendor=request.user,
+                status=PrequalificationStatus.PENDING,
+                submitted_at=timezone.now(),
+                reviewed_by=None,
+                reviewed_at=None,
+                reviewer_comments='',
+            )
+            log_audit(request.user, 'prequalification_submitted', preq, {
+                'vendor_id': request.user.id, 'previous_status': existing.status,
+            })
+            return Response(self.get_serializer(preq).data, status=status.HTTP_201_CREATED)
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         preq = serializer.save(vendor=request.user, status=PrequalificationStatus.PENDING)
@@ -832,9 +851,15 @@ class VendorPrequalificationViewSet(viewsets.ModelViewSet):
     def update(self, request, *args, **kwargs):
         preq = self.get_object()
         if request.user.role == UserRole.VENDOR and preq.vendor_id == request.user.id:
-            if preq.status != PrequalificationStatus.CLARIFICATION_REQUESTED:
-                raise PermissionDenied('Only submissions marked Partial (Resubmit) can be edited.')
+            if preq.status not in (PrequalificationStatus.CLARIFICATION_REQUESTED, PrequalificationStatus.REJECTED):
+                raise PermissionDenied('Only submissions marked Partial (Resubmit) or Rejected can be edited.')
             response = super().update(request, *args, **kwargs)
+            if preq.status == PrequalificationStatus.REJECTED:
+                preq.status = PrequalificationStatus.PENDING
+                preq.reviewed_by = None
+                preq.reviewed_at = None
+                preq.reviewer_comments = ''
+                preq.save(update_fields=['status', 'reviewed_by', 'reviewed_at', 'reviewer_comments'])
             response = self._refresh_vendor_resubmission_priority(preq, response)
             log_audit(request.user, 'prequalification_resubmitted', preq, {'vendor_id': preq.vendor_id})
             return response
@@ -845,9 +870,15 @@ class VendorPrequalificationViewSet(viewsets.ModelViewSet):
     def partial_update(self, request, *args, **kwargs):
         preq = self.get_object()
         if request.user.role == UserRole.VENDOR and preq.vendor_id == request.user.id:
-            if preq.status != PrequalificationStatus.CLARIFICATION_REQUESTED:
-                raise PermissionDenied('Only submissions marked Partial (Resubmit) can be edited.')
+            if preq.status not in (PrequalificationStatus.CLARIFICATION_REQUESTED, PrequalificationStatus.REJECTED):
+                raise PermissionDenied('Only submissions marked Partial (Resubmit) or Rejected can be edited.')
             response = super().partial_update(request, *args, **kwargs)
+            if preq.status == PrequalificationStatus.REJECTED:
+                preq.status = PrequalificationStatus.PENDING
+                preq.reviewed_by = None
+                preq.reviewed_at = None
+                preq.reviewer_comments = ''
+                preq.save(update_fields=['status', 'reviewed_by', 'reviewed_at', 'reviewer_comments'])
             response = self._refresh_vendor_resubmission_priority(preq, response)
             log_audit(request.user, 'prequalification_resubmitted', preq, {'vendor_id': preq.vendor_id})
             return response
