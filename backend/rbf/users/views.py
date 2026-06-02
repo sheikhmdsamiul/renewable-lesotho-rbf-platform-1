@@ -308,19 +308,22 @@ class UserViewSet(viewsets.ModelViewSet):
             if email_error:
                 data['email_error'] = email_error
 
-        location_area_1 = user.verification_zone or user.region or ''
-        SyncToProspectJob.dispatch_async(
-            'pushAgent',
-            [{
-                'external_id': str(user.id),
-                'agent_type': 'installer' if user.role == UserRole.FIELD_VERIFIER else 'sales_agent',
-                'gender': normalize_prospect_gender(user.gender),
-                'country': 'LS',
-                'location_area_1': location_area_1,
-            }],
-            record_id=int(user.id),
-            record_type='user',
-        )
+        # Only sync non-vendor users to Prospect so vendor registration (which precedes
+        # pre-qualification submission) does not push any data to the external system.
+        if user.role != UserRole.VENDOR:
+            location_area_1 = user.verification_zone or user.region or ''
+            SyncToProspectJob.dispatch_async(
+                'pushAgent',
+                [{
+                    'external_id': str(user.id),
+                    'agent_type': 'installer' if user.role == UserRole.FIELD_VERIFIER else 'sales_agent',
+                    'gender': normalize_prospect_gender(user.gender),
+                    'country': 'LS',
+                    'location_area_1': location_area_1,
+                }],
+                record_id=int(user.id),
+                record_type='user',
+            )
         AuditLogger.log('user_created', 'users', user.id, 'user', new_status=user.status, notes=f'Created {user.role} user.')
 
         return Response(data, status=status.HTTP_201_CREATED, headers=headers)

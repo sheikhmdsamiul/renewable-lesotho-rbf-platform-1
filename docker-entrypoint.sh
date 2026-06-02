@@ -6,7 +6,7 @@
 #
 # Expected vars:
 #   VITE_API_URL  (default: /api)
-#   VITE_API_TIMEOUT_MS  (default: 15000)
+#   VITE_API_TIMEOUT_MS  (default: 60000)
 
 set -e
 
@@ -18,7 +18,7 @@ TEMPLATE_FILE="${CONFIG_DIR}/config.template.json"
 if [ -f "$TEMPLATE_FILE" ]; then
   echo "Generating ${CONFIG_FILE} from template …"
   export VITE_API_URL="${VITE_API_URL:-/api}"
-  export VITE_API_TIMEOUT_MS="${VITE_API_TIMEOUT_MS:-15000}"
+  export VITE_API_TIMEOUT_MS="${VITE_API_TIMEOUT_MS:-60000}"
 
   # Use envsubst to replace ${VAR} placeholders in the template
   envsubst < "$TEMPLATE_FILE" > "$CONFIG_FILE"
@@ -30,7 +30,7 @@ else
   cat > "$CONFIG_FILE" <<EOF
 {
   "VITE_API_URL": "${VITE_API_URL:-/api}",
-  "VITE_API_TIMEOUT_MS": "${VITE_API_TIMEOUT_MS:-15000}"
+  "VITE_API_TIMEOUT_MS": "${VITE_API_TIMEOUT_MS:-60000}"
 }
 EOF
   echo "Config written directly to ${CONFIG_FILE}"

@@ -58,7 +58,7 @@ import {
 const env = (import.meta as any)?.env ?? {};
 const buildTimeApiBase = (env?.VITE_API_URL as string | undefined)?.replace(/\/$/, "");
 let configuredApiBase = buildTimeApiBase;
-let requestTimeoutMs = Number(env?.VITE_API_TIMEOUT_MS ?? 15000);
+let requestTimeoutMs = Number(env?.VITE_API_TIMEOUT_MS ?? 60000);
 const isDevMode = Boolean(env?.DEV);
 const ACCESS_TOKEN_KEY = "rbf_access_token";
 const REFRESH_TOKEN_KEY = "rbf_refresh_token";
