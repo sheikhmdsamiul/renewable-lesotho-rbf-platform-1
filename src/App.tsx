@@ -2568,6 +2568,7 @@ const Tenders = ({
       const time = new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
       return `${date} • ${time}`;
     };
+    const stageTwoBids = tenderBids.filter(bid => bid.stage_key === "site_specific");
 
     return (
       <div className="space-y-6 max-w-5xl mx-auto pb-12">
@@ -2805,14 +2806,14 @@ const Tenders = ({
                 <div className="space-y-4">
                   <div className="flex items-center justify-between">
                     <span className="text-sm text-slate-500">Total Bids</span>
-                    <span className="font-bold">{tenderBids.length}</span>
+                    <span className="font-bold">{stageTwoBids.length}</span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-sm text-slate-500">Verified Bids (Stage 2)</span>
                     <span className="font-bold text-emerald-600">{tenderBids.filter(bid => bid.evaluation_status === "evaluated").length}</span>
                   </div>
                   <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
-                    <div className="bg-emerald-500 h-full" style={{ width: `${tenderBids.length > 0 ? Math.round((tenderBids.filter(bid => bid.evaluation_status === "evaluated").length / tenderBids.length) * 100) : 0}%` }} />
+                    <div className="bg-emerald-500 h-full" style={{ width: `${stageTwoBids.length > 0 ? Math.round((tenderBids.filter(bid => bid.evaluation_status === "evaluated").length / stageTwoBids.length) * 100) : 0}%` }} />
                   </div>
                 </div>
               )}
