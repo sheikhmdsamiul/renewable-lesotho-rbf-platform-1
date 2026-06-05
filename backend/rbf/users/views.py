@@ -548,6 +548,7 @@ class UserViewSet(viewsets.ModelViewSet):
                 latest_prequals.setdefault(prequal.vendor_id, prequal)
         for vendor in queryset:
             vendor._latest_prequalification = latest_prequals.get(vendor.id)
+        self.paginator.page_size = 20
         page = self.paginate_queryset(queryset)
         serializer = VendorDirectorySerializer(page if page is not None else queryset, many=True)
         if page is not None:

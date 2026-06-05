@@ -2487,9 +2487,23 @@ export async function fetchVendorProfile(vendorId: string): Promise<VendorProfil
   return mapVendorProfileFromApi(data);
 }
 
-export async function fetchVendorDirectory(): Promise<VendorDirectoryEntry[]> {
-  const data = await http<any>(`/api/users/vendor_directory/`);
-  return unwrapListResponse<any>(data).map(mapVendorDirectoryEntryFromApi);
+const VENDOR_DIRECTORY_PAGE_SIZE = 20;
+
+export async function fetchVendorDirectory(page: number = 1): Promise<{
+  vendors: VendorDirectoryEntry[];
+  total: number;
+  page: number;
+  totalPages: number;
+}> {
+  const data = await http<any>(`/api/users/vendor_directory/?page=${page}`);
+  if (Array.isArray(data)) {
+    const vendors = data.map(mapVendorDirectoryEntryFromApi);
+    return { vendors, total: vendors.length, page: 1, totalPages: 1 };
+  }
+  const results = (data.results || []).map(mapVendorDirectoryEntryFromApi);
+  const total = data.count ?? 0;
+  const totalPages = Math.ceil(total / VENDOR_DIRECTORY_PAGE_SIZE) || 1;
+  return { vendors: results, total, page, totalPages };
 }
 
 export async function fetchBlacklistCases(): Promise<VendorBlacklistCase[]> {

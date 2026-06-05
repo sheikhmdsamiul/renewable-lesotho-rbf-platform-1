@@ -1258,7 +1258,7 @@ export interface VendorDirectoryEntry {
   prequalificationStatus?: string;
   prequalificationApprovedAt?: string;
   blacklistStatus?: string;
-  operationalStanding: "Active" | "Suspended" | "Blacklisted" | "Reinstated";
+  operationalStanding: "Active" | "Suspended" | "Blacklisted" | "Reinstated" | "Not Pre-Qualified" | "Pre-Qualification Under Review";
   projectCount: number;
   bidCount: number;
 }

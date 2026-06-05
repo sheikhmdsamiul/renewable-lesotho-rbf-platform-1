@@ -12649,21 +12649,30 @@ const VendorDirectory = ({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
-
+  const [currentPage, setCurrentPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [totalPages, setTotalPages] = useState(1);
   React.useEffect(() => {
+    let cancelled = false;
     const loadVendors = async () => {
       setLoading(true);
       setError(null);
       try {
-        setVendors(await fetchVendorDirectory());
+        const result = await fetchVendorDirectory(currentPage);
+        if (!cancelled) {
+          setVendors(result.vendors);
+          setTotal(result.total);
+          setTotalPages(result.totalPages);
+        }
       } catch (err: any) {
-        setError(String(err?.message || "Unable to load vendors."));
+        if (!cancelled) setError(String(err?.message || "Unable to load vendors."));
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     };
     loadVendors();
-  }, []);
+    return () => { cancelled = true; };
+  }, [currentPage]);
 
   const filteredVendors = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -12689,7 +12698,37 @@ const VendorDirectory = ({
       ? "Browse vendors assigned to your region and open their full profile."
       : "Browse vendor organizations and open each profile with your role-based access.";
   const columnHelpText =
-    "Operational Standing only shows the vendor lifecycle states: Active, Suspended, Blacklisted, or Reinstated.";
+    "Operational Standing shows: Active, Suspended, Blacklisted, Reinstated, Not Pre-Qualified (never submitted), or Pre-Qualification Under Review (pending review).";
+
+  const goToPage = (page: number) => {
+    if (page >= 1 && page <= totalPages) {
+      setCurrentPage(page);
+    }
+  };
+
+  const renderPageNumbers = () => {
+    const pages: (number | string)[] = [];
+    const maxVisible = 5;
+    if (totalPages <= maxVisible) {
+      for (let i = 1; i <= totalPages; i++) pages.push(i);
+    } else {
+      pages.push(1);
+      let start = Math.max(2, currentPage - 1);
+      let end = Math.min(totalPages - 1, currentPage + 1);
+      if (currentPage <= 3) {
+        start = 2;
+        end = Math.min(maxVisible - 1, totalPages - 1);
+      } else if (currentPage >= totalPages - 2) {
+        start = Math.max(2, totalPages - maxVisible + 2);
+        end = totalPages - 1;
+      }
+      if (start > 2) pages.push("...");
+      for (let i = start; i <= end; i++) pages.push(i);
+      if (end < totalPages - 1) pages.push("...");
+      pages.push(totalPages);
+    }
+    return pages;
+  };
 
   return (
     <div className="space-y-6">
@@ -12761,8 +12800,8 @@ const VendorDirectory = ({
                   <td className="px-4 py-3 text-slate-600">{vendor.region || "N/A"}</td>
                   <td className="px-4 py-3 text-slate-600">{vendor.technologyTypes.join(", ") || "N/A"}</td>
                   <td className="px-4 py-3">
-                    <span className={`badge ${vendor.prequalificationStatus === "Approved" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
-                      {vendor.prequalificationStatus || "Pending"}
+                    <span className={`badge ${vendor.prequalificationStatus === "Approved" ? "bg-emerald-50 text-emerald-700" : !vendor.prequalificationStatus ? "bg-slate-50 text-slate-600" : "bg-amber-50 text-amber-700"}`}>
+                      {vendor.prequalificationStatus || "Not Submitted"}
                     </span>
                   </td>
                   <td className="px-4 py-3">
@@ -12774,6 +12813,10 @@ const VendorDirectory = ({
                           ? "bg-amber-50 text-amber-700"
                           : vendor.operationalStanding === "Reinstated"
                           ? "bg-blue-50 text-blue-700"
+                          : vendor.operationalStanding === "Not Pre-Qualified"
+                          ? "bg-slate-50 text-slate-600"
+                          : vendor.operationalStanding === "Pre-Qualification Under Review"
+                          ? "bg-amber-50 text-amber-700"
                           : "bg-emerald-50 text-emerald-700"
                       }`}
                     >
@@ -12790,6 +12833,44 @@ const VendorDirectory = ({
             </tbody>
           </table>
         </div>
+        {!loading && !error && totalPages > 1 && (
+          <div className="flex items-center justify-between border-t border-slate-200 px-4 py-3">
+            <span className="text-sm text-slate-500">{total} vendor{total !== 1 ? "s" : ""} total</span>
+            <div className="flex items-center gap-1">
+              <button
+                disabled={currentPage <= 1}
+                onClick={() => goToPage(currentPage - 1)}
+                className="btn-secondary py-1.5 px-2.5 text-xs disabled:opacity-40"
+              >
+                Prev
+              </button>
+              {renderPageNumbers().map((p, i) =>
+                typeof p === "string" ? (
+                  <span key={`ellipsis-${i}`} className="px-1 text-xs text-slate-400">...</span>
+                ) : (
+                  <button
+                    key={p}
+                    onClick={() => goToPage(p)}
+                    className={`min-w-[2rem] rounded-md px-2 py-1.5 text-xs font-medium ${
+                      p === currentPage
+                        ? "bg-emerald-600 text-white"
+                        : "text-slate-600 hover:bg-slate-100"
+                    }`}
+                  >
+                    {p}
+                  </button>
+                )
+              )}
+              <button
+                disabled={currentPage >= totalPages}
+                onClick={() => goToPage(currentPage + 1)}
+                className="btn-secondary py-1.5 px-2.5 text-xs disabled:opacity-40"
+              >
+                Next
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

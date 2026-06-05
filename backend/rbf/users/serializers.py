@@ -861,13 +861,21 @@ class VendorProfileSerializer(serializers.ModelSerializer):
                 return 'Suspended'
             if latest_blacklist_case.status == BlacklistCaseStatus.REINSTATED:
                 return 'Reinstated'
-            if latest_blacklist_case.status in {BlacklistCaseStatus.REJECTED, BlacklistCaseStatus.EXPIRED}:
-                return 'Active'
 
-        if latest_prequalification and latest_prequalification.status == PrequalificationStatus.APPROVED:
+        if latest_prequalification is None:
+            return 'Not Pre-Qualified'
+
+        if latest_prequalification.status == PrequalificationStatus.APPROVED:
             return 'Active'
 
-        return 'Active'
+        if latest_prequalification.status in {
+            PrequalificationStatus.PENDING,
+            PrequalificationStatus.UNDER_REVIEW,
+            PrequalificationStatus.CLARIFICATION_REQUESTED,
+        }:
+            return 'Pre-Qualification Under Review'
+
+        return 'Not Pre-Qualified'
 
     def get_bid_count(self, obj):
         from rbf.tenders.models import TenderBid
@@ -1267,13 +1275,21 @@ class VendorDirectorySerializer(serializers.ModelSerializer):
                 return 'Suspended'
             if latest_blacklist_case.status == BlacklistCaseStatus.REINSTATED:
                 return 'Reinstated'
-            if latest_blacklist_case.status in {BlacklistCaseStatus.REJECTED, BlacklistCaseStatus.EXPIRED}:
-                return 'Active'
 
-        if latest_prequalification and latest_prequalification.status == PrequalificationStatus.APPROVED:
+        if latest_prequalification is None:
+            return 'Not Pre-Qualified'
+
+        if latest_prequalification.status == PrequalificationStatus.APPROVED:
             return 'Active'
 
-        return 'Active'
+        if latest_prequalification.status in {
+            PrequalificationStatus.PENDING,
+            PrequalificationStatus.UNDER_REVIEW,
+            PrequalificationStatus.CLARIFICATION_REQUESTED,
+        }:
+            return 'Pre-Qualification Under Review'
+
+        return 'Not Pre-Qualified'
 
     def get_project_count(self, obj):
         from rbf.projects.models import Project
