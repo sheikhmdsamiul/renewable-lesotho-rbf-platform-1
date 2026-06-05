@@ -8379,10 +8379,11 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
       "Complete the remaining bid information before submission.";
 
     const canProceed = Boolean(editableDraft?.stage_two_unlocked || display.status === BidStatus.DRAFT) && !(display.stage_key === "site_specific" && latestSubmitted?.status === BidStatus.SUBMITTED);
-    const proceedAllowed = canProceed || display.status === BidStatus.REVISION_REQUIRED;
+    const proceedAllowed = canProceed || display.status === BidStatus.REVISION_REQUIRED || display.status === BidStatus.SUBMITTED;
     const proceedLabel =
       editableDraft?.stage_two_unlocked ? "Proceed to Stage 2" :
       display.status === BidStatus.REVISION_REQUIRED ? "Revise Stage 1" :
+      display.status === BidStatus.SUBMITTED ? "Resubmit" :
       display.stage_two_unlocked ? "Continue Stage 2" :
       display.status === BidStatus.DRAFT ? "Continue Draft" :
       null;
@@ -8463,7 +8464,8 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
 
   const getBidActionLabel = (display: TenderBid, editableDraft: TenderBid | null) => {
     if (editableDraft?.stage_two_unlocked || display.status === BidStatus.DRAFT) return "Continue";
-    if (display.status === BidStatus.SUBMITTED) return "Open";
+    if (display.status === BidStatus.SUBMITTED) return "Resubmit";
+    if (display.status === BidStatus.REVISION_REQUIRED) return "Resubmit";
     return "View";
   };
 
@@ -8641,69 +8643,100 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
             const progress = getBidProgress(display, editableDraft, latestSubmitted);
             const visibleStatus = getVendorVisibleStatus(display, editableDraft, latestSubmitted);
             const stageTwoBadge = getStageTwoBadge(progress.stageTwoStatus);
-            const statusSummary =
-              operationalState === "action_required" ? "Action required" :
-              operationalState === "under_review" ? "Under review" :
-              operationalState === "completed" ? "Completed" :
-              operationalState === "rejected" ? "Rejected" :
-              "Active";
+            const isStageTwo = display.stage_key === "site_specific";
+            const showResubmit = display.status === BidStatus.SUBMITTED || display.status === BidStatus.REVISION_REQUIRED || Boolean(editableDraft?.stage_two_unlocked);
             return (
-              <div key={latest.id} className="border border-slate-100 rounded-2xl p-5 hover:border-emerald-200 transition-colors bg-white">
-                <div className="flex flex-col xl:flex-row xl:items-start xl:justify-between gap-5">
-                  <div className="space-y-3 min-w-0">
+              <div key={latest.id} className="border border-slate-100 rounded-2xl bg-white shadow-sm hover:shadow-md transition-shadow">
+                <div className="p-5">
+                  <div className="flex items-start justify-between gap-4">
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className={`badge ${visibleStatus.color}`}>{visibleStatus.label}</span>
-                      <span className="badge bg-slate-100 text-slate-700">{display.stage_badge || display.stage || "Bid"}</span>
-                      {editableDraft?.stage_key === "site_specific" && (
-                        <span className="badge bg-emerald-100 text-emerald-700">Stage 2 draft ready</span>
-                      )}
-                      <span className="text-[11px] font-medium text-slate-500">{statusSummary}</span>
+                      <span className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-bold ${visibleStatus.color}`}>{visibleStatus.label}</span>
+                      <span className="inline-flex items-center rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-medium text-slate-600">
+                        {(isStageTwo ? "Stage 2" : display.stage_badge || display.stage || "Stage 1")}
+                      </span>
+                      <span className="text-xs text-slate-400">v{latest.version_number}</span>
                     </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button onClick={() => openViewBid(display)} className="btn-secondary py-1.5 px-3 text-xs">View</button>
+                      {progress.canProceed && (
+                        <button onClick={() => onOpenBid(display)} className="btn-primary py-1.5 px-3 text-xs">
+                          {progress.proceedLabel || getBidActionLabel(display, editableDraft)}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="mt-4">
                     <p className="text-base font-bold text-slate-900">
                       {display.tender_name || `Tender ${display.tender_reference || display.tender}`}
                     </p>
-                    <p className="text-xs text-slate-500">
-                      Ref: {display.tender_reference || "N/A"} • Latest Version {latest.version_number}
+                    <p className="mt-0.5 text-xs text-slate-500">
+                      Ref: {display.tender_reference || "N/A"} • {display.bid_amount != null ? `Amount: M ${Number(display.bid_amount).toLocaleString()}` : "Amount: N/A"}
                     </p>
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-[11px] text-slate-500">
-                      <span>Amount: {display.bid_amount != null ? `M ${Number(display.bid_amount).toLocaleString()}` : "N/A"}</span>
-                      <span>{display.status === BidStatus.DRAFT ? "Last updated" : "Submitted"}: {getBidActivityTimestamp(display) ? new Date(getBidActivityTimestamp(display)).toLocaleString() : "Draft"}</span>
-                      <span>Versions: {versions.length}</span>
-                    </div>
-                    <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-3">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className={`badge ${progress.stageOnePassed ? "bg-emerald-100 text-emerald-700" : progress.stageOneStatus === "in_review" ? "bg-amber-100 text-amber-700" : progress.stageOneStatus === "failed" ? "bg-rose-100 text-rose-700" : "bg-slate-100 text-slate-700"}`}>
-                          Stage 1 {progress.stageOnePassed ? "Passed" : progress.stageOneStatus === "in_review" ? "In Review" : progress.stageOneStatus === "failed" ? "Failed" : progress.stageOneStatus === "draft" ? "Draft" : "Pending"}
+                  </div>
+
+                  <div className="mt-4 flex items-center gap-4">
+                    <div className="flex items-center gap-2">
+                      <div className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 ${
+                        progress.stageOneStatus === "passed" ? "bg-emerald-50" :
+                        progress.stageOneStatus === "in_review" ? "bg-amber-50" :
+                        progress.stageOneStatus === "failed" ? "bg-rose-50" :
+                        progress.stageOneStatus === "draft" ? "bg-blue-50" :
+                        "bg-slate-50"
+                      }`}>
+                        <div className={`w-2 h-2 rounded-full ${
+                          progress.stageOneStatus === "passed" ? "bg-emerald-500" :
+                          progress.stageOneStatus === "in_review" ? "bg-amber-500" :
+                          progress.stageOneStatus === "failed" ? "bg-rose-500" :
+                          progress.stageOneStatus === "draft" ? "bg-blue-500" :
+                          "bg-slate-400"
+                        }`} />
+                        <span className={`text-xs font-semibold ${
+                          progress.stageOneStatus === "passed" ? "text-emerald-700" :
+                          progress.stageOneStatus === "in_review" ? "text-amber-700" :
+                          progress.stageOneStatus === "failed" ? "text-rose-700" :
+                          progress.stageOneStatus === "draft" ? "text-blue-700" :
+                          "text-slate-600"
+                        }`}>
+                          Stage 1 {progress.stageOneStatus === "passed" ? "Passed" : progress.stageOneStatus === "in_review" ? "In Review" : progress.stageOneStatus === "failed" ? "Failed" : progress.stageOneStatus === "draft" ? "Draft" : "Pending"}
                         </span>
-                        <span className={`badge ${stageTwoBadge.color}`}>
+                      </div>
+                      <ChevronRight size={14} className="text-slate-300" />
+                      <div className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 ${
+                        stageTwoBadge.label === "Passed" || stageTwoBadge.label === "Evaluated" ? "bg-emerald-50" :
+                        stageTwoBadge.label === "Technical Scored" || stageTwoBadge.label === "Ready" || stageTwoBadge.label === "Available" ? "bg-blue-50" :
+                        stageTwoBadge.label === "In Review" ? "bg-amber-50" :
+                        stageTwoBadge.label === "Failed" ? "bg-rose-50" :
+                        "bg-slate-50"
+                      }`}>
+                        <div className={`w-2 h-2 rounded-full ${
+                          stageTwoBadge.label === "Passed" || stageTwoBadge.label === "Evaluated" ? "bg-emerald-500" :
+                          stageTwoBadge.label === "Technical Scored" || stageTwoBadge.label === "Ready" || stageTwoBadge.label === "Available" ? "bg-blue-500" :
+                          stageTwoBadge.label === "In Review" ? "bg-amber-500" :
+                          stageTwoBadge.label === "Failed" ? "bg-rose-500" :
+                          "bg-slate-400"
+                        }`} />
+                        <span className={`text-xs font-semibold ${
+                          stageTwoBadge.label === "Passed" || stageTwoBadge.label === "Evaluated" ? "text-emerald-700" :
+                          stageTwoBadge.label === "Technical Scored" || stageTwoBadge.label === "Ready" || stageTwoBadge.label === "Available" ? "text-blue-700" :
+                          stageTwoBadge.label === "In Review" ? "text-amber-700" :
+                          stageTwoBadge.label === "Failed" ? "text-rose-700" :
+                          "text-slate-600"
+                        }`}>
                           Stage 2 {stageTwoBadge.label}
                         </span>
                       </div>
-                      <p className="mt-3 text-sm font-semibold text-slate-900">{progress.primaryMessage}</p>
-                      <p className="mt-1 text-xs text-slate-600">{progress.secondaryMessage}</p>
                     </div>
-                    {editableDraft?.stage_key === "site_specific" && latestSubmitted?.submitted_at && (
-                      <div className="rounded-xl border border-emerald-100 bg-emerald-50 px-3 py-2 text-xs text-emerald-800">
-                        Stage 1 was submitted on {new Date(latestSubmitted.submitted_at).toLocaleString()}. Stage 2 is unlocked and editable here.
-                      </div>
-                    )}
-                    {!editableDraft?.stage_two_unlocked && latestSubmitted?.status === BidStatus.SUBMITTED && (
-                      <div className="rounded-xl border border-amber-100 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                        Stage 1 is submitted and waiting for technical review before Stage 2 unlocks.
-                      </div>
-                    )}
-                    {display.rejection_reason && (
-                      <div className="rounded-xl border border-rose-100 bg-rose-50 px-3 py-2 text-xs text-rose-700">Rejection: {display.rejection_reason}</div>
-                    )}
                   </div>
-                  <div className="flex flex-col sm:flex-row xl:flex-col gap-3 xl:min-w-[180px]">
-                    <button onClick={() => openViewBid(display)} className="btn-secondary text-xs">View</button>
-                    {progress.canProceed && (
-                      <button onClick={() => onOpenBid(display)} className="btn-primary text-xs">
-                        {progress.proceedLabel || getBidActionLabel(display, editableDraft)}
-                      </button>
-                    )}
+
+                  <div className="mt-3 rounded-xl bg-slate-50 border border-slate-100 px-3.5 py-2.5">
+                    <p className="text-sm font-semibold text-slate-900">{progress.primaryMessage}</p>
+                    <p className="mt-0.5 text-xs text-slate-600">{progress.secondaryMessage}</p>
                   </div>
+
+                  {display.rejection_reason && (
+                    <div className="mt-3 rounded-lg border border-rose-100 bg-rose-50 px-3.5 py-2 text-xs text-rose-700">{display.rejection_reason}</div>
+                  )}
                 </div>
               </div>
             );
@@ -8782,7 +8815,7 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
                 </div>
                 {(viewProgress.canProceed || viewBid.status === BidStatus.SUBMITTED) && (
                   <button onClick={() => onOpenBid(viewBid)} className="btn-primary text-sm">
-                    {viewProgress.proceedLabel || (viewBid.status === BidStatus.DRAFT ? "Continue Editing" : "Open Bid")}
+                    {viewProgress.proceedLabel || (viewBid.status === BidStatus.DRAFT ? "Continue Editing" : viewBid.status === BidStatus.SUBMITTED ? "Resubmit" : "Open Bid")}
                   </button>
                 )}
               </div>
@@ -8808,7 +8841,11 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
                   </p>
                   <p className="mt-1 text-xs text-slate-600">
                     {viewProgress.proceedLabel
-                      ? "You can move this bid forward from here using the action button."
+                      ? viewBid.status === BidStatus.SUBMITTED
+                        ? "You can resubmit this bid to update your submission."
+                        : viewBid.status === BidStatus.REVISION_REQUIRED
+                          ? "Apply the requested changes and resubmit."
+                          : "You can move this bid forward from here using the action button."
                       : viewBid.status === BidStatus.ACCEPTED
                         ? "This bid has already passed the final evaluation."
                         : viewBid.status === BidStatus.REJECTED
@@ -9616,8 +9653,12 @@ const VendorDashboard = ({
         || versions.sort((a, b) => (b.version_number || 0) - (a.version_number || 0))[0];
       if (preferredVersion) {
         useBidVersion(preferredVersion);
-        if (preferredVersion.stage_key !== "site_specific" && preferredVersion.status !== BidStatus.DRAFT) {
-          setBidMessage("Stage 1 has been submitted. Stage 2 will unlock only if you are shortlisted.");
+        if (preferredVersion.status !== BidStatus.DRAFT) {
+          setBidMessage(
+            preferredVersion.stage_key === "site_specific"
+              ? "This Stage 2 proposal has been submitted. You can edit and resubmit it."
+              : "Stage 1 has been submitted. You can edit and resubmit. Stage 2 will unlock only if you are shortlisted."
+          );
         }
       }
     } catch {
@@ -9667,16 +9708,19 @@ const VendorDashboard = ({
         pvPanelSizeW: version.system_configuration?.pv_panel_size_w != null ? String(version.system_configuration.pv_panel_size_w) : "",
         inverterType: version.system_configuration?.inverter_type ?? "",
       },
-      boqItems: (version.boq_items && version.boq_items.length > 0
-        ? version.boq_items.map((item, index) => ({
-            itemNumber: item.item_number ?? index + 1,
-            description: item.description ?? "",
-            qty: item.qty != null ? String(item.qty) : "",
-            unit: item.unit ?? "",
-            unitPrice: item.unit_price != null ? String(item.unit_price) : "",
-            total: item.total != null ? Number(item.total) : Number(item.qty || 0) * Number(item.unit_price || 0),
-          }))
-        : [{ itemNumber: 1, description: "", qty: "", unit: "", unitPrice: "", total: 0 }]),
+      boqItems: (() => {
+        const boqSource = (version.boq_items && version.boq_items.length > 0) ? version.boq_items : (version.boq_details || []);
+        return boqSource.length > 0
+          ? boqSource.map((item: any, index: number) => ({
+              itemNumber: item.item_number ?? index + 1,
+              description: item.description ?? "",
+              qty: item.qty != null ? String(item.qty) : "",
+              unit: item.unit ?? "",
+              unitPrice: item.unit_price != null ? String(item.unit_price) : "",
+              total: item.total != null ? Number(item.total) : Number(item.qty || 0) * Number(item.unit_price || 0),
+            }))
+          : [{ itemNumber: 1, description: "", qty: "", unit: "", unitPrice: "", total: 0 }];
+      })(),
       femaleTargetPct: version.female_target_pct != null ? String(version.female_target_pct) : "50",
       vulnerableTargetPct: version.vulnerable_target_pct != null ? String(version.vulnerable_target_pct) : "30",
       lowIncomeTargetPct: version.low_income_target_pct != null ? String(version.low_income_target_pct) : "60",
@@ -9984,11 +10028,7 @@ const VendorDashboard = ({
     if (!bidTender) return;
     setBidSubmitError(null);
     if (editingBidStatus && editingBidStatus !== BidStatus.DRAFT && editingBidStatus !== BidStatus.REVISION_REQUIRED && editingBidStatus !== BidStatus.SUBMITTED) {
-      setBidMessage("Submitted bids are locked. Open a draft version to make changes.");
-      return;
-    }
-    if (status === BidStatus.SUBMITTED && editingBidStatus === BidStatus.SUBMITTED) {
-      setBidMessage("This bid has already been submitted.");
+      setBidMessage(`Bid status "${editingBidStatus}" cannot be edited.`);
       return;
     }
     if (!isPreQualified) {
@@ -10550,7 +10590,7 @@ const VendorDashboard = ({
                     <div className="space-y-1">
                       <label className="text-sm font-bold text-slate-700 ml-1">Installation Target</label>
                       <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-medium text-slate-700">
-                        {installationTarget > 0 ? `${installationTarget.toLocaleString()} households` : "Add village rows to calculate target"}
+                        {installationTarget > 0 ? `${installationTarget.toLocaleString()} installations` : "Add village rows to calculate target"}
                       </div>
                     </div>
                   </div>
@@ -10610,7 +10650,7 @@ const VendorDashboard = ({
                               </select>
                             </div>
                             <div className="space-y-1">
-                              <label className="text-sm font-bold text-slate-700 ml-1">{isSiteSpecificStage ? "Number of Households *" : "Estimated Households *"}</label>
+                              <label className="text-sm font-bold text-slate-700 ml-1">Estimated Installations *</label>
                               <input type="number" className="input-field" value={site.estimatedHouseholds} onChange={(e) => {
                                 updateBidSite(index, "estimatedHouseholds", e.target.value);
                                 updateBidSite(index, "numberOfHouseholds", e.target.value);
@@ -11133,7 +11173,7 @@ const VendorDashboard = ({
             <div className="bg-white rounded-2xl max-w-md w-full p-6">
               <h3 className="text-lg font-bold text-slate-900 mb-2">Confirm Final Submission</h3>
               <div className="space-y-3 text-sm text-slate-600">
-                <p>You are about to submit the final proposal. Once submitted, the form will be locked.</p>
+                <p>You are about to submit the final proposal. You can edit and resubmit it later if needed — each submission creates a new version.</p>
                 <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                   <div className="flex items-center justify-between"><span>Bid Amount</span><span className="font-bold text-slate-900">LSL {totalProjectValue.toLocaleString()}</span></div>
                   <div className="mt-2 flex items-center justify-between"><span>Stage</span><span className="font-bold text-slate-900">{bidStageLabel}</span></div>

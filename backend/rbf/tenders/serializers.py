@@ -460,8 +460,8 @@ class TenderBidSerializer(serializers.ModelSerializer):
                     unit_price = item.get('unit_price') if isinstance(item, dict) else None
                     if qty not in (None, '') and unit_price not in (None, ''):
                         boq_total += Decimal(str(qty)) * Decimal(str(unit_price))
-                    if bid_amount not in (None, '') and boq_total != Decimal(str(bid_amount)):
-                        errors['boq_items'] = f'BOQ grand total must equal the bid amount. Current total: {boq_total}.'
+                if bid_amount not in (None, '') and boq_total != Decimal(str(bid_amount)):
+                    errors['boq_items'] = f'BOQ grand total must equal the bid amount. Current total: {boq_total}.'
 
             if stage_key == 'site_specific':
                 om_strategy_summary = attrs.get('om_strategy_summary', instance.om_strategy_summary if instance else '')
