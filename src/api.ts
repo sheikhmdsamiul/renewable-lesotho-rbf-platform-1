@@ -137,16 +137,22 @@ function joinApiUrl(base: string, url: string): string {
 function normalizeFileUrl(raw?: string): string | undefined {
   if (!raw) return raw;
   if (typeof window === "undefined") return raw;
-  if (!/^https?:\/\//i.test(raw)) return raw;
-  try {
-    const url = new URL(raw);
-    if (url.hostname === "127.0.0.1" || url.hostname === "localhost") {
-      const preferredOrigin = getConfiguredApiOrigin() || getBrowserOrigin();
-      if (!preferredOrigin) return raw;
-      return `${preferredOrigin}${url.pathname}${url.search}${url.hash}`;
+  if (/^https?:\/\//i.test(raw)) {
+    try {
+      const url = new URL(raw);
+      if (url.hostname === "127.0.0.1" || url.hostname === "localhost") {
+        const preferredOrigin = getConfiguredApiOrigin() || getBrowserOrigin();
+        if (!preferredOrigin) return raw;
+        return `${preferredOrigin}${url.pathname}${url.search}${url.hash}`;
+      }
+    } catch {
+      return raw;
     }
-  } catch {
     return raw;
+  }
+  if (raw.startsWith('/')) {
+    const apiOrigin = getConfiguredApiOrigin();
+    if (apiOrigin) return `${apiOrigin}${raw}`;
   }
   return raw;
 }

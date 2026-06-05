@@ -17762,14 +17762,17 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
     const technicalReferenceEvaluation = technicalEvaluationsByBid.get(technicalReferenceBidId);
     const technicalDocumentLinks = [
       { label: "Technical Proposal", url: selectedEval.bid.technical_proposal_file },
-      { label: "Financial Proposal", url: selectedEval.bid.financial_proposal_file },
       { label: "Bill of Quantities", url: selectedEval.bid.boq_file },
-      { label: "Gender Action Plan", url: selectedEval.bid.gender_action_plan_file },
       { label: "Implementation Plan", url: selectedEval.bid.implementation_plan_file },
       { label: "O&M Plan", url: selectedEval.bid.om_plan_file },
+      { label: "Gender Action Plan", url: selectedEval.bid.gender_action_plan_file },
       ...(tenderSecurityRequired[selectedEval.bid.tender] ? [{ label: "Tender Security", url: selectedEval.bid.tender_security_file }] : []),
     ].filter(doc => Boolean(doc.url));
-    const financialDocumentLinks = technicalDocumentLinks;
+    const financialDocumentLinks = [
+      { label: "Financial Proposal", url: selectedEval.bid.financial_proposal_file },
+      { label: "Bill of Quantities", url: selectedEval.bid.boq_file },
+      ...(tenderSecurityRequired[selectedEval.bid.tender] ? [{ label: "Tender Security", url: selectedEval.bid.tender_security_file }] : []),
+    ].filter(doc => Boolean(doc.url));
     const proposedTechTier = selectedEval.bid.tech_tier || selectedEval.bid.service_tier || "Not provided";
     const projectedEnergyTarget = selectedEval.bid.energy_target || selectedEval.bid.energy_target_kwh_month;
     const techTierNumber = Number(String(proposedTechTier).match(/\d+/)?.[0] || 0);
@@ -18174,9 +18177,10 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
     const allDocuments = [
       { label: "Technical Proposal", url: bid.technical_proposal_file },
       { label: "Financial Proposal", url: bid.financial_proposal_file },
-      { label: "Itemized BoQ", url: bid.boq_file },
+      { label: "Bill of Quantities", url: bid.boq_file },
+      { label: "Implementation Plan", url: bid.implementation_plan_file },
+      { label: "O&M Plan", url: bid.om_plan_file },
       { label: "Gender Action Plan", url: bid.gender_action_plan_file },
-      { label: "O&M Plan", url: bid.implementation_plan_file },
       { label: "Reporting Templates", url: bid.reporting_templates_file },
       { label: "Distribution Map", url: bid.distribution_map_file },
       ...(tenderSecurityRequired[bid.tender] ? [{ label: "Tender Security", url: bid.tender_security_file }] : []),
