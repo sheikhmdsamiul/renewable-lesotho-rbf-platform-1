@@ -1859,7 +1859,7 @@ const Tenders = ({
       setExtendDeadlineOpen(false);
       setNewDeadline("");
       setNewSecurityDeadline("");
-      showNotification("Deadline extended successfully.");
+      showNotification("Deadline updated successfully.");
     } catch (err: any) {
       showNotification(toActionError(err, "Failed to extend deadline."));
     } finally {
@@ -2837,7 +2837,7 @@ const Tenders = ({
                     {isActioning ? "Closing..." : "Close Bidding"}
                   </button>
                 )}
-                {String(selectedTender.applicationType || "").toLowerCase() === "application window" && selectedTender.status === TenderStatus.PUBLISHED && (
+                {(selectedTender.status === TenderStatus.PUBLISHED || selectedTender.status === TenderStatus.EVALUATION) && (
                   <button
                     onClick={() => {
                       setNewDeadline(selectedTender.lastDateSubmission || selectedTender.deadline || "");
@@ -2846,7 +2846,7 @@ const Tenders = ({
                     }}
                     className="btn-secondary w-full border-amber-200 text-amber-700 hover:bg-amber-50"
                   >
-                    Extend Deadline
+                    Extend / Shorten Deadline
                   </button>
                 )}
                 {(selectedTender.status === TenderStatus.EVALUATION || selectedTender.status === TenderStatus.PUBLISHED) && (
@@ -2863,7 +2863,7 @@ const Tenders = ({
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-white rounded-2xl p-6 w-full max-w-md shadow-2xl">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-bold text-slate-900">Extend Deadline</h3>
+              <h3 className="text-lg font-bold text-slate-900">Update Deadline</h3>
               <button onClick={() => setExtendDeadlineOpen(false)} className="p-1 hover:bg-slate-100 rounded-lg">
                 <X size={20} className="text-slate-500" />
               </button>
@@ -2901,7 +2901,7 @@ const Tenders = ({
                   disabled={isExtending || !newDeadline}
                   className="btn-primary flex-1 disabled:opacity-60"
                 >
-                  {isExtending ? "Extending..." : "Extend"}
+                  {isExtending ? "Updating..." : "Update"}
                 </button>
               </div>
             </div>
