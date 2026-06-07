@@ -17654,6 +17654,21 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
     [bidQueue]
   );
 
+  const groupByTender = (bids: TenderBid[]) => {
+    const map = new Map<string, { tenderName: string; bids: TenderBid[] }>();
+    bids.forEach(bid => {
+      const key = bid.tender_name || bid.tender_reference || String(bid.tender);
+      if (!map.has(key)) {
+        map.set(key, { tenderName: bid.tender_name || bid.tender_reference || `Tender #${bid.tender}`, bids: [] });
+      }
+      map.get(key)!.bids.push(bid);
+    });
+    return Array.from(map.entries()).sort(([a], [b]) => a.localeCompare(b));
+  };
+
+  const stageOneGroups = useMemo(() => groupByTender(stageOneReviewQueue), [stageOneReviewQueue]);
+  const stageTwoGroups = useMemo(() => groupByTender(filteredBidQueue), [filteredBidQueue]);
+
   const handleStartEvaluation = (bid: TenderBid) => {
     const existing = roleScopedEvaluationsByBid.get(bid.id);
     setSelectedEval({
@@ -18472,16 +18487,23 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
             </span>
           </div>
           <div className="divide-y divide-slate-100">
-            {stageOneReviewQueue.map((item) => (
-              <div key={item.id} className="p-6 flex items-center justify-between hover:bg-slate-50 transition-colors">
-                <div>
-                  <p className="font-bold text-slate-900">{item.vendor_name}</p>
-                  <p className="text-xs text-slate-500">Submitted {item.submitted_at ? new Date(item.submitted_at).toLocaleDateString() : "N/A"} • {item.tender_reference || item.tender}</p>
+            {stageOneGroups.map(([key, group]) => (
+              <div key={key}>
+                <div className="px-6 py-3 bg-slate-50 border-b border-slate-100">
+                  <p className="text-xs font-bold text-slate-500 uppercase tracking-wider">{group.tenderName}</p>
                 </div>
-                <div className="flex items-center gap-4">
-                  <span className={`inline-flex rounded-full px-3 py-1 text-xs font-bold ${queueStatusTone(item)}`}>{item.status === BidStatus.ACCEPTED ? "Shortlisted" : item.status}</span>
-                  <button onClick={() => handleStartEvaluation(item)} className="btn-primary py-1.5 px-4 text-sm">{item.status === BidStatus.ACCEPTED ? "View" : "Review"}</button>
-                </div>
+                {group.bids.map((item) => (
+                  <div key={item.id} className="p-6 flex items-center justify-between hover:bg-slate-50 transition-colors">
+                    <div>
+                      <p className="font-bold text-slate-900">{item.vendor_name}</p>
+                      <p className="text-xs text-slate-500">Submitted {item.submitted_at ? new Date(item.submitted_at).toLocaleDateString() : "N/A"}</p>
+                    </div>
+                    <div className="flex items-center gap-4">
+                      <span className={`inline-flex rounded-full px-3 py-1 text-xs font-bold ${queueStatusTone(item)}`}>{item.status === BidStatus.ACCEPTED ? "Shortlisted" : item.status}</span>
+                      <button onClick={() => handleStartEvaluation(item)} className="btn-primary py-1.5 px-4 text-sm">{item.status === BidStatus.ACCEPTED ? "View" : "Review"}</button>
+                    </div>
+                  </div>
+                ))}
               </div>
             ))}
             {!stageOneReviewQueue.length && (
@@ -18502,7 +18524,13 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
           {isLoading && (
             <div className="p-6 text-sm text-slate-500">Loading evaluations...</div>
           )}
-          {!isLoading && filteredBidQueue.map((item) => {
+          {!isLoading && stageTwoGroups.map(([key, group]) => (
+            <div key={key}>
+              <div className="px-6 py-3 bg-slate-50 border-b border-slate-100 flex items-center justify-between">
+                <p className="text-xs font-bold text-slate-500 uppercase tracking-wider">{group.tenderName}</p>
+                <span className="text-xs text-slate-400">{group.bids.length} bid{group.bids.length !== 1 ? "s" : ""}</span>
+              </div>
+              {group.bids.map((item) => {
             const existing = roleScopedEvaluationsByBid.get(item.id);
             const technicalExisting = technicalEvaluationsByBid.get(item.id);
             const financialExisting = financialEvaluationsByBid.get(item.id);
@@ -18561,6 +18589,8 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
               </div>
             </div>
           )})}
+            </div>
+          ))}
           {!isLoading && filteredBidQueue.length === 0 && (
             <div className="p-6 text-sm text-slate-500">{isFinancialEvaluationMode ? "No bids have passed the technical threshold for RMT financial evaluation yet." : "No submitted bids awaiting evaluation."}</div>
           )}
