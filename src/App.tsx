@@ -1845,14 +1845,10 @@ const Tenders = ({
     }
     try {
       setIsExtending(true);
-      const securityDeadline = selectedTender.tenderSecurityRequired 
-        ? (newSecurityDeadline || newDeadline)
-        : selectedTender.lastDateSecurity;
-      
       const payload = {
         ...selectedTender,
         lastDateSubmission: newDeadline,
-        lastDateSecurity: securityDeadline,
+        lastDateSecurity: newSecurityDeadline || newDeadline,
         dateOpening: newOpeningDate || selectedTender.dateOpening,
       };
       const updated = await updateTender(selectedTender.id, payload as Partial<Tender> & { scheduleFile?: File | null });
@@ -2882,17 +2878,15 @@ const Tenders = ({
                   className="input-field"
                 />
               </div>
-              {selectedTender.tenderSecurityRequired && (
-                <div>
-                  <label className="text-sm font-bold text-slate-700 mb-2 block">Security Deadline</label>
-                  <input
-                    type="datetime-local"
-                    value={newSecurityDeadline}
-                    onChange={(e) => setNewSecurityDeadline(e.target.value)}
-                    className="input-field"
-                  />
-                </div>
-              )}
+              <div>
+                <label className="text-sm font-bold text-slate-700 mb-2 block">Security Deadline</label>
+                <input
+                  type="datetime-local"
+                  value={newSecurityDeadline}
+                  onChange={(e) => setNewSecurityDeadline(e.target.value)}
+                  className="input-field"
+                />
+              </div>
               <div>
                 <label className="text-sm font-bold text-slate-700 mb-2 block">Date Opening</label>
                 <input
