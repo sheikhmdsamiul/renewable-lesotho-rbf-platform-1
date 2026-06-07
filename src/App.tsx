@@ -1215,6 +1215,7 @@ const Tenders = ({
   const [extendDeadlineOpen, setExtendDeadlineOpen] = useState(false);
   const [newDeadline, setNewDeadline] = useState("");
   const [newSecurityDeadline, setNewSecurityDeadline] = useState("");
+  const [newOpeningDate, setNewOpeningDate] = useState("");
   const [isExtending, setIsExtending] = useState(false);
   const [formStep, setFormStep] = useState(1);
 
@@ -1852,6 +1853,7 @@ const Tenders = ({
         ...selectedTender,
         lastDateSubmission: newDeadline,
         lastDateSecurity: securityDeadline,
+        dateOpening: newOpeningDate || selectedTender.dateOpening,
       };
       const updated = await updateTender(selectedTender.id, payload as Partial<Tender> & { scheduleFile?: File | null });
       upsertTender(updated);
@@ -1859,6 +1861,7 @@ const Tenders = ({
       setExtendDeadlineOpen(false);
       setNewDeadline("");
       setNewSecurityDeadline("");
+      setNewOpeningDate("");
       showNotification("Deadline updated successfully.");
     } catch (err: any) {
       showNotification(toActionError(err, "Failed to extend deadline."));
@@ -2842,11 +2845,12 @@ const Tenders = ({
                     onClick={() => {
                       setNewDeadline(selectedTender.lastDateSubmission || selectedTender.deadline || "");
                       setNewSecurityDeadline(selectedTender.lastDateSecurity || "");
+                      setNewOpeningDate(selectedTender.dateOpening || "");
                       setExtendDeadlineOpen(true);
                     }}
                     className="btn-secondary w-full border-amber-200 text-amber-700 hover:bg-amber-50"
                   >
-                    Extend / Shorten Deadline
+                    Update Deadlines & Schedule
                   </button>
                 )}
                 {(selectedTender.status === TenderStatus.EVALUATION || selectedTender.status === TenderStatus.PUBLISHED) && (
@@ -2863,14 +2867,14 @@ const Tenders = ({
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-white rounded-2xl p-6 w-full max-w-md shadow-2xl">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-bold text-slate-900">Update Deadline</h3>
+              <h3 className="text-lg font-bold text-slate-900">Update Deadlines & Schedule</h3>
               <button onClick={() => setExtendDeadlineOpen(false)} className="p-1 hover:bg-slate-100 rounded-lg">
                 <X size={20} className="text-slate-500" />
               </button>
             </div>
             <div className="space-y-4">
               <div>
-                <label className="text-sm font-bold text-slate-700 mb-2 block">New Submission Deadline *</label>
+                <label className="text-sm font-bold text-slate-700 mb-2 block">Submission Deadline *</label>
                 <input
                   type="datetime-local"
                   value={newDeadline}
@@ -2880,7 +2884,7 @@ const Tenders = ({
               </div>
               {selectedTender.tenderSecurityRequired && (
                 <div>
-                  <label className="text-sm font-bold text-slate-700 mb-2 block">New Security Deadline</label>
+                  <label className="text-sm font-bold text-slate-700 mb-2 block">Security Deadline</label>
                   <input
                     type="datetime-local"
                     value={newSecurityDeadline}
@@ -2889,6 +2893,15 @@ const Tenders = ({
                   />
                 </div>
               )}
+              <div>
+                <label className="text-sm font-bold text-slate-700 mb-2 block">Date Opening</label>
+                <input
+                  type="datetime-local"
+                  value={newOpeningDate}
+                  onChange={(e) => setNewOpeningDate(e.target.value)}
+                  className="input-field"
+                />
+              </div>
               <div className="flex gap-3 pt-2">
                 <button
                   onClick={() => setExtendDeadlineOpen(false)}
