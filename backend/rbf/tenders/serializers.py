@@ -11,12 +11,19 @@ from .models import (
     Tender,
     TenderBid,
     TenderBidSite,
-    BidStatus,
     TenderBidEvaluation,
     EvaluationStatus,
     TenderContract,
-    ContractStatus,
+    TenderChallenge,
+    ChallengeStatus,
+    ChallengeCategory,
+    ChallengeDocument,
+    ChallengeEvent,
     Notice,
+    TenderStatus,
+    BidStatus,
+    ContractStatus,
+    ContractSignatureStatus,
 )
 from rbf.users.models import UserRole, VendorPrequalification, PrequalificationStatus
 from rbf.projects.models import TechnologyType, VerificationMethod
@@ -291,6 +298,7 @@ class TenderBidSerializer(serializers.ModelSerializer):
     evaluation_status = serializers.SerializerMethodField()
     technical_score_total = serializers.SerializerMethodField()
     financial_score_total = serializers.SerializerMethodField()
+    has_challenge = serializers.SerializerMethodField()
     
     class Meta:
         model = TenderBid
@@ -312,7 +320,7 @@ class TenderBidSerializer(serializers.ModelSerializer):
             'stage_two_unlocked', 'stage_two_unlocked_at', 'stage_two_source_bid', 'stage_two_ready',
             'document_requirements', 'document_counts',
             'deadline', 'deadline_passed', 'deadline_countdown_seconds', 'is_locked', 'version_history',
-            'evaluation_status', 'technical_score_total', 'financial_score_total',
+            'evaluation_status', 'technical_score_total', 'financial_score_total', 'has_challenge',
             'status', 'version_number',
             'submitted_at', 'reviewed_at', 'reviewed_by', 'rejection_reason',
             'created_at', 'updated_at', 'sites'
@@ -744,6 +752,11 @@ class TenderBidSerializer(serializers.ModelSerializer):
             for ev in scored_evaluations
         ]
         return round(sum(totals) / len(totals))
+
+    def get_has_challenge(self, obj):
+        return obj.challenges.filter(
+            status__in=[ChallengeStatus.SUBMITTED, ChallengeStatus.UNDER_REVIEW]
+        ).exists()
 
 
 class TenderBidEvaluationSerializer(serializers.ModelSerializer):
@@ -1272,7 +1285,7 @@ class TenderSerializer(serializers.ModelSerializer):
     class Meta:
         model = Tender
         fields = '__all__'
-        read_only_fields = ['id', 'created_at', 'updated_at', 'verified_at', 'published_at', 'awarded_at', 'closed_at', 'security_deposit_verified_at', 'bid_count']
+        read_only_fields = ['id', 'created_at', 'updated_at', 'verified_at', 'published_at', 'awarded_at', 'closed_at', 'dispute_started_at', 'security_deposit_verified_at', 'bid_count']
         extra_kwargs = {
             'reference_number': {'required': False, 'allow_blank': True},
             'schedule_file': {'required': False, 'allow_null': True},
@@ -1385,3 +1398,105 @@ class NoticeListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Notice
         fields = ['id', 'notice_id', 'title', 'category', 'summary', 'content', 'linked_tender', 'tender_reference', 'tender_name', 'is_pinned', 'show_countdown', 'countdown_date', 'attachments', 'status', 'published_at', 'created_at']
+
+
+class ChallengeDocumentSerializer(serializers.ModelSerializer):
+    uploaded_by_name = serializers.SerializerMethodField()
+    file_url = serializers.SerializerMethodField()
+
+    def get_uploaded_by_name(self, obj):
+        if obj.uploaded_by:
+            return obj.uploaded_by.get_full_name() or obj.uploaded_by.username
+        return None
+
+    def get_file_url(self, obj):
+        if obj.document:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.document.url)
+            return obj.document.url
+        return None
+
+    class Meta:
+        model = ChallengeDocument
+        fields = ['id', 'challenge', 'title', 'description', 'document_type', 'file_url', 'uploaded_by', 'uploaded_by_name', 'uploaded_at', 'is_confidential']
+        read_only_fields = ['uploaded_by', 'uploaded_at']
+
+
+class ChallengeEventSerializer(serializers.ModelSerializer):
+    actor_name = serializers.SerializerMethodField()
+
+    def get_actor_name(self, obj):
+        if obj.actor:
+            return obj.actor.get_full_name() or obj.actor.username
+        return "System"
+
+    class Meta:
+        model = ChallengeEvent
+        fields = ['id', 'event_type', 'description', 'actor', 'actor_name', 'actor_role', 'metadata', 'created_at']
+
+
+class TenderChallengeSerializer(serializers.ModelSerializer):
+    challenger_bid_id = serializers.SerializerMethodField()
+    challenger_vendor_name = serializers.SerializerMethodField()
+    documents = ChallengeDocumentSerializer(many=True, read_only=True)
+    events = ChallengeEventSerializer(many=True, read_only=True)
+    assigned_reviewer_name = serializers.SerializerMethodField()
+    days_until_deadline = serializers.SerializerMethodField()
+    can_withdraw = serializers.SerializerMethodField()
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    category_display = serializers.CharField(source='get_category_display', read_only=True)
+
+    def get_challenger_bid_id(self, obj):
+        return str(obj.challenger_bid.id) if obj.challenger_bid else None
+
+    def get_challenger_vendor_name(self, obj):
+        return obj.challenger_bid.vendor_name if obj.challenger_bid else None
+
+    def get_assigned_reviewer_name(self, obj):
+        if obj.assigned_reviewer:
+            return obj.assigned_reviewer.get_full_name() or obj.assigned_reviewer.username
+        return None
+
+    def get_days_until_deadline(self, obj):
+        if obj.challenge_deadline:
+            delta = obj.challenge_deadline - timezone.now()
+            return max(0, delta.days)
+        return None
+
+    def get_can_withdraw(self, obj):
+        return obj.status in [ChallengeStatus.DRAFT, ChallengeStatus.SUBMITTED, ChallengeStatus.UNDER_REVIEW,
+                               ChallengeStatus.ADDITIONAL_INFO_REQUESTED, ChallengeStatus.HEARING_SCHEDULED]
+
+    class Meta:
+        model = TenderChallenge
+        fields = [
+            'id', 'tender', 'filed_by_vendor_id', 'filed_by_vendor_name',
+            'challenger_bid_id', 'challenger_vendor_name',
+            'category', 'category_display', 'grounds', 'legal_basis', 'requested_relief',
+            'status', 'status_display', 'priority',
+            'challenge_deadline', 'response_deadline', 'hearing_date',
+            'assigned_reviewer', 'assigned_reviewer_name', 'review_committee',
+            'filed_at', 'acknowledged_at', 'reviewed_by', 'resolution_notes', 'resolved_at',
+            'withdrawn_at', 'withdrawal_reason',
+            'parent_challenge', 'is_consolidated',
+            'documents', 'events',
+            'days_until_deadline', 'can_withdraw',
+        ]
+        read_only_fields = ['filed_at', 'acknowledged_at', 'reviewed_by', 'resolved_at', 'withdrawn_at']
+
+
+class ChallengeCreateSerializer(serializers.Serializer):
+    """Serializer for creating a new challenge with validation."""
+    filed_by_vendor_id = serializers.CharField(max_length=64)
+    filed_by_vendor_name = serializers.CharField(max_length=255)
+    challenger_bid_id = serializers.CharField(required=False, allow_null=True)
+    category = serializers.ChoiceField(choices=ChallengeCategory.choices, default=ChallengeCategory.OTHER)
+    grounds = serializers.CharField()
+    legal_basis = serializers.CharField(required=False, allow_blank=True)
+    requested_relief = serializers.CharField(required=False, allow_blank=True)
+    priority = serializers.ChoiceField(choices=[('normal', 'Normal'), ('urgent', 'Urgent')], default='normal')
+    documents = serializers.ListField(
+        child=serializers.DictField(child=serializers.CharField()),
+        required=False
+    )

@@ -40,6 +40,8 @@ export enum TenderStatus {
   DRAFT = "Draft",
   PUBLISHED = "Published",
   EVALUATION = "Evaluation",
+  STANDSTILL = "Standstill",
+  DISPUTED = "Disputed",
   AWARDED = "Awarded",
   CLOSED = "Closed",
 }
@@ -200,6 +202,7 @@ export interface Tender {
   intentToAwardBidId?: string;
   intentToAwardAt?: string;
   coolingOffUntil?: string;
+  disputeStartedAt?: string;
   createdAt?: string;
   updatedAt?: string;
   publishedAt?: string;
@@ -209,6 +212,22 @@ export interface Tender {
   awardedVendorName?: string;
   awardedVendorId?: string;
   bidCount?: number;
+  challenges?: TenderChallenge[];
+}
+
+export interface TenderChallenge {
+  id: string;
+  tender: string;
+  filed_by_vendor_id: string;
+  filed_by_vendor_name: string;
+  challenger_bid_id?: string;
+  challenger_vendor_name?: string;
+  grounds: string;
+  status: "Pending" | "Under Review" | "Upheld" | "Dismissed";
+  filed_at: string;
+  reviewed_by?: string | number;
+  resolution_notes?: string;
+  resolved_at?: string;
 }
 
 export interface TenderBidSite {

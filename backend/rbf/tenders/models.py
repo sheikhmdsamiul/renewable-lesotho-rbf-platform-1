@@ -7,6 +7,8 @@ class TenderStatus(models.TextChoices):
     DRAFT = 'Draft'
     PUBLISHED = 'Published'
     EVALUATION = 'Evaluation'
+    STANDSTILL = 'Standstill'
+    DISPUTED = 'Disputed'
     AWARDED = 'Awarded'
     CLOSED = 'Closed'
 
@@ -93,6 +95,7 @@ class Tender(models.Model):
     )
     intent_to_award_at = models.DateTimeField(null=True, blank=True)
     cooling_off_until = models.DateTimeField(null=True, blank=True)
+    dispute_started_at = models.DateTimeField(null=True, blank=True)
     verified_at = models.DateTimeField(null=True, blank=True)
     published_at = models.DateTimeField(null=True, blank=True)
     awarded_at = models.DateTimeField(null=True, blank=True)
@@ -234,6 +237,150 @@ class TenderBidEvaluation(models.Model):
 
     def __str__(self):
         return f"Evaluation for bid {self.bid_id} ({self.status})"
+
+
+class ChallengeCategory(models.TextChoices):
+    PROCEDURAL = 'procedural', 'Procedural Irregularity'
+    EVALUATION = 'evaluation', 'Evaluation Error'
+    DISCRIMINATION = 'discrimination', 'Discrimination / Bias'
+    CONFLICT_OF_INTEREST = 'conflict_of_interest', 'Conflict of Interest'
+    TECHNICAL_SPECIFICATION = 'technical_spec', 'Technical Specification Issue'
+    FINANCIAL_EVALUATION = 'financial_eval', 'Financial Evaluation Error'
+    ELIGIBILITY = 'eligibility', 'Eligibility / Qualification Error'
+    CORRUPTION = 'corruption', 'Corruption / Fraud Allegation'
+    OTHER = 'other', 'Other Grounds'
+
+
+class ChallengeStatus(models.TextChoices):
+    DRAFT = 'draft', 'Draft'
+    SUBMITTED = 'submitted', 'Submitted'
+    UNDER_REVIEW = 'under_review', 'Under Review'
+    ADDITIONAL_INFO_REQUESTED = 'additional_info', 'Additional Information Requested'
+    HEARING_SCHEDULED = 'hearing_scheduled', 'Hearing Scheduled'
+    UPHELD = 'upheld', 'Upheld'
+    PARTIALLY_UPHELD = 'partially_upheld', 'Partially Upheld'
+    DISMISSED = 'dismissed', 'Dismissed'
+    WITHDRAWN = 'withdrawn', 'Withdrawn'
+    SETTLED = 'settled', 'Settled'
+
+
+class TenderChallenge(models.Model):
+    tender = models.ForeignKey(Tender, on_delete=models.CASCADE, related_name='challenges')
+    filed_by_vendor_id = models.CharField(max_length=64)
+    filed_by_vendor_name = models.CharField(max_length=255)
+    challenger_bid = models.ForeignKey(
+        TenderBid, null=True, blank=True, on_delete=models.SET_NULL, related_name='challenges'
+    )
+
+    # Structured challenge details
+    category = models.CharField(max_length=30, choices=ChallengeCategory.choices, default=ChallengeCategory.OTHER)
+    grounds = models.TextField()
+    legal_basis = models.TextField(blank=True, help_text="Specific legal/regulatory provisions cited")
+    requested_relief = models.TextField(blank=True, help_text="What the challenger wants as remedy")
+
+    # Status and workflow
+    status = models.CharField(max_length=25, choices=ChallengeStatus.choices, default=ChallengeStatus.DRAFT)
+    priority = models.CharField(max_length=10, choices=[('normal', 'Normal'), ('urgent', 'Urgent')], default='normal')
+
+    # Deadlines
+    challenge_deadline = models.DateTimeField(null=True, blank=True, help_text="Deadline to file challenge (standstill end)")
+    response_deadline = models.DateTimeField(null=True, blank=True, help_text="Deadline for RMT to respond")
+    hearing_date = models.DateTimeField(null=True, blank=True)
+
+    # Review assignment
+    assigned_reviewer = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name='assigned_challenges'
+    )
+    review_committee = models.JSONField(default=list, blank=True, help_text="List of reviewer user IDs")
+
+    # Timestamps
+    filed_at = models.DateTimeField(null=True, blank=True)
+    acknowledged_at = models.DateTimeField(null=True, blank=True)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name='reviewed_challenges'
+    )
+    resolution_notes = models.TextField(blank=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    withdrawn_at = models.DateTimeField(null=True, blank=True)
+    withdrawal_reason = models.TextField(blank=True)
+
+    # Consolidation
+    parent_challenge = models.ForeignKey('self', null=True, blank=True, on_delete=models.SET_NULL, related_name='consolidated_challenges')
+    is_consolidated = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ['-filed_at']
+        indexes = [
+            models.Index(fields=['tender', 'status']),
+            models.Index(fields=['filed_by_vendor_id', 'status']),
+            models.Index(fields=['challenge_deadline']),
+        ]
+
+    def __str__(self):
+        return f"Challenge by {self.filed_by_vendor_name} on {self.tender.reference_number} [{self.get_status_display()}]"
+
+    def is_within_filing_deadline(self):
+        """Check if challenge was filed within standstill period."""
+        if self.challenge_deadline:
+            return self.filed_at and self.filed_at <= self.challenge_deadline
+        return True  # No deadline set = allowed
+
+    def days_until_deadline(self):
+        """Days remaining until challenge filing deadline."""
+        if self.challenge_deadline:
+            delta = self.challenge_deadline - timezone.now()
+            return max(0, delta.days)
+        return None
+
+    def can_withdraw(self):
+        """Challenge can be withdrawn before resolution."""
+        return self.status in [ChallengeStatus.DRAFT, ChallengeStatus.SUBMITTED, ChallengeStatus.UNDER_REVIEW,
+                               ChallengeStatus.ADDITIONAL_INFO_REQUESTED, ChallengeStatus.HEARING_SCHEDULED]
+
+
+class ChallengeDocument(models.Model):
+    """Supporting documents for challenges."""
+    challenge = models.ForeignKey(TenderChallenge, on_delete=models.CASCADE, related_name='documents')
+    document = models.FileField(upload_to='challenge_documents/')
+    title = models.CharField(max_length=255)
+    description = models.TextField(blank=True)
+    document_type = models.CharField(
+        max_length=30,
+        choices=[
+            ('evidence', 'Evidence'),
+            ('legal_argument', 'Legal Argument'),
+            ('correspondence', 'Correspondence'),
+            ('expert_report', 'Expert Report'),
+            ('other', 'Other'),
+        ],
+        default='evidence'
+    )
+    uploaded_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True)
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+    is_confidential = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ['-uploaded_at']
+
+    def __str__(self):
+        return f"{self.title} ({self.challenge_id})"
+
+
+class ChallengeEvent(models.Model):
+    """Audit trail / timeline events for challenge."""
+    challenge = models.ForeignKey(TenderChallenge, on_delete=models.CASCADE, related_name='events')
+    event_type = models.CharField(max_length=50)
+    description = models.TextField()
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)
+    actor_role = models.CharField(max_length=50, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['created_at']
+
+    def __str__(self):
+        return f"{self.event_type} - {self.challenge_id}"
 
 
 class ContractStatus(models.TextChoices):

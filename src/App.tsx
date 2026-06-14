@@ -18,6 +18,7 @@ import {
   Settings, 
   LogOut, 
   ChevronRight,
+  ChevronDown,
   Search,
   Plus,
   Filter,
@@ -56,7 +57,8 @@ import {
   FolderKanban,
   RefreshCw,
   Printer,
-  Paperclip
+  Paperclip,
+  Pause,
 } from "lucide-react";
 import {
   LineChart,
@@ -188,6 +190,12 @@ import {
   rejectTenderContract,
   fetchTenderAwardRanking,
   confirmTenderAward,
+  pauseTenderAward,
+  revokeIntentToAward,
+  resolveChallenge,
+  fetchTenderChallenges,
+  createChallenge,
+  updateCoolingOff,
   saveProjectSetupDraft,
   submitProjectSetup,
   testProjectSetupConnection,
@@ -1210,6 +1218,21 @@ const Tenders = ({
   const [awardConfirmOpen, setAwardConfirmOpen] = useState(false);
   const [finalAwardConfirmOpen, setFinalAwardConfirmOpen] = useState(false);
   const [awardRankingRows, setAwardRankingRows] = useState<TenderAwardRankingRow[]>([]);
+  const [tenderChallenges, setTenderChallenges] = useState<any[]>([]);
+  const [pauseConfirmOpen, setPauseConfirmOpen] = useState(false);
+  const [revokeConfirmOpen, setRevokeConfirmOpen] = useState(false);
+  const [resolveChallengeOpen, setResolveChallengeOpen] = useState(false);
+  const [selectedChallengeId, setSelectedChallengeId] = useState<string | null>(null);
+  const [challengeOutcome, setChallengeOutcome] = useState<"upheld" | "dismissed">("dismissed");
+  const [challengeResolutionNotes, setChallengeResolutionNotes] = useState("");
+  const [createChallengeOpen, setCreateChallengeOpen] = useState(false);
+  const [challengeFormVendorId, setChallengeFormVendorId] = useState("");
+  const [challengeFormVendorName, setChallengeFormVendorName] = useState("");
+  const [challengeFormGrounds, setChallengeFormGrounds] = useState("");
+  const [challengeFormBidId, setChallengeFormBidId] = useState("");
+  const [coolingOffAdjustOpen, setCoolingOffAdjustOpen] = useState(false);
+  const [coolingOffAction, setCoolingOffAction] = useState<"extend" | "shorten">("extend");
+  const [coolingOffDays, setCoolingOffDays] = useState(3);
   const [tenderBids, setTenderBids] = useState<TenderBid[]>([]);
   const [bidsLoading, setBidsLoading] = useState(false);
   const [extendDeadlineOpen, setExtendDeadlineOpen] = useState(false);
@@ -1622,6 +1645,15 @@ const Tenders = ({
           targetLowIncomePct: 60,
         });
         setDistrictDropdownOpen(false);
+        if (full.status === TenderStatus.DISPUTED) {
+          try {
+            const challenges = await fetchTenderChallenges(tenderId);
+            setTenderChallenges(challenges);
+            setSelectedTender({ ...full, challenges });
+          } catch {
+            setTenderChallenges([]);
+          }
+        }
       }
       if (syncUrl) {
         navigateView(nextView, tenderId);
@@ -1967,6 +1999,98 @@ const Tenders = ({
 
   const closeFinalAwardConfirm = () => {
     setFinalAwardConfirmOpen(false);
+  };
+
+  const handlePauseAward = async () => {
+    const tenderId = selectedTender?.id;
+    if (!tenderId) return;
+    try {
+      setIsActioning(true);
+      const updated = await pauseTenderAward(tenderId);
+      if (selectedTender?.id === tenderId) setSelectedTender(updated);
+      upsertTender(updated);
+      setPauseConfirmOpen(false);
+      showNotification("Award process paused. Cooling-off clock has been frozen.");
+    } catch (err: any) {
+      showNotification(toActionError(err, "Failed to pause award."));
+    } finally {
+      setIsActioning(false);
+    }
+  };
+
+  const handleRevokeIntent = async () => {
+    const tenderId = selectedTender?.id;
+    if (!tenderId) return;
+    try {
+      setIsActioning(true);
+      const updated = await revokeIntentToAward(tenderId);
+      if (selectedTender?.id === tenderId) setSelectedTender(updated);
+      upsertTender(updated);
+      setRevokeConfirmOpen(false);
+      showNotification("Intent to Award revoked. Tender returned to Evaluation status.");
+    } catch (err: any) {
+      showNotification(toActionError(err, "Failed to revoke intent."));
+    } finally {
+      setIsActioning(false);
+    }
+  };
+
+  const handleResolveChallenge = async () => {
+    const tenderId = selectedTender?.id;
+    if (!tenderId || !selectedChallengeId) return;
+    try {
+      setIsActioning(true);
+      const updated = await resolveChallenge(tenderId, {
+        challengeId: selectedChallengeId,
+        outcome: challengeOutcome,
+        resolutionNotes: challengeResolutionNotes,
+      });
+      if (selectedTender?.id === tenderId) setSelectedTender(updated);
+      upsertTender(updated);
+      setResolveChallengeOpen(false);
+      setSelectedChallengeId(null);
+      setChallengeResolutionNotes("");
+      showNotification(`Challenge resolved as ${challengeOutcome}.`);
+    } catch (err: any) {
+      showNotification(toActionError(err, "Failed to resolve challenge."));
+    } finally {
+      setIsActioning(false);
+    }
+  };
+
+  const handleCreateChallenge = async () => {
+    const tenderId = selectedTender?.id;
+    if (!tenderId) return;
+    if (!challengeFormVendorId.trim() || !challengeFormVendorName.trim() || !challengeFormGrounds.trim()) {
+      showNotification("Vendor ID, Vendor Name, and Grounds are required.");
+      return;
+    }
+    try {
+      setIsActioning(true);
+      const result = await createChallenge(tenderId, {
+        filedByVendorId: challengeFormVendorId,
+        filedByVendorName: challengeFormVendorName,
+        grounds: challengeFormGrounds,
+        challengerBidId: challengeFormBidId || undefined,
+      });
+      const updated = result.tender as Tender;
+      if (selectedTender?.id === tenderId) setSelectedTender(updated);
+      upsertTender(updated);
+      if (updated.status === TenderStatus.DISPUTED) {
+        const challenges = await fetchTenderChallenges(tenderId);
+        setSelectedTender({ ...updated, challenges });
+      }
+      setCreateChallengeOpen(false);
+      setChallengeFormVendorId("");
+      setChallengeFormVendorName("");
+      setChallengeFormGrounds("");
+      setChallengeFormBidId("");
+      showNotification("Challenge filed. Award process paused.");
+    } catch (err: any) {
+      showNotification(toActionError(err, "Failed to file challenge."));
+    } finally {
+      setIsActioning(false);
+    }
   };
 
   const handleApproveContract = async (contractId: string) => {
@@ -2615,6 +2739,7 @@ const Tenders = ({
                 <span className={`badge ${
                   selectedTender.status === TenderStatus.PUBLISHED ? 'bg-emerald-100 text-emerald-700' :
                   selectedTender.status === TenderStatus.EVALUATION ? 'bg-blue-100 text-blue-700' :
+                  selectedTender.status === TenderStatus.STANDSTILL ? 'bg-amber-100 text-amber-700' :
                   selectedTender.status === TenderStatus.AWARDED ? 'bg-purple-100 text-purple-700' :
                   'bg-amber-100 text-amber-700'
                 }`}>
@@ -2828,7 +2953,7 @@ const Tenders = ({
                 <button onClick={exportBidList} className="btn-secondary w-full flex items-center justify-center gap-2">
                   <Download size={16} /> Export Bid List
                 </button>
-                {(selectedTender.status === TenderStatus.PUBLISHED || selectedTender.status === TenderStatus.EVALUATION) && (
+                {(selectedTender.status === TenderStatus.PUBLISHED) && (
                   <button
                     onClick={() => void handleCloseBidding(selectedTender.id)}
                     disabled={isActioning}
@@ -2837,7 +2962,7 @@ const Tenders = ({
                     {isActioning ? "Closing..." : "Close Bidding"}
                   </button>
                 )}
-                {(selectedTender.status === TenderStatus.PUBLISHED || selectedTender.status === TenderStatus.EVALUATION) && (
+                {(selectedTender.status === TenderStatus.PUBLISHED) && (
                   <button
                     onClick={() => {
                       setNewDeadline(selectedTender.lastDateSubmission || selectedTender.deadline || "");
@@ -2850,9 +2975,40 @@ const Tenders = ({
                     Update Deadlines & Schedule
                   </button>
                 )}
-                {(selectedTender.status === TenderStatus.EVALUATION || selectedTender.status === TenderStatus.PUBLISHED) && (
+                {(selectedTender.status === TenderStatus.EVALUATION || selectedTender.status === TenderStatus.PUBLISHED || selectedTender.status === TenderStatus.STANDSTILL) && (
                   <button onClick={() => navigateView("award")} className="btn-primary w-full bg-purple-600 hover:bg-purple-700">
-                    Issue Award
+                    {selectedTender.intentToAwardAt ? "Manage Award" : "Issue Award"}
+                  </button>
+                )}
+                {selectedTender.status !== TenderStatus.AWARDED && (
+                  <button onClick={() => setCoolingOffAdjustOpen(true)} className="btn-secondary w-full border-blue-200 text-blue-700 hover:bg-blue-50 flex items-center justify-center gap-2">
+                    <Clock size={16} /> Adjust Cooling-Off
+                  </button>
+                )}
+                {selectedTender.status !== TenderStatus.AWARDED && selectedTender.intentToAwardAt && selectedTender.status !== TenderStatus.DISPUTED && (
+                  <button onClick={() => {
+                    setChallengeFormVendorId("");
+                    setChallengeFormVendorName("");
+                    setChallengeFormGrounds("");
+                    setChallengeFormBidId("");
+                    setCreateChallengeOpen(true);
+                  }} className="btn-secondary w-full border-rose-200 text-rose-700 hover:bg-rose-50 flex items-center justify-center gap-2">
+                    <AlertTriangle size={16} /> File Challenge
+                  </button>
+                )}
+                {selectedTender.status !== TenderStatus.AWARDED && selectedTender.status !== TenderStatus.DISPUTED && selectedTender.intentToAwardAt && (
+                  <button onClick={() => setPauseConfirmOpen(true)} className="btn-secondary w-full border-amber-200 text-amber-700 hover:bg-amber-50 flex items-center justify-center gap-2">
+                    <Pause size={16} /> Pause Award
+                  </button>
+                )}
+                {selectedTender.status !== TenderStatus.AWARDED && selectedTender.intentToAwardAt && (
+                  <button onClick={() => setRevokeConfirmOpen(true)} className="btn-secondary w-full border-rose-200 text-rose-700 hover:bg-rose-50 flex items-center justify-center gap-2">
+                    <XCircle size={16} /> Revoke Intent
+                  </button>
+                )}
+                {selectedTender.status === TenderStatus.DISPUTED && (
+                  <button onClick={() => openTenderView(selectedTender.id, "award")} className="btn-secondary w-full border-rose-300 text-rose-700 hover:bg-rose-50 flex items-center justify-center gap-2">
+                    <AlertTriangle size={16} /> Review Challenge
                   </button>
                 )}
               </div>
@@ -2912,6 +3068,110 @@ const Tenders = ({
                   {isExtending ? "Updating..." : "Update"}
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {coolingOffAdjustOpen && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-2xl p-6 w-full max-w-md shadow-2xl">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-slate-900">Adjust Cooling-Off Period</h3>
+              <button onClick={() => setCoolingOffAdjustOpen(false)} className="p-1 hover:bg-slate-100 rounded-lg">
+                <X size={20} className="text-slate-500" />
+              </button>
+            </div>
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
+                  <p className="text-xs text-slate-500 font-medium">Current Period</p>
+                  <p className="text-sm font-bold text-slate-900 mt-0.5">
+                    {selectedTender?.coolingOffDays ?? 7} day{(selectedTender?.coolingOffDays ?? 7) > 1 ? "s" : ""}
+                  </p>
+                </div>
+                <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
+                  <p className="text-xs text-slate-500 font-medium">Ends at</p>
+                  <p className="text-sm font-bold text-slate-900 mt-0.5">
+                    {selectedTender?.coolingOffUntil ? new Date(selectedTender.coolingOffUntil).toLocaleString() : "Not yet started"}
+                  </p>
+                </div>
+              </div>
+              {selectedTender?.coolingOffUntil ? (<>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setCoolingOffAction("extend")}
+                    className={`flex-1 py-2 rounded-xl text-sm font-semibold border transition-colors ${
+                      coolingOffAction === "extend"
+                        ? "border-blue-500 bg-blue-50 text-blue-700"
+                        : "border-slate-200 text-slate-600 hover:bg-slate-50"
+                    }`}
+                  >
+                    Extend
+                  </button>
+                  <button
+                    onClick={() => setCoolingOffAction("shorten")}
+                    className={`flex-1 py-2 rounded-xl text-sm font-semibold border transition-colors ${
+                      coolingOffAction === "shorten"
+                        ? "border-blue-500 bg-blue-50 text-blue-700"
+                        : "border-slate-200 text-slate-600 hover:bg-slate-50"
+                    }`}
+                  >
+                    Shorten
+                  </button>
+                </div>
+                <div>
+                  <label className="text-sm font-bold text-slate-700 mb-2 block">
+                    {coolingOffAction === "extend" ? "Add days" : "Remove days"}
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={30}
+                    value={coolingOffDays}
+                    onChange={(e) => setCoolingOffDays(Math.max(1, parseInt(e.target.value) || 1))}
+                    className="input-field"
+                  />
+                </div>
+                <div className="p-3 bg-amber-50 rounded-xl border border-amber-100">
+                  <p className="text-xs text-amber-700">
+                    {coolingOffAction === "extend"
+                      ? "The cooling-off deadline will be pushed back by the specified number of days."
+                      : "The cooling-off deadline will be moved earlier by the specified number of days."}
+                  </p>
+                </div>
+                <div className="flex gap-3 pt-2">
+                  <button onClick={() => setCoolingOffAdjustOpen(false)} className="btn-secondary flex-1">Cancel</button>
+                  <button
+                    onClick={async () => {
+                      if (!selectedTender) return;
+                      setCoolingOffAdjustOpen(false);
+                      setIsActioning(true);
+                      try {
+                        const result = await updateCoolingOff(selectedTender.id, {
+                          action: coolingOffAction,
+                          days: coolingOffDays,
+                        });
+                        setSelectedTender(result);
+                        showNotification(`Cooling-off period ${coolingOffAction}ed by ${coolingOffDays} day${coolingOffDays > 1 ? "s" : ""}.`);
+                      } catch (err: any) {
+                        const msg = typeof err === "string" ? err : err?.message || "Failed to adjust cooling-off.";
+                        showNotification(msg);
+                      } finally {
+                        setIsActioning(false);
+                      }
+                    }}
+                    className="btn-primary flex-1 disabled:opacity-60"
+                  >
+                    Confirm
+                </button>
+              </div>
+              </>) : (
+                <div className="p-4 bg-slate-50 rounded-xl border border-slate-100 text-center">
+                  <p className="text-sm text-slate-600 font-medium">No active cooling-off period</p>
+                  <p className="text-xs text-slate-500 mt-1">Issue an Intent to Award first to start the cooling-off period.</p>
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -3198,6 +3458,7 @@ const Tenders = ({
                   <span className={`badge ${
                     tender.status === TenderStatus.PUBLISHED ? 'bg-emerald-100 text-emerald-700' :
                     tender.status === TenderStatus.EVALUATION ? 'bg-blue-100 text-blue-700' :
+                    tender.status === TenderStatus.STANDSTILL ? 'bg-amber-100 text-amber-700' :
                     tender.status === TenderStatus.AWARDED ? 'bg-purple-100 text-purple-700' :
                     'bg-amber-100 text-amber-700'
                   }`}>
@@ -3237,7 +3498,7 @@ const Tenders = ({
                         Publish
                       </button>
                     )}
-                    {(tender.status === TenderStatus.EVALUATION || tender.status === TenderStatus.PUBLISHED || tender.status === TenderStatus.AWARDED) && (
+                    {(tender.status === TenderStatus.EVALUATION || tender.status === TenderStatus.PUBLISHED || tender.status === TenderStatus.STANDSTILL || tender.status === TenderStatus.AWARDED) && (
                       <button 
                         onClick={() => void openTenderView(tender.id, "award")}
                         className="text-purple-600 hover:text-purple-700 font-medium text-sm"
@@ -3276,10 +3537,10 @@ const Tenders = ({
               onClick={(e) => e.stopPropagation()}
             >
               <h2 className="text-xl font-bold text-slate-900">
-                {selectedTender.intentToAwardAt && selectedTender.status !== TenderStatus.AWARDED ? "Intent to Award Review" : "Issue Intent to Award"}
+                {selectedTender.status === TenderStatus.DISPUTED ? "Award Challenge Review" : selectedTender.intentToAwardAt && selectedTender.status !== TenderStatus.AWARDED ? "Intent to Award Review" : "Issue Intent to Award"}
               </h2>
               <p className="text-sm text-slate-500">
-                The system ranks bidders by weighted technical and financial scoring. First issue the Intent to Award to the best evaluated bidder, then confirm the final award after the cooling-off period to generate the PBA.
+                {selectedTender.status === TenderStatus.DISPUTED ? "The award process is paused due to a filed challenge. Review the challenge details below and resolve by selecting Upheld or Dismissed." : "The system ranks bidders by weighted technical and financial scoring. First issue the Intent to Award to the best evaluated bidder, then confirm the final award after the cooling-off period to generate the PBA."}
               </p>
               
               <div className="grid grid-cols-1 gap-6 xl:grid-cols-[1.2fr_0.8fr]">
@@ -3415,6 +3676,40 @@ const Tenders = ({
                     </div>
                   )}
                 </div>
+
+                {selectedTender.status === TenderStatus.DISPUTED && selectedTender.challenges && selectedTender.challenges.length > 0 && (
+                  <div className="rounded-xl border border-rose-200 bg-rose-50 p-4">
+                    <p className="text-sm font-bold text-rose-800 mb-3">Pending Challenges</p>
+                    <div className="space-y-3">
+                      {selectedTender.challenges.filter((ch: any) => ch.status === "submitted" || ch.status === "under_review").map((challenge: any) => (
+                        <div key={challenge.id} className="rounded-lg border border-rose-200 bg-white p-3 text-sm">
+                          <div className="flex items-center justify-between mb-2">
+                            <p className="font-semibold text-slate-900">{challenge.filed_by_vendor_name}</p>
+                            <span className={`badge ${
+                              challenge.status === "submitted" ? "bg-amber-100 text-amber-700" : "bg-blue-100 text-blue-700"
+                            }`}>{challenge.status_display || challenge.status}</span>
+                          </div>
+                          <p className="text-xs text-slate-600 mb-2">{challenge.grounds}</p>
+                          <p className="text-[11px] text-slate-400 mb-3">Filed: {new Date(challenge.filed_at).toLocaleString()}</p>
+                          <div className="flex gap-2">
+                            <button
+                              onClick={() => { setSelectedChallengeId(challenge.id); setChallengeOutcome("dismissed"); setResolveChallengeOpen(true); }}
+                              className="btn-secondary py-1 px-3 text-xs flex-1"
+                            >
+                              Dismiss Challenge
+                            </button>
+                            <button
+                              onClick={() => { setSelectedChallengeId(challenge.id); setChallengeOutcome("upheld"); setResolveChallengeOpen(true); }}
+                              className="btn-primary py-1 px-3 text-xs flex-1 bg-rose-600 hover:bg-rose-700"
+                            >
+                              Upheld — Reassign Award
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
                 <div className="space-y-4 border-t border-slate-100 pt-4 xl:border-t-0 xl:border-l xl:border-slate-100 xl:pl-6 xl:pt-0">
                 <h3 className="text-sm font-bold text-slate-700">Contract & Project Assignment</h3>
@@ -3714,21 +4009,40 @@ const Tenders = ({
               </div>
               </div>
 
-              <div className="flex flex-col gap-3 border-t border-slate-100 pt-4 sm:flex-row">
-                <button onClick={() => navigateView("list")} className="btn-secondary flex-1">Cancel</button>
-                {selectedTender.status !== TenderStatus.AWARDED && !selectedTender.intentToAwardAt && (
-                  <button onClick={() => handleAward(selectedTender.id)} disabled={isActioning} className="btn-primary flex-1 bg-purple-600 hover:bg-purple-700 disabled:opacity-60">
+              <div className="flex flex-col gap-3 border-t border-slate-100 pt-4 sm:flex-row sm:flex-wrap">
+                <button onClick={() => navigateView("list")} className="btn-secondary sm:flex-1">Cancel</button>
+                {selectedTender.status !== TenderStatus.AWARDED && selectedTender.status !== TenderStatus.DISPUTED && !selectedTender.intentToAwardAt && (
+                  <button onClick={() => handleAward(selectedTender.id)} disabled={isActioning} className="btn-primary sm:flex-1 bg-purple-600 hover:bg-purple-700 disabled:opacity-60">
                     {isActioning ? "Submitting..." : "Issue Intent to Award"}
                   </button>
                 )}
-                {selectedTender.status !== TenderStatus.AWARDED && selectedTender.intentToAwardAt && (
-                  <button
-                    onClick={() => handleConfirmFinalAward(selectedTender.id)}
-                    disabled={isActioning || (selectedTender.coolingOffUntil ? new Date(selectedTender.coolingOffUntil).getTime() > Date.now() : false)}
-                    className="btn-primary flex-1 bg-purple-600 hover:bg-purple-700 disabled:opacity-60"
-                  >
-                    {isActioning ? "Confirming..." : "Confirm Final Award"}
-                  </button>
+                {selectedTender.status !== TenderStatus.AWARDED && selectedTender.status !== TenderStatus.DISPUTED && selectedTender.intentToAwardAt && (
+                  <>
+                    <button
+                      onClick={() => setPauseConfirmOpen(true)}
+                      disabled={isActioning}
+                      className="btn-secondary sm:flex-1 bg-amber-50 hover:bg-amber-100 text-amber-800 border-amber-200"
+                    >
+                      Pause Award
+                    </button>
+                    <button
+                      onClick={() => setRevokeConfirmOpen(true)}
+                      disabled={isActioning}
+                      className="btn-secondary sm:flex-1 bg-rose-50 hover:bg-rose-100 text-rose-700 border-rose-200"
+                    >
+                      Revoke Intent
+                    </button>
+                    <button
+                      onClick={() => handleConfirmFinalAward(selectedTender.id)}
+                      disabled={isActioning || (selectedTender.coolingOffUntil ? new Date(selectedTender.coolingOffUntil).getTime() > Date.now() : false)}
+                      className="btn-primary sm:flex-1 bg-purple-600 hover:bg-purple-700 disabled:opacity-60"
+                    >
+                      {isActioning ? "Confirming..." : "Confirm Final Award"}
+                    </button>
+                  </>
+                )}
+                {selectedTender.status === TenderStatus.DISPUTED && (
+                  <p className="text-xs text-rose-600 italic py-2">Award process is paused. Resolve challenges in the panel above to proceed.</p>
                 )}
               </div>
             </motion.div>
@@ -3841,6 +4155,103 @@ const Tenders = ({
                   className="btn-primary flex-1 bg-purple-600 hover:bg-purple-700 disabled:opacity-60"
                 >
                   {isActioning ? "Confirming..." : "Confirm Final Award"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {pauseConfirmOpen && selectedTender && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[110]">
+          <div className="bg-white rounded-2xl p-6 w-full max-w-lg shadow-2xl">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-slate-900">Pause Award Process</h3>
+              <button onClick={() => setPauseConfirmOpen(false)} className="p-1 hover:bg-slate-100 rounded-lg">
+                <X size={20} className="text-slate-500" />
+              </button>
+            </div>
+            <div className="space-y-4">
+              <div className="p-4 bg-amber-50 rounded-xl border border-amber-100">
+                <p className="text-sm text-amber-800 font-medium">Freeze the cooling-off clock and pause the award process.</p>
+                <p className="text-xs text-amber-700 mt-2">A challenge has been filed. The cooling-off period will resume once the challenge is resolved.</p>
+              </div>
+              <div className="flex gap-3 pt-2">
+                <button onClick={() => setPauseConfirmOpen(false)} className="btn-secondary flex-1">Cancel</button>
+                <button onClick={() => void handlePauseAward()} disabled={isActioning} className="btn-primary flex-1 bg-amber-600 hover:bg-amber-700 disabled:opacity-60">
+                  {isActioning ? "Pausing..." : "Pause Award Process"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {revokeConfirmOpen && selectedTender && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[110]">
+          <div className="bg-white rounded-2xl p-6 w-full max-w-lg shadow-2xl">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-slate-900">Revoke Intent to Award</h3>
+              <button onClick={() => setRevokeConfirmOpen(false)} className="p-1 hover:bg-slate-100 rounded-lg">
+                <X size={20} className="text-slate-500" />
+              </button>
+            </div>
+            <div className="space-y-4">
+              <div className="p-4 bg-rose-50 rounded-xl border border-rose-100">
+                <p className="text-sm text-rose-800 font-medium">This will revoke the Intent to Award and return the tender to Evaluation status.</p>
+                <p className="text-xs text-rose-700 mt-2">All award fields will be cleared. The cooling-off period will be cancelled.</p>
+              </div>
+              <div className="flex gap-3 pt-2">
+                <button onClick={() => setRevokeConfirmOpen(false)} className="btn-secondary flex-1">Cancel</button>
+                <button onClick={() => void handleRevokeIntent()} disabled={isActioning} className="btn-primary flex-1 bg-rose-600 hover:bg-rose-700 disabled:opacity-60">
+                  {isActioning ? "Revoking..." : "Revoke Intent to Award"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {resolveChallengeOpen && selectedTender && selectedChallengeId && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[110]">
+          <div className="bg-white rounded-2xl p-6 w-full max-w-lg shadow-2xl">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-slate-900">{challengeOutcome === "dismissed" ? "Dismiss Challenge" : "Upheld — Reassign Award"}</h3>
+              <button onClick={() => setResolveChallengeOpen(false)} className="p-1 hover:bg-slate-100 rounded-lg">
+                <X size={20} className="text-slate-500" />
+              </button>
+            </div>
+            <div className="space-y-4">
+              <div className={`p-4 rounded-xl border ${challengeOutcome === "dismissed" ? "bg-emerald-50 border-emerald-100" : "bg-rose-50 border-rose-100"}`}>
+                {challengeOutcome === "dismissed" ? (
+                  <>
+                    <p className="text-sm text-emerald-800 font-medium">Dismiss this challenge and resume the award process.</p>
+                    <p className="text-xs text-emerald-700 mt-2">The cooling-off clock will resume. The current Intent to Award remains valid.</p>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-sm text-rose-800 font-medium">Upheld — revoke current award and reassign to the challenging bidder.</p>
+                    <p className="text-xs text-rose-700 mt-2">The old Intent to Award will be revoked. The challenging bidder becomes the new Best Evaluated Bidder and a new cooling-off period will start.</p>
+                  </>
+                )}
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-bold text-slate-700">Resolution Notes</label>
+                <textarea
+                  className="input-field w-full min-h-[80px]"
+                  value={challengeResolutionNotes}
+                  onChange={(e) => setChallengeResolutionNotes(e.target.value)}
+                  placeholder="Enter resolution notes (optional)..."
+                />
+              </div>
+              <div className="flex gap-3 pt-2">
+                <button onClick={() => setResolveChallengeOpen(false)} className="btn-secondary flex-1">Cancel</button>
+                <button
+                  onClick={() => void handleResolveChallenge()}
+                  disabled={isActioning}
+                  className={`btn-primary flex-1 disabled:opacity-60 ${challengeOutcome === "dismissed" ? "bg-emerald-600 hover:bg-emerald-700" : "bg-rose-600 hover:bg-rose-700"}`}
+                >
+                  {isActioning ? "Resolving..." : `Confirm ${challengeOutcome === "dismissed" ? "Dismiss" : "Upheld"}`}
                 </button>
               </div>
             </div>
@@ -8280,11 +8691,21 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
+  const [notification, setNotification] = useState<string | null>(null);
+  const showNotification = (msg: string) => {
+    setNotification(msg);
+    setTimeout(() => setNotification(null), 3000);
+  };
   const [statusFilter, setStatusFilter] = useState<"all" | "action_required" | "under_review" | "completed" | "rejected">("all");
   const [viewBid, setViewBid] = useState<TenderBid | null>(null);
   const [viewBidVersions, setViewBidVersions] = useState<TenderBid[]>([]);
   const [viewBidLoading, setViewBidLoading] = useState(false);
   const [viewBidTenderSecurityRequired, setViewBidTenderSecurityRequired] = useState(false);
+  const [challengeModalOpen, setChallengeModalOpen] = useState(false);
+  const [challengeTargetBid, setChallengeTargetBid] = useState<TenderBid | null>(null);
+  const [challengeGrounds, setChallengeGrounds] = useState("");
+  const [challengeSubmitting, setChallengeSubmitting] = useState(false);
+  const [challengedBidIds, setChallengedBidIds] = useState<Set<string>>(new Set());
 
   const loadBids = React.useCallback(async () => {
     setLoading(true);
@@ -8292,6 +8713,12 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
     try {
       const data = await fetchTenderBids();
       setBids(data);
+      // Initialize challengedBidIds from backend data
+      const challengedIds = new Set<string>();
+      data.forEach((bid: any) => {
+        if (bid.has_challenge) challengedIds.add(bid.id);
+      });
+      setChallengedBidIds(challengedIds);
     } catch {
       setBids([]);
       setLoadError("We couldn't load your bids right now. Please refresh and try again.");
@@ -8746,12 +9173,97 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
                   {display.rejection_reason && (
                     <div className="mt-3 rounded-lg border border-rose-100 bg-rose-50 px-3.5 py-2 text-xs text-rose-700">{display.rejection_reason}</div>
                   )}
+                  {display.tender_intent_to_award_at && display.tender_status !== TenderStatus.AWARDED && display.tender_intent_to_award_bid_id !== display.id && (
+                    <button
+                      onClick={() => { setChallengeTargetBid(display); setChallengeGrounds(""); setChallengeModalOpen(true); }}
+                      disabled={challengedBidIds.has(display.id) || display.has_challenge}
+                      className={`mt-3 w-full rounded-xl py-2 text-sm font-semibold transition-colors ${
+                        challengedBidIds.has(display.id) || display.has_challenge
+                          ? "border border-slate-200 bg-slate-50 text-slate-400 cursor-not-allowed"
+                          : "border border-rose-200 text-rose-700 hover:bg-rose-50"
+                      }`}
+                    >
+                      {(challengedBidIds.has(display.id) || display.has_challenge) ? "Already Submitted" : "Challenge Award Decision"}
+                    </button>
+                  )}
                 </div>
               </div>
             );
           })}
         </div>
       </div>
+
+      <AnimatePresence>
+        {notification && (
+          <motion.div
+            initial={{ opacity: 0, y: -20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -20 }}
+            className="fixed top-24 right-8 z-[200] bg-emerald-600 text-white px-6 py-3 rounded-xl shadow-xl flex items-center gap-3"
+          >
+            <CheckCircle2 size={20} />
+            <span className="font-medium">{notification}</span>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {challengeModalOpen && challengeTargetBid && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[130]">
+          <div className="bg-white rounded-2xl p-6 w-full max-w-lg shadow-2xl">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-slate-900">Challenge Award Decision</h3>
+              <button onClick={() => setChallengeModalOpen(false)} className="p-1 hover:bg-slate-100 rounded-lg">
+                <X size={20} className="text-slate-500" />
+              </button>
+            </div>
+            <div className="space-y-4">
+              <div className="p-4 bg-amber-50 rounded-xl border border-amber-100">
+                <p className="text-sm text-amber-800 font-medium">File a protest against the Intent to Award.</p>
+                <p className="text-xs text-amber-700 mt-2">This will notify the RMT and pause the award process for review.</p>
+              </div>
+              <div>
+                <label className="text-sm font-bold text-slate-700">Grounds for Challenge</label>
+                <textarea
+                  className="input-field w-full min-h-[120px] mt-1"
+                  value={challengeGrounds}
+                  onChange={(e) => setChallengeGrounds(e.target.value)}
+                  placeholder="Explain why you believe the award decision should be reviewed..."
+                />
+              </div>
+              <div className="flex gap-3 pt-2">
+                <button onClick={() => setChallengeModalOpen(false)} className="btn-secondary flex-1">Cancel</button>
+                <button
+                  onClick={async () => {
+                    if (!challengeGrounds.trim()) { showNotification("Please describe the grounds for your challenge."); return; }
+                    setChallengeSubmitting(true);
+                    try {
+                      const tenderId = challengeTargetBid.tender;
+                      const result = await createChallenge(tenderId, {
+                        filedByVendorId: challengeTargetBid.vendor_id,
+                        filedByVendorName: challengeTargetBid.vendor_name,
+                        grounds: challengeGrounds,
+                        challengerBidId: challengeTargetBid.id,
+                      });
+                      setChallengedBidIds(prev => new Set(prev).add(challengeTargetBid.id));
+                      setChallengeModalOpen(false);
+                      showNotification("Your challenge has been filed. The RMT will review it.");
+                    } catch (err: any) {
+                      const msg = typeof err === "string" ? err : err?.message || "Failed to file challenge.";
+                      showNotification(msg);
+                    } finally {
+                      setChallengeSubmitting(false);
+                    }
+                  }}
+                  disabled={challengeSubmitting}
+                  className="btn-primary flex-1 bg-rose-600 hover:bg-rose-700 disabled:opacity-60"
+                >
+                  {challengeSubmitting ? "Filing..." : "Submit Challenge"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <AnimatePresence>
         {viewBid && (
@@ -11971,41 +12483,6 @@ const VendorDashboard = ({
                 <span className="badge bg-slate-100 text-slate-700">{project.status}</span>
                 <span className="text-xs text-slate-500">Progress {project.progress}%</span>
               </div>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      <div className="card">
-        <div className="p-6 border-b border-slate-100">
-          <h3 className="text-lg font-bold">My Project Milestones</h3>
-        </div>
-        <div className="p-6 space-y-6">
-          {[
-            { id: "demo-ms-1", projectId: "demo-project-1", name: "Thaba-Tseka SHS Phase 1", percentage: 100, progressPercentage: 100, progress: 100, status: "Verified" as const, amount: 45000 },
-            { id: "demo-ms-2", projectId: "demo-project-2", name: "Thaba-Tseka SHS Phase 2", percentage: 45, progressPercentage: 45, progress: 45, status: "Submitted" as const, amount: 60000 },
-            { id: "demo-ms-3", projectId: "demo-project-3", name: "Maseru Mini-Grid Expansion", percentage: 10, progressPercentage: 10, progress: 10, status: "Pending" as const, amount: 250000 },
-          ].map((p, i) => (
-            <div key={i} className="flex items-center gap-6">
-              <div className="flex-1">
-                <div className="flex justify-between mb-2">
-                  <span className="font-medium text-slate-900">{p.name}</span>
-                  <span className="text-sm font-bold text-slate-500">{p.progress}%</span>
-                </div>
-                <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
-                  <div className="bg-emerald-500 h-full" style={{ width: `${p.progress}%` }} />
-                </div>
-              </div>
-              <div className="text-right min-w-[100px]">
-                <div className="text-sm font-bold text-slate-900">M {Number(p.amount).toLocaleString()}</div>
-                <div className={`text-[10px] font-bold uppercase ${p.status === 'Verified' ? 'text-emerald-600' : 'text-amber-600'}`}>{p.status}</div>
-              </div>
-              <button 
-                onClick={() => handleStartClaim(p)}
-                className="btn-secondary py-1 px-3 text-xs"
-              >
-                Claim
-              </button>
             </div>
           ))}
         </div>
@@ -17533,6 +18010,7 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
   const [evaluations, setEvaluations] = useState<TenderBidEvaluation[]>([]);
   const [tenderThresholds, setTenderThresholds] = useState<Record<string, number>>({});
   const [tenderSecurityRequired, setTenderSecurityRequired] = useState<Record<string, boolean>>({});
+  const [expandedTender, setExpandedTender] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [notification, setNotification] = useState<string | null>(null);
   const [isStageOneDecisionSubmitting, setIsStageOneDecisionSubmitting] = useState(false);
@@ -17654,7 +18132,7 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
     [bidQueue]
   );
 
-  const groupByTender = (bids: TenderBid[]) => {
+  const groupByTender = (bids: TenderBid[], priorityFn?: (bid: TenderBid) => boolean) => {
     const map = new Map<string, { tenderName: string; bids: TenderBid[] }>();
     bids.forEach(bid => {
       const key = bid.tender_name || bid.tender_reference || String(bid.tender);
@@ -17663,11 +18141,23 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
       }
       map.get(key)!.bids.push(bid);
     });
-    return Array.from(map.entries()).sort(([a], [b]) => a.localeCompare(b));
+    const entries = Array.from(map.entries());
+    if (priorityFn) {
+      entries.sort(([, a], [, b]) => {
+        const aHasPriority = a.bids.some(priorityFn);
+        const bHasPriority = b.bids.some(priorityFn);
+        if (aHasPriority && !bHasPriority) return -1;
+        if (!aHasPriority && bHasPriority) return 1;
+        return a.tenderName.localeCompare(b.tenderName);
+      });
+    } else {
+      entries.sort(([a], [b]) => a.localeCompare(b));
+    }
+    return entries;
   };
 
-  const stageOneGroups = useMemo(() => groupByTender(stageOneReviewQueue), [stageOneReviewQueue]);
-  const stageTwoGroups = useMemo(() => groupByTender(filteredBidQueue), [filteredBidQueue]);
+  const stageOneGroups = useMemo(() => groupByTender(stageOneReviewQueue, item => [BidStatus.SUBMITTED, BidStatus.UNDER_REVIEW].includes(item.status)), [stageOneReviewQueue]);
+  const stageTwoGroups = useMemo(() => groupByTender(filteredBidQueue, item => !roleScopedEvaluationsByBid.get(item.id)), [filteredBidQueue, roleScopedEvaluationsByBid]);
 
   const handleStartEvaluation = (bid: TenderBid) => {
     const existing = roleScopedEvaluationsByBid.get(bid.id);
@@ -18487,13 +18977,26 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
             </span>
           </div>
           <div className="divide-y divide-slate-100">
-            {stageOneGroups.map(([key, group]) => (
+            {stageOneGroups.map(([key, group]) => {
+              const isExpanded = expandedTender === key;
+              const pending = group.bids.filter(item => [BidStatus.SUBMITTED, BidStatus.UNDER_REVIEW].includes(item.status)).length;
+              return (
               <div key={key}>
-                <div className="px-6 py-3 bg-slate-50 border-b border-slate-100">
-                  <p className="text-xs font-bold text-slate-500 uppercase tracking-wider">{group.tenderName}</p>
-                </div>
-                {group.bids.map((item) => (
-                  <div key={item.id} className="p-6 flex items-center justify-between hover:bg-slate-50 transition-colors">
+                <button
+                  onClick={() => setExpandedTender(isExpanded ? null : key)}
+                  className="w-full flex items-center justify-between px-6 py-4 bg-slate-50 hover:bg-slate-100 transition-colors border-b border-slate-100"
+                >
+                  <div className="flex items-center gap-3">
+                    <ChevronDown size={16} className={`text-slate-400 transition-transform ${isExpanded ? "" : "-rotate-90"}`} />
+                    <p className="text-sm font-bold text-slate-700">{group.tenderName}</p>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs text-slate-500">{group.bids.length} bid{group.bids.length !== 1 ? "s" : ""}</span>
+                    {pending > 0 && <span className="badge bg-amber-100 text-amber-700">{pending} pending</span>}
+                  </div>
+                </button>
+                {isExpanded && group.bids.map((item) => (
+                  <div key={item.id} className="p-6 flex items-center justify-between hover:bg-slate-50 transition-colors border-b border-slate-50 last:border-b-0">
                     <div>
                       <p className="font-bold text-slate-900">{item.vendor_name}</p>
                       <p className="text-xs text-slate-500">Submitted {item.submitted_at ? new Date(item.submitted_at).toLocaleDateString() : "N/A"}</p>
@@ -18505,7 +19008,7 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
                   </div>
                 ))}
               </div>
-            ))}
+            )})}
             {!stageOneReviewQueue.length && (
               <div className="p-6 text-sm text-slate-500">No Stage 1 submissions found.</div>
             )}
@@ -18524,13 +19027,25 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
           {isLoading && (
             <div className="p-6 text-sm text-slate-500">Loading evaluations...</div>
           )}
-          {!isLoading && stageTwoGroups.map(([key, group]) => (
+          {!isLoading && stageTwoGroups.map(([key, group]) => {
+            const isExpanded = expandedTender === key;
+            const pending = group.bids.filter(item => !roleScopedEvaluationsByBid.get(item.id)).length;
+            return (
             <div key={key}>
-              <div className="px-6 py-3 bg-slate-50 border-b border-slate-100 flex items-center justify-between">
-                <p className="text-xs font-bold text-slate-500 uppercase tracking-wider">{group.tenderName}</p>
-                <span className="text-xs text-slate-400">{group.bids.length} bid{group.bids.length !== 1 ? "s" : ""}</span>
-              </div>
-              {group.bids.map((item) => {
+              <button
+                onClick={() => setExpandedTender(isExpanded ? null : key)}
+                className="w-full flex items-center justify-between px-6 py-4 bg-slate-50 hover:bg-slate-100 transition-colors border-b border-slate-100"
+              >
+                <div className="flex items-center gap-3">
+                  <ChevronDown size={16} className={`text-slate-400 transition-transform ${isExpanded ? "" : "-rotate-90"}`} />
+                  <p className="text-sm font-bold text-slate-700">{group.tenderName}</p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className="text-xs text-slate-500">{group.bids.length} bid{group.bids.length !== 1 ? "s" : ""}</span>
+                  {pending > 0 && <span className="badge bg-rose-100 text-rose-700">{pending} pending</span>}
+                </div>
+              </button>
+              {isExpanded && group.bids.map((item) => {
             const existing = roleScopedEvaluationsByBid.get(item.id);
             const technicalExisting = technicalEvaluationsByBid.get(item.id);
             const financialExisting = financialEvaluationsByBid.get(item.id);
@@ -18590,7 +19105,7 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
             </div>
           )})}
             </div>
-          ))}
+          )})}
           {!isLoading && filteredBidQueue.length === 0 && (
             <div className="p-6 text-sm text-slate-500">{isFinancialEvaluationMode ? "No bids have passed the technical threshold for RMT financial evaluation yet." : "No submitted bids awaiting evaluation."}</div>
           )}
@@ -20431,11 +20946,59 @@ const NoticeBoardSection = ({ tenders }: { tenders: Tender[] }) => {
                 </div>
               )}
             </div>
+        </div>
+      )}
+
+      {createChallengeOpen && selectedTender && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[110]">
+          <div className="bg-white rounded-2xl p-6 w-full max-w-lg shadow-2xl">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-slate-900">File Challenge / Protest</h3>
+              <button onClick={() => setCreateChallengeOpen(false)} className="p-1 hover:bg-slate-100 rounded-lg">
+                <X size={20} className="text-slate-500" />
+              </button>
+            </div>
+            <div className="space-y-4">
+              <div className="p-4 bg-rose-50 rounded-xl border border-rose-100">
+                <p className="text-sm text-rose-800 font-medium">Record a protest filed by an unsuccessful bidder.</p>
+                <p className="text-xs text-rose-700 mt-2">The award process will automatically pause and the cooling-off clock will freeze.</p>
+              </div>
+              <div className="space-y-3">
+                <div>
+                  <label className="text-sm font-bold text-slate-700">Challenger Vendor ID *</label>
+                  <input className="input-field mt-1" value={challengeFormVendorId} onChange={(e) => setChallengeFormVendorId(e.target.value)} placeholder="Vendor user ID" />
+                </div>
+                <div>
+                  <label className="text-sm font-bold text-slate-700">Challenger Vendor Name *</label>
+                  <input className="input-field mt-1" value={challengeFormVendorName} onChange={(e) => setChallengeFormVendorName(e.target.value)} placeholder="Vendor legal name" />
+                </div>
+                <div>
+                  <label className="text-sm font-bold text-slate-700">Challenger Bid</label>
+                  <select className="input-field mt-1" value={challengeFormBidId} onChange={(e) => setChallengeFormBidId(e.target.value)}>
+                    <option value="">Select a bid (optional)</option>
+                    {awardBids.map(bid => (
+                      <option key={bid.id} value={bid.id}>{bid.vendor_name} • Version {bid.version_number ?? 1}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-sm font-bold text-slate-700">Grounds for Challenge *</label>
+                  <textarea className="input-field mt-1 w-full min-h-[100px]" value={challengeFormGrounds} onChange={(e) => setChallengeFormGrounds(e.target.value)} placeholder="Describe the grounds for the protest..." />
+                </div>
+              </div>
+              <div className="flex gap-3 pt-2">
+                <button onClick={() => setCreateChallengeOpen(false)} className="btn-secondary flex-1">Cancel</button>
+                <button onClick={() => void handleCreateChallenge()} disabled={isActioning} className="btn-primary flex-1 bg-rose-600 hover:bg-rose-700 disabled:opacity-60">
+                  {isActioning ? "Filing..." : "File Challenge"}
+                </button>
+              </div>
+            </div>
           </div>
-        )}
-      </div>
-    );
-  };
+        </div>
+      )}
+    </div>
+  );
+};
 
   return (
     <div className="space-y-6">

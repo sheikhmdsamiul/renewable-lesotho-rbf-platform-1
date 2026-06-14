@@ -25,6 +25,11 @@ from .models import (
     TenderContract,
     ContractStatus,
     ContractSignatureStatus,
+    TenderChallenge,
+    ChallengeStatus,
+    ChallengeCategory,
+    ChallengeDocument,
+    ChallengeEvent,
     Notice,
 )
 from .serializers import (
@@ -39,6 +44,10 @@ from .serializers import (
     tender_stage_label,
     NoticeSerializer,
     NoticeListSerializer,
+    TenderChallengeSerializer,
+    ChallengeDocumentSerializer,
+    ChallengeEventSerializer,
+    ChallengeCreateSerializer,
 )
 from .pba_pdf import generate_contract_pdf
 from rbf.users.models import UserRole, VendorPrequalification, PrequalificationStatus
@@ -930,6 +939,11 @@ class TenderViewSet(viewsets.ModelViewSet):
 
     WRITE_ROLES = {UserRole.RBF_OFFICIAL, UserRole.ADMIN}
 
+    def get_permissions(self):
+        if self.action == 'create_challenge':
+            return [IsAuthenticated()]
+        return super().get_permissions()
+
     def get_queryset(self):
         qs = Tender.objects.all().order_by('-created_at')
         user = self.request.user
@@ -959,7 +973,8 @@ class TenderViewSet(viewsets.ModelViewSet):
     def check_permissions(self, request):
         super().check_permissions(request)
         if request.method not in SAFE_METHODS and getattr(request.user, 'role', None) not in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}:
-            self.permission_denied(request, message='Only the RBF Management Team can create or modify tenders.')
+            if self.action != 'create_challenge':
+                self.permission_denied(request, message='Only the RBF Management Team can create or modify tenders.')
 
     def create(self, request, *args, **kwargs):
         self._assert_write_permission()
@@ -1168,6 +1183,7 @@ class TenderViewSet(viewsets.ModelViewSet):
             )
 
         now = timezone.now()
+        tender.status = TenderStatus.STANDSTILL
         tender.intent_to_award_bid = bid
         tender.intent_to_award_at = now
         tender.awarded_vendor_id = awarded_vendor_id
@@ -1176,6 +1192,7 @@ class TenderViewSet(viewsets.ModelViewSet):
         tender.cooling_off_until = now + timedelta(days=cooling_off_days)
         tender.save(
             update_fields=[
+                'status',
                 'intent_to_award_bid',
                 'intent_to_award_at',
                 'awarded_vendor_id',
@@ -1222,6 +1239,28 @@ class TenderViewSet(viewsets.ModelViewSet):
     def confirm_award(self, request, pk=None):
         self._assert_write_permission()
         tender = self.get_object()
+
+        if tender.status == TenderStatus.AWARDED:
+            return Response(
+                {'detail': 'Tender has already been awarded.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if tender.status == TenderStatus.DISPUTED:
+            return Response(
+                {'detail': 'Cannot finalize award while a dispute is active. Resolve all challenges first.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if tender.status == TenderStatus.CLOSED:
+            return Response(
+                {'detail': 'Closed tender cannot be awarded.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if tender.status not in {TenderStatus.STANDSTILL, TenderStatus.EVALUATION}:
+            return Response(
+                {'detail': 'Final award can only be issued from Standstill or Evaluation state.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         bid = tender.intent_to_award_bid
         if bid is None:
             return Response(
@@ -1242,12 +1281,16 @@ class TenderViewSet(viewsets.ModelViewSet):
             tender.awarded_vendor_id = bid.vendor_id
             tender.awarded_vendor_name = bid.vendor_name
             tender.awarded_at = timezone.now()
+            tender.cooling_off_until = None
+            tender.dispute_started_at = None
             tender.save(
                 update_fields=[
                     'status',
                     'awarded_vendor_id',
                     'awarded_vendor_name',
                     'awarded_at',
+                    'cooling_off_until',
+                    'dispute_started_at',
                     'updated_at',
                 ]
             )
@@ -1281,6 +1324,536 @@ class TenderViewSet(viewsets.ModelViewSet):
                 context={'request': request},
             ).data
         return Response(response_data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def pause_award(self, request, pk=None):
+        """
+        Pause the award process and freeze the cooling-off clock.
+        Sets tender status to DISPUTED so challenges can be reviewed.
+        """
+        self._assert_write_permission()
+        tender = self.get_object()
+
+        if tender.status == TenderStatus.DISPUTED:
+            return Response(
+                {'detail': 'Award process is already paused.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not tender.intent_to_award_at:
+            return Response(
+                {'detail': 'No intent to award has been issued yet. Nothing to pause.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if tender.status == TenderStatus.AWARDED:
+            return Response(
+                {'detail': 'Tender has already been awarded. Cannot pause.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        old_status = tender.status
+        tender.status = TenderStatus.DISPUTED
+        tender.dispute_started_at = timezone.now()
+        tender.save(update_fields=['status', 'dispute_started_at', 'updated_at'])
+
+        log_audit(
+            request.user,
+            'award_paused',
+            tender,
+            {
+                'reference_number': tender.reference_number,
+                'previous_status': old_status,
+                'cooling_off_until': tender.cooling_off_until.isoformat() if tender.cooling_off_until else None,
+                'dispute_started_at': tender.dispute_started_at.isoformat(),
+            },
+        )
+
+        # Notify all bidders that award is paused
+        self._notify_award_paused(tender)
+
+        return Response(TenderSerializer(tender).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def revoke_intent(self, request, pk=None):
+        """
+        Revoke the intent to award, clearing all award fields.
+        Tender returns to EVALUATION status.
+        """
+        self._assert_write_permission()
+        tender = self.get_object()
+
+        if not tender.intent_to_award_at:
+            return Response(
+                {'detail': 'No intent to award has been issued yet.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if tender.status == TenderStatus.AWARDED:
+            return Response(
+                {'detail': 'Tender has already been awarded. Cannot revoke intent.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        previous_bid_id = str(tender.intent_to_award_bid.id) if tender.intent_to_award_bid else None
+        previous_vendor_id = tender.awarded_vendor_id
+        previous_vendor_name = tender.awarded_vendor_name
+
+        tender.intent_to_award_bid = None
+        tender.intent_to_award_at = None
+        tender.awarded_vendor_id = ''
+        tender.awarded_vendor_name = ''
+        tender.cooling_off_until = None
+        tender.dispute_started_at = None
+        tender.status = TenderStatus.EVALUATION
+        tender.save(update_fields=[
+            'intent_to_award_bid',
+            'intent_to_award_at',
+            'awarded_vendor_id',
+            'awarded_vendor_name',
+            'cooling_off_until',
+            'dispute_started_at',
+            'status',
+            'updated_at',
+        ])
+
+        log_audit(
+            request.user,
+            'intent_revoked',
+            tender,
+            {
+                'reference_number': tender.reference_number,
+                'previous_bid_id': previous_bid_id,
+                'previous_vendor_id': previous_vendor_id,
+                'previous_vendor_name': previous_vendor_name,
+            },
+        )
+
+        self._notify_intent_revoked(tender, previous_vendor_id, previous_vendor_name)
+
+        return Response(TenderSerializer(tender).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def create_challenge(self, request, pk=None):
+        """
+        Log a challenge/protest filed by an unsuccessful bidder.
+        Sets tender to DISPUTED status and freezes cooling-off.
+        """
+        try:
+            tender = Tender.objects.get(id=pk)
+        except Tender.DoesNotExist:
+            return Response(
+                {'detail': 'Tender not found.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if not tender.intent_to_award_at:
+            return Response(
+                {'detail': 'No intent to award has been issued. Cannot file a challenge.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if tender.status == TenderStatus.AWARDED:
+            return Response(
+                {'detail': 'Tender has already been awarded. Cannot file a challenge.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        filed_by_vendor_id = str(request.data.get('filed_by_vendor_id') or '').strip()
+        filed_by_vendor_name = str(request.data.get('filed_by_vendor_name') or '').strip()
+        grounds = str(request.data.get('grounds') or '').strip()
+        challenger_bid_id = request.data.get('challenger_bid_id')
+
+        if not filed_by_vendor_id or not filed_by_vendor_name:
+            return Response(
+                {'detail': 'filed_by_vendor_id and filed_by_vendor_name are required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not grounds:
+            return Response(
+                {'detail': 'grounds is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        challenger_bid = None
+        if challenger_bid_id:
+            try:
+                challenger_bid = TenderBid.objects.get(id=challenger_bid_id, tender=tender)
+            except TenderBid.DoesNotExist:
+                return Response(
+                    {'detail': 'Challenger bid not found for this tender.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        challenge = TenderChallenge.objects.create(
+            tender=tender,
+            filed_by_vendor_id=filed_by_vendor_id,
+            filed_by_vendor_name=filed_by_vendor_name,
+            challenger_bid=challenger_bid,
+            grounds=grounds,
+            status=ChallengeStatus.SUBMITTED,
+        )
+
+        # Auto-pause award if not already paused
+        if tender.status != TenderStatus.DISPUTED:
+            tender.status = TenderStatus.DISPUTED
+            tender.dispute_started_at = timezone.now()
+            tender.save(update_fields=['status', 'dispute_started_at', 'updated_at'])
+
+        log_audit(
+            request.user,
+            'challenge_filed',
+            tender,
+            {
+                'reference_number': tender.reference_number,
+                'challenge_id': str(challenge.id),
+                'filed_by_vendor_id': filed_by_vendor_id,
+                'filed_by_vendor_name': filed_by_vendor_name,
+            },
+        )
+
+        self._notify_award_paused(tender)
+
+        from .serializers import TenderChallengeSerializer
+        data = TenderChallengeSerializer(challenge, context={'request': request}).data
+        data['tender'] = TenderSerializer(tender, context={'request': request}).data
+        return Response(data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['get'])
+    def challenges(self, request, pk=None):
+        """List all challenges for this tender."""
+        tender = self.get_object()
+        challenges = tender.challenges.all()
+        from .serializers import TenderChallengeSerializer
+        return Response(
+            TenderChallengeSerializer(challenges, many=True, context={'request': request}).data,
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=True, methods=['post'])
+    def resolve_challenge(self, request, pk=None):
+        """
+        Resolve a challenge with outcome 'upheld' or 'dismissed'.
+        If upheld: revokes old intent, sets challenger as new recommended winner, resets cooling-off.
+        If dismissed: returns tender to EVALUATION, resumes cooling-off clock.
+        """
+        self._assert_write_permission()
+        tender = self.get_object()
+
+        challenge_id = request.data.get('challenge_id')
+        outcome = request.data.get('outcome', '').strip().lower()
+        resolution_notes = request.data.get('resolution_notes', '')
+
+        if not challenge_id:
+            return Response(
+                {'detail': 'challenge_id is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if outcome not in {'upheld', 'dismissed'}:
+            return Response(
+                {'detail': 'outcome must be "upheld" or "dismissed".'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            challenge = tender.challenges.get(id=challenge_id)
+        except TenderChallenge.DoesNotExist:
+            return Response(
+                {'detail': 'Challenge not found for this tender.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if challenge.status in {ChallengeStatus.UPHELD, ChallengeStatus.DISMISSED}:
+            return Response(
+                {'detail': f'Challenge has already been resolved as {challenge.status}.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        challenge.status = ChallengeStatus.UPHELD if outcome == 'upheld' else ChallengeStatus.DISMISSED
+        challenge.reviewed_by = request.user
+        challenge.resolution_notes = resolution_notes
+        challenge.resolved_at = timezone.now()
+        challenge.save(update_fields=['status', 'reviewed_by', 'resolution_notes', 'resolved_at'])
+
+        if outcome == 'dismissed':
+            remaining_seconds = 0
+            if tender.dispute_started_at and tender.cooling_off_until:
+                total_cooling = (tender.cooling_off_until - tender.dispute_started_at).total_seconds()
+                elapsed = (timezone.now() - tender.dispute_started_at).total_seconds()
+                remaining_seconds = max(0, total_cooling - elapsed)
+            tender.cooling_off_until = timezone.now() + timedelta(seconds=remaining_seconds)
+            tender.dispute_started_at = None
+            tender.status = TenderStatus.STANDSTILL
+            tender.save(update_fields=['cooling_off_until', 'dispute_started_at', 'status', 'updated_at'])
+
+            log_audit(
+                request.user,
+                'challenge_dismissed',
+                tender,
+                {
+                    'reference_number': tender.reference_number,
+                    'challenge_id': str(challenge.id),
+                    'filed_by': challenge.filed_by_vendor_name,
+                    'resolution_notes': resolution_notes,
+                },
+            )
+
+            self._notify_challenge_dismissed(tender, challenge)
+
+        elif outcome == 'upheld':
+            previous_bid_id = str(tender.intent_to_award_bid.id) if tender.intent_to_award_bid else None
+            previous_vendor_id = tender.awarded_vendor_id
+            previous_vendor_name = tender.awarded_vendor_name
+
+            challenger_bid = challenge.challenger_bid
+            if not challenger_bid:
+                return Response(
+                    {'detail': 'Challenger bid is not set. Cannot re-issue intent.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            tender.intent_to_award_bid = challenger_bid
+            tender.intent_to_award_at = timezone.now()
+            tender.awarded_vendor_id = challenger_bid.vendor_id
+            tender.awarded_vendor_name = challenger_bid.vendor_name
+            cooling_off_days = tender.cooling_off_days if tender.cooling_off_days is not None else 7
+            tender.cooling_off_until = timezone.now() + timedelta(days=cooling_off_days)
+            tender.dispute_started_at = None
+            tender.status = TenderStatus.STANDSTILL
+            tender.save(update_fields=[
+                'intent_to_award_bid',
+                'intent_to_award_at',
+                'awarded_vendor_id',
+                'awarded_vendor_name',
+                'cooling_off_until',
+                'dispute_started_at',
+                'status',
+                'updated_at',
+            ])
+
+            log_audit(
+                request.user,
+                'intent_revoked',
+                tender,
+                {
+                    'reference_number': tender.reference_number,
+                    'previous_bid_id': previous_bid_id,
+                    'previous_vendor_id': previous_vendor_id,
+                    'previous_vendor_name': previous_vendor_name,
+                    'reason': f'Challenge UPHELD — challenge_id={challenge.id}',
+                },
+            )
+            log_audit(
+                request.user,
+                'challenge_upheld',
+                tender,
+                {
+                    'reference_number': tender.reference_number,
+                    'challenge_id': str(challenge.id),
+                    'filed_by': challenge.filed_by_vendor_name,
+                    'new_intent_bid_id': str(challenger_bid.id),
+                    'new_intent_vendor_id': challenger_bid.vendor_id,
+                    'new_intent_vendor_name': challenger_bid.vendor_name,
+                    'new_cooling_off_until': tender.cooling_off_until.isoformat(),
+                    'resolution_notes': resolution_notes,
+                },
+            )
+            log_audit(
+                request.user,
+                'intent_reissued',
+                tender,
+                {
+                    'reference_number': tender.reference_number,
+                    'bid_id': str(challenger_bid.id),
+                    'vendor_id': challenger_bid.vendor_id,
+                    'vendor_name': challenger_bid.vendor_name,
+                    'new_cooling_off_until': tender.cooling_off_until.isoformat(),
+                },
+            )
+
+            if previous_vendor_id:
+                self._notify_intent_revoked(tender, previous_vendor_id, previous_vendor_name)
+            self._notify_challenge_upheld(tender, challenge, challenger_bid)
+
+        return Response(TenderSerializer(tender).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def update_cooling_off(self, request, pk=None):
+        """
+        Extend or shorten the cooling-off period for a tender with active intent to award.
+        Body: { "action": "extend" | "shorten", "days": <positive integer> }
+        """
+        self._assert_write_permission()
+        tender = self.get_object()
+
+        action = request.data.get('action', '').strip().lower()
+        days_str = request.data.get('days')
+
+        if action not in {'extend', 'shorten'}:
+            return Response(
+                {'detail': 'action must be "extend" or "shorten".'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            days = int(days_str)
+        except (TypeError, ValueError):
+            return Response(
+                {'detail': 'days must be a positive integer.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if days <= 0:
+            return Response(
+                {'detail': 'days must be a positive integer.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not tender.cooling_off_until:
+            return Response(
+                {'detail': 'Cooling-off period is not active. No intent to award has been issued.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if tender.status == TenderStatus.AWARDED:
+            return Response(
+                {'detail': 'Cannot adjust cooling-off after final award.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        prev_cooling_off_until = tender.cooling_off_until
+
+        if action == 'extend':
+            tender.cooling_off_until += timedelta(days=days)
+        else:  # shorten
+            min_allowed = timezone.now() + timedelta(hours=1)
+            new_cooling_off = tender.cooling_off_until - timedelta(days=days)
+            if new_cooling_off < min_allowed:
+                return Response(
+                    {'detail': 'Shortening by that many days would leave less than 1 hour before the deadline.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            tender.cooling_off_until = new_cooling_off
+
+        tender.save(update_fields=['cooling_off_until', 'updated_at'])
+
+        log_audit(
+            request.user,
+            'cooling_off_adjusted',
+            tender,
+            {
+                'reference_number': tender.reference_number,
+                'action': action,
+                'days': days,
+                'previous_cooling_off_until': prev_cooling_off_until.isoformat(),
+                'new_cooling_off_until': tender.cooling_off_until.isoformat(),
+            },
+        )
+
+        return Response(TenderSerializer(tender).data, status=status.HTTP_200_OK)
+
+    def _notify_award_paused(self, tender: Tender):
+        """Notify all bidders that the award process has been paused."""
+        from rbf.users.models import User
+        bids = TenderBid.objects.filter(tender=tender, status__in={
+            BidStatus.SUBMITTED, BidStatus.UNDER_REVIEW, BidStatus.ACCEPTED, BidStatus.AWARDED,
+        }).values('vendor_id').distinct()
+        vendor_ids = [b['vendor_id'] for b in bids]
+        vendors = User.objects.filter(id__in=vendor_ids).only('id', 'email', 'full_name', 'username')
+        title = f'Award Process Paused: {tender.reference_number}'
+        body = (
+            f"The award process for {tender.name} ({tender.reference_number}) has been paused.\n"
+            f"A challenge has been filed and is under review.\n"
+            f"You will be notified when the process resumes.\n"
+        )
+        for vendor in vendors:
+            Notification.objects.create(
+                recipient_id=str(vendor.id),
+                recipient_name=vendor.full_name or vendor.username or vendor.email,
+                type=NotificationChannel.IN_APP,
+                event='award_paused',
+                title=title,
+                body=body,
+                status=NotificationStatus.SENT,
+                linked_entity_id=str(tender.id),
+            )
+
+    def _notify_intent_revoked(self, tender: Tender, vendor_id: str, vendor_name: str):
+        """Notify the previously selected winner that intent has been revoked."""
+        from rbf.users.models import User
+        try:
+            vendor = User.objects.get(id=vendor_id)
+        except User.DoesNotExist:
+            return
+        title = f'Intent to Award Revoked: {tender.reference_number}'
+        body = (
+            f"The Intent to Award previously issued for {tender.name} ({tender.reference_number}) "
+            f"has been revoked.\n"
+            f"A challenge was upheld by the review committee.\n"
+        )
+        Notification.objects.create(
+            recipient_id=str(vendor.id),
+            recipient_name=vendor.full_name or vendor.username or vendor.email,
+            type=NotificationChannel.IN_APP,
+            event='intent_revoked',
+            title=title,
+            body=body,
+            status=NotificationStatus.SENT,
+            linked_entity_id=str(tender.id),
+        )
+
+    def _notify_challenge_dismissed(self, tender: Tender, challenge: TenderChallenge):
+        """Notify the challenging vendor that their challenge was dismissed."""
+        from rbf.users.models import User
+        try:
+            vendor = User.objects.get(id=challenge.filed_by_vendor_id)
+        except User.DoesNotExist:
+            return
+        title = f'Challenge Dismissed: {tender.reference_number}'
+        body = (
+            f"Your challenge for {tender.name} ({tender.reference_number}) has been reviewed and dismissed.\n"
+            f"The award process will continue with the current intent to award.\n"
+        )
+        Notification.objects.create(
+            recipient_id=str(vendor.id),
+            recipient_name=vendor.full_name or vendor.username or vendor.email,
+            type=NotificationChannel.IN_APP,
+            event='challenge_dismissed',
+            title=title,
+            body=body,
+            status=NotificationStatus.SENT,
+            linked_entity_id=str(tender.id),
+        )
+
+    def _notify_challenge_upheld(self, tender: Tender, challenge: TenderChallenge, new_bid: TenderBid):
+        """Notify the challenging vendor that their challenge was upheld and they are the new winner."""
+        from rbf.users.models import User
+        try:
+            vendor = User.objects.get(id=challenge.filed_by_vendor_id)
+        except User.DoesNotExist:
+            return
+        cooling_date_text = tender.cooling_off_until.strftime('%Y-%m-%d %H:%M:%S') if tender.cooling_off_until else 'N/A'
+        title = f'Challenge Upheld — New Intent to Award: {tender.reference_number}'
+        body = (
+            f"Your challenge for {tender.name} ({tender.reference_number}) has been upheld.\n"
+            f"You are now the Best Evaluated Bidder.\n"
+            f"Cooling-off period ends on: {cooling_date_text}\n"
+            f"The final award will occur after the cooling-off period expires without further protest.\n"
+        )
+        Notification.objects.create(
+            recipient_id=str(vendor.id),
+            recipient_name=vendor.full_name or vendor.username or vendor.email,
+            type=NotificationChannel.IN_APP,
+            event='challenge_upheld_new_intent',
+            title=title,
+            body=body,
+            status=NotificationStatus.SENT,
+            linked_entity_id=str(tender.id),
+        )
+        # Also notify the new winner via email if possible
+        if vendor.email:
+            try:
+                send_mail(
+                    subject=title,
+                    message=body,
+                    from_email=settings.DEFAULT_FROM_EMAIL,
+                    recipient_list=[vendor.email],
+                    fail_silently=True,
+                )
+            except Exception:
+                pass
 
     def _notify_award(self, tender: Tender, vendor_id: str, vendor_name: str, send_email=True):
         """Send award notification to winning vendor"""

@@ -322,6 +322,7 @@ function mapTenderFromApi(api: any): Tender {
     intentToAwardBidId: api.intent_to_award_bid != null ? String(api.intent_to_award_bid) : undefined,
     intentToAwardAt: api.intent_to_award_at ?? undefined,
     coolingOffUntil: api.cooling_off_until ?? undefined,
+    disputeStartedAt: api.dispute_started_at ?? undefined,
     createdAt: api.created_at ?? undefined,
     updatedAt: api.updated_at ?? undefined,
     publishedAt: api.published_at ?? undefined,
@@ -1664,6 +1665,67 @@ export async function confirmTenderAward(
     body: JSON.stringify({
       send_email: payload?.sendEmail ?? true,
     }),
+  });
+  return mapTenderFromApi(data);
+}
+
+export async function pauseTenderAward(tenderId: string): Promise<Tender> {
+  const data = await http<any>(`/api/tenders/${tenderId}/pause_award/`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  return mapTenderFromApi(data);
+}
+
+export async function revokeIntentToAward(tenderId: string): Promise<Tender> {
+  const data = await http<any>(`/api/tenders/${tenderId}/revoke_intent/`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  return mapTenderFromApi(data);
+}
+
+export async function resolveChallenge(
+  tenderId: string,
+  payload: { challengeId: string; outcome: "upheld" | "dismissed"; resolutionNotes?: string }
+): Promise<Tender> {
+  const data = await http<any>(`/api/tenders/${tenderId}/resolve_challenge/`, {
+    method: "POST",
+    body: JSON.stringify({
+      challenge_id: payload.challengeId,
+      outcome: payload.outcome,
+      resolution_notes: payload.resolutionNotes ?? "",
+    }),
+  });
+  return mapTenderFromApi(data);
+}
+
+export async function fetchTenderChallenges(tenderId: string): Promise<any[]> {
+  return await http<any[]>(`/api/tenders/${tenderId}/challenges/`);
+}
+
+export async function createChallenge(
+  tenderId: string,
+  payload: { filedByVendorId: string; filedByVendorName: string; grounds: string; challengerBidId?: string }
+): Promise<any> {
+  return await http<any>(`/api/tenders/${tenderId}/create_challenge/`, {
+    method: "POST",
+    body: JSON.stringify({
+      filed_by_vendor_id: payload.filedByVendorId,
+      filed_by_vendor_name: payload.filedByVendorName,
+      grounds: payload.grounds,
+      challenger_bid_id: payload.challengerBidId ?? "",
+    }),
+  });
+}
+
+export async function updateCoolingOff(
+  tenderId: string,
+  payload: { action: "extend" | "shorten"; days: number }
+): Promise<Tender> {
+  const data = await http<any>(`/api/tenders/${tenderId}/update_cooling_off/`, {
+    method: "POST",
+    body: JSON.stringify(payload),
   });
   return mapTenderFromApi(data);
 }

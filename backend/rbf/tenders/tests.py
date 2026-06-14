@@ -152,8 +152,8 @@ class TenderApiTests(APITestCase):
         verify_response = self.client.post(f"/api/tenders/{tender.id}/verify/", {}, format="json")
         self.assertEqual(verify_response.status_code, status.HTTP_200_OK)
         self.assertTrue(verify_response.data["is_verified"])
-
         publish_response = self.client.post(f"/api/tenders/{tender.id}/publish/", {}, format="json")
+
         self.assertEqual(publish_response.status_code, status.HTTP_200_OK)
         self.assertEqual(publish_response.data["status"], TenderStatus.PUBLISHED)
 
@@ -168,9 +168,10 @@ class TenderApiTests(APITestCase):
         )
 
         self.assertEqual(award_response.status_code, status.HTTP_200_OK)
-        self.assertEqual(award_response.data["status"], TenderStatus.PUBLISHED)
+        self.assertEqual(award_response.data["status"], TenderStatus.STANDSTILL)
 
         tender.refresh_from_db()
+        self.assertEqual(tender.status, TenderStatus.STANDSTILL)
         self.assertEqual(str(tender.intent_to_award_bid_id), str(bid.id))
         self.assertIsNotNone(tender.cooling_off_until)
         mock_generate_contract_pdf.assert_not_called()
@@ -193,7 +194,190 @@ class TenderApiTests(APITestCase):
         contract = TenderContract.objects.get(tender=tender, vendor_id=str(vendor.id))
         self.assertEqual(contract.status, ContractStatus.GENERATED)
         self.assertEqual(contract.bid_id, bid.id)
+        self.assertIsNone(tender.cooling_off_until)
         mock_generate_contract_pdf.assert_called_once()
+
+    def test_award_changes_status_to_standstill(self):
+        self.client.force_authenticate(self.admin_user)
+        vendor = User.objects.create_user(
+            username="standstill_test_vendor",
+            password="securePass123",
+            role=UserRole.VENDOR,
+            status="Active",
+            full_name="Standstill Test Vendor",
+        )
+        tender = Tender.objects.create(
+            reference_number="STNDST-001",
+            name="Standstill Test",
+            department="DoE",
+            category="SHS",
+            status=TenderStatus.EVALUATION,
+            deadline=timezone.now(),
+            technology_types=["Solar Home System"],
+        )
+        bid = TenderBid.objects.create(
+            tender=tender,
+            vendor_id=str(vendor.id),
+            vendor_name=vendor.full_name,
+            bid_amount=100000,
+            status=BidStatus.SUBMITTED,
+        )
+        TenderBidEvaluation.objects.create(
+            bid=bid,
+            evaluator=self.admin_user,
+            status=EvaluationStatus.SCORED,
+            technical_score=18,
+            feasibility_score=14,
+            kpi_score=9,
+            gender_score=8,
+            environmental_score=4,
+            om_score=9,
+            financial_score=74,
+            total_score=62,
+        )
+
+        response = self.client.post(
+            f"/api/tenders/{tender.id}/award/",
+            {"bid_id": str(bid.id), "awarded_vendor_id": str(vendor.id), "awarded_vendor_name": vendor.full_name},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], TenderStatus.STANDSTILL)
+        tender.refresh_from_db()
+        self.assertEqual(tender.status, TenderStatus.STANDSTILL)
+        self.assertIsNotNone(tender.cooling_off_until)
+
+    def test_confirm_award_rejects_disputed_status(self):
+        self.client.force_authenticate(self.admin_user)
+        vendor = User.objects.create_user(
+            username="disputed_confirm_vendor",
+            password="securePass123",
+            role=UserRole.VENDOR,
+            status="Active",
+            full_name="Disputed Confirm Vendor",
+        )
+        tender = Tender.objects.create(
+            reference_number="DSP-CNF-001",
+            name="Disputed Confirm",
+            department="DoE",
+            category="SHS",
+            status=TenderStatus.DISPUTED,
+            deadline=timezone.now(),
+            technology_types=["Solar Home System"],
+            intent_to_award_bid=None,
+            cooling_off_until=timezone.now() - timedelta(days=1),
+        )
+
+        response = self.client.post(
+            f"/api/tenders/{tender.id}/confirm_award/",
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("dispute", response.data["detail"].lower())
+
+    def test_confirm_award_rejects_cooling_off_not_expired(self):
+        self.client.force_authenticate(self.admin_user)
+        vendor = User.objects.create_user(
+            username="cooling_not_expired",
+            password="securePass123",
+            role=UserRole.VENDOR,
+            status="Active",
+            full_name="Cooling Not Expired",
+        )
+        tender = Tender.objects.create(
+            reference_number="COOL-001",
+            name="Cooling Not Expired",
+            department="DoE",
+            category="SHS",
+            status=TenderStatus.STANDSTILL,
+            deadline=timezone.now(),
+            technology_types=["Solar Home System"],
+        )
+        bid = TenderBid.objects.create(
+            tender=tender,
+            vendor_id=str(vendor.id),
+            vendor_name=vendor.full_name,
+            bid_amount=100000,
+            status=BidStatus.SUBMITTED,
+        )
+        tender.intent_to_award_bid = bid
+        tender.cooling_off_until = timezone.now() + timedelta(days=7)
+        tender.save()
+
+        response = self.client.post(
+            f"/api/tenders/{tender.id}/confirm_award/",
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("cooling-off", response.data["detail"].lower())
+
+    def test_confirm_award_rejects_already_awarded(self):
+        self.client.force_authenticate(self.admin_user)
+        tender = Tender.objects.create(
+            reference_number="ALR-AWD-001",
+            name="Already Awarded",
+            department="DoE",
+            category="SHS",
+            status=TenderStatus.AWARDED,
+            deadline=timezone.now(),
+            technology_types=["Solar Home System"],
+        )
+
+        response = self.client.post(
+            f"/api/tenders/{tender.id}/confirm_award/",
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("already been awarded", response.data["detail"].lower())
+
+    def test_confirm_award_rejects_no_intent(self):
+        self.client.force_authenticate(self.admin_user)
+        tender = Tender.objects.create(
+            reference_number="NO-INT-001",
+            name="No Intent",
+            department="DoE",
+            category="SHS",
+            status=TenderStatus.STANDSTILL,
+            deadline=timezone.now(),
+            technology_types=["Solar Home System"],
+        )
+
+        response = self.client.post(
+            f"/api/tenders/{tender.id}/confirm_award/",
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("intent to award must be issued", response.data["detail"].lower())
+
+    def test_confirm_award_rejects_closed_tender(self):
+        self.client.force_authenticate(self.admin_user)
+        tender = Tender.objects.create(
+            reference_number="CLS-CNF-001",
+            name="Closed Tender",
+            department="DoE",
+            category="SHS",
+            status=TenderStatus.CLOSED,
+            deadline=timezone.now(),
+            technology_types=["Solar Home System"],
+        )
+
+        response = self.client.post(
+            f"/api/tenders/{tender.id}/confirm_award/",
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("closed tender", response.data["detail"].lower())
 
     def test_award_ranking_recommends_best_value_not_lowest_price(self):
         self.client.force_authenticate(self.admin_user)
@@ -2211,3 +2395,228 @@ class TenderContractAssignmentTests(APITestCase):
         self.assertEqual(project.technology_type, "GMG")
         self.assertEqual(project.tech_type, "GMG")
         queue_targets.assert_called_once_with(str(project.id), run_immediately=True, record_type="project")
+
+
+class StandstillTransitionTests(APITestCase):
+    def setUp(self):
+        self.admin_user = User.objects.create_user(
+            username="ststill_admin",
+            password="securePass123",
+            role=UserRole.ADMIN,
+            status="Active",
+            full_name="Standstill Admin",
+        )
+        self.vendor = User.objects.create_user(
+            username="ststill_vendor",
+            password="securePass123",
+            role=UserRole.VENDOR,
+            status="Active",
+            full_name="Standstill Vendor",
+        )
+        self.tender = Tender.objects.create(
+            reference_number="STTRANS-001",
+            name="Standstill Transitions",
+            department="DoE",
+            category="SHS",
+            status=TenderStatus.EVALUATION,
+            deadline=timezone.now(),
+            technology_types=["Solar Home System"],
+            cooling_off_days=14,
+        )
+        self.bid = TenderBid.objects.create(
+            tender=self.tender,
+            vendor_id=str(self.vendor.id),
+            vendor_name=self.vendor.full_name,
+            bid_amount=100000,
+            status=BidStatus.SUBMITTED,
+        )
+        TenderBidEvaluation.objects.create(
+            bid=self.bid,
+            evaluator=self.admin_user,
+            status=EvaluationStatus.SCORED,
+            technical_score=18,
+            feasibility_score=14,
+            kpi_score=9,
+            gender_score=8,
+            environmental_score=4,
+            om_score=9,
+            financial_score=74,
+            total_score=62,
+        )
+
+    def test_resolve_challenge_dismissed_returns_to_standstill(self):
+        self.client.force_authenticate(self.admin_user)
+
+        award_response = self.client.post(
+            f"/api/tenders/{self.tender.id}/award/",
+            {"bid_id": str(self.bid.id), "awarded_vendor_id": str(self.vendor.id), "awarded_vendor_name": self.vendor.full_name},
+            format="json",
+        )
+        self.assertEqual(award_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(award_response.data["status"], TenderStatus.STANDSTILL)
+
+        challenge_response = self.client.post(
+            f"/api/tenders/{self.tender.id}/create_challenge/",
+            {
+                "filed_by_vendor_id": str(self.vendor.id),
+                "filed_by_vendor_name": "Other Vendor",
+                "grounds": "Evaluation scoring error in financial criteria.",
+            },
+            format="json",
+        )
+        self.assertEqual(challenge_response.status_code, status.HTTP_201_CREATED)
+        self.tender.refresh_from_db()
+        self.assertEqual(self.tender.status, TenderStatus.DISPUTED)
+
+        challenge_id = challenge_response.data["id"]
+
+        resolve_response = self.client.post(
+            f"/api/tenders/{self.tender.id}/resolve_challenge/",
+            {"challenge_id": challenge_id, "outcome": "dismissed", "resolution_notes": "No evidence of scoring error."},
+            format="json",
+        )
+        self.assertEqual(resolve_response.status_code, status.HTTP_200_OK)
+        self.tender.refresh_from_db()
+        self.assertEqual(self.tender.status, TenderStatus.STANDSTILL)
+        self.assertIsNotNone(self.tender.cooling_off_until)
+        self.assertIsNone(self.tender.dispute_started_at)
+
+    def test_resolve_challenge_upheld_returns_to_standstill_with_new_intent(self):
+        self.client.force_authenticate(self.admin_user)
+
+        award_response = self.client.post(
+            f"/api/tenders/{self.tender.id}/award/",
+            {"bid_id": str(self.bid.id), "awarded_vendor_id": str(self.vendor.id), "awarded_vendor_name": self.vendor.full_name},
+            format="json",
+        )
+        self.assertEqual(award_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(award_response.data["status"], TenderStatus.STANDSTILL)
+
+        challenger = User.objects.create_user(
+            username="challenger_vendor",
+            password="securePass123",
+            role=UserRole.VENDOR,
+            status="Active",
+            full_name="Challenger Vendor",
+        )
+        challenger_bid = TenderBid.objects.create(
+            tender=self.tender,
+            vendor_id=str(challenger.id),
+            vendor_name=challenger.full_name,
+            bid_amount=95000,
+            status=BidStatus.SUBMITTED,
+        )
+
+        challenge_response = self.client.post(
+            f"/api/tenders/{self.tender.id}/create_challenge/",
+            {
+                "filed_by_vendor_id": str(challenger.id),
+                "filed_by_vendor_name": challenger.full_name,
+                "grounds": "Evaluation scoring error",
+                "challenger_bid_id": str(challenger_bid.id),
+            },
+            format="json",
+        )
+        self.assertEqual(challenge_response.status_code, status.HTTP_201_CREATED)
+        self.tender.refresh_from_db()
+        self.assertEqual(self.tender.status, TenderStatus.DISPUTED)
+        challenge_id = challenge_response.data["id"]
+
+        resolve_response = self.client.post(
+            f"/api/tenders/{self.tender.id}/resolve_challenge/",
+            {"challenge_id": challenge_id, "outcome": "upheld", "resolution_notes": "Scoring error confirmed."},
+            format="json",
+        )
+        self.assertEqual(resolve_response.status_code, status.HTTP_200_OK)
+        self.tender.refresh_from_db()
+        self.assertEqual(self.tender.status, TenderStatus.STANDSTILL)
+        self.assertEqual(str(self.tender.intent_to_award_bid_id), str(challenger_bid.id))
+        self.assertEqual(self.tender.awarded_vendor_id, str(challenger.id))
+        self.assertEqual(self.tender.awarded_vendor_name, challenger.full_name)
+        self.assertIsNotNone(self.tender.cooling_off_until)
+        self.assertIsNone(self.tender.dispute_started_at)
+
+    def test_award_standstill_confirm_full_cycle(self):
+        self.client.force_authenticate(self.admin_user)
+
+        award_response = self.client.post(
+            f"/api/tenders/{self.tender.id}/award/",
+            {"bid_id": str(self.bid.id), "awarded_vendor_id": str(self.vendor.id), "awarded_vendor_name": self.vendor.full_name},
+            format="json",
+        )
+        self.assertEqual(award_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(award_response.data["status"], TenderStatus.STANDSTILL)
+
+        self.tender.refresh_from_db()
+        self.tender.cooling_off_until = timezone.now() - timedelta(minutes=1)
+        self.tender.save(update_fields=["cooling_off_until"])
+
+        confirm_response = self.client.post(
+            f"/api/tenders/{self.tender.id}/confirm_award/",
+            {},
+            format="json",
+        )
+        self.assertEqual(confirm_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(confirm_response.data["status"], TenderStatus.AWARDED)
+
+        self.tender.refresh_from_db()
+        self.assertEqual(self.tender.status, TenderStatus.AWARDED)
+        self.assertIsNone(self.tender.cooling_off_until)
+        self.assertIsNone(self.tender.dispute_started_at)
+
+    def test_standstill_tender_pause_and_resume_cycle(self):
+        """Verify: EVALUATION -> award() -> STANDSTILL -> pause_award() -> DISPUTED -> resolve_challenge(dismissed) -> STANDSTILL -> confirm_award() -> AWARDED"""
+        self.client.force_authenticate(self.admin_user)
+
+        award_response = self.client.post(
+            f"/api/tenders/{self.tender.id}/award/",
+            {"bid_id": str(self.bid.id), "awarded_vendor_id": str(self.vendor.id), "awarded_vendor_name": self.vendor.full_name},
+            format="json",
+        )
+        self.assertEqual(award_response.status_code, status.HTTP_200_OK)
+        self.tender.refresh_from_db()
+        self.assertEqual(self.tender.status, TenderStatus.STANDSTILL)
+
+        pause_response = self.client.post(
+            f"/api/tenders/{self.tender.id}/pause_award/",
+            {},
+            format="json",
+        )
+        self.assertEqual(pause_response.status_code, status.HTTP_200_OK)
+        self.tender.refresh_from_db()
+        self.assertEqual(self.tender.status, TenderStatus.DISPUTED)
+
+        challenge_response = self.client.post(
+            f"/api/tenders/{self.tender.id}/create_challenge/",
+            {
+                "filed_by_vendor_id": str(self.vendor.id),
+                "filed_by_vendor_name": "Other Vendor",
+                "grounds": "Scoring error",
+            },
+            format="json",
+        )
+        self.assertEqual(challenge_response.status_code, status.HTTP_201_CREATED)
+        challenge_id = challenge_response.data["id"]
+
+        resolve_response = self.client.post(
+            f"/api/tenders/{self.tender.id}/resolve_challenge/",
+            {"challenge_id": challenge_id, "outcome": "dismissed", "resolution_notes": "No merit."},
+            format="json",
+        )
+        self.assertEqual(resolve_response.status_code, status.HTTP_200_OK)
+        self.tender.refresh_from_db()
+        self.assertEqual(self.tender.status, TenderStatus.STANDSTILL)
+
+        self.tender.cooling_off_until = timezone.now() - timedelta(minutes=1)
+        self.tender.save(update_fields=["cooling_off_until"])
+
+        confirm_response = self.client.post(
+            f"/api/tenders/{self.tender.id}/confirm_award/",
+            {},
+            format="json",
+        )
+        self.assertEqual(confirm_response.status_code, status.HTTP_200_OK)
+        self.tender.refresh_from_db()
+        self.assertEqual(self.tender.status, TenderStatus.AWARDED)
+        self.assertIsNone(self.tender.cooling_off_until)
+        self.assertIsNone(self.tender.dispute_started_at)
