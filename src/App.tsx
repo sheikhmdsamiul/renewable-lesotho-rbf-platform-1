@@ -55,6 +55,7 @@ import {
   Building2,
   Gavel,
   FolderKanban,
+  FolderOpen,
   RefreshCw,
   Printer,
   Paperclip,
@@ -19154,6 +19155,7 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
     ? currentUser.districts 
     : [currentUser?.district || currentUser?.verificationZone || currentUser?.region || ""].filter(Boolean);
   const assignedDistrict = assignedDistricts[0] || "District not assigned";
+  const [expandedTenderGroup, setExpandedTenderGroup] = useState<string | null>(null);
 
   const formatDateTime = (value?: string | null) => {
     if (!value) return "N/A";
@@ -19239,10 +19241,32 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
         item.beneficiaryName,
         item.report?.serialNumber,
         item.project?.projectReference,
+        item.project?.tenderName,
+        item.project?.tenderReferenceNumber,
       ].join(" ").toLowerCase();
       return haystack.includes(q);
     });
   }, [queue, searchQuery]);
+
+  const groupedQueueByTender = useMemo(() => {
+    const groups: Record<string, { tenderName: string; tenderReference?: string; items: typeof filteredQueue }> = {};
+    
+    filteredQueue.forEach((item) => {
+      const tenderKey = item.project?.tenderId || item.project?.tenderReferenceNumber || "no-tender";
+      const tenderName = item.project?.tenderName || item.project?.tenderReferenceNumber || "Other / Direct Projects";
+      
+      if (!groups[tenderKey]) {
+        groups[tenderKey] = {
+          tenderName,
+          tenderReference: item.project?.tenderReferenceNumber,
+          items: [],
+        };
+      }
+      groups[tenderKey].items.push(item);
+    });
+    
+    return Object.values(groups).sort((a, b) => a.tenderName.localeCompare(b.tenderName));
+  }, [filteredQueue]);
 
   const pendingCount = queue.filter(({ task }) => task.status === "Pending").length;
   const completedCount = queue.filter(({ task }) => task.status === "Verified").length;
@@ -19966,71 +19990,100 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
 
         {loading ? (
           <div className="p-8 text-center text-slate-500">Loading assigned verification tasks...</div>
-        ) : filteredQueue.length === 0 ? (
+        ) : groupedQueueByTender.length === 0 ? (
           <div className="p-8 text-center text-slate-500">No verification tasks matched your search.</div>
         ) : (
-          <div className="divide-y divide-slate-100">
-            {filteredQueue.map((item) => {
-              const isLocked = item.task.status === "Paused" || item.task.status === "Terminated";
-              const actionLabel =
-                item.task.status === "Verified" ? "View" :
-                item.task.status === "Flagged" || item.task.status === "Partial" ? "Resume" :
-                isLocked ? "View" : "Verify";
+          <div className="border border-slate-200 rounded-xl overflow-hidden">
+            {groupedQueueByTender.map((group) => {
+              const isExpanded = expandedTenderGroup === group.tenderName;
               return (
-                <div key={item.task.id} className="p-6 flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
-                  <div className="flex gap-4 items-start">
-                    <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${
-                      item.task.status === "Verified" ? "bg-emerald-100 text-emerald-600" :
-                      item.task.status === "Flagged" ? "bg-rose-100 text-rose-600" :
-                      item.task.status === "Partial" ? "bg-amber-100 text-amber-600" :
-                      "bg-slate-100 text-slate-400"
-                    }`}>
-                      {item.task.status === "Verified" ? <CheckCircle2 size={20} /> : item.task.status === "Flagged" ? <AlertTriangle size={20} /> : <Clock size={20} />}
-                    </div>
-                    <div>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <p className="font-bold text-slate-900">{item.siteName}</p>
-                        <span className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-bold ${statusTone(item.task.status)}`}>
-                          {item.task.status}
-                        </span>
-                      </div>
-                      <p className="text-xs text-slate-500 mt-1">
-                        {item.technology} • {item.vendorName} • {item.district}
-                      </p>
-                      <p className="text-xs text-slate-500">
-                        Task {item.task.id} • Beneficiary: {item.beneficiaryName} • Serial: {item.report?.serialNumber || "N/A"}
-                      </p>
-                      <div className="mt-2 flex items-center gap-3">
-                        <button
-                          type="button"
-                          onClick={() => focusQueueItemOnGisMap(item)}
-                          className="inline-flex text-xs font-semibold text-emerald-700 hover:text-emerald-800"
-                        >
-                          GIS map pin
-                        </button>
-                        <a
-                          href={`https://www.google.com/maps?q=${item.report?.gpsLat},${item.report?.gpsLng}`}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="inline-flex text-xs font-semibold text-blue-600 hover:text-blue-700"
-                        >
-                          Google map pin
-                        </a>
+                <div key={group.tenderName} className="border-b border-slate-200 last:border-b-0">
+                  <button
+                    onClick={() => setExpandedTenderGroup(isExpanded ? null : group.tenderName)}
+                    className="w-full px-6 py-3 bg-slate-50 hover:bg-slate-100 transition-colors border-b border-slate-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 text-left"
+                  >
+                    <div className="flex items-center gap-3">
+                      <ChevronDown size={16} className={isExpanded ? "text-slate-400 transition-transform" : "text-slate-400 transition-transform -rotate-90"} />
+                      <FolderOpen className="text-slate-500" size={20} />
+                      <div>
+                        <p className="font-bold text-slate-900">{group.tenderName}</p>
+                        {group.tenderReference && (
+                          <p className="text-xs text-slate-500">{group.tenderReference}</p>
+                        )}
                       </div>
                     </div>
-                  </div>
+                    <span className="inline-flex rounded-full bg-slate-200 text-slate-700 px-3 py-1 text-xs font-semibold">
+                      {group.items.length} task{group.items.length === 1 ? "" : "s"}
+                    </span>
+                  </button>
+                  {isExpanded && (
+                    <div className="divide-y divide-slate-100">
+                      {group.items.map((item) => {
+                        const isLocked = item.task.status === "Paused" || item.task.status === "Terminated";
+                        const actionLabel =
+                          item.task.status === "Verified" ? "View" :
+                          item.task.status === "Flagged" || item.task.status === "Partial" ? "Resume" :
+                          isLocked ? "View" : "Verify";
+                        return (
+                          <div key={item.task.id} className="p-6 flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+                            <div className="flex gap-4 items-start">
+                              <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${
+                                item.task.status === "Verified" ? "bg-emerald-100 text-emerald-600" :
+                                item.task.status === "Flagged" ? "bg-rose-100 text-rose-600" :
+                                item.task.status === "Partial" ? "bg-amber-100 text-amber-600" :
+                                "bg-slate-100 text-slate-400"
+                              }`}>
+                                {item.task.status === "Verified" ? <CheckCircle2 size={20} /> : item.task.status === "Flagged" ? <AlertTriangle size={20} /> : <Clock size={20} />}
+                              </div>
+                              <div>
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <p className="font-bold text-slate-900">{item.siteName}</p>
+                                  <span className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-bold ${statusTone(item.task.status)}`}>
+                                    {item.task.status}
+                                  </span>
+                                </div>
+                                <p className="text-xs text-slate-500 mt-1">
+                                  {item.technology} • {item.vendorName} • {item.district}
+                                </p>
+                                <p className="text-xs text-slate-500">
+                                  Task {item.task.id} • Beneficiary: {item.beneficiaryName} • Serial: {item.report?.serialNumber || "N/A"}
+                                </p>
+                                <div className="mt-2 flex items-center gap-3">
+                                  <button
+                                    type="button"
+                                    onClick={() => focusQueueItemOnGisMap(item)}
+                                    className="inline-flex text-xs font-semibold text-emerald-700 hover:text-emerald-800"
+                                  >
+                                    GIS map pin
+                                  </button>
+                                  <a
+                                    href={`https://www.google.com/maps?q=${item.report?.gpsLat},${item.report?.gpsLng}`}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="inline-flex text-xs font-semibold text-blue-600 hover:text-blue-700"
+                                  >
+                                    Google map pin
+                                  </a>
+                                </div>
+                              </div>
+                            </div>
 
-                  <div className="flex items-center gap-4">
-                    <div className="text-right">
-                      <p className="text-sm text-slate-500">{formatDateTime(item.submittedAt)}</p>
-                      {item.task.distanceMeters != null && (
-                        <p className="text-xs text-slate-400">{item.task.distanceMeters.toFixed(1)} m from vendor pin</p>
-                      )}
+                            <div className="flex items-center gap-4">
+                              <div className="text-right">
+                                <p className="text-sm text-slate-500">{formatDateTime(item.submittedAt)}</p>
+                                {item.task.distanceMeters != null && (
+                                  <p className="text-xs text-slate-400">{item.task.distanceMeters.toFixed(1)} m from vendor pin</p>
+                                )}
+                              </div>
+                              <button onClick={() => openInspection(item.task.id)} className="btn-primary py-1.5 px-4 text-xs">
+                                {actionLabel}
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
-                    <button onClick={() => openInspection(item.task.id)} className="btn-primary py-1.5 px-4 text-xs">
-                      {actionLabel}
-                    </button>
-                  </div>
+                  )}
                 </div>
               );
             })}
