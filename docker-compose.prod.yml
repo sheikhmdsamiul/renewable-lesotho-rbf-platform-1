@@ -24,7 +24,7 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
-    image: ghcr.io/sheikh-samiul/renewable-lesotho-rbf-platform-1-backend:${IMAGE_TAG:-latest}
+    image: ghcr.io/sheikhmdsamiul/renewable-lesotho-rbf-platform-1-backend:${IMAGE_TAG:-latest}
     container_name: rbf_web_prod
     env_file:
       - .env.prod
@@ -80,7 +80,7 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
-    image: ghcr.io/sheikh-samiul/renewable-lesotho-rbf-platform-1-backend:${IMAGE_TAG:-latest}
+    image: ghcr.io/sheikhmdsamiul/renewable-lesotho-rbf-platform-1-backend:${IMAGE_TAG:-latest}
     container_name: rbf_scheduler_prod
     env_file:
       - .env.prod
@@ -110,7 +110,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.frontend
-    image: ghcr.io/sheikh-samiul/renewable-lesotho-rbf-platform-1-frontend:${IMAGE_TAG:-latest}
+    image: ghcr.io/sheikhmdsamiul/renewable-lesotho-rbf-platform-1-frontend:${IMAGE_TAG:-latest}
     container_name: rbf_nginx_prod
     volumes:
       - /etc/nginx/ssl:/etc/nginx/ssl:ro
