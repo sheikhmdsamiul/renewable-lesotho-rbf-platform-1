@@ -115,10 +115,6 @@ jobs:
             docker compose -f docker-compose.prod.yml --env-file .env.prod pull
             docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --remove-orphans
 
-            # Run migrations and collect static assets
-            docker compose -f docker-compose.prod.yml --env-file .env.prod exec backend python manage.py migrate --noinput
-            docker compose -f docker-compose.prod.yml --env-file .env.prod exec backend python manage.py collectstatic --noinput
-
             # Clean up old images and log out
             docker image prune -f
             docker logout ghcr.io
