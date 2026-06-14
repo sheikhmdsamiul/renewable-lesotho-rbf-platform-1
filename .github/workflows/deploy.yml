@@ -78,15 +78,21 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      packages: read
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.ref == 'refs/heads/develop'
 
     steps:
       - name: Deploy to production server
         uses: appleboy/ssh-action@v1.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_ACTOR: ${{ github.actor }}
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
+          envs: GITHUB_TOKEN,GITHUB_ACTOR
           script: |
             set -euo pipefail
             APP_DIR="/opt/renewable-lesotho-rbf-platform/renewable-lesotho-rbf-platform-1"
@@ -99,8 +105,20 @@ jobs:
             git checkout "$BRANCH"
             git pull origin "$BRANCH"
 
-            docker compose -f docker-compose.prod.yml --env-file .env.prod down
-            docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build --remove-orphans
+            # Set environment variables for docker compose
+            export IMAGE_TAG="$BRANCH"
+
+            # Log in to GitHub Container Registry to pull images
+            echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+            # Pull pre-built images and perform zero-downtime update
+            docker compose -f docker-compose.prod.yml --env-file .env.prod pull
+            docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --remove-orphans
+
+            # Run migrations and collect static assets
             docker compose -f docker-compose.prod.yml --env-file .env.prod exec backend python manage.py migrate --noinput
             docker compose -f docker-compose.prod.yml --env-file .env.prod exec backend python manage.py collectstatic --noinput
+
+            # Clean up old images and log out
             docker image prune -f
+            docker logout ghcr.io
