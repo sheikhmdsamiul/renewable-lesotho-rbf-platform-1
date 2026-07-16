@@ -1,0 +1,1439 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>User Manual — Renewable Lesotho RBF Platform</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #f8fafc;
+      color: #1e293b;
+      line-height: 1.7;
+      display: flex;
+    }
+
+    /* Sidebar */
+    nav.sidebar {
+      position: fixed;
+      top: 0; left: 0;
+      width: 280px;
+      height: 100vh;
+      background: #0f172a;
+      color: #e2e8f0;
+      overflow-y: auto;
+      padding: 1.5rem 1rem;
+      z-index: 100;
+    }
+    nav.sidebar .logo {
+      font-size: 1.25rem;
+      font-weight: 700;
+      color: #10b981;
+      margin-bottom: 1.5rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    nav.sidebar .logo svg { flex-shrink: 0; }
+    nav.sidebar a {
+      display: block;
+      padding: 0.45rem 0.75rem;
+      color: #94a3b8;
+      text-decoration: none;
+      font-size: 0.9rem;
+      border-radius: 6px;
+      transition: 0.15s;
+      margin-bottom: 2px;
+    }
+    nav.sidebar a:hover, nav.sidebar a.active { background: #1e293b; color: #f1f5f9; }
+    nav.sidebar .section-label {
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #64748b;
+      margin: 1.2rem 0 0.4rem 0.75rem;
+    }
+
+    /* Main */
+    main {
+      margin-left: 280px;
+      flex: 1;
+      max-width: 960px;
+      padding: 2.5rem 3rem 4rem;
+    }
+    main h1 {
+      font-size: 2.2rem;
+      font-weight: 700;
+      color: #0f172a;
+      margin-bottom: 0.5rem;
+      letter-spacing: -0.02em;
+    }
+    main h1 + p.subtitle {
+      font-size: 1.1rem;
+      color: #64748b;
+      margin-bottom: 2.5rem;
+    }
+    main h2 {
+      font-size: 1.5rem;
+      font-weight: 600;
+      color: #0f172a;
+      margin: 2.5rem 0 0.75rem;
+      padding-bottom: 0.4rem;
+      border-bottom: 2px solid #e2e8f0;
+    }
+    main h3 {
+      font-size: 1.15rem;
+      font-weight: 600;
+      color: #0f172a;
+      margin: 1.5rem 0 0.5rem;
+    }
+    main h4 {
+      font-size: 1rem;
+      font-weight: 600;
+      color: #334155;
+      margin: 1rem 0 0.3rem;
+    }
+    main p { margin-bottom: 0.9rem; color: #334155; }
+    main ul, main ol { margin: 0.5rem 0 1rem 1.5rem; color: #334155; }
+    main li { margin-bottom: 0.3rem; }
+    main a { color: #059669; text-decoration: none; }
+    main a:hover { text-decoration: underline; }
+
+    .note {
+      background: #fffbeb;
+      border-left: 4px solid #f59e0b;
+      padding: 0.75rem 1rem;
+      border-radius: 0 8px 8px 0;
+      margin: 1rem 0;
+      font-size: 0.92rem;
+    }
+    .tip {
+      background: #f0fdf4;
+      border-left: 4px solid #10b981;
+      padding: 0.75rem 1rem;
+      border-radius: 0 8px 8px 0;
+      margin: 1rem 0;
+      font-size: 0.92rem;
+    }
+    .warn {
+      background: #fef2f2;
+      border-left: 4px solid #ef4444;
+      padding: 0.75rem 1rem;
+      border-radius: 0 8px 8px 0;
+      margin: 1rem 0;
+      font-size: 0.92rem;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1rem 0;
+      font-size: 0.9rem;
+    }
+    th {
+      text-align: left;
+      background: #f1f5f9;
+      padding: 0.6rem 0.8rem;
+      font-weight: 600;
+      color: #0f172a;
+    }
+    td {
+      padding: 0.6rem 0.8rem;
+      border-bottom: 1px solid #e2e8f0;
+    }
+
+    code {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.85em;
+      background: #f1f5f9;
+      padding: 0.15em 0.4em;
+      border-radius: 4px;
+    }
+    pre {
+      background: #0f172a;
+      color: #e2e8f0;
+      padding: 1rem 1.25rem;
+      border-radius: 8px;
+      overflow-x: auto;
+      font-size: 0.85rem;
+      margin: 1rem 0;
+    }
+    pre code { background: transparent; padding: 0; color: inherit; font-size: inherit; }
+
+    .badge {
+      display: inline-block;
+      padding: 0.15em 0.6em;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }
+    .badge-green { background: #d1fae5; color: #065f46; }
+    .badge-blue { background: #dbeafe; color: #1e40af; }
+    .badge-amber { background: #fef3c7; color: #92400e; }
+    .badge-red { background: #fecaca; color: #991b1b; }
+    .badge-purple { background: #e9d5ff; color: #6b21a8; }
+
+    hr { border: none; border-top: 1px solid #e2e8f0; margin: 2rem 0; }
+
+    .toc-card {
+      background: #fff;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      padding: 1.5rem 2rem;
+      margin-bottom: 2rem;
+    }
+    .toc-card h3 { margin-top: 0; border: none; }
+    .toc-card ol { margin-bottom: 0; }
+    .toc-card a { color: #059669; font-weight: 500; }
+
+    @media (max-width: 768px) {
+      nav.sidebar { position: relative; width: 100%; height: auto; }
+      main { margin-left: 0; padding: 1.5rem; }
+    }
+
+    /* Card flow diagram */
+    .flow-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 0.75rem;
+      margin: 1rem 0;
+    }
+    .flow-step {
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 10px;
+      padding: 1rem;
+      text-align: center;
+      font-weight: 500;
+      font-size: 0.9rem;
+    }
+    .flow-step .arrow { display: block; color: #94a3b8; font-size: 1.2rem; margin-top: 0.3rem; }
+  </style>
+</head>
+<body>
+
+<!-- ============ SIDEBAR ============ -->
+<nav class="sidebar">
+  <div class="logo">
+    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+    Renewable Lesotho RBF
+  </div>
+
+  <div class="section-label">Getting Started</div>
+  <a href="#introduction">Introduction</a>
+  <a href="#overview">System Overview</a>
+  <a href="#roles">User Roles &amp; Permissions</a>
+  <a href="#login">Sign In &amp; Registration</a>
+
+  <div class="section-label">Core Workflows</div>
+  <a href="#workflow-a">A &mdash; Full RBF Lifecycle</a>
+  <a href="#workflow-b">B &mdash; Project Lifecycle</a>
+  <a href="#workflow-c">C &mdash; Payment Disbursement</a>
+
+  <div class="section-label">Monitoring &amp; Oversight</div>
+  <a href="#kpi">KPI Dashboard &amp; Review</a>
+  <a href="#gis">GIS Mapping &amp; Map View</a>
+  <a href="#reports">Reports &amp; Briefings</a>
+  <a href="#audit">Audit &amp; Compliance</a>
+  <a href="#notices">Notice Board &amp; Notifications</a>
+
+  <div class="section-label">Administration</div>
+  <a href="#admin">Super Admin Portal</a>
+  <a href="#blacklist">Blacklisting</a>
+  <a href="#sync">Prospect Sync</a>
+
+  <div class="section-label">Support</div>
+  <a href="#faq">FAQ</a>
+  <a href="#support">Contact &amp; Support</a>
+</nav>
+
+<!-- ============ MAIN CONTENT ============ -->
+<main>
+
+  <h1>Renewable Lesotho RBF Platform</h1>
+  <p class="subtitle">User Manual &mdash; Version 1.0</p>
+
+  <div class="toc-card">
+    <h3>Table of Contents</h3>
+    <ol>
+      <li><a href="#introduction">Introduction</a></li>
+      <li><a href="#overview">System Overview</a></li>
+      <li><a href="#roles">User Roles &amp; Permissions</a></li>
+      <li><a href="#login">Sign In &amp; Registration</a></li>
+      <li><a href="#workflow-a">Workflow A &mdash; Full RBF Lifecycle</a></li>
+      <li><a href="#workflow-b">Workflow B &mdash; Project Lifecycle</a></li>
+      <li><a href="#workflow-c">Workflow C &mdash; Payment Disbursement</a></li>
+      <li><a href="#kpi">KPI Dashboard &amp; Review</a></li>
+      <li><a href="#gis">GIS Mapping &amp; Map View</a></li>
+      <li><a href="#reports">Reports &amp; Briefings</a></li>
+      <li><a href="#audit">Audit &amp; Compliance</a></li>
+      <li><a href="#notices">Notice Board &amp; Notifications</a></li>
+      <li><a href="#admin">Super Admin Portal</a></li>
+      <li><a href="#blacklist">Blacklisting</a></li>
+      <li><a href="#sync">Prospect Sync</a></li>
+      <li><a href="#faq">Frequently Asked Questions</a></li>
+      <li><a href="#support">Contact &amp; Support</a></li>
+    </ol>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2 id="introduction">1. Introduction</h2>
+  <p>
+    The <strong>Renewable Lesotho RBF (Results-Based Financing) Platform</strong> is a digital system
+    developed by the Department of Energy (DoE) in partnership with UNDP to manage, monitor, and
+    disburse funding for renewable energy projects across Lesotho. The platform follows a
+    results-based financing model, meaning payments are tied to verified outcomes rather than
+    upfront inputs.
+  </p>
+  <p>
+    This manual describes every feature of the platform, from tendering and bidding to project
+    implementation, field verification, KPI monitoring, and payment disbursement.
+  </p>
+
+  <!-- ============================================================ -->
+  <h2 id="overview">2. System Overview</h2>
+  <p>
+    The platform serves as a single source of truth for the entire RBF program lifecycle. Key
+    capabilities include:
+  </p>
+  <ul>
+    <li><strong>Tender Management</strong> &mdash; Create, publish, evaluate, and award tenders for renewable energy installations.</li>
+    <li><strong>Vendor Pre-Qualification</strong> &mdash; Vendors register and submit pre-qualification documents for review.</li>
+    <li><strong>Bidding</strong> &mdash; Qualified vendors submit stage-based proposals (Stage 1: Concept, Stage 2: Detailed).</li>
+    <li><strong>Project Lifecycle Management</strong> &mdash; Track projects from setup through installation, verification, and completion.</li>
+    <li><strong>Field Verification</strong> &mdash; Field verifiers (DoE officers) use GPS and checklists to validate installations.</li>
+    <li><strong>Payment Claims &amp; Multi-Tier Approval</strong> &mdash; Vendors submit milestone-based claims; RMT, TAC, and PSC review and approve.</li>
+    <li><strong>KPI Monitoring</strong> &mdash; Real-time dashboards track energy output, uptime, gender impact, and inclusion targets.</li>
+    <li><strong>GIS Mapping / Map View</strong> &mdash; Interactive map showing all installation sites with status indicators.</li>
+    <li><strong>Audit &amp; Compliance</strong> &mdash; Audit trail, anomaly detection, audit findings, and issues management.</li>
+    <li><strong>Prospect Sync</strong> &mdash; Synchronises project data, installations, and reports with the Prospect M&E platform.</li>
+  </ul>
+
+  <!-- ============================================================ -->
+  <h2 id="roles">3. User Roles &amp; Permissions</h2>
+  <p>The platform defines the following user roles, each with specific permissions:</p>
+  <table>
+    <thead>
+      <tr><th>Role</th><th>Label</th><th>Primary Responsibilities</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><span class="badge badge-green">Admin</span></td><td>Platform Administrator (Super Admin)</td><td>User management, platform configuration, system health, oversee all modules</td></tr>
+      <tr><td><span class="badge badge-blue">RBF Official</span></td><td>RBF Management Team (RMT)</td><td>Portfolio oversight, tender management, payment approvals, issue resolution</td></tr>
+      <tr><td><span class="badge badge-purple">TAC</span></td><td>TAC Member</td><td>Technical evaluation, bid scoring, project KPI review, payment endorsement</td></tr>
+      <tr><td><span class="badge badge-amber">DoE Officer</span></td><td>Department of Energy Officer</td><td>Regional monitoring, field verification oversight, raise concerns</td></tr>
+      <tr><td><span class="badge badge-blue">Field Verifier</span></td><td>Field Verifier</td><td>On-site installation verification using GPS and checklists</td></tr>
+      <tr><td><span class="badge badge-green">Vendor</span></td><td>Vendor</td><td>Submit bids, manage projects, submit payment claims, view performance KPIs</td></tr>
+      <tr><td><span class="badge badge-purple">UNDP/Donor</span></td><td>Project Steering Committee (PSC)</td><td>High-level oversight, final payment approval, portfolio dashboards</td></tr>
+      <tr><td><span class="badge badge-red">Auditor</span></td><td>Auditor</td><td>Audit logs, anomaly reports, audit findings, compliance checks</td></tr>
+    </tbody>
+  </table>
+
+  <!-- ============================================================ -->
+  <h2 id="login">4. Sign In &amp; Registration</h2>
+  <h3>4.1 Accessing the Platform</h3>
+    <p>
+      Open the frontend URL in a modern web browser (Chrome, Firefox, Edge). The login screen appears
+      with fields for <strong>Username</strong> and <strong>Password</strong>. Click
+      <strong>&ldquo;Sign In&rdquo;</strong> to log in.
+    </p>
+
+  <h3>4.2 Demo / Development Login</h3>
+  <p>In development mode, you can use any of the following demo accounts:</p>
+  <table>
+    <thead>
+      <tr><th>Username</th><th>Role</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>admin_user</code></td><td>Platform Administrator (Super Admin)</td></tr>
+      <tr><td><code>rbf_official</code></td><td>RBF Management Team</td></tr>
+      <tr><td><code>tac_member</code></td><td>TAC Member</td></tr>
+      <tr><td><code>doe_officer</code></td><td>DoE Officer</td></tr>
+      <tr><td><code>field_verifier</code></td><td>Field Verifier</td></tr>
+      <tr><td><code>vendor_approved</code></td><td>Vendor</td></tr>
+      <tr><td><code>donor_user</code></td><td>Project Steering Committee</td></tr>
+      <tr><td><code>auditor_user</code></td><td>Auditor</td></tr>
+    </tbody>
+  </table>
+
+  <h3>4.3 Vendor Registration</h3>
+  <p>
+    New vendors can register by clicking <strong>&ldquo;Register your organization first&rdquo;</strong>
+    on the Sign In screen. The registration form collects company details, contact information,
+    technology types, and supporting documents. Use <strong>&ldquo;Next: Organization Details&rdquo;</strong>,
+    <strong>&ldquo;Send Verification Code&rdquo;</strong> for OTP verification, and finally
+    <strong>&ldquo;Verify &amp; Submit Registration&rdquo;</strong> to complete.
+    After registration, the vendor must complete the pre-qualification process (see Section 7)
+    before bidding on tenders.
+  </p>
+
+  <div class="tip">
+    <strong>Tip:</strong> After signing in for the first time, you may be prompted to change your
+    password (<strong>&ldquo;Update Password&rdquo;</strong>). Use a strong password with a mix
+    of uppercase, lowercase, numbers, and symbols.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2 id="workflow-a">5. Workflow A &mdash; Full RBF Lifecycle</h2>
+  <p>
+    This section describes the <strong>complete end-to-end RBF lifecycle</strong>, from tender
+    creation through vendor registration, pre-qualification, bidding, evaluation, award, contract
+    signing, project creation, and final closure. Each step involves specific user roles and actions.
+  </p>
+
+  <h3>5.1 Tender Creation &amp; Launch</h3>
+  <p>
+    Tenders are the starting point for any procurement cycle. Only users with the
+    <strong>RBF Management Team (RMT)</strong> or <strong>Super Admin</strong> role can create,
+    edit, publish, and manage tenders.
+  </p>
+
+  <h4>Accessing the Tender Module</h4>
+  <p>
+    After signing in with an RMT or Admin account, click <strong>&ldquo;Tender Management&rdquo;</strong>
+    in the left sidebar to open the tender list view showing all
+    tenders with reference number, name, status, deadline, and department. Use the filter bar to narrow results by status
+    (Draft, Published, Evaluation, etc.), category, or department.
+  </p>
+
+  <h4>Creating a New Tender</h4>
+  <p>
+    Click the <strong>&ldquo;Add Tender&rdquo;</strong> button in the top-right corner of the
+    tender list. This opens a multi-section creation form with steps:
+    <strong>General Info</strong>, <strong>Timeline &amp; Address</strong>,
+    <strong>Technical Details</strong>, and <strong>Documents &amp; Save</strong>.
+  </p>
+
+  <h4>General Information</h4>
+  <ul>
+    <li><strong>Reference Number</strong> &mdash; A unique identifier (e.g., RL-2025-SHS-01).</li>
+    <li><strong>Tender Name</strong> &mdash; A descriptive title.</li>
+    <li><strong>Department</strong> &mdash; The issuing department.</li>
+    <li><strong>Category</strong> &mdash; Technology category: SHS, Mini-Grid, ICS, SWP.</li>
+    <li><strong>Funding Source</strong> &mdash; E.g., Government Budget, UNDP Grant.</li>
+    <li><strong>Budget (LSL)</strong> &mdash; Total budget for this tender.</li>
+  </ul>
+
+  <h4>Timeline &amp; Deadlines</h4>
+  <ul>
+    <li><strong>Deadline / Last Date of Submission</strong> &mdash; Date and time after which bids are no longer accepted.</li>
+    <li><strong>Last Date for Bid Security</strong> &mdash; Deadline for bid security documents.</li>
+    <li><strong>Date of Opening</strong> &mdash; When bids will be opened.</li>
+    <li><strong>Time for Completion</strong> &mdash; Expected project duration.</li>
+  </ul>
+
+  <h4>Procurement Settings</h4>
+  <ul>
+    <li><strong>Procurement Method</strong> &mdash; Open Tendering, Selective Tendering, etc.</li>
+    <li><strong>Application Type</strong> &mdash; Access Window or Application Window.</li>
+    <li><strong>Stage Type</strong> &mdash; Defines bidding structure:
+      <ul>
+        <li><em>Pre-Qualification</em> &mdash; Pre-qualification only.</li>
+        <li><em>Stage 1: Concept</em> &mdash; Concept note + preliminary budget.</li>
+        <li><em>Stage 2: Detailed</em> &mdash; Full technical + financial proposal.</li>
+        <li><em>Site-Specific</em> &mdash; For specific installation sites.</li>
+      </ul>
+    </li>
+    <li><strong>Bid Security Required</strong> &mdash; Toggle whether vendors must submit bid security.</li>
+    <li><strong>Bidders Schedule of Purchase</strong> &mdash; Toggle if bidders must submit a purchase schedule.</li>
+  </ul>
+
+  <h4>Scoring Configuration</h4>
+  <ul>
+    <li><strong>Technical Weight (%)</strong> &mdash; Weight for technical score (e.g., 70).</li>
+    <li><strong>Financial Weight (%)</strong> &mdash; Weight for financial score (e.g., 30). Must sum to 100.</li>
+    <li><strong>Technical Threshold (%)</strong> &mdash; Minimum technical score required.</li>
+    <li><strong>Cooling-Off Days</strong> &mdash; Standstill/challenge period days.</li>
+  </ul>
+
+  <h4>Targeting &amp; Scope</h4>
+  <ul>
+    <li><strong>Technology Types</strong> &mdash; Solar PV, Wind, Biomass, etc.</li>
+    <li><strong>Target Districts</strong> &mdash; One or more districts in Lesotho.</li>
+    <li><strong>Target Site Type</strong> &mdash; Household, Business, School, Clinic.</li>
+    <li><strong>Approximate Installation Target</strong> &mdash; Number of expected installations.</li>
+    <li><strong>Minimum Service Tier</strong> &mdash; Tier 1 through Tier 5.</li>
+  </ul>
+
+  <h4>Documents</h4>
+  <ul>
+    <li><strong>Schedule File</strong> &mdash; Upload detailed schedule/timeline document.</li>
+    <li><strong>RFP Documents</strong> &mdash; Upload full Request for Proposal package.</li>
+    <li><strong>Milestone Payment Schedule</strong> &mdash; Upload milestone-linked payment plan.</li>
+  </ul>
+
+  <h4>Addresses &amp; Contact Details</h4>
+  <ul>
+    <li><strong>Address for Documents</strong> &mdash; Where physical documents are delivered.</li>
+    <li><strong>Address for Bid Security</strong> &mdash; Where bid security instruments are sent.</li>
+    <li><strong>Place for Opening</strong> &mdash; Bid opening location.</li>
+    <li><strong>Contact Details</strong> &mdash; Contact person and phone/email.</li>
+    <li><strong>Pre-Tender Meeting Info</strong> &mdash; Pre-bid meeting details.</li>
+  </ul>
+
+  <h4>Eligibility &amp; Currency</h4>
+  <ul>
+    <li><strong>Bidders Eligibility</strong> &mdash; Who is eligible (e.g., &ldquo;Pre-qualified vendors only&rdquo;).</li>
+    <li><strong>Bidding Currency</strong> &mdash; LSL, USD, etc.</li>
+    <li><strong>Instructions</strong> &mdash; Additional instructions for bidders.</li>
+  </ul>
+
+  <div class="tip">
+    <strong>Tip:</strong> You can save the tender as <strong>Draft</strong> at any point and
+    return later. Draft tenders are only visible to RMT and Admin. When complete, use the
+    <strong>Publish</strong> button to make the tender visible to pre-qualified vendors.
+  </div>
+
+  <h3>5.2 Vendor Registration</h3>
+  <p>
+    New vendors can register by clicking <strong>&ldquo;Register your organization first&rdquo;</strong>
+    on the Sign In screen. The registration form collects company details, contact information,
+    technology types, and supporting documents. Use <strong>&ldquo;Next: Organization Details&rdquo;</strong>,
+    <strong>&ldquo;Send Verification Code&rdquo;</strong> for OTP verification, and
+    <strong>&ldquo;Verify &amp; Submit Registration&rdquo;</strong> to complete.
+  </p>
+
+  <div class="tip">
+    <strong>Tip:</strong> After signing in for the first time, you may be prompted to change your
+    password (<strong>&ldquo;Update Password&rdquo;</strong>). Use a strong password with a mix
+    of uppercase, lowercase, numbers, and symbols.
+  </div>
+
+  <h3>5.3 Pre-Qualification Submission &amp; Review</h3>
+  <p>
+    Pre-qualification is a mandatory gatekeeping process all vendors must complete before they
+    can bid on any tender. It assesses technical capacity, financial stability, operational
+    experience, and program compliance.
+  </p>
+
+  <h4>Starting Your Application</h4>
+  <ol>
+    <li>Sign in to your vendor account. You will see a <span class="badge badge-amber">Required</span> badge next to <strong>&ldquo;Pre-Qualification&rdquo;</strong> in the sidebar.</li>
+    <li>Click <strong>&ldquo;Pre-Qualification&rdquo;</strong> to open the application form.</li>
+    <li>Complete each section using <strong>&ldquo;Next Step&rdquo;</strong> to proceed, then <strong>&ldquo;Submit Pre-Qualification&rdquo;</strong> at the end.</li>
+  </ol>
+
+  <h4>Company Information</h4>
+  <ul>
+    <li><strong>Company Name</strong> &mdash; Registered legal entity name.</li>
+    <li><strong>Organization Type</strong> &mdash; Private Company, NGO, Cooperative, etc.</li>
+    <li><strong>Tax ID / VAT Number</strong> &mdash; Tax registration number.</li>
+    <li><strong>Headquarters Address</strong> &mdash; Physical address.</li>
+    <li><strong>Contact Number</strong> &mdash; Primary phone number.</li>
+    <li><strong>Email</strong> &mdash; Primary business email.</li>
+  </ul>
+
+  <h4>Technology &amp; Experience</h4>
+  <ul>
+    <li><strong>Technology Types</strong> &mdash; SHS, Mini-Grid, ICS, SWP, etc.</li>
+    <li><strong>Technology Tier</strong> &mdash; Self-assessed tier (Tier 1 through Tier 5).</li>
+    <li><strong>Years of Experience</strong> &mdash; Years in renewable energy.</li>
+    <li><strong>Number of Prior Projects</strong> &mdash; Similar past projects.</li>
+    <li><strong>Annual Revenue (LSL)</strong> &mdash; Most recent annual revenue.</li>
+    <li><strong>Districts Covered</strong> &mdash; Districts where you have worked.</li>
+  </ul>
+
+  <h4>Gender &amp; Inclusion Commitments</h4>
+  <ul>
+    <li><strong>Female Beneficiary Target (%)</strong> &mdash; Minimum percentage of female-headed households.</li>
+    <li><strong>Vulnerable Group Target (%)</strong> &mdash; Minimum percentage of vulnerable beneficiaries.</li>
+  </ul>
+
+  <h4>Bank Details</h4>
+  <ul>
+    <li><strong>Bank Name</strong>, <strong>Bank Branch</strong>, <strong>SWIFT Code</strong>, <strong>Sort Code</strong>, <strong>Account Holder Name</strong>, <strong>Account Number</strong>.</li>
+  </ul>
+
+  <h4>Supporting Documents</h4>
+  <ul>
+    <li><strong>Trading License</strong>, <strong>Registration Certificate</strong>, <strong>Tax Compliance Certificate</strong>, <strong>Authorised Signatory ID</strong>, <strong>Experience / Financial Proof</strong>.</li>
+  </ul>
+
+  <h4>Declaration</h4>
+  <p>Check the declaration box to confirm all information is accurate and complete.</p>
+
+  <h4>Application Statuses</h4>
+  <table>
+    <thead>
+      <tr><th>Status</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><span class="badge badge-amber">Pending</span></td><td>Submitted and in queue.</td></tr>
+      <tr><td><span class="badge badge-blue">Under Review</span></td><td>RMT is reviewing your submission.</td></tr>
+      <tr><td><span class="badge badge-green">Approved</span></td><td>Pre-qualified. You can now bid on matching tenders.</td></tr>
+      <tr><td><span class="badge badge-amber">Partial (Resubmit)</span></td><td>Some documents or information need correction.</td></tr>
+      <tr><td><span class="badge badge-red">Rejected</span></td><td>Did not meet minimum requirements.</td></tr>
+    </tbody>
+  </table>
+
+  <h4>RMT Review Process</h4>
+  <p>
+    From the RMT sidebar, click <strong>&ldquo;Pre-Qualification&rdquo;</strong> to view pending
+    applications. Review each submission and choose an action:
+    <strong>Approve</strong>, <strong>Request Clarification</strong> (sets Partial/Resubmit), or
+    <strong>Reject</strong> (requires a clear reason).
+  </p>
+
+  <h3>5.4 Published Tenders &amp; Bidding</h3>
+  <p>
+    Pre-qualified vendors browse available tenders from <strong>&ldquo;Published Tenders&rdquo;</strong>
+    in the sidebar. Tenders with a two-stage process split bidding into two distinct phases:
+    a <strong>Stage 1 Concept Proposal</strong> followed by a <strong>Stage 2 Detailed Proposal</strong>.
+    Stage 2 is only accessible after RMT shortlists the Stage 1 submission.
+  </p>
+
+  <h4>Stage 1: Submitting a Concept Proposal</h4>
+  <ol>
+    <li>Navigate to <strong>&ldquo;Published Tenders&rdquo;</strong> and click a tender card.</li>
+    <li>Click <strong>&ldquo;Submit Proposal&rdquo;</strong> to start a Stage 1 draft.</li>
+    <li>Complete the form across these sections:
+      <ul>
+        <li><strong>Financial</strong> &mdash; Concept-stage budget: bid amount and subsidy requested.</li>
+        <li><strong>Geography</strong> &mdash; Target district, site name, primary beneficiary type, and estimated household count. GPS is optional at this stage.</li>
+        <li><strong>Inclusion</strong> &mdash; Commitments for female-headed, vulnerable, and low-income beneficiary percentages.</li>
+        <li><strong>Narrative</strong> &mdash; Concept note / implementation strategy describing project understanding and approach (minimum 200 characters).</li>
+      </ul>
+    </li>
+    <li>Use <strong>&ldquo;Save Draft&rdquo;</strong> to save progress. When complete, click <strong>&ldquo;Submit Final Proposal&rdquo;</strong>.</li>
+  </ol>
+
+  <div class="warn">
+    <strong>Important:</strong> Once a Stage 1 bid is submitted, you cannot edit it. If the RMT
+    requires changes, they will set the status to <strong>Revision Required</strong>, allowing
+    you to resubmit. The deadline still applies.
+  </div>
+
+  <h4>Stage 1 Review &amp; Shortlisting</h4>
+  <p>
+    After submission, RMT reviews Stage 1 proposals from
+    <strong>&ldquo;Financial Evaluation&rdquo;</strong> in the sidebar. The RMT opens
+    <strong>&ldquo;Stage 1 Evaluation&rdquo;</strong> and chooses either
+    <strong>&ldquo;Shortlist&rdquo;</strong> (bid accepted, Stage 2 unlocked) or
+    <strong>&ldquo;Reject&rdquo;</strong> (bid denied with a reason). Only shortlisted
+    vendors can proceed to Stage 2.
+  </p>
+
+  <h4>Stage 2: Submitting a Detailed Proposal</h4>
+  <p>
+    When a Stage 1 bid is shortlisted, the vendor sees a
+    <span class="badge badge-green">Stage 2 unlocked</span> badge and a
+    <strong>&ldquo;Continue Stage 2&rdquo;</strong> button. A Stage 2 draft is
+    auto-created:
+  </p>
+  <ol>
+    <li>Click <strong>&ldquo;Continue Stage 2&rdquo;</strong> to open the detailed proposal form.</li>
+    <li>Complete the form across these sections:
+      <ul>
+        <li><strong>Financial</strong> &mdash; Upload the <strong>Bill of Quantities (BOQ)</strong> with itemised components, quantities, and prices.</li>
+        <li><strong>Technical</strong> &mdash; Hardware specifications: technology type, device brand, model, and technology tier (cannot exceed approved pre-qualification tier).</li>
+        <li><strong>Geography</strong> &mdash; Exact village list with mandatory GPS coordinates, household count, and access details for field verification.</li>
+        <li><strong>Inclusion</strong> &mdash; Binding inclusion targets plus gender action plan upload.</li>
+        <li><strong>Narrative</strong> &mdash; O&amp;M strategy summary, implementation notes, and PAYGO details (for SHS tenders).</li>
+        <li><strong>Documents</strong> &mdash; Upload required files: tender security, gender action plan, and other supporting documents.</li>
+      </ul>
+    </li>
+    <li>Use <strong>&ldquo;Save Draft&rdquo;</strong> to save progress. When complete, click <strong>&ldquo;Submit Final Proposal&rdquo;</strong>.</li>
+  </ol>
+
+  <h4>Tracking Your Bid</h4>
+  <p>
+    Monitor bid statuses from <strong>&ldquo;My Bids&rdquo;</strong> in the sidebar:
+  </p>
+  <ul>
+    <li><strong>Stage 1 path:</strong> Draft &rarr; Submitted &rarr; Shortlisted (Accepted) / Rejected / Revision Required</li>
+    <li><strong>Stage 2 path:</strong> Draft &rarr; Submitted &rarr; Under Review &rarr; Awarded / Not Awarded / Revision Required</li>
+  </ul>
+  <p>
+    During standstill, click <strong>&ldquo;File Challenge&rdquo;</strong> to dispute an award.
+  </p>
+
+  <h3>5.5 Evaluation &amp; Scoring</h3>
+  <p>
+    Evaluation is split between <strong>TAC</strong> (technical) and <strong>RMT</strong> (financial).
+  </p>
+
+  <h4>TAC: Technical Evaluation</h4>
+  <p>
+    TAC members access the scoring screen from <strong>&ldquo;Evaluations&rdquo;</strong> in the
+    sidebar. The page header reads <strong>&ldquo;TAC Stage 2 Technical Evaluation&rdquo;</strong>.
+    TAC evaluates Stage 2 (Detailed Proposal) submissions only:
+  </p>
+  <ol>
+    <li>Click <strong>&ldquo;Start Technical Score&rdquo;</strong> on a bid to open the
+    <strong>&ldquo;Technical Evaluation&rdquo;</strong> form.</li>
+    <li>Enter scores in the <strong>Technical Scoring Matrix</strong>:
+      <ul>
+        <li><strong>Technical design quality</strong> (max 20)</li>
+        <li><strong>Technology tier</strong> (max 15)</li>
+        <li><strong>O&amp;M strategy</strong> (max 10)</li>
+        <li><strong>Implementation plan</strong> (max 10)</li>
+        <li><strong>Gender/inclusion approach</strong> (max 10)</li>
+        <li><strong>Local capacity</strong> (max 5)</li>
+        <li>Technical Total auto-calculated (<strong>/70</strong>)</li>
+      </ul>
+    </li>
+    <li>Add justification comments and click <strong>&ldquo;Save Score&rdquo;</strong>.</li>
+  </ol>
+  <div class="note">
+    <strong>Note:</strong> TAC sees a blue info box: <em>&ldquo;TAC reviews technical feasibility
+    and readiness only. Financial details do not drive the technical endorsement decision on this
+    screen.&rdquo;</em>
+  </div>
+
+  <h4>RMT: Financial Evaluation</h4>
+  <p>
+    RMT members access from <strong>&ldquo;Financial Evaluation&rdquo;</strong> in the sidebar.
+    The page header reads <strong>&ldquo;RMT Evaluation Screens&rdquo;</strong>. RMT handles two stages:
+  </p>
+  <ol>
+    <li><strong>Stage 1 Review</strong> &mdash; Click <strong>&ldquo;Review&rdquo;</strong> to open
+    <strong>&ldquo;Stage 1 Evaluation&rdquo;</strong>. Choose <strong>&ldquo;Shortlist&rdquo;</strong> or
+    <strong>&ldquo;Reject&rdquo;</strong>. Shortlisting auto-creates a Stage 2 draft for the vendor,
+    who will then see a <strong>&ldquo;Continue Stage 2&rdquo;</strong> button.</li>
+    <li><strong>Stage 2 Financial Scoring</strong> &mdash; Click <strong>&ldquo;Start Financial Score&rdquo;</strong>
+    and enter scores in <strong>RMT Financial Scoring</strong>:
+      <ul>
+        <li><strong>Value for money</strong> (max 10)</li>
+        <li><strong>Subsidy reasonableness</strong> (max 10)</li>
+        <li><strong>BOQ accuracy</strong> (max 5)</li>
+        <li><strong>Co-financing contribution</strong> (max 5)</li>
+        <li>Financial Total auto-calculated (<strong>/30</strong>)</li>
+      </ul>
+    </li>
+    <li>Add evaluation notes and click <strong>&ldquo;Save Score&rdquo;</strong>.</li>
+  </ol>
+  <p>
+    The system combines Technical (/70) and Financial (/30) into a weighted total (/100). Bids
+    below the configured technical threshold are disqualified.
+  </p>
+
+  <h3>5.6 Award Process</h3>
+  <p>After all bids are evaluated, the RMT follows these steps:</p>
+  <ol>
+    <li><strong>Open Award Panel</strong> &mdash; From the tender detail page, click <strong>&ldquo;Award&rdquo;</strong> or <strong>&ldquo;Manage Award&rdquo;</strong>. The panel shows the <strong>Comparative Ranking Table</strong> with all bids sorted by combined score.</li>
+    <li><strong>Select Winner</strong> &mdash; Review rankings. The system recommends the highest-scoring bid. RMT can override with a reason.</li>
+    <li><strong>Issue Intent to Award</strong> &mdash; Click <strong>&ldquo;Issue Intent to Award&rdquo;</strong>. This triggers <strong>Standstill</strong> status and starts the cooling-off period.</li>
+    <li><strong>Manage Cooling-Off</strong> &mdash; Use <strong>&ldquo;Adjust Cooling-Off&rdquo;</strong> to extend or shorten, <strong>&ldquo;Pause Award&rdquo;</strong> to pause, or <strong>&ldquo;Revoke Intent&rdquo;</strong> to cancel.</li>
+    <li><strong>Confirm Final Award</strong> &mdash; After the period expires without challenges, click <strong>&ldquo;Confirm Final Award&rdquo;</strong> to generate the Performance-Based Agreement (PBA).</li>
+  </ol>
+
+  <h3>5.7 Standstill, Challenges &amp; Disputes</h3>
+  <p>
+    After the Intent to Award is issued, the tender enters <strong>Standstill</strong> (cooling-off).
+    During this window, any bidder who submitted a bid may file a challenge:
+  </p>
+  <ul>
+    <li><strong>Filing a Challenge</strong> &mdash; The challenging vendor clicks <strong>&ldquo;File Challenge&rdquo;</strong> on the tender detail page, provides grounds, and submits. Status changes to <strong>Disputed</strong>.</li>
+    <li><strong>RMT Reviews</strong> &mdash; Actions available:
+      <ul>
+        <li><strong>Dismiss</strong> &mdash; Challenge deemed invalid; award proceeds.</li>
+        <li><strong>Upheld</strong> &mdash; Challenge is valid. Award revoked, tender returns to Evaluation.</li>
+      </ul>
+    </li>
+    <li>Resolved status returns to Standstill (dismissed) or Evaluation (upheld).</li>
+  </ul>
+
+  <h3>5.8 Contracts &amp; Project Creation</h3>
+
+  <h4>PBA Generation</h4>
+  <p>
+    Clicking <strong>&ldquo;Confirm Final Award&rdquo;</strong> immediately triggers the
+    system to generate a <strong>Performance-Based Agreement (PBA)</strong> &mdash;
+    the legally binding contract between the RBF authority and the awarded vendor. The PBA is
+    a single PDF composed of:
+  </p>
+  <ul>
+    <li><strong>Main Agreement</strong> &mdash; Templated legal text with parties, scope, term, payment structure, and signature blocks.</li>
+    <li><strong>Annex A &mdash; Results Framework</strong> &mdash; Derived from the vendor&rsquo;s Gender Action Plan.</li>
+    <li><strong>Annex B &mdash; Implementation Schedule</strong> &mdash; From the vendor&rsquo;s implementation plan.</li>
+    <li><strong>Annex C &mdash; Payment Terms</strong> &mdash; From the financial proposal and BOQ.</li>
+    <li><strong>Annex D &mdash; Reporting Formats</strong> &mdash; From the reporting templates and milestone payment schedule.</li>
+    <li><strong>Annex E &mdash; Technical Standards</strong> &mdash; From the technical proposal.</li>
+  </ul>
+  <p>
+    The PBA is stored on the platform and becomes available in the
+    <strong>Contracting</strong> section for both the vendor and RMT.
+  </p>
+
+  <h4>Vendor Signs the Contract</h4>
+  <p>
+    Once the PBA is generated, the vendor receives a notification to review and sign:
+  </p>
+  <ol>
+    <li>Navigate to the awarded tender and open the <strong>Contracting</strong> tab.</li>
+    <li>Click <strong>&ldquo;Download generated Performance-Based Agreement&rdquo;</strong> to review the full PBA PDF including all annexes.</li>
+    <li>Review Annexes A&ndash;E (locked from the bid documents).</li>
+    <li>Sign the document (digital signature or wet signature scanned to PDF).</li>
+    <li>Upload the signed PDF using the <strong>Upload Signed Contract</strong> field and click <strong>&ldquo;Submit&rdquo;</strong>.</li>
+  </ol>
+  <p>
+    After submission, the contract status changes to <strong>Submitted</strong> and the RMT is
+    notified to review the signed document.
+  </p>
+
+  <h4>RMT Approves &amp; Assigns Project</h4>
+  <p>
+    The RMT opens the signed contract from the tender detail page and clicks
+    <strong>&ldquo;Save &amp; Assign Project&rdquo;</strong>. This performs two actions:
+  </p>
+  <ol>
+    <li><strong>Approve Contract</strong> &mdash; Status changes to <strong>Approved</strong> with timestamp and reviewer record.</li>
+    <li><strong>Create Project</strong> &mdash; The system creates a <strong>Project</strong> with three milestones:
+      <ul>
+        <li><strong>M1 &mdash; Mobilization</strong> (20%) &mdash; Status: <strong>Pending</strong> (can be claimed after project setup).</li>
+        <li><strong>M2 &mdash; 80% Implementation</strong> (50%) &mdash; Status: <strong>Locked</strong>.</li>
+        <li><strong>M3 &mdash; Final</strong> (30%) &mdash; Status: <strong>Locked</strong>.</li>
+      </ul>
+    </li>
+  </ol>
+  <p>
+    The project reference follows the format <code>PRJ-{tender-ref}-{vendor-id}</code> and
+    appears in both the vendor&rsquo;s and RMT&rsquo;s project lists with
+    <strong>Setup Pending</strong> status. The RMT can also configure the project assignment
+    form with districts, technology, duration, and installation targets before finalising.
+  </p>
+
+  <h3>5.9 Archival, Audit &amp; Closure</h3>
+  <p>
+    When a tender reaches <strong>Closed</strong> status, it becomes view-only with no further
+    actions available. All actions throughout the lifecycle are logged in the audit trail. When
+    the final milestone of a project is paid, the project automatically closes. Archived tenders
+    and projects remain accessible via search and filter.
+  </p>
+
+  <!-- ============================================================ -->
+  <h2 id="workflow-b">6. Workflow B &mdash; Project Lifecycle</h2>
+  <p>
+    Once a tender is awarded and the contract is approved, a <strong>Project</strong> is
+    automatically created. The project lifecycle encompasses setup, installation, field verification,
+    milestone tracking, and completion.
+  </p>
+
+  <h3>6.1 Project Statuses</h3>
+  <div class="flow-grid">
+    <div class="flow-step">Setup Pending<span class="arrow">&rarr;</span></div>
+    <div class="flow-step">Active<span class="arrow">&rarr;</span></div>
+    <div class="flow-step">Installation<span class="arrow">&rarr;</span></div>
+    <div class="flow-step">Field Verification<span class="arrow">&rarr;</span></div>
+    <div class="flow-step">Disbursement<span class="arrow">&rarr;</span></div>
+    <div class="flow-step">Completed</div>
+  </div>
+  <p style="margin-top:0.3rem;">
+    Projects can also enter a <strong>Halted</strong> state if issues arise (e.g., blacklisting,
+    compliance problems, unresolved anomaly flags).
+  </p>
+
+  <h3>6.2 Finding Projects</h3>
+  <p>
+    <strong>Vendors:</strong> Click <strong>&ldquo;Projects Hub&rdquo;</strong> in the sidebar.
+    The project detail page is organised into tabs: <strong>Overview</strong>, <strong>Planning</strong>,
+    <strong>KPI</strong>, <strong>Map View</strong>, <strong>Milestones</strong>,
+    <strong>Field Work</strong>, <strong>Device Readings</strong>, <strong>Payments</strong>,
+    <strong>Documents</strong>, and <strong>Updates</strong>.
+  </p>
+  <p>
+    <strong>RMT / Admin:</strong> Click <strong>&ldquo;Projects Hub&rdquo;</strong> to see all
+    projects. Additional tabs: <strong>Overview</strong>, <strong>Milestones</strong>,
+    <strong>Installations</strong>, <strong>Device Readings</strong>, <strong>KPI</strong>,
+    <strong>Payments</strong>, <strong>Anomaly Flags</strong>, <strong>Documents</strong>,
+    <strong>Prospect Sync</strong>, and <strong>Audit Trail</strong>.
+  </p>
+  <p>
+    <strong>PSC / Donor:</strong> Click <strong>&ldquo;Portfolio Overview&rdquo;</strong> with
+    tabs: <strong>Summary</strong>, <strong>Milestones &amp; Payments</strong>, <strong>KPI</strong>,
+    <strong>Compliance Record</strong>, and <strong>Device Readings</strong>.
+  </p>
+
+  <h3>6.3 Project Setup (Vendor)</h3>
+  <p>
+    When a project enters <strong>Setup Pending</strong> status, click
+    <strong>&ldquo;Complete Project Setup&rdquo;</strong> or <strong>&ldquo;Complete Setup&rdquo;</strong>.
+    Complete each section:
+  </p>
+
+  <h4>Team &amp; Logistics</h4>
+  <ul>
+    <li><strong>Team Roster</strong> &mdash; Deployment team with names, roles, and contact info.</li>
+    <li><strong>Equipment Plan</strong> &mdash; Equipment description, suppliers, logistics, storage.</li>
+    <li><strong>Work Schedule</strong> &mdash; Start and end dates by phase.</li>
+    <li><strong>Compliance Documents</strong> &mdash; Regulatory approvals.</li>
+    <li><strong>Insurance Certificate</strong> &mdash; Proof of insurance coverage.</li>
+    <li><strong>Site Readiness Status</strong> &mdash; Ready, in progress, or not started.</li>
+  </ul>
+
+  <h4>Device Configuration</h4>
+  <ul>
+    <li><strong>Device Brand</strong> &mdash; Manufacturer name.</li>
+    <li><strong>Device Model</strong> &mdash; Specific model number/name.</li>
+    <li><strong>Technology Tier</strong> &mdash; Equipment tier.</li>
+    <li><strong>Meter API Endpoint</strong> &mdash; API endpoint for automatic reading collection.</li>
+    <li><strong>Meter API Token</strong> &mdash; Authentication token for meter API.</li>
+  </ul>
+
+  <h4>Verification Method</h4>
+  <ul>
+    <li><strong>Verification Method</strong> &mdash; Field, remote, or manual.</li>
+    <li><strong>Manual Verification Confirmed</strong> &mdash; Confirmation checkbox.</li>
+  </ul>
+
+  <h4>Setup Checklist</h4>
+  <p>Confirm readiness across five areas:</p>
+  <ul>
+    <li><strong>Team Ready</strong> &mdash; All team members assigned and briefed.</li>
+    <li><strong>Equipment Ready</strong> &mdash; Equipment procured and on-site or in transit.</li>
+    <li><strong>Site Ready</strong> &mdash; Installation sites prepared.</li>
+    <li><strong>Safety Ready</strong> &mdash; Safety protocols and PPE in place.</li>
+    <li><strong>Logistics Ready</strong> &mdash; Transport and supply chain arranged.</li>
+  </ul>
+
+  <div class="tip">
+    <strong>Tip:</strong> You can save as draft and return later. Once all sections are complete,
+    click <strong>&ldquo;Submit Project Setup&rdquo;</strong>. The RMT will be notified and can
+    request changes if needed.
+  </div>
+
+  <h3>6.4 RMT Setup Review</h3>
+  <p>
+    When a vendor submits project setup, review each section. Verify the team roster, equipment
+    plan, work schedule, compliance documents, and insurance. Use <strong>&ldquo;Test Connection&rdquo;</strong>
+    to verify the meter API. To send the setup back with comments, use
+    <strong>&ldquo;Request Change&rdquo;</strong>. The project advances on vendor submission.
+  </p>
+
+  <h3>6.5 Installation Phase (Vendor)</h3>
+  <p>
+    Once setup is approved and the project status is <strong>Installation</strong>, navigate to
+    the <strong>&ldquo;Field Work&rdquo;</strong> tab and click <strong>&ldquo;Submit Installation&rdquo;</strong>.
+    Fill in the installation details:
+  </p>
+  <ul>
+    <li><strong>Serial Number</strong> &mdash; Unique device serial number.</li>
+    <li><strong>Beneficiary ID / Name</strong> &mdash; Beneficiary identifier and full name.</li>
+    <li><strong>Household Type</strong> &mdash; Female-headed, Vulnerable, Low-income, Standard.</li>
+    <li><strong>GPS Coordinates</strong> &mdash; Latitude/longitude of the installation site.</li>
+    <li><strong>Meter ID</strong> &mdash; Smart meter identifier (if applicable).</li>
+    <li><strong>kWh Reading</strong> &mdash; Initial meter reading (if applicable).</li>
+  </ul>
+  <p>Upload evidence photos and submit. The report is recorded and queued for field verification.</p>
+
+  <div class="note">
+    <strong>Important:</strong> The GPS coordinates you submit must be accurate. Field verifiers
+    will visit the site and record their own coordinates. If the distance exceeds the threshold
+    (default 50m), an anomaly flag is raised, which may delay milestone payments.
+  </div>
+
+  <h3>6.6 Milestones &amp; Progress</h3>
+  <p>Each project is assigned a <strong>Milestone Plan</strong> during project creation. The standard plan has three milestones based on the PBA disbursement schedule:</p>
+  <table>
+    <thead>
+      <tr><th>Milestone</th><th>Trigger Condition</th><th>Payout %</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>M1 &mdash; Mobilization</td><td>Contract approved and project setup completed by vendor</td><td>20%</td></tr>
+      <tr><td>M2 &mdash; 80% Implementation</td><td>80% of target installations field-verified</td><td>50%</td></tr>
+      <tr><td>M3 &mdash; Final</td><td>All installations verified and sustained KPI achievement</td><td>30%</td></tr>
+    </tbody>
+  </table>
+
+  <h4>Milestone States</h4>
+  <ul>
+    <li><strong>Locked</strong> &mdash; Preceding conditions not met. No action possible.</li>
+    <li><strong>Pending</strong> &mdash; Conditions met; RMT verifying readiness.</li>
+    <li><strong>Claimable</strong> &mdash; Ready for payment claim submission.</li>
+    <li><strong>Claimed</strong> &mdash; Claim submitted and in approval workflow.</li>
+    <li><strong>Paid</strong> &mdash; Disbursement completed successfully.</li>
+  </ul>
+
+  <h3>6.7 Field Verification</h3>
+  <p>
+    Field verification is the process of physically visiting installation sites to confirm that
+    devices are installed, operational, and match the vendor&rsquo;s submitted reports. This is a
+    critical control mechanism in the RBF model.
+  </p>
+
+  <h4>Accessing Tasks (Field Verifier)</h4>
+  <ol>
+    <li>Sign in with your <strong>Field Verifier</strong> account.</li>
+    <li>Click <strong>&ldquo;Verifications&rdquo;</strong> in the sidebar to see assigned installations.</li>
+    <li>View all installation locations on <strong>&ldquo;Map View&rdquo;</strong> from the sidebar.</li>
+  </ol>
+
+  <h4>Conducting a Field Visit</h4>
+  <ol>
+    <li><strong>Travel to the site</strong> &mdash; Navigate to the GPS coordinates provided by the vendor.</li>
+    <li><strong>Locate the installation</strong> &mdash; Verify the serial number matches the submitted report.</li>
+    <li><strong>Record your GPS position</strong> &mdash; Click <strong>&ldquo;Use Current Location&rdquo;</strong> (or enter manually).</li>
+    <li><strong>Inspect the installation</strong> &mdash; Check presence, operation, installation quality.</li>
+    <li><strong>Complete the checklist</strong> &mdash; Answer verification questions.</li>
+    <li>Click <strong>&ldquo;Next Step&rdquo;</strong> to navigate the form, then <strong>&ldquo;Submit Verification&rdquo;</strong>.</li>
+  </ol>
+
+  <h4>Verification Outcomes</h4>
+  <table>
+    <thead>
+      <tr><th>Outcome</th><th>Status</th><th>Next Step</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Confirmed and matches report</td><td><span class="badge badge-green">Verified</span></td><td>Counted toward milestone progress.</td></tr>
+      <tr><td>Minor discrepancies</td><td><span class="badge badge-amber">Partial</span></td><td>RMT reviews; may request clarification.</td></tr>
+      <tr><td>Significant issues</td><td><span class="badge badge-red">Flagged</span></td><td>Anomaly flag raised; RMT investigates.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>6.8 GPS &amp; Anomaly Detection</h3>
+  <p>The platform automatically performs checks during verification:</p>
+
+  <h4>GPS Duplicate Detection</h4>
+  <p>
+    Checks whether vendor-submitted GPS coordinates are within the <strong>GPS Duplicate Radius</strong>
+    (configurable, default 10m) of any other installation by the same vendor. If found, an anomaly
+    flag is raised with type <strong>&ldquo;GPS Location Fraud&rdquo;</strong>.
+  </p>
+
+  <h4>Verification Distance Check</h4>
+  <p>
+    Measures distance between vendor coordinates and verifier coordinates. If it exceeds
+    <strong>GPS Verification Max Distance</strong> (configurable, default 50m), the verification
+    is flagged as anomalous.
+  </p>
+
+  <h4>Anomaly Flags</h4>
+  <p>
+    Anomaly flags are auto-created with flag type, description, status (Resolved/Unresolved),
+    and linked installation. RMT reviews and resolves or escalates flags. Unresolved flags can
+    block milestone progression and payment claims.
+  </p>
+
+  <h3>6.9 RMT: Managing Verification Outcomes</h3>
+  <p>After a verification report is submitted:</p>
+  <ul>
+    <li><strong>Confirm Verified</strong> &mdash; Override flags if the installation is legitimate.</li>
+    <li><strong>Request Re-Verification</strong> &mdash; Assign a different verifier for a second visit.</li>
+    <li><strong>Initiate Investigation</strong> &mdash; For serious anomalies, raise a concern or audit finding.</li>
+  </ul>
+  <p>Field Verifiers access their submission history from <strong>&ldquo;My Reports&rdquo;</strong> in the sidebar.</p>
+
+  <h3>6.10 Project Issues &amp; Halting</h3>
+  <p>
+    If problems arise, the RMT can set the project to <strong>Halted</strong> status. Common
+    reasons include vendor blacklisting, serious compliance issues, unresolved anomaly flags,
+    or extended delays beyond the project timeline. A halted project cannot proceed with
+    installations or claims until the RMT reactivates it.
+  </p>
+
+  <!-- ============================================================ -->
+  <h2 id="workflow-c">7. Workflow C &mdash; Payment Disbursement</h2>
+  <p>
+    Payment claims are the mechanism by which vendors receive funds for completed milestones.
+    The platform enforces a <strong>multi-tier approval chain</strong> to ensure all payments are
+    justified by verified results and endorsed by the appropriate oversight bodies.
+  </p>
+
+  <h3>7.1 Milestone Eligibility</h3>
+  <p>
+    A milestone becomes <strong>Claimable</strong> when all of its conditions are met. Check
+    milestone eligibility from the project detail page:
+  </p>
+  <ol>
+    <li>Open your project from <strong>&ldquo;Projects Hub&rdquo;</strong>.</li>
+    <li>Click the <strong>Milestones</strong> tab to see the milestone plan.</li>
+    <li>Each milestone card shows its current state: <strong>Locked</strong>, <strong>Pending</strong>,
+    <strong>Claimable</strong>, <strong>Claimed</strong>, or <strong>Paid</strong>.</li>
+    <li>If <strong>Claimable</strong>, the <strong>&ldquo;Submit Claim&rdquo;</strong> button becomes active.</li>
+  </ol>
+
+  <div class="note">
+    <strong>Note:</strong> Typical milestone conditions include: minimum verified installations,
+    minimum female beneficiary percentage, minimum uptime, and no unresolved flags or anomalies.
+  </div>
+
+  <h3>7.2 Accessing Claims by Role</h3>
+  <ul>
+    <li><strong>Vendors:</strong> <strong>&ldquo;Payment Claims&rdquo;</strong> in sidebar, or <strong>Payments</strong> tab within a project.</li>
+    <li><strong>RMT:</strong> <strong>&ldquo;Disbursements&rdquo;</strong> in sidebar.</li>
+    <li><strong>TAC:</strong> <strong>&ldquo;Claim Reviews&rdquo;</strong> in sidebar.</li>
+    <li><strong>PSC:</strong> <strong>&ldquo;Disbursements&rdquo;</strong> in sidebar.</li>
+    <li><strong>Auditor:</strong> <strong>&ldquo;Claims Audit&rdquo;</strong> in sidebar.</li>
+  </ul>
+
+  <h3>7.3 Submitting a Claim (Vendor)</h3>
+  <p>When a milestone is claimable, follow these steps:</p>
+  <ol>
+    <li>Navigate to the project from <strong>&ldquo;Projects Hub&rdquo;</strong>, click the
+    <strong>Payments</strong> tab, then <strong>&ldquo;Submit Claim&rdquo;</strong> or
+    <strong>&ldquo;Submit Milestone N Claim&rdquo;</strong>.</li>
+    <li>Complete the form:
+      <ul>
+        <li><strong>Completion Date</strong> &mdash; When milestone conditions were substantially met.</li>
+        <li><strong>Claim Amount (LSL)</strong> &mdash; Auto-calculated based on milestone percentage and project budget.</li>
+        <li><strong>Actual Total Beneficiaries</strong> &mdash; Beneficiaries reached to date.</li>
+        <li><strong>Actual Female Beneficiaries</strong> &mdash; Female-headed households reached.</li>
+        <li><strong>Implementation Notes</strong> &mdash; Narrative describing completed work.</li>
+      </ul>
+    </li>
+    <li><strong>Upload Evidence Files</strong> &mdash; Photos, beneficiary sign-off sheets, progress reports.</li>
+    <li><strong>Accept Declaration</strong> &mdash; Confirm all information is accurate.</li>
+    <li>Click <strong>&ldquo;Submit Claim&rdquo;</strong>.</li>
+  </ol>
+
+  <div class="warn">
+    <strong>Warning:</strong> Submitting a false or inflated claim may result in payment hold,
+    blacklisting, or legal action. Always ensure your claim accurately reflects verified work.
+  </div>
+
+  <h3>7.4 Multi-Tier Approval Chain</h3>
+  <p>Once submitted, every claim must pass through four steps:</p>
+  <table>
+    <thead>
+      <tr><th>Step</th><th>Role</th><th>Action</th><th>Status After</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>1</td>
+        <td><strong>RMT</strong></td>
+        <td>Managerial review: checks contractual and compliance requirements. Click <strong>&ldquo;RMT Review&rdquo;</strong> to approve forward.</td>
+        <td><span class="badge badge-blue">RMT Approved</span></td>
+      </tr>
+      <tr>
+        <td>2</td>
+        <td><strong>TAC</strong></td>
+        <td>Technical review: audits technical KPIs (energy output, uptime). Click <strong>&ldquo;Endorse Claim&rdquo;</strong> to approve.</td>
+        <td><span class="badge badge-purple">TAC Endorsed</span></td>
+      </tr>
+      <tr>
+        <td>3</td>
+        <td><strong>PSC</strong></td>
+        <td>Financial authorization: budget check and compliance review. Click <strong>&ldquo;Approve Payment&rdquo;</strong>.</td>
+        <td><span class="badge badge-green">PSC Approved</span></td>
+      </tr>
+      <tr>
+        <td>4</td>
+        <td><strong>RMT</strong></td>
+        <td>Payment confirmation: open <strong>&ldquo;Confirm Payment&rdquo;</strong> modal, enter transaction reference, click <strong>&ldquo;Submit&rdquo;</strong>.</td>
+        <td><span class="badge badge-green">Completed / Paid</span></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>7.5 Claim Status Reference</h3>
+  <table>
+    <thead>
+      <tr><th>Status</th><th>Description</th><th>Who Acts Next</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Submitted</td><td>Vendor has submitted the claim.</td><td>RMT</td></tr>
+      <tr><td>RMT Approved</td><td>RMT verified the claim. Sent to TAC.</td><td>TAC</td></tr>
+      <tr><td>TAC Endorsed</td><td>TAC endorsed based on KPIs. Sent to PSC.</td><td>PSC</td></tr>
+      <tr><td>PSC Approved</td><td>PSC gave final approval. Ready for disbursement.</td><td>RMT</td></tr>
+      <tr><td>Completed / Paid</td><td>Payment processed and disbursed.</td><td>&mdash;</td></tr>
+      <tr><td>Rejected</td><td>Claim rejected at any step.</td><td>Vendor (may resubmit)</td></tr>
+      <tr><td>Locked</td><td>Payment hold active.</td><td>RMT (resolve hold)</td></tr>
+    </tbody>
+  </table>
+
+  <h3>7.6 RMT Claim Review Details</h3>
+  <p>
+    From <strong>&ldquo;Disbursements&rdquo;</strong> in the sidebar, open a claim to view full
+    details: milestone conditions, vendor data, KPI data, evidence files, and anomaly flags.
+    Use the review notes textarea and click <strong>&ldquo;RMT Review&rdquo;</strong> to approve
+    forward. Use <strong>&ldquo;Cancel&rdquo;</strong> to close without action.
+  </p>
+
+  <h3>7.7 TAC Endorsement Details</h3>
+  <p>
+    From <strong>&ldquo;Claim Reviews&rdquo;</strong> in the sidebar, review KPIs including uptime
+    and energy output. Click <strong>&ldquo;Endorse Claim&rdquo;</strong> to approve or
+    <strong>&ldquo;Push Back to RMT&rdquo;</strong> to reject.
+  </p>
+
+  <h3>7.8 PSC Approval Details</h3>
+  <p>
+    From <strong>&ldquo;Disbursements&rdquo;</strong> in the sidebar, perform budget check and
+    compliance review. Click <strong>&ldquo;Approve Payment&rdquo;</strong> to approve or
+    <strong>&ldquo;Reject Claim&rdquo;</strong> to reject.
+  </p>
+
+  <h3>7.9 Disbursement Process</h3>
+  <p>
+    After PSC approval, the claim status becomes <strong>PSC Approved</strong>. The RMT opens the
+    <strong>&ldquo;Confirm Payment&rdquo;</strong> modal, which displays vendor bank details
+    (from their pre-qualification). Enter the transaction/reference ID and click
+    <strong>&ldquo;Submit&rdquo;</strong>. The system updates the milestone to <strong>Paid</strong>.
+  </p>
+
+  <h3>7.10 Claim History &amp; Audit Trail</h3>
+  <p>
+    All claim activity is recorded with reviewer name, role, timestamp, and comments. Access the
+    <strong>Audit Trail</strong> tab from RMT projects for full traceability across the entire
+    payment lifecycle.
+  </p>
+
+  <!-- ============================================================ -->
+  <h2 id="kpi">8. KPI Dashboard</h2>
+  <p>
+    The KPI dashboard provides real-time performance metrics at project and portfolio levels.
+    Key indicators include:
+  </p>
+
+  <h3>8.1 Project-Level KPIs</h3>
+  <ul>
+    <li><strong>Installation Progress</strong> &mdash; Submitted vs. verified vs. flagged installations against target.</li>
+    <li><strong>Gender KPI</strong> &mdash; Percentage of female-headed households, vulnerable groups, and low-income beneficiaries.</li>
+    <li><strong>Energy KPI</strong> &mdash; Monthly kWh generation against targets.</li>
+    <li><strong>Uptime KPI</strong> &mdash; Average device uptime percentage against target.</li>
+    <li><strong>Milestone Eligibility</strong> &mdash; Current milestone readiness status.</li>
+  </ul>
+
+  <h3>8.2 Portfolio-Level KPIs</h3>
+  <p>
+    The <strong>Portfolio Monitoring</strong> view aggregates data across all projects:
+  </p>
+  <ul>
+    <li>Total installations target vs. verified</li>
+    <li>Overall gender percentage</li>
+    <li>Average uptime</li>
+    <li>Projects on track, at risk, and completed</li>
+    <li>Total disbursed and pending amounts</li>
+    <li>Comparison against national main program budget</li>
+  </ul>
+
+  <h3>8.3 Accessing KPIs by Role</h3>
+  <ul>
+    <li><strong>Vendors:</strong> Click the <strong>KPI</strong> tab within any project from <strong>&ldquo;Projects Hub&rdquo;</strong>.</li>
+    <li><strong>RMT:</strong> Select <strong>&ldquo;KPI Review&rdquo;</strong> or the <strong>KPI</strong> tab in project detail.</li>
+    <li><strong>DoE Officers:</strong> Use <strong>&ldquo;KPI Review&rdquo;</strong> from the sidebar for regional KPIs.</li>
+    <li><strong>Auditor:</strong> Use <strong>&ldquo;KPI Dashboard&rdquo;</strong> from the sidebar.</li>
+    <li><strong>PSC / Donor:</strong> Use <strong>&ldquo;Portfolio Overview&rdquo;</strong> for high-level macro KPIs.</li>
+  </ul>
+
+  <!-- ============================================================ -->
+  <h2 id="gis">9. GIS Installations Map</h2>
+  <p>
+    The GIS map displays all installation sites on an interactive map of Lesotho.
+    Access it from the sidebar via <strong>&ldquo;GIS Mapping&rdquo;</strong>
+    (RMT), <strong>&ldquo;GIS Map&rdquo;</strong> (Auditor), or
+    <strong>&ldquo;Map View&rdquo;</strong> (Field Verifier, Vendor project tab).
+    Each marker is colour-coded by verification status:
+  </p>
+  <ul>
+    <li><strong>Green</strong> &mdash; Verified installation.</li>
+    <li><strong>Yellow</strong> &mdash; Pending verification.</li>
+    <li><strong>Red</strong> &mdash; Flagged / anomalous.</li>
+  </ul>
+  <p>
+    Click on a marker to view installation details (beneficiary name, device info, verification
+    status, uptime). The map also includes a summary panel showing total, verified, pending, and
+    flagged counts.
+  </p>
+
+
+  <!-- ============================================================ -->
+  <h2 id="reports">10. Reports Hub</h2>
+  <p>
+    The <strong>&ldquo;Reports&rdquo;</strong> section (sidebar) allows authorised users
+    to generate and download reports in multiple formats (CSV, PDF, Excel).
+    For PSC/Donor users, this is labelled <strong>&ldquo;Briefings &amp; Reports&rdquo;</strong>.
+    Available reports include:
+  </p>
+  <ul>
+    <li>Project Progress Reports</li>
+    <li>Installation Summary Reports</li>
+    <li>Payment &amp; Disbursement Reports</li>
+    <li>KPI Performance Reports</li>
+    <li>Audit Trail Reports</li>
+    <li>Vendor Performance Reports</li>
+  </ul>
+  <p>
+    Reports can be generated on demand. Previously generated reports are available in the report
+    history for re-download.
+  </p>
+
+  <!-- ============================================================ -->
+  <h2 id="audit">11. Audit &amp; Compliance</h2>
+
+  <h3>11.1 Audit Logs</h3>
+  <p>
+    Every significant action on the platform is logged with timestamps, actor details, old/new
+    values, and module context. The <strong>Auditor</strong> role can access all logs from
+    <strong>&ldquo;Audit Logs&rdquo;</strong> in the sidebar. Admin users have the same view
+    under <strong>&ldquo;Audit Logs&rdquo;</strong>. RMT users can view project-level audit
+    trails from the <strong>Audit Trail</strong> tab within any project.
+  </p>
+
+  <h3>11.2 Anomaly Reports</h3>
+  <p>
+    The <strong>&ldquo;Anomaly Report&rdquo;</strong> section (Auditor sidebar) shows all
+    system-generated anomaly flags. The project-level <strong>Anomaly Flags</strong> tab
+    (RMT) shows flags per project. The system automatically detects:
+  </p>
+  <ul>
+    <li>GPS coordinate duplicates</li>
+    <li>Verification distance threshold violations</li>
+    <li>Data integrity issues</li>
+  </ul>
+
+  <h3>11.3 Audit Findings</h3>
+  <p>
+    The <strong>&ldquo;Audit Findings&rdquo;</strong> section (Auditor sidebar) allows
+    auditors to raise formal findings categorised by type (payment compliance, data integrity,
+    GPS fraud, KPI manipulation, document irregularity, process violation, conflict of interest,
+    etc.) with risk levels (Observation, Minor Finding, Major Finding, Critical).
+  </p>
+  <p>
+    Findings can be linked to specific projects, claims, installations, or audit log entries.
+    RMT responds to findings, and PSC can provide final comments.
+  </p>
+
+  <h3>11.4 Issues &amp; Concerns</h3>
+  <p>
+    RMT users can access all issues from <strong>&ldquo;Issues &amp; Findings&rdquo;</strong>
+    in the sidebar. DoE Officers and Auditors can raise concerns about projects. Concerns have
+    types (KPI issue,
+    GPS issue, verification issue, vendor behaviour, etc.), severity levels, and a response
+    thread where RMT can reply and take action. Concerns can be escalated to PSC.
+  </p>
+
+  <!-- ============================================================ -->
+  <h2 id="notices">12. Notices &amp; Communications</h2>
+  <p>
+    The <strong>&ldquo;Notice Board&rdquo;</strong> module (RMT and Admin only, accessed from
+    the sidebar) allows publishing notices to all platform users. Notices can be:
+  </p>
+  <ul>
+    <li>Categorised (tender, deadline, award, clarification, training, general)</li>
+    <li>Pinned to the top</li>
+    <li>Scheduled for future publication</li>
+    <li>Linked to a specific tender</li>
+    <li>Accompanied by file attachments</li>
+    <li>Set with countdown dates</li>
+  </ul>
+  <p>
+    Email notifications can optionally be sent when a notice is published. The system also
+    supports in-app notifications for events like tender publication, bid submission confirmations,
+    milestone approvals, and field survey submissions.
+  </p>
+
+  <!-- ============================================================ -->
+  <h2 id="admin">13. Super Admin Portal</h2>
+  <p>
+    The Super Admin has full access to:
+  </p>
+  <ul>
+    <li><strong>&ldquo;User Management&rdquo;</strong> &mdash; Create, edit, activate/deactivate users of any role. Click <strong>&ldquo;Create User&rdquo;</strong> to add a new user.</li>
+    <li><strong>&ldquo;System Configuration&rdquo;</strong> &mdash; Set national program budget, KPI targets (female %, vulnerable %, uptime), anomaly thresholds, GPS duplicate radius, verification max distance, email/SMS settings, file upload limits.</li>
+    <li><strong>&ldquo;System Health&rdquo;</strong> &mdash; Monitor database status, worker queues, scheduler, storage usage, Prospect API connectivity.</li>
+    <li><strong>&ldquo;Prospect Sync&rdquo;</strong> &mdash; View and retry failed synchronisation jobs.</li>
+    <li><strong>&ldquo;Audit Logs&rdquo;</strong> &mdash; Full audit trail of all platform actions.</li>
+  </ul>
+
+  <!-- ============================================================ -->
+  <h2 id="blacklist">14. Blacklisting</h2>
+  <p>
+    The blacklisting module manages vendor suspensions and exclusions. The workflow:
+  </p>
+  <ol>
+    <li><strong>Initiation</strong> &mdash; RMT starts a blacklist case with reason and evidence.</li>
+    <li><strong>Notice &amp; Cooling-Off</strong> &mdash; Vendor is notified and given a cooling-off period to respond.</li>
+    <li><strong>Review</strong> &mdash; RMT reviews the vendor&rsquo;s rebuttal (if any).</li>
+    <li><strong>Confirmation</strong> &mdash; RMT confirms the blacklisting (temporary with expiry or permanent).</li>
+    <li><strong>Appeal</strong> &mdash; Vendor may appeal; RMT reviews the appeal.</li>
+    <li><strong>Reinstatement</strong> &mdash; If the blacklist expires or the appeal is upheld, the vendor is reinstated.</li>
+  </ol>
+
+  <div class="warn">
+    <strong>Warning:</strong> Blacklisted vendors cannot bid on tenders or receive payments.
+    Their existing projects enter a halted state.
+  </div>
+
+  <!-- ============================================================ -->
+  <h2 id="sync">15. Prospect Sync</h2>
+  <p>
+    The platform synchronises data with <strong>Prospect</strong>, an external M&amp;E (Monitoring &amp;
+    Evaluation) system. The following entities are synced:
+  </p>
+  <ul>
+    <li><strong>Agents</strong> &mdash; Vendor profiles are pushed as Prospect agents after setup completion.</li>
+    <li><strong>Customers</strong> &mdash; Beneficiaries / installation records.</li>
+    <li><strong>Installations</strong> &mdash; Installation reports are queued for sync after submission.</li>
+    <li><strong>Targets</strong> &mdash; Project targets are pushed after project creation and on update.</li>
+    <li><strong>Reports</strong> &mdash; Monthly report data.</li>
+  </ul>
+  <p>
+    Sync logs are visible in the <strong>Super Admin Portal</strong>. Failed jobs can be retried
+    via the &ldquo;Refresh Panel&rdquo; button or using the management command:
+  </p>
+  <pre><code>python manage.py retry_prospect_syncs</code></pre>
+
+  <!-- ============================================================ -->
+  <h2 id="faq">16. Frequently Asked Questions</h2>
+
+  <h4>Q: Why can't I see any tenders?</h4>
+  <p>
+    Ensure your vendor account is <strong>pre-qualified</strong> and <strong>approved</strong>.
+    Only approved vendors can see published tenders in <strong>&ldquo;Published Tenders&rdquo;</strong>.
+    Also check that your account status is &ldquo;Active&rdquo; and not &ldquo;Suspended&rdquo;
+    or &ldquo;Blacklisted.&rdquo;
+  </p>
+
+  <h4>Q: My bid was rejected. Can I resubmit?</h4>
+  <p>
+    If the RMT requests revisions, you can resubmit. Otherwise, you may need to wait for the
+    next tender cycle.
+  </p>
+
+  <h4>Q: How do I update my company information?</h4>
+  <p>
+    Navigate to <strong>&ldquo;My Profile&rdquo;</strong> in the sidebar. The profile has tabs:
+    <strong>Company Profile</strong>, <strong>Documents</strong>, <strong>Bids &amp; Tenders</strong>,
+    <strong>Projects</strong>, <strong>Performance</strong>, <strong>Payments</strong>, and
+    <strong>Audit Trail</strong>. Click <strong>&ldquo;Edit Profile&rdquo;</strong> to update
+    contact details, bank information, and uploaded documents. Changes to pre-qualification
+    status require re-review by the RMT.
+  </p>
+
+  <h4>Q: When will I receive payment after submitting a claim?</h4>
+  <p>
+    Payment processing time depends on the multi-tier approval workflow
+    (RMT &rarr; TAC &rarr; PSC). Each tier must approve before disbursement is initiated.
+    Check the claim status from <strong>&ldquo;Payment Claims&rdquo;</strong> in the sidebar
+    or the <strong>Payments</strong> tab within your project.
+  </p>
+
+  <h4>Q: What does the &ldquo;Flagged&rdquo; status mean on my installation?</h4>
+  <p>
+    Flagged installations require attention. A flag is raised when GPS coordinates are
+    duplicated, verification distance exceeds thresholds, or discrepancies are found. The RMT
+    will review and either resolve or escalate the flag.
+  </p>
+
+  <h4>Q: How do I use the GIS map?</h4>
+  <p>
+    The GIS map is available from the sidebar (<strong>&ldquo;GIS Mapping&rdquo;</strong> for
+    RMT, <strong>&ldquo;GIS Map&rdquo;</strong> for Auditor,
+    <strong>&ldquo;Map View&rdquo;</strong> for Field Verifier). It loads all installation
+    locations in Lesotho. Use mouse scroll to zoom, click markers to view details.
+  </p>
+
+  <h4>Q: Can I download reports?</h4>
+  <p>
+    Yes, the <strong>&ldquo;Reports&rdquo;</strong> section (or
+    <strong>&ldquo;Briefings &amp; Reports&rdquo;</strong> for PSC) allows downloading in CSV,
+    PDF, and Excel formats. Available reports depend on your role and permissions.
+  </p>
+
+  <!-- ============================================================ -->
+  <p>
+    <em>End of User Manual &mdash; Version 1.0 &bull; Renewable Lesotho RBF Platform</em>
+  </p>
+
+  <hr>
+
+  <p style="text-align:center; color:#94a3b8; font-size:0.85rem;">
+    &copy; Department of Energy, Lesotho &mdash; UNDP Lesotho. All rights reserved.
+  </p>
+
+</main>
+
+</body>
+</html>

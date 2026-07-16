@@ -60,6 +60,7 @@ import {
   Printer,
   Paperclip,
   Pause,
+  WifiOff,
 } from "lucide-react";
 import {
   LineChart,
@@ -19117,6 +19118,151 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
   );
 };
 
+const OFFLINE_DB_NAME = "lesotho-rbf-offline";
+const OFFLINE_STORE_NAME = "pending-inspections";
+
+interface OfflineInspection {
+  id: string;
+  taskId: string;
+  step: number;
+  data: {
+    gpsLat: string;
+    gpsLong: string;
+    serialNumber: string;
+    householdType: string;
+    beneficiaryConfirmed: boolean;
+    beneficiaryGender: string;
+    systemWorking: boolean;
+    serialVisible: boolean;
+    verificationStatus: "verified" | "flagged" | "partial";
+    notes: string;
+    flagReason: string;
+    sitePhotos: File[];
+  };
+  createdAt: string;
+  updatedAt: string;
+  synced: boolean;
+  syncAttempts: number;
+}
+
+const openOfflineDB = (): Promise<IDBDatabase> => {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(OFFLINE_DB_NAME, 1);
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => resolve(request.result);
+    request.onupgradeneeded = (event) => {
+      const db = (event.target as IDBOpenDBRequest).result;
+      if (!db.objectStoreNames.contains(OFFLINE_STORE_NAME)) {
+        const store = db.createObjectStore(OFFLINE_STORE_NAME, { keyPath: "id" });
+        store.createIndex("taskId", "taskId", { unique: false });
+        store.createIndex("synced", "synced", { unique: false });
+      }
+    };
+  });
+};
+
+const saveOfflineInspection = async (inspection: OfflineInspection): Promise<void> => {
+  const db = await openOfflineDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(OFFLINE_STORE_NAME, "readwrite");
+    const store = tx.objectStore(OFFLINE_STORE_NAME);
+    const request = store.put(inspection);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
+};
+
+const getOfflineInspection = async (taskId: string): Promise<OfflineInspection | null> => {
+  const db = await openOfflineDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(OFFLINE_STORE_NAME, "readonly");
+    const store = tx.objectStore(OFFLINE_STORE_NAME);
+    const index = store.index("taskId");
+    const request = index.get(taskId);
+    request.onsuccess = () => resolve(request.result || null);
+    request.onerror = () => reject(request.error);
+  });
+};
+
+const getAllPendingInspections = async (): Promise<OfflineInspection[]> => {
+  const db = await openOfflineDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(OFFLINE_STORE_NAME, "readonly");
+    const store = tx.objectStore(OFFLINE_STORE_NAME);
+    const index = store.index("synced");
+    const request = index.getAll(IDBKeyRange.only(false));
+    request.onsuccess = () => resolve(request.result || []);
+    request.onerror = () => reject(request.error);
+  });
+};
+
+const markInspectionSynced = async (id: string): Promise<void> => {
+  const db = await openOfflineDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(OFFLINE_STORE_NAME, "readwrite");
+    const store = tx.objectStore(OFFLINE_STORE_NAME);
+    const request = store.get(id);
+    request.onsuccess = () => {
+      const inspection = request.result;
+      if (inspection) {
+        inspection.synced = true;
+        const putRequest = store.put(inspection);
+        putRequest.onsuccess = () => resolve();
+        putRequest.onerror = () => reject(putRequest.error);
+      } else {
+        resolve();
+      }
+    };
+    request.onerror = () => reject(request.error);
+  });
+};
+
+const deleteOfflineInspection = async (id: string): Promise<void> => {
+  const db = await openOfflineDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(OFFLINE_STORE_NAME, "readwrite");
+    const store = tx.objectStore(OFFLINE_STORE_NAME);
+    const request = store.delete(id);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
+};
+
+const fileToBase64 = (file: File): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+};
+
+const base64ToFile = (base64: string, filename: string): File => {
+  const arr = base64.split(",");
+  const mime = arr[0].match(/:(.*?);/)?.[1] || "image/jpeg";
+  const bstr = atob(arr[1]);
+  let n = bstr.length;
+  const u8arr = new Uint8Array(n);
+  while (n--) u8arr[n] = bstr.charCodeAt(n);
+  return new File([u8arr], filename, { type: mime });
+};
+
+const useOnlineStatus = () => {
+  const [isOnline, setIsOnline] = useState(true);
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    setIsOnline(navigator.onLine);
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, []);
+  return isOnline;
+};
+
 const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboard" | "inspections" | "gis" | "reports"; onNavigate?: (action: string, id?: string) => void }) => {
   const [view, setView] = useState<"dashboard" | "inspect">("dashboard");
   const navigateView = (newView: typeof view, id?: string | null) => { setView(newView); onNavigate?.(newView, id ?? undefined); };
@@ -19149,6 +19295,9 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
     flagReason: "",
     sitePhotos: [] as File[],
   });
+  const [isOnline, setIsOnline] = useState(true);
+  const [pendingInspections, setPendingInspections] = useState<OfflineInspection[]>([]);
+  const [syncing, setSyncing] = useState(false);
 
   const currentUser = getStoredUser();
   const assignedDistricts = currentUser?.districts && currentUser.districts.length > 0 
@@ -19199,6 +19348,74 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
   React.useEffect(() => {
     void loadVerifierData();
   }, [loadVerifierData]);
+
+  React.useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    setIsOnline(navigator.onLine);
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, []);
+
+  React.useEffect(() => {
+    const loadPending = async () => {
+      const pending = await getAllPendingInspections();
+      setPendingInspections(pending);
+    };
+    loadPending();
+  }, []);
+
+  const syncPendingInspections = async () => {
+    if (!isOnline || syncing || pendingInspections.length === 0) return;
+    setSyncing(true);
+    setMessage("Syncing pending inspections...");
+    for (const inspection of pendingInspections) {
+      if (inspection.synced) continue;
+      try {
+        const sitePhotos = await Promise.all(
+          (inspection.data.sitePhotos as string[]).map((base64, index) => 
+            base64ToFile(base64, `photo-${index}.jpg`)
+          )
+        );
+        const form = new FormData();
+        form.append("verifier_lat", String(Number(inspection.data.gpsLat)));
+        form.append("verifier_lng", String(Number(inspection.data.gpsLong)));
+        form.append("verification_status", inspection.data.verificationStatus);
+        if (inspection.data.householdType) {
+          form.append("household_type", inspection.data.householdType);
+        }
+        form.append("beneficiary_present", inspection.data.beneficiaryConfirmed ? "true" : "false");
+        form.append("beneficiary_gender", inspection.data.beneficiaryGender);
+        form.append("system_working", inspection.data.systemWorking ? "true" : "false");
+        form.append("serial_visible", inspection.data.serialVisible ? "true" : "false");
+        form.append("observation_notes", inspection.data.notes);
+        form.append("flag_reason", inspection.data.flagReason);
+        for (const file of sitePhotos) {
+          form.append("site_photos", file);
+        }
+        await verifyVerificationTask(inspection.taskId, form);
+        await markInspectionSynced(inspection.id);
+        setMessage(`Synced inspection for task ${inspection.taskId}`);
+      } catch (err: any) {
+        const raw = String(err?.message || "");
+        setError(toFriendlyApiMessage(raw) || `Failed to sync task ${inspection.taskId}`);
+      }
+    }
+    setSyncing(false);
+    const updated = await getAllPendingInspections();
+    setPendingInspections(updated);
+    await loadVerifierData(true);
+  };
+
+  React.useEffect(() => {
+    if (isOnline && pendingInspections.some(i => !i.synced)) {
+      void syncPendingInspections();
+    }
+  }, [isOnline, pendingInspections]);
 
   const reportsById = useMemo(() => Object.fromEntries(reports.map(report => [report.id, report])), [reports]);
   const projectsById = useMemo(() => Object.fromEntries(projects.map(project => [project.id, project])), [projects]);
@@ -19296,25 +19513,51 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
   const selectedReport = selectedQueueItem?.report;
   const selectedProject = selectedQueueItem?.project;
 
-  const openInspection = (taskId: string) => {
+  const openInspection = async (taskId: string) => {
     const item = queue.find((entry) => entry.task.id === taskId);
     setSelectedTaskId(taskId);
     setInspectionStep(1);
-    setInspectionData({
-      gpsLat: item?.task.verifierLat != null ? String(item.task.verifierLat) : "",
-      gpsLong: item?.task.verifierLng != null ? String(item.task.verifierLng) : "",
-      serialNumber: item?.report?.serialNumber || "",
-      beneficiaryConfirmed: false,
-      beneficiaryGender: item?.report?.householdType === "female_headed" ? "female" : "unknown",
-      systemWorking: true,
-      serialVisible: true,
-      verificationStatus: item?.task.status === "Flagged" ? "flagged" : item?.task.status === "Partial" ? "partial" : "verified",
-      notes: "",
-      flagReason: "",
-      sitePhotos: [],
-    });
     setMessage(null);
     setError(null);
+    
+    const saved = await getOfflineInspection(taskId);
+    if (saved && !saved.synced) {
+      const sitePhotos = await Promise.all(
+        (saved.data.sitePhotos as string[]).map((base64, index) => 
+          base64ToFile(base64, `photo-${index}.jpg`)
+        )
+      );
+      setInspectionData({
+        gpsLat: saved.data.gpsLat,
+        gpsLong: saved.data.gpsLong,
+        serialNumber: saved.data.serialNumber,
+        householdType: saved.data.householdType,
+        beneficiaryConfirmed: saved.data.beneficiaryConfirmed,
+        beneficiaryGender: saved.data.beneficiaryGender,
+        systemWorking: saved.data.systemWorking,
+        serialVisible: saved.data.serialVisible,
+        verificationStatus: saved.data.verificationStatus,
+        notes: saved.data.notes,
+        flagReason: saved.data.flagReason,
+        sitePhotos,
+      });
+      setInspectionStep(saved.step);
+      setMessage("Loaded saved draft from offline storage");
+    } else {
+      setInspectionData({
+        gpsLat: item?.task.verifierLat != null ? String(item.task.verifierLat) : "",
+        gpsLong: item?.task.verifierLng != null ? String(item.task.verifierLng) : "",
+        serialNumber: item?.report?.serialNumber || "",
+        beneficiaryConfirmed: false,
+        beneficiaryGender: item?.report?.householdType === "female_headed" ? "female" : "unknown",
+        systemWorking: true,
+        serialVisible: true,
+        verificationStatus: item?.task.status === "Flagged" ? "flagged" : item?.task.status === "Partial" ? "partial" : "verified",
+        notes: "",
+        flagReason: "",
+        sitePhotos: [],
+      });
+    }
     navigateView("inspect");
   };
 
@@ -19355,6 +19598,43 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
   const handleNextStep = async () => {
     if (!selectedTask) return;
 
+    const saveDraft = async (step: number) => {
+      try {
+        const sitePhotosBase64 = await Promise.all(
+          inspectionData.sitePhotos.map((file) => fileToBase64(file))
+        );
+        const offlineInspection: OfflineInspection = {
+          id: `offline-${selectedTask.id}`,
+          taskId: selectedTask.id,
+          step,
+          data: {
+            gpsLat: inspectionData.gpsLat,
+            gpsLong: inspectionData.gpsLong,
+            serialNumber: inspectionData.serialNumber,
+            householdType: inspectionData.householdType,
+            beneficiaryConfirmed: inspectionData.beneficiaryConfirmed,
+            beneficiaryGender: inspectionData.beneficiaryGender,
+            systemWorking: inspectionData.systemWorking,
+            serialVisible: inspectionData.serialVisible,
+            verificationStatus: inspectionData.verificationStatus,
+            notes: inspectionData.notes,
+            flagReason: inspectionData.flagReason,
+            sitePhotos: sitePhotosBase64,
+          },
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          synced: false,
+          syncAttempts: 0,
+        };
+        await saveOfflineInspection(offlineInspection);
+        const updated = await getAllPendingInspections();
+        setPendingInspections(updated);
+      } catch (err) {
+        console.error("Failed to save draft offline:", err);
+        setError("Could not save draft locally. Data may be lost if offline.");
+      }
+    };
+
     if (inspectionStep === 1) {
       const lat = Number(inspectionData.gpsLat);
       const lng = Number(inspectionData.gpsLong);
@@ -19367,7 +19647,9 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
         return;
       }
       setError(null);
+      await saveDraft(2);
       setInspectionStep(2);
+      if (!isOnline) setMessage("Saved draft locally (offline mode)");
       return;
     }
 
@@ -19381,12 +19663,22 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
         return;
       }
       setError(null);
+      await saveDraft(3);
       setInspectionStep(3);
+      if (!isOnline) setMessage("Saved draft locally (offline mode)");
       return;
     }
 
     if (inspectionData.sitePhotos.length < 1) {
       setError("Upload at least one site photo before submitting.");
+      return;
+    }
+
+    await saveDraft(3);
+
+    if (!isOnline) {
+      setMessage("Inspection saved offline. Will sync when online.");
+      navigateView("dashboard");
       return;
     }
 
@@ -19410,11 +19702,17 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
       const updatedTask = await verifyVerificationTask(selectedTask.id, form);
       setMessage(`Verification submitted for ${selectedQueueItem?.siteName || "the assigned site"} with status ${updatedTask.status}.`);
       await loadVerifierData(true);
+      await deleteOfflineInspection(`offline-${selectedTask.id}`);
+      const updated = await getAllPendingInspections();
+      setPendingInspections(updated);
       setSelectedTaskId(updatedTask.id);
       navigateView("dashboard");
     } catch (err: any) {
       const raw = String(err?.message || "");
-      setError(toFriendlyApiMessage(raw) || "Unable to submit this verification.");
+      setError(toFriendlyApiMessage(raw) || "Unable to submit this verification. Saved locally for later sync.");
+      if (!isOnline) {
+        navigateView("dashboard");
+      }
     } finally {
       setSubmitting(false);
     }
@@ -19514,17 +19812,25 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
 
     return (
       <div className="space-y-6 max-w-5xl mx-auto pb-20">
-          <div className="flex items-center gap-4 mb-8">
-            <button onClick={() => navigateView("dashboard")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
-              <ChevronRight className="rotate-180" size={20} />
-            </button>
-            <div>
-              <h1 className="text-2xl font-bold text-slate-900">Inspection Workspace</h1>
-            <p className="text-slate-500">
-              {selectedQueueItem?.siteName} • Task {selectedTask.id} • {selectedProject?.district || selectedProject?.region || assignedDistrict}
-            </p>
+          <div className="flex items-center justify-between gap-4 mb-8">
+            <div className="flex items-center gap-4">
+              <button onClick={() => navigateView("dashboard")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
+                <ChevronRight className="rotate-180" size={20} />
+              </button>
+              <div>
+                <h1 className="text-2xl font-bold text-slate-900">Inspection Workspace</h1>
+                <p className="text-slate-500">
+                  {selectedQueueItem?.siteName} • Task {selectedTask.id} • {selectedProject?.district || selectedProject?.region || assignedDistrict}
+                </p>
+              </div>
+            </div>
+            {!isOnline && (
+              <div className="flex items-center gap-2 px-3 py-1.5 bg-amber-50 border border-amber-200 rounded-full text-amber-700">
+                <WifiOff size={14} />
+                <span className="text-xs font-semibold">Offline Mode</span>
+              </div>
+            )}
           </div>
-        </div>
 
         {(message || error || lockedStatus) && (
           <div className={`rounded-2xl border px-4 py-3 text-sm ${error || lockedStatus ? "border-amber-200 bg-amber-50 text-amber-800" : "border-emerald-200 bg-emerald-50 text-emerald-700"}`}>
@@ -19862,7 +20168,27 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div className="card p-6 bg-slate-900 text-white">
-          <h3 className="text-lg font-bold mb-4">Verification Queue Sync</h3>
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-bold">Verification Queue Sync</h3>
+            <div className="flex items-center gap-3">
+              <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold ${
+                isOnline ? "bg-emerald-500/20 text-emerald-400" : "bg-rose-500/20 text-rose-400"
+              }`}>
+                <span className={`w-2 h-2 rounded-full ${isOnline ? "bg-emerald-400" : "bg-rose-400"}`} />
+                {isOnline ? "Online" : "Offline"}
+              </span>
+              {pendingInspections.length > 0 && (
+                <button
+                  onClick={() => void syncPendingInspections()}
+                  disabled={syncing || !isOnline}
+                  className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-500/20 text-amber-400 text-xs font-bold disabled:opacity-50"
+                >
+                  <RefreshCw size={12} className={syncing ? "animate-spin" : ""} />
+                  {syncing ? "Syncing..." : `${pendingInspections.filter(i => !i.synced).length} Pending Sync`}
+                </button>
+              )}
+            </div>
+          </div>
           <div className="flex items-center justify-between mb-6">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-full bg-emerald-500/20 flex items-center justify-center text-emerald-400">
@@ -22298,6 +22624,8 @@ export default function App() {
   const [pendingBidId, setPendingBidId] = useState<string | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [showNotifications, setShowNotifications] = useState(false);
+  const [showUserMenu, setShowUserMenu] = useState(false);
+  const [showUserManual, setShowUserManual] = useState(false);
   const [notifications, setNotifications] = useState<Notification[]>(MOCK_NOTIFICATIONS);
   const [authMessage, setAuthMessage] = useState<string | null>(null);
   const [fieldVerifierInspectionBadge, setFieldVerifierInspectionBadge] = useState<string | undefined>(undefined);
@@ -22477,6 +22805,8 @@ export default function App() {
     setCurrentUser(null);
     setAuthView("login");
     setShowNotifications(false);
+    setShowUserMenu(false);
+    setShowUserManual(false);
     setActiveTab("dashboard");
     setPendingBidTenderId(null);
     setPendingBidId(null);
@@ -23099,22 +23429,60 @@ case "dashboard":
           </div>
         </nav>
 
-        <div className="p-4 border-t border-[#17305a]">
-          <div className="bg-[#17284c] rounded-xl p-4 flex items-center gap-3 ring-1 ring-[#243b66]">
-            <div className="w-10 h-10 rounded-full bg-[#243b66] flex items-center justify-center text-blue-100">
+        <div className="p-4 border-t border-[#17305a] relative">
+          {showUserMenu && (
+            <>
+              {/* Click outside overlay */}
+              <div 
+                className="fixed inset-0 z-40" 
+                onClick={() => setShowUserMenu(false)}
+              />
+              
+              {/* Dropdown Popover */}
+              <div className="absolute bottom-20 left-4 right-4 bg-[#111e3b] border border-[#243b66] rounded-xl shadow-xl overflow-hidden z-50 py-1 ring-1 ring-black/20 animate-in fade-in slide-in-from-bottom-2 duration-150">
+                <button 
+                  onClick={() => {
+                    setShowUserMenu(false);
+                    setShowUserManual(true);
+                  }}
+                  className="w-full px-4 py-3 flex items-center gap-3 text-sm font-semibold text-blue-100 hover:bg-[#1a2f5c] transition-colors text-left"
+                >
+                  <HelpCircle size={18} className="text-emerald-400" />
+                  <span>User Manual / Help</span>
+                </button>
+                <div className="border-t border-[#1d3564]" />
+                <button 
+                  onClick={() => {
+                    setShowUserMenu(false);
+                    handleLogout();
+                  }}
+                  className="w-full px-4 py-3 flex items-center gap-3 text-sm font-semibold text-rose-300 hover:bg-[#2e1d30] hover:text-rose-200 transition-colors text-left"
+                >
+                  <LogOut size={18} />
+                  <span>Log Out</span>
+                </button>
+              </div>
+            </>
+          )}
+          
+          <button 
+            onClick={() => setShowUserMenu(!showUserMenu)}
+            className="w-full bg-[#17284c] hover:bg-[#1f3461] rounded-xl p-4 flex items-center gap-3 ring-1 ring-[#243b66] transition-colors text-left focus:outline-none"
+          >
+            <div className="w-10 h-10 rounded-full bg-[#243b66] flex items-center justify-center text-blue-100 shrink-0">
               <UserCircle size={24} />
             </div>
             <div className="flex-1 overflow-hidden">
               <p className="text-sm font-bold text-blue-50 truncate">{currentUser.fullName}</p>
               <p className="text-xs text-blue-200 truncate">{role}</p>
             </div>
-            <button 
-              onClick={handleLogout}
-              className="text-blue-200 hover:text-rose-300 transition-colors"
-            >
-              <LogOut size={18} />
-            </button>
-          </div>
+            <div className="text-blue-300 hover:text-blue-100 transition-colors shrink-0">
+              <ChevronDown 
+                size={18} 
+                className={`transition-transform duration-200 ${showUserMenu ? "rotate-180" : ""}`}
+              />
+            </div>
+          </button>
         </div>
       </motion.aside>
 
@@ -23204,6 +23572,51 @@ case "dashboard":
           viewerRole={currentUser?.role || ""}
           onClose={() => { setViewingVendorProfile(null); navigateTo("all_vendors"); }}
         />
+      )}
+
+      {showUserManual && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-[9999] p-4 md:p-8">
+          <div className="bg-white rounded-2xl shadow-2xl flex flex-col w-full h-full max-w-6xl overflow-hidden border border-slate-200">
+            {/* Modal Header */}
+            <div className="px-6 py-4 bg-slate-50 border-b border-slate-200 flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-emerald-50 text-emerald-600 rounded-lg">
+                  <HelpCircle size={20} />
+                </div>
+                <div>
+                  <h3 className="font-bold text-slate-800 text-sm md:text-base">Renewable Lesotho RBF Platform - User Manual</h3>
+                  <p className="text-[11px] text-slate-500">System Documentation & User Guidelines</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-3">
+                <a 
+                  href="/User%20Manual/index.html" 
+                  target="_blank" 
+                  rel="noopener noreferrer" 
+                  className="px-3 py-1.5 text-xs font-semibold text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg flex items-center gap-1.5 transition-colors border border-slate-200"
+                >
+                  <ExternalLink size={14} />
+                  <span>Open in New Tab</span>
+                </a>
+                <button 
+                  onClick={() => setShowUserManual(false)}
+                  className="p-2 hover:bg-slate-200 rounded-lg text-slate-500 hover:text-slate-700 transition-colors"
+                  title="Close Manual"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+            </div>
+            {/* Modal Body / Iframe */}
+            <div className="flex-1 bg-slate-100 relative">
+              <iframe 
+                src="/User%20Manual/index.html" 
+                className="w-full h-full border-0" 
+                title="User Manual"
+              />
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
