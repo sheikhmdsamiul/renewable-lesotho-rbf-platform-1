@@ -1662,18 +1662,259 @@
   <h3>5.7 Standstill, Challenges &amp; Disputes</h3>
   <p>
     After the Intent to Award is issued, the tender enters <strong>Standstill</strong> (cooling-off).
-    During this window, any bidder who submitted a bid may file a challenge:
+    During this window, any unsuccessful vendor can challenge the award decision directly from
+    their <strong>All My Bids</strong> page. The RMT then reviews and resolves the challenge from
+    the Award Panel.
   </p>
-  <ul>
-    <li><strong>Filing a Challenge</strong> &mdash; The challenging vendor clicks <strong>&ldquo;File Challenge&rdquo;</strong> on the tender detail page, provides grounds, and submits. Status changes to <strong>Disputed</strong>.</li>
-    <li><strong>RMT Reviews</strong> &mdash; Actions available:
+
+  <h4>Vendor Files a Challenge</h4>
+  <ol>
+    <li>The unsuccessful vendor navigates to <strong>All My Bids</strong> in their sidebar.</li>
+    <li>Each bid card shows the tender name, reference, bid amount, and Stage 1/Stage 2 progress badges. If the tender has an Intent to Award issued for a <em>different</em> bid, a <strong>&ldquo;Challenge Award Decision&rdquo;</strong> button appears at the bottom of the card (rose border). If the vendor has already challenged this bid, the button is replaced by a disabled <strong>&ldquo;Already Submitted&rdquo;</strong> label.</li>
+    <li>Click <strong>&ldquo;Challenge Award Decision&rdquo;</strong> to open the challenge modal.</li>
+  </ol>
+
+  <!-- WORKFRAME: Vendor All My Bids with Challenge button -->
+  <div class="workframe">
+    <div class="workframe-header">
+      <span class="dot red"></span><span class="dot yellow"></span><span class="dot green"></span>
+      <span class="title">All My Bids &mdash; Vendor View (Standstill)</span>
+    </div>
+    <div class="workframe-body">
+      <!-- Page header -->
+      <div style="margin-bottom:0.75rem;">
+        <div style="font-size:1rem;font-weight:700;color:#0f172a;">All My Bids</div>
+        <div style="font-size:0.72rem;color:#64748b;">Filter, inspect, and continue the exact bid that needs your attention</div>
+      </div>
+      <!-- Search + filter bar -->
+      <div style="display:grid;grid-template-columns:1fr 160px;gap:0.75rem;margin-bottom:0.75rem;">
+        <div class="ui-mock input-mock" style="font-size:0.72rem;">Search by tender name, reference, stage, or bid status</div>
+        <div class="ui-mock input-mock" style="font-size:0.72rem;">All statuses</div>
+      </div>
+      <!-- Bid card -->
+      <div style="border:1px solid #e2e8f0;border-radius:16px;background:#fff;padding:1.25rem;box-shadow:0 1px 3px rgba(0,0,0,0.06);">
+        <!-- Card header: status + stage badges + action buttons -->
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem;">
+          <div style="display:flex;flex-wrap:wrap;gap:0.4rem;align-items:center;">
+            <span style="font-size:0.6rem;padding:0.2em 0.6em;border-radius:999px;background:#fef3c7;color:#92400e;font-weight:700;">Standstill</span>
+            <span style="font-size:0.6rem;padding:0.2em 0.6em;border-radius:999px;border:1px solid #e2e8f0;background:#fff;color:#475569;font-weight:500;">Stage 2</span>
+            <span style="font-size:0.65rem;color:#94a3b8;">v2</span>
+          </div>
+          <div style="display:flex;gap:0.4rem;">
+            <div class="ui-mock btn-mock outline" style="font-size:0.68rem;padding:0.3rem 0.6rem;">View</div>
+            <div class="ui-mock btn-mock" style="font-size:0.68rem;padding:0.3rem 0.6rem;background:#059669;color:#fff;">Edit</div>
+          </div>
+        </div>
+        <!-- Tender name + ref -->
+        <div style="margin-bottom:0.75rem;">
+          <div style="font-size:0.88rem;font-weight:700;color:#0f172a;">RL-2025-SHS-01 &mdash; Solar Home Systems</div>
+          <div style="font-size:0.72rem;color:#64748b;margin-top:0.15rem;">Ref: RL-2025-SHS-01 &bull; Amount: M 2,450,000</div>
+        </div>
+        <!-- Stage progress badges -->
+        <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.75rem;">
+          <div style="display:flex;align-items:center;gap:0.35rem;border-radius:8px;padding:0.35rem 0.6rem;background:#ecfdf5;">
+            <div style="width:8px;height:8px;border-radius:50%;background:#10b981;"></div>
+            <span style="font-size:0.72rem;font-weight:600;color:#065f46;">Stage 1 Passed</span>
+          </div>
+          <div style="color:#cbd5e1;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+          <div style="display:flex;align-items:center;gap:0.35rem;border-radius:8px;padding:0.35rem 0.6rem;background:#ecfdf5;">
+            <div style="width:8px;height:8px;border-radius:50%;background:#10b981;"></div>
+            <span style="font-size:0.72rem;font-weight:600;color:#065f46;">Stage 2 Evaluated</span>
+          </div>
+        </div>
+        <!-- Progress message -->
+        <div style="border-radius:12px;background:#f8fafc;border:1px solid #f1f5f9;padding:0.6rem 0.85rem;margin-bottom:0.5rem;">
+          <div style="font-size:0.78rem;font-weight:600;color:#0f172a;">Intent to Award issued to another bidder</div>
+          <div style="font-size:0.68rem;color:#64748b;margin-top:0.15rem;">This tender is in standstill. You may challenge the award decision if you believe it was made in error.</div>
+        </div>
+        <!-- Challenge Award Decision button (rose border, the key element) -->
+        <button style="width:100%;border:1px solid #fecdd3;border-radius:12px;padding:0.55rem;font-size:0.78rem;font-weight:600;color:#be123c;background:#fff;cursor:pointer;transition:background 0.15s;">
+          Challenge Award Decision
+        </button>
+      </div>
+      <p style="font-size:0.78rem;color:#64748b;margin:0.5rem 0 0;">
+        <strong>Above:</strong> The vendor&rsquo;s <strong>All My Bids</strong> page lists each bid as a card showing status badge (<strong>Standstill</strong> = amber), stage badges, tender name, reference, amount, Stage 1/2 progress, and a progress message. When a tender has an Intent to Award for a different bid, a <strong>&ldquo;Challenge Award Decision&rdquo;</strong> button appears at the bottom with a <strong>rose border</strong>. If the vendor has already challenged, this button is replaced by a disabled <strong>&ldquo;Already Submitted&rdquo;</strong> label.
+      </p>
+    </div>
+  </div>
+
+  <!-- WORKFRAME: Challenge Award Decision Modal -->
+  <div class="workframe">
+    <div class="workframe-header">
+      <span class="dot red"></span><span class="dot yellow"></span><span class="dot green"></span>
+      <span class="title">Challenge Award Decision &mdash; Modal</span>
+    </div>
+    <div class="workframe-body">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;">
+        <div style="font-size:0.9rem;font-weight:700;color:#0f172a;">Challenge Award Decision</div>
+        <div style="width:24px;height:24px;border-radius:6px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:#94a3b8;">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </div>
+      </div>
+      <!-- Amber warning callout (matching actual: bg-amber-50 border-amber-100) -->
+      <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:12px;padding:0.75rem;margin-bottom:0.75rem;">
+        <div style="font-size:0.78rem;font-weight:600;color:#92400e;">File a protest against the Intent to Award.</div>
+        <div style="font-size:0.68rem;color:#b45309;margin-top:0.2rem;">This will notify the RMT and pause the award process for review.</div>
+      </div>
+      <!-- Grounds for Challenge (only field the vendor fills in) -->
+      <div>
+        <div style="font-size:0.78rem;font-weight:700;color:#334155;margin-bottom:0.25rem;">Grounds for Challenge</div>
+        <div class="ui-mock" style="font-size:0.72rem;padding:0.6rem;min-height:90px;border:1px solid #e2e8f0;border-radius:10px;background:#fff;color:#94a3b8;">Explain why you believe the award decision should be reviewed...</div>
+      </div>
+      <!-- Buttons -->
+      <div style="display:flex;gap:0.75rem;margin-top:0.75rem;">
+        <div class="ui-mock btn-mock outline" style="font-size:0.75rem;padding:0.4rem 1rem;flex:1;">Cancel</div>
+        <div class="ui-mock btn-mock" style="font-size:0.75rem;padding:0.4rem 1rem;flex:1;background:#e11d48;color:#fff;">Submit Challenge</div>
+      </div>
+      <p style="font-size:0.78rem;color:#64748b;margin:0.5rem 0 0;">
+        <strong>Above:</strong> The <strong>Challenge Award Decision</strong> modal opens from the vendor&rsquo;s bid card. The amber warning box states that filing a protest will notify the RMT and pause the award process. The vendor only needs to fill in <strong>Grounds for Challenge</strong> (required) &mdash; their Vendor ID, name, and bid reference are automatically captured from the existing bid. Click <strong>&ldquo;Submit Challenge&rdquo;</strong> (rose button) to file. The tender status changes to <strong>Disputed</strong> and the button on the bid card changes to <strong>&ldquo;Already Submitted&rdquo;</strong> (disabled).
+      </p>
+    </div>
+  </div>
+
+  <ol start="4">
+    <li>Fill in <strong>Grounds for Challenge</strong> explaining why the award decision should be reviewed.</li>
+    <li>Click <strong>&ldquo;Submit Challenge&rdquo;</strong> (rose button). A notification confirms: <em>&ldquo;Your challenge has been filed. The RMT will review it.&rdquo;</em> The tender status changes to <strong>Disputed</strong> and the cooling-off clock freezes.</li>
+  </ol>
+
+  <div class="note">
+    <strong>Note:</strong> The vendor&rsquo;s Vendor ID, name, and bid reference are automatically captured from their existing bid submission &mdash; the vendor does not need to enter these manually.
+  </div>
+
+  <h4>RMT Reviews a Challenge</h4>
+  <ol>
+    <li>After a challenge is filed, the tender status changes to <strong>Disputed</strong>. In the RMT tender detail <strong>Quick Actions</strong> sidebar, the <strong>&ldquo;File Challenge&rdquo;</strong> button is replaced by <strong>&ldquo;Review Challenge&rdquo;</strong> (rose border button with AlertTriangle icon).</li>
+    <li>Click <strong>&ldquo;Review Challenge&rdquo;</strong> to open the Award Panel. The panel header changes to <strong>&ldquo;Award Challenge Review&rdquo;</strong> and a <strong>Pending Challenges</strong> box appears.</li>
+  </ol>
+
+  <!-- WORKFRAME: Award Panel with Pending Challenges -->
+  <div class="workframe">
+    <div class="workframe-header">
+      <span class="dot red"></span><span class="dot yellow"></span><span class="dot green"></span>
+      <span class="title">Award Challenge Review &mdash; Pending Challenges</span>
+    </div>
+    <div class="workframe-body">
+      <!-- Header changes to Award Challenge Review -->
+      <div style="margin-bottom:0.75rem;">
+        <div style="font-size:1rem;font-weight:700;color:#0f172a;">Award Challenge Review</div>
+        <div style="font-size:0.72rem;color:#64748b;">The award process is paused due to a filed challenge. Review the challenge details below and resolve by selecting Upheld or Dismissed.</div>
+      </div>
+      <!-- Two-column layout matching actual Award Panel -->
+      <div style="display:grid;grid-template-columns:1.2fr 0.8fr;gap:1.5rem;">
+        <!-- Left column: Pending Challenges + form stub -->
+        <div style="display:flex;flex-direction:column;gap:1rem;">
+          <!-- Pending Challenges box (rose, matching actual) -->
+          <div style="border:1px solid #fecdd3;background:#fff1f2;border-radius:12px;padding:0.75rem;">
+            <div style="font-size:0.78rem;font-weight:700;color:#9f1239;margin-bottom:0.6rem;">Pending Challenges</div>
+            <!-- Challenge card -->
+            <div style="border:1px solid #fecdd3;background:#fff;border-radius:10px;padding:0.75rem;">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.4rem;">
+                <div style="font-size:0.78rem;font-weight:600;color:#0f172a;">GreenEnergy Maseru</div>
+                <span style="font-size:0.6rem;padding:0.2em 0.55em;border-radius:999px;background:#fef3c7;color:#92400e;font-weight:600;">Submitted</span>
+              </div>
+              <div style="font-size:0.72rem;color:#475569;margin-bottom:0.4rem;">Our bid scored higher on technical design and we believe the evaluation criteria were applied inconsistently. We request a review of the scoring methodology.</div>
+              <div style="font-size:0.65rem;color:#94a3b8;margin-bottom:0.6rem;">Filed: 22 Jul 2026, 10:30 AM</div>
+              <div style="display:flex;gap:0.5rem;">
+                <div class="ui-mock btn-mock outline" style="font-size:0.72rem;padding:0.3rem 0.6rem;flex:1;">Dismiss Challenge</div>
+                <div class="ui-mock btn-mock" style="font-size:0.72rem;padding:0.3rem 0.6rem;flex:1;background:#e11d48;color:#fff;">Upheld &mdash; Reassign Award</div>
+              </div>
+            </div>
+          </div>
+          <!-- Award form stub (same layout as normal award panel) -->
+          <div style="border:1px solid #e2e8f0;border-radius:12px;padding:0.75rem;background:#f8fafc;">
+            <div style="font-size:0.72rem;color:#64748b;">The award form (Winning Bid, Vendor ID/Name) and Comparative Ranking Table remain visible below the Pending Challenges box.</div>
+          </div>
+        </div>
+        <!-- Right column: Contract & Project Assignment stub -->
+        <div style="border-left:1px solid #f1f5f9;padding-left:1.5rem;">
+          <div style="font-size:0.82rem;font-weight:700;color:#334155;margin-bottom:0.5rem;">Contract &amp; Project Assignment</div>
+          <div style="border:1px solid #e2e8f0;border-radius:10px;padding:0.75rem;background:#f8fafc;font-size:0.72rem;color:#64748b;">
+            The Contract &amp; Project Assignment section remains in the right column, but actions are blocked while the challenge is pending.
+          </div>
+        </div>
+      </div>
+      <!-- Bottom action bar shows dispute paused message -->
+      <div style="margin-top:0.75rem;padding-top:0.75rem;border-top:1px solid #f1f5f9;">
+        <div style="font-size:0.72rem;color:#e11d48;font-style:italic;">Award process is paused. Resolve challenges in the panel above to proceed.</div>
+      </div>
+      <p style="font-size:0.78rem;color:#64748b;margin:0.5rem 0 0;">
+        <strong>Above:</strong> When status is <strong>Disputed</strong>, the Award Panel header changes to <strong>&ldquo;Award Challenge Review&rdquo;</strong>. A <strong>Pending Challenges</strong> box (rose border/bg) appears at the top of the left column with each challenge card showing: vendor name, status badge (<strong>Submitted</strong> = amber, <strong>Under Review</strong> = blue), grounds text, filed date, and two action buttons: <strong>&ldquo;Dismiss Challenge&rdquo;</strong> (secondary) and <strong>&ldquo;Upheld &mdash; Reassign Award&rdquo;</strong> (rose). The bottom bar shows a red italic message: <em>&ldquo;Award process is paused. Resolve challenges in the panel above to proceed.&rdquo;</em>
+      </p>
+    </div>
+  </div>
+
+  <ol start="3">
+    <li>Review the challenge grounds and filed date in the <strong>Pending Challenges</strong> box. Choose an action:
       <ul>
-        <li><strong>Dismiss</strong> &mdash; Challenge deemed invalid; award proceeds.</li>
-        <li><strong>Upheld</strong> &mdash; Challenge is valid. Award revoked, tender returns to Evaluation.</li>
+        <li><strong>Dismiss Challenge</strong> &mdash; Challenge deemed invalid; the cooling-off clock resumes and the current Intent to Award remains valid.</li>
+        <li><strong>Upheld &mdash; Reassign Award</strong> &mdash; Challenge is valid. The old Intent to Award is revoked, the challenging bidder becomes the new Best Evaluated Bidder, and a new cooling-off period starts.</li>
       </ul>
     </li>
-    <li>Resolved status returns to Standstill (dismissed) or Evaluation (upheld).</li>
-  </ul>
+  </ol>
+
+  <!-- WORKFRAME: Resolve Challenge Modal -->
+  <div class="workframe">
+    <div class="workframe-header">
+      <span class="dot red"></span><span class="dot yellow"></span><span class="dot green"></span>
+      <span class="title">Resolve Challenge &mdash; Dismiss or Upheld</span>
+    </div>
+    <div class="workframe-body">
+      <!-- Two side-by-side modals -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;">
+        <!-- Dismiss modal -->
+        <div style="border:1px solid #e2e8f0;border-radius:16px;background:#fff;padding:1rem;box-shadow:0 4px 12px rgba(0,0,0,0.08);">
+          <div style="font-size:0.82rem;font-weight:700;color:#0f172a;margin-bottom:0.5rem;">Dismiss Challenge</div>
+          <div style="background:#ecfdf5;border:1px solid #a7f3d0;border-radius:10px;padding:0.65rem;margin-bottom:0.6rem;">
+            <div style="font-size:0.75rem;font-weight:600;color:#065f46;">Dismiss this challenge and resume the award process.</div>
+            <div style="font-size:0.68rem;color:#059669;margin-top:0.2rem;">The cooling-off clock will resume. The current Intent to Award remains valid.</div>
+          </div>
+          <div style="font-size:0.72rem;font-weight:700;color:#334155;margin-bottom:0.2rem;">Resolution Notes</div>
+          <div class="ui-mock" style="font-size:0.72rem;padding:0.5rem;min-height:50px;border:1px solid #e2e8f0;border-radius:10px;background:#f8fafc;color:#94a3b8;">Enter resolution notes (optional)...</div>
+          <div style="display:flex;gap:0.5rem;margin-top:0.6rem;">
+            <div class="ui-mock btn-mock outline" style="font-size:0.72rem;padding:0.35rem 0.6rem;flex:1;">Cancel</div>
+            <div class="ui-mock btn-mock" style="font-size:0.72rem;padding:0.35rem 0.6rem;flex:1;background:#059669;color:#fff;">Confirm Dismiss</div>
+          </div>
+        </div>
+        <!-- Upheld modal -->
+        <div style="border:1px solid #e2e8f0;border-radius:16px;background:#fff;padding:1rem;box-shadow:0 4px 12px rgba(0,0,0,0.08);">
+          <div style="font-size:0.82rem;font-weight:700;color:#0f172a;margin-bottom:0.5rem;">Upheld &mdash; Reassign Award</div>
+          <div style="background:#fff1f2;border:1px solid #fecdd3;border-radius:10px;padding:0.65rem;margin-bottom:0.6rem;">
+            <div style="font-size:0.75rem;font-weight:600;color:#9f1239;">Upheld &mdash; revoke current award and reassign to the challenging bidder.</div>
+            <div style="font-size:0.68rem;color:#be123c;margin-top:0.2rem;">The old Intent to Award will be revoked. The challenging bidder becomes the new Best Evaluated Bidder and a new cooling-off period will start.</div>
+          </div>
+          <div style="font-size:0.72rem;font-weight:700;color:#334155;margin-bottom:0.2rem;">Resolution Notes</div>
+          <div class="ui-mock" style="font-size:0.72rem;padding:0.5rem;min-height:50px;border:1px solid #e2e8f0;border-radius:10px;background:#f8fafc;color:#94a3b8;">Enter resolution notes (optional)...</div>
+          <div style="display:flex;gap:0.5rem;margin-top:0.6rem;">
+            <div class="ui-mock btn-mock outline" style="font-size:0.72rem;padding:0.35rem 0.6rem;flex:1;">Cancel</div>
+            <div class="ui-mock btn-mock" style="font-size:0.72rem;padding:0.35rem 0.6rem;flex:1;background:#e11d48;color:#fff;">Confirm Upheld</div>
+          </div>
+        </div>
+      </div>
+      <p style="font-size:0.78rem;color:#64748b;margin:0.5rem 0 0;">
+        <strong>Above:</strong> Two resolution modals. <strong>Dismiss</strong> (green info box) resumes the cooling-off clock and keeps the current Intent to Award valid; confirm button is green. <strong>Upheld</strong> (rose info box) revokes the current award and reassigns to the challenger; confirm button is rose. Both include a <strong>Resolution Notes</strong> textarea and <strong>Cancel</strong>/<strong>Confirm</strong> buttons.
+      </p>
+    </div>
+  </div>
+
+  <ol start="4">
+    <li>Click <strong>&ldquo;Dismiss Challenge&rdquo;</strong> or <strong>&ldquo;Upheld &mdash; Reassign Award&rdquo;</strong> on the challenge card. A confirmation modal opens.</li>
+    <li>Optionally enter <strong>Resolution Notes</strong> and click <strong>&ldquo;Confirm Dismiss&rdquo;</strong> (green) or <strong>&ldquo;Confirm Upheld&rdquo;</strong> (rose).</li>
+  </ol>
+
+  <h4>Resolution Outcomes</h4>
+  <table>
+    <thead>
+      <tr><th>Outcome</th><th>Tender Status</th><th>Effect</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><strong>Dismissed</strong></td><td>Returns to Standstill</td><td>Cooling-off clock resumes. Current Intent to Award remains valid. Award proceeds after cooling-off expires.</td></tr>
+      <tr><td><strong>Upheld</strong></td><td>Returns to Evaluation</td><td>Old Intent to Award revoked. Challenging bidder becomes new Best Evaluated Bidder. New cooling-off period starts.</td></tr>
+    </tbody>
+  </table>
+
+  <div class="note">
+    <strong>Note:</strong> The platform logs all challenge actions in the audit trail. RMT should document resolution notes for transparency and accountability.
+  </div>
 
   <h3>5.8 Contracts &amp; Project Creation</h3>
 

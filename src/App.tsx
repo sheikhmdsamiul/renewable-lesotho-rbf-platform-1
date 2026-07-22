@@ -23443,17 +23443,6 @@ case "dashboard":
                 <button 
                   onClick={() => {
                     setShowUserMenu(false);
-                    setShowUserManual(true);
-                  }}
-                  className="w-full px-4 py-3 flex items-center gap-3 text-sm font-semibold text-blue-100 hover:bg-[#1a2f5c] transition-colors text-left"
-                >
-                  <HelpCircle size={18} className="text-emerald-400" />
-                  <span>User Manual / Help</span>
-                </button>
-                <div className="border-t border-[#1d3564]" />
-                <button 
-                  onClick={() => {
-                    setShowUserMenu(false);
                     handleLogout();
                   }}
                   className="w-full px-4 py-3 flex items-center gap-3 text-sm font-semibold text-rose-300 hover:bg-[#2e1d30] hover:text-rose-200 transition-colors text-left"
@@ -23531,6 +23520,13 @@ case "dashboard":
                 )}
               </AnimatePresence>
             </div>
+            <button
+              onClick={() => setShowUserManual(true)}
+              className="p-2 hover:bg-slate-100 rounded-lg text-slate-500"
+              title="User Manual"
+            >
+              <HelpCircle size={20} />
+            </button>
             <button
               onClick={() => setActiveTab("notifications")}
               className="p-2 hover:bg-slate-100 rounded-lg text-slate-500"
