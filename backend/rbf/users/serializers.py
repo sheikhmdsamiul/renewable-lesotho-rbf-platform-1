@@ -11,6 +11,8 @@ from .blacklisting import get_active_blacklist_case, normalize_identifier
 from .models import (
     Organization,
     OrganizationType,
+    PasswordResetRequest,
+    PasswordResetRequestStatus,
     PlatformConfiguration,
     BlacklistedIdentifier,
     BlacklistAppeal,
@@ -1213,6 +1215,7 @@ class VendorDirectorySerializer(serializers.ModelSerializer):
     project_count = serializers.SerializerMethodField()
     bid_count = serializers.SerializerMethodField()
     status = serializers.SerializerMethodField()
+    has_pending_password_reset = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -1234,7 +1237,14 @@ class VendorDirectorySerializer(serializers.ModelSerializer):
             'operational_standing',
             'project_count',
             'bid_count',
+            'has_pending_password_reset',
         ]
+
+    def get_has_pending_password_reset(self, obj):
+        return PasswordResetRequest.objects.filter(
+            user=obj,
+            status=PasswordResetRequestStatus.PENDING,
+        ).exists()
 
     def get_vendor_tag(self, obj):
         if obj.role != UserRole.VENDOR:

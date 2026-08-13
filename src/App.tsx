@@ -161,6 +161,8 @@ import {
   rejectPaymentClaim,
   confirmPaymentClaim,
   flagProjectIssue,
+  requestPasswordReset,
+  confirmResetPassword,
   fetchNotices,
   fetchProjects,
   createProjectUpdate,
@@ -502,6 +504,10 @@ const Login = ({
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [showForgotModal, setShowForgotModal] = useState(false);
+  const [forgotIdentifier, setForgotIdentifier] = useState("");
+  const [forgotSubmitting, setForgotSubmitting] = useState(false);
+  const [forgotResult, setForgotResult] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -596,7 +602,7 @@ const Login = ({
             </label>
             <button
               type="button"
-              onClick={() => setError("Password reset is managed by admin. Please contact support.")}
+              onClick={() => { setShowForgotModal(true); setForgotResult(null); setForgotIdentifier(""); }}
               className="text-xs font-bold text-emerald-600 hover:text-emerald-700"
             >
               Forgot Password?
@@ -617,22 +623,203 @@ const Login = ({
             onClick={onViewPublic}
             className="w-full py-3 px-4 bg-emerald-50 text-emerald-700 rounded-xl font-bold text-sm flex items-center justify-center gap-2 hover:bg-emerald-100 transition-colors"
           >
-            <Globe size={18} /> View Public Impact Portal
+            <Eye size={16} />
+            View Public Portal
           </button>
-
-          <div className="text-center">
-            <p className="text-sm text-slate-500">
-              Are you a Vendor?{" "}
-              <button onClick={onRegisterClick} className="font-bold text-emerald-600 hover:text-emerald-700">
-                Register your organization first
-              </button>
-            </p>
-          </div>
+          <p className="text-sm text-slate-500">
+            Are you a Vendor?{" "}
+            <button onClick={onRegisterClick} className="font-bold text-emerald-600 hover:text-emerald-700">
+              Register your organization first
+            </button>
+          </p>
         </div>
+      </motion.div>
+
+      {showForgotModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-xl border border-slate-100"
+          >
+            <h3 className="text-lg font-bold text-slate-900">Reset Password</h3>
+            <p className="mt-1 text-sm text-slate-500">
+              Enter your username or email address. If an account exists, a reset link will be sent to your email.
+            </p>
+            {!forgotResult ? (
+              <div className="mt-4 space-y-3">
+                <input
+                  type="text"
+                  value={forgotIdentifier}
+                  onChange={(e) => setForgotIdentifier(e.target.value)}
+                  className="input-field w-full"
+                  placeholder="Username or email"
+                  autoFocus
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && forgotIdentifier.trim() && !forgotSubmitting) {
+                      e.preventDefault();
+                      document.getElementById("forgot-submit-btn")?.click();
+                    }
+                  }}
+                />
+                <div className="flex justify-end gap-2">
+                  <button
+                    onClick={() => setShowForgotModal(false)}
+                    className="btn-secondary text-xs"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    id="forgot-submit-btn"
+                    onClick={async () => {
+                      if (!forgotIdentifier.trim()) return;
+                      setForgotSubmitting(true);
+                      try {
+                        const result = await requestPasswordReset(forgotIdentifier.trim());
+                        let msg = "If an account with that username or email exists, a reset link has been sent to the email on file.";
+                        if (result.resetUrl) msg += `\n\nDebug reset link: ${result.resetUrl}`;
+                        if (result.emailError) msg += `\n\nEmail error: ${result.emailError}`;
+                        setForgotResult(msg);
+                      } catch (err: any) {
+                        setForgotResult("If an account with that username or email exists, a reset link has been sent to the email on file.");
+                      } finally {
+                        setForgotSubmitting(false);
+                      }
+                    }}
+                    disabled={forgotSubmitting || !forgotIdentifier.trim()}
+                    className="btn-primary text-xs"
+                  >
+                    {forgotSubmitting ? "Sending..." : "Send Reset Link"}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="mt-4 space-y-3">
+                <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs text-emerald-700 whitespace-pre-wrap">
+                  {forgotResult}
+                </div>
+                <button
+                  onClick={() => setShowForgotModal(false)}
+                  className="w-full btn-primary text-xs"
+                >
+                  Close
+                </button>
+              </div>
+            )}
+          </motion.div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const ResetPassword = () => {
+  const token = new URLSearchParams(window.location.search).get("token") || "";
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [result, setResult] = useState<{ success: boolean; message: string } | null>(null);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!token) {
+      setResult({ success: false, message: "Invalid reset link. No token found." });
+      return;
+    }
+    if (newPassword.length < 8) {
+      setResult({ success: false, message: "Password must be at least 8 characters." });
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setResult({ success: false, message: "Passwords do not match." });
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await confirmResetPassword(token, newPassword);
+      setResult({ success: true, message: "Password has been reset successfully. You can now sign in." });
+    } catch (err: any) {
+      setResult({ success: false, message: String(err?.message || "Invalid or expired reset link.") });
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="max-w-md w-full bg-white rounded-3xl shadow-xl p-8 border border-slate-100"
+      >
+        <div className="text-center mb-8">
+          <div className="w-16 h-16 rounded-2xl bg-emerald-600 flex items-center justify-center text-white font-bold text-3xl mx-auto mb-4 shadow-lg shadow-emerald-600/20">
+            R
+          </div>
+          <h2 className="text-2xl font-bold text-slate-900">Reset Password</h2>
+          <p className="text-slate-500">Enter your new password below</p>
+        </div>
+
+        {!result ? (
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <div className="space-y-1">
+              <label className="text-sm font-bold text-slate-700 ml-1">New Password</label>
+              <input
+                type="password"
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+                className="input-field w-full"
+                placeholder="At least 8 characters"
+                autoFocus
+              />
+            </div>
+            <div className="space-y-1">
+              <label className="text-sm font-bold text-slate-700 ml-1">Confirm Password</label>
+              <input
+                type="password"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                className="input-field w-full"
+                placeholder="Re-enter your new password"
+              />
+            </div>
+            <button
+              type="submit"
+              disabled={submitting || !newPassword || !confirmPassword}
+              className="w-full btn-primary py-3 rounded-xl shadow-lg shadow-emerald-600/20 disabled:opacity-60 disabled:cursor-not-allowed"
+            >
+              {submitting ? "Resetting..." : "Reset Password"}
+            </button>
+          </form>
+        ) : (
+          <div className="space-y-4">
+            <div className={`rounded-xl border px-4 py-3 text-xs ${result.success ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-rose-200 bg-rose-50 text-rose-700"}`}>
+              {result.message}
+            </div>
+            {result.success && (
+              <a
+                href="/login"
+                onClick={(e) => { e.preventDefault(); window.history.replaceState({ __app: "rbf-spa" }, "", "/login"); window.location.reload(); }}
+                className="w-full btn-primary py-3 rounded-xl text-center block"
+              >
+                Go to Sign In
+              </a>
+            )}
+            {!result.success && (
+              <button
+                onClick={() => setResult(null)}
+                className="w-full btn-primary py-3 rounded-xl"
+              >
+                Try Again
+              </button>
+            )}
+          </div>
+        )}
       </motion.div>
     </div>
   );
 };
+
 const Register = ({
   onBackToLogin,
   onRegisterSuccess,
@@ -22658,7 +22845,7 @@ export default function App() {
   const [showPublicPortal, setShowPublicPortal] = useState(false);
   const [publicSubView, setPublicSubView] = useState<null | "faq" | "tender">(null);
   const [publicTenderId, setPublicTenderId] = useState<string | null>(null);
-  const [authView, setAuthView] = useState<"login" | "register">("login");
+  const [authView, setAuthView] = useState<"login" | "register" | "reset-password">("login");
   const [activeTab, setActiveTab] = useState("dashboard");
   const [routerAction, setRouterAction] = useState<string | undefined>(undefined);
   const [routerId, setRouterId] = useState<string | undefined>(undefined);
@@ -22701,6 +22888,8 @@ export default function App() {
     // Parse path-based routes for clean URLs
     if (pathname === "/register") {
       setAuthView("register");
+    } else if (pathname === "/reset-password") {
+      setAuthView("reset-password");
     } else if (pathname === "/public/faq") {
       setShowPublicPortal(true);
       setPublicSubView("faq");
@@ -22996,6 +23185,9 @@ export default function App() {
   }
 
   if (!currentUser) {
+    if (authView === "reset-password") {
+      return <ResetPassword />;
+    }
     return authView === "login" ? (
       <Login 
         onLogin={handleLogin} 

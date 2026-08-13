@@ -584,6 +584,7 @@ function mapVendorDirectoryEntryFromApi(api: any): VendorDirectoryEntry {
     operationalStanding: api.operational_standing ?? "Active",
     projectCount: Number(api.project_count ?? 0),
     bidCount: Number(api.bid_count ?? 0),
+    hasPendingPasswordReset: api.has_pending_password_reset ?? false,
   };
 }
 
@@ -3350,6 +3351,24 @@ export async function resetAdminManagedUserPassword(userId: string): Promise<{ t
     temporaryPassword: data?.temporary_password ?? undefined,
     emailError: data?.email_error ?? undefined,
   };
+}
+
+export async function requestPasswordReset(identifier: string): Promise<{ resetUrl?: string; emailError?: string }> {
+  const data = await http<any>(`/api/users/request-password-reset/`, {
+    method: "POST",
+    body: JSON.stringify({ username_or_email: identifier }),
+  });
+  return {
+    resetUrl: data?.reset_url ?? undefined,
+    emailError: data?.email_error ?? undefined,
+  };
+}
+
+export async function confirmResetPassword(token: string, newPassword: string): Promise<void> {
+  await http<any>(`/api/users/reset-password-confirm/`, {
+    method: "POST",
+    body: JSON.stringify({ token, new_password: newPassword }),
+  });
 }
 
 export async function fetchSuperAdminDashboardSummary(): Promise<SuperAdminDashboardSummary> {

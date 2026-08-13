@@ -358,3 +358,39 @@ class PlatformConfiguration(models.Model):
 
     def __str__(self):
         return f"Platform Configuration #{self.id}"
+
+
+class PasswordResetRequestStatus(models.TextChoices):
+    PENDING = 'Pending', 'Pending'
+    RESOLVED = 'Resolved', 'Resolved'
+    EXPIRED = 'Expired', 'Expired'
+
+
+class PasswordResetRequest(models.Model):
+    user = models.ForeignKey(User, related_name='password_reset_requests', on_delete=models.CASCADE)
+    contact_info = models.CharField(max_length=255, help_text='Username or email the requester entered.')
+    token = models.CharField(max_length=255, unique=True, blank=True, db_index=True)
+    token_expires_at = models.DateTimeField(null=True, blank=True)
+    status = models.CharField(
+        max_length=16,
+        choices=PasswordResetRequestStatus.choices,
+        default=PasswordResetRequestStatus.PENDING,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    resolved_by = models.ForeignKey(
+        User,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='resolved_password_resets',
+    )
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', 'status']),
+        ]
+
+    def __str__(self):
+        return f"Password reset for {self.user} ({self.status})"

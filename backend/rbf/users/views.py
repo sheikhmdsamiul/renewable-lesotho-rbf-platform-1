@@ -1,10 +1,12 @@
 import json
 import random
+import secrets
 import string
 import time
 from datetime import timedelta, datetime
 from pathlib import Path
 import shutil
+from urllib.parse import urlencode
 
 from django.conf import settings
 from django.core.cache import cache
@@ -39,6 +41,8 @@ from .models import (
     BlacklistAppealStatus,
     BlacklistCaseStatus,
     Organization,
+    PasswordResetRequest,
+    PasswordResetRequestStatus,
     PlatformConfiguration,
     User,
     UserRole,
@@ -64,11 +68,11 @@ from .serializers import (
     VendorPrequalificationSerializer,
     VendorProfileSerializer,
     VendorDirectorySerializer,
+    generate_temporary_password,
 )
 from rbf.projects.audit import log_audit, AuditLogger
 from rbf.projects.integrations import SyncToProspectJob, normalize_prospect_gender
 from rbf.projects.models import AuditLog, Project, ProjectStatus, ProspectSyncLog, ProspectSyncStatus
-from rbf.notifications.models import Notification
 
 
 DEFAULT_ORGANIZATIONS = [
@@ -335,7 +339,7 @@ class UserViewSet(viewsets.ModelViewSet):
             user.save(update_fields=['must_change_password'])
 
     def get_permissions(self):
-        if self.action == 'create':
+        if self.action in {'create', 'request_password_reset'}:
             return [AllowAny()]
         return [IsAuthenticated()]
 
@@ -494,6 +498,111 @@ class UserViewSet(viewsets.ModelViewSet):
             'email_error': email_error,
         }
         return Response(payload, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['post'], url_path='request-password-reset')
+    def request_password_reset(self, request):
+        identifier = str(request.data.get('username_or_email') or '').strip()
+        if not identifier:
+            return Response({'detail': 'username_or_email is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = User.objects.filter(
+            Q(username__iexact=identifier) | Q(email__iexact=identifier),
+            is_active=True,
+        ).first()
+
+        if user is None or not user.email:
+            return Response(
+                {'detail': 'If an account with that username or email exists, a reset link has been sent.'},
+                status=status.HTTP_200_OK,
+            )
+
+        token = secrets.token_urlsafe(48)
+        expires_at = timezone.now() + timedelta(hours=1)
+
+        PasswordResetRequest.objects.filter(user=user, status=PasswordResetRequestStatus.PENDING).update(
+            status=PasswordResetRequestStatus.EXPIRED,
+        )
+        PasswordResetRequest.objects.create(
+            user=user,
+            contact_info=identifier,
+            token=token,
+            token_expires_at=expires_at,
+        )
+
+        frontend_base = getattr(settings, 'FRONTEND_BASE_URL', 'http://localhost:5173')
+        reset_url = f"{frontend_base}/reset-password?token={token}"
+
+        email_error = None
+        email_configured = bool(settings.EMAIL_HOST_USER and settings.EMAIL_HOST_PASSWORD) or settings.DEBUG
+        if email_configured:
+            try:
+                send_mail(
+                    subject='Reset your password',
+                    message=(
+                        f'Hello {user.full_name or user.username},\n\n'
+                        'You requested a password reset for your RBF Platform account.\n\n'
+                        f'Click the link below to reset your password (valid for 1 hour):\n\n'
+                        f'{reset_url}\n\n'
+                        'If you did not request this, please ignore this email.'
+                    ),
+                    from_email=settings.DEFAULT_FROM_EMAIL,
+                    recipient_list=[user.email],
+                    fail_silently=False,
+                )
+            except Exception as exc:
+                email_error = str(exc)
+        else:
+            email_error = 'Email service is not configured.'
+
+        return Response({
+            'detail': 'If an account with that username or email exists, a reset link has been sent.',
+            'email_error': email_error,
+            'reset_url': reset_url if settings.DEBUG else None,
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['post'], url_path='reset-password-confirm')
+    def reset_password_confirm(self, request):
+        token = str(request.data.get('token') or '').strip()
+        new_password = str(request.data.get('new_password') or '').strip()
+
+        if not token or not new_password:
+            return Response({'detail': 'token and new_password are required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if len(new_password) < 8:
+            return Response({'detail': 'Password must be at least 8 characters.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        reset_request = PasswordResetRequest.objects.filter(
+            token=token,
+            status=PasswordResetRequestStatus.PENDING,
+        ).order_by('-created_at').first()
+
+        if not reset_request:
+            return Response({'detail': 'Invalid or expired reset link.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if reset_request.token_expires_at and reset_request.token_expires_at < timezone.now():
+            reset_request.status = PasswordResetRequestStatus.EXPIRED
+            reset_request.save(update_fields=['status'])
+            return Response({'detail': 'Invalid or expired reset link.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = reset_request.user
+        user.set_password(new_password)
+        user.must_change_password = False
+        user.save(update_fields=['password', 'must_change_password'])
+
+        reset_request.status = PasswordResetRequestStatus.RESOLVED
+        reset_request.resolved_at = timezone.now()
+        reset_request.save(update_fields=['status', 'resolved_at'])
+
+        self._invalidate_user_sessions(user)
+
+        log_audit(
+            user,
+            'password_reset_completed',
+            user,
+            {'username': user.username, 'reset_request_id': reset_request.id},
+        )
+
+        return Response({'detail': 'Password has been reset successfully.'}, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated], url_path='management/meta')
     def management_meta(self, request):
