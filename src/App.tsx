@@ -15872,8 +15872,8 @@ const ProjectsHub = ({
                 <table className="min-w-full divide-y divide-slate-200 text-sm">
                   <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
                     <tr>
-                      <th className="px-4 py-3">ID</th>
-                      <th className="px-4 py-3">Install</th>
+                      <th className="px-4 py-3">Flag ID</th>
+                      <th className="px-4 py-3">Installation ID</th>
                       <th className="px-4 py-3">Type</th>
                       <th className="px-4 py-3">Description</th>
                       <th className="px-4 py-3">Raised</th>
@@ -16670,7 +16670,7 @@ const ProjectsHub = ({
                 <table className="min-w-full divide-y divide-slate-200 text-sm">
                   <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
                     <tr>
-                      <th className="px-4 py-3">ID</th>
+                      <th className="px-4 py-3">Installation ID</th>
                       <th className="px-4 py-3">Beneficiary</th>
                       <th className="px-4 py-3">Household</th>
                       <th className="px-4 py-3">GPS Link</th>
@@ -16715,6 +16715,18 @@ const ProjectsHub = ({
               )}
 
               {canVendorManage && <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4 space-y-3">
+                <div className="rounded-xl border border-blue-200 bg-blue-50 p-4 space-y-2">
+                  <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-blue-800">How to Submit an Installation Correctly</p>
+                  <ol className="list-decimal space-y-1 pl-4 text-xs text-slate-700">
+                    <li><strong>Serial number</strong> &mdash; the device&rsquo;s unique serial number (as printed on the unit). Required for identification.</li>
+                    <li><strong>Beneficiary ID (NID)</strong> &mdash; the national ID of the household that received the installation.</li>
+                    <li><strong>Household type</strong> &mdash; choose the correct category (Standard, Female Headed, Vulnerable, Low Income). This drives the gender/inclusion KPIs.</li>
+                    <li><strong>GPS Latitude / Longitude</strong> &mdash; capture the location on-site (e.g., Google Maps). Coordinates must be within Lesotho &mdash; wrong or missing coordinates will be rejected during verification.</li>
+                    <li><strong>Smart meter ID</strong> &mdash; enter the meter ID exactly as shown on the physical meter. This is <strong>critical if you plan to upload meter data via CSV later</strong>: the CSV rows are matched to this installation using this meter ID.</li>
+                    <li><strong>kWh reading (optional)</strong> &mdash; the meter&rsquo;s current reading at installation time, if available.</li>
+                    <li><strong>Photos &amp; receipt</strong> &mdash; attach at least one site photo (max 5) and the proof-of-sale receipt.</li>
+                  </ol>
+                </div>
                 <div className="flex items-center justify-between">
                   <p className="text-sm font-semibold text-slate-700">New Installation Report</p>
                   <span className="text-[11px] text-slate-400">GPS + Photo + Receipt</span>
@@ -16764,6 +16776,40 @@ const ProjectsHub = ({
                       {meterCsvUploading ? "Uploading..." : "Upload Meter Data CSV"}
                     </button>
                   </div>
+                </div>
+                <div className="rounded-xl border border-blue-200 bg-blue-50 p-4 space-y-3">
+                  <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-blue-800">How to Upload Meter Data Correctly</p>
+                  <ol className="list-decimal space-y-1 pl-4 text-xs text-slate-700">
+                    <li><strong>Start from the template.</strong> Click <em>Download CSV Template</em> and fill it in &mdash; the column names must match exactly. Never rename, reorder, or remove the header row.</li>
+                    <li><strong>Match the installation.</strong> Each row links to the installation you submitted earlier via its <code className="bg-blue-100 px-1 rounded">meter_id</code> (exactly as typed on the New Installation Report) or its numeric <code className="bg-blue-100 px-1 rounded">installation_id</code>. If you left the meter ID blank on the installation, the row can only be matched by <code className="bg-blue-100 px-1 rounded">installation_id</code>.</li>
+                    <li><strong>Use recent timestamps.</strong> <code className="bg-blue-100 px-1 rounded">recorded_at</code> must be valid ISO datetime (e.g. <code className="bg-blue-100 px-1 rounded">2026-08-13T08:00:00</code>) and within the last 30 days &mdash; this is what proves the meter is actively reporting (Milestone 2). Readings older than 48 hours will raise a &ldquo;no data&rdquo; flag.</li>
+                    <li><strong>Keep values in range.</strong> <code className="bg-blue-100 px-1 rounded">kwh_generated</code> must be 0 or more, <code className="bg-blue-100 px-1 rounded">uptime_pct</code> between 0 and 100. A 0% uptime row creates a &ldquo;zero uptime&rdquo; flag.</li>
+                    <li><strong>Every meter in the file must belong to this project and your vendor account.</strong> Rows for installations from another vendor or project are rejected.</li>
+                    <li><strong>One reading per row.</strong> Readings that deviate more than 5% from the previous reading for the same meter create an &ldquo;output deviation&rdquo; flag &mdash; submit realistic readings.</li>
+                  </ol>
+                  <div className="rounded-lg border border-blue-200 bg-white p-3">
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-blue-800">CSV column reference</p>
+                    <div className="mt-2 overflow-x-auto">
+                      <table className="min-w-full divide-y divide-slate-200 text-[11px]">
+                        <thead className="text-left text-slate-500">
+                          <tr>
+                            <th className="px-2 py-1 font-semibold">Column</th>
+                            <th className="px-2 py-1 font-semibold">Required</th>
+                            <th className="px-2 py-1 font-semibold">What to enter</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 text-slate-700">
+                          <tr><td className="px-2 py-1"><code>meter_id</code></td><td className="px-2 py-1">Yes</td><td className="px-2 py-1">Meter ID as recorded on the installation</td></tr>
+                          <tr><td className="px-2 py-1"><code>installation_id</code></td><td className="px-2 py-1">No</td><td className="px-2 py-1">Numeric installation ID (or meter ID / serial / NID)</td></tr>
+                          <tr><td className="px-2 py-1"><code>recorded_at</code></td><td className="px-2 py-1">Yes</td><td className="px-2 py-1">ISO datetime, e.g. <code>2026-08-13T08:00:00</code></td></tr>
+                          <tr><td className="px-2 py-1"><code>kwh_generated</code></td><td className="px-2 py-1">Yes</td><td className="px-2 py-1">Energy generated, must be &ge; 0</td></tr>
+                          <tr><td className="px-2 py-1"><code>uptime_pct</code></td><td className="px-2 py-1">Yes</td><td className="px-2 py-1">System uptime, 0&ndash;100</td></tr>
+                          <tr><td className="px-2 py-1"><code>output_power_w</code></td><td className="px-2 py-1">No</td><td className="px-2 py-1">Instantaneous output in watts</td></tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                  <p className="text-xs text-slate-600"><strong>After uploading:</strong> check the &ldquo;Last Upload&rdquo; report &mdash; <span className="font-semibold text-slate-700">Valid rows = ingested</span> and <span className="font-semibold text-slate-700">Errors = rejected</span>. Click <em>View Upload Report</em> to see which rows failed and why. Readings only count toward Milestone 2 once the installation is verified.</p>
                 </div>
                 {latestCsvAudit ? (
                   <div className="rounded-xl border border-slate-200 bg-white p-4">

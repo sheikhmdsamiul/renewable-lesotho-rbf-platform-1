@@ -707,6 +707,152 @@
       <tr><td><span class="badge badge-red">Auditor</span></td><td>Auditor</td><td>Audit logs, anomaly reports, audit findings, compliance checks</td></tr>
     </tbody>
   </table>
+  <p>
+    The sections below describe what each role does in the platform, one by one. Every official
+    account is created by the <strong>Platform Administrator (Super Admin)</strong> &mdash; officials
+    do not self-register. Only vendors self-register.
+  </p>
+
+  <h3>3.1 Platform Administrator (Super Admin)</h3>
+  <p>
+    The Super Admin is the system owner and top-level operator. They keep the platform running,
+    manage every official account, and can access all modules. The Super Admin portal is the control
+    centre for the whole system.
+  </p>
+  <ul>
+    <li><strong>User Management</strong> &mdash; Create accounts for officials and committee members (RMT, TAC, DoE, Field Verifiers, PSC, Auditors), assign roles, reset passwords, and activate or suspend accounts.</li>
+    <li><strong>Organization Registry</strong> &mdash; Manage government, international, and NGO organizations registered on the platform.</li>
+    <li><strong>System Configuration</strong> &mdash; Set the national programme budget, inclusion target minimums (female 50%, vulnerable 30%, low-income 60%), uptime and anomaly thresholds, GPS duplicate radius, email/SMS notification settings, and file upload limits.</li>
+    <li><strong>Payments</strong> &mdash; Full RMT payment rights on the disbursement chain (review, verify, and mark claims paid).</li>
+    <li><strong>Blacklisting</strong> &mdash; Confirms blacklist cases and reviews vendor appeals.</li>
+    <li><strong>System Health &amp; Audit</strong> &mdash; Monitor system health, review audit logs, manage Prospect sync, view reports, and review notifications.</li>
+  </ul>
+
+  <h3>3.2 RBF Management Team (RMT) &mdash; RBF Official</h3>
+  <p>
+    The RBF Management Team is the central operator that runs the entire RBF process from tender to
+    disbursement. Most core workflows start and finish with the RMT.
+  </p>
+  <ul>
+    <li><strong>Tender Management</strong> &mdash; Create tenders, publish them, verify tender details, extend or shorten deadlines, issue clarifications, close bidding, and send bid reminders.</li>
+    <li><strong>Pre-Qualification Review</strong> &mdash; Review vendor pre-qualification applications submitted at Stage 1 (concept) and approve, reject, or request resubmission (partial approval).</li>
+    <li><strong>Financial Evaluation</strong> &mdash; Run the financial evaluation matrix (30 points) for Stage 2 bids. Financial scoring only unlocks after the technical score passes the TAC threshold.</li>
+    <li><strong>Award &amp; Contracts</strong> &mdash; Issue intent-to-award, manage the standstill/cooling-off period, review challenges, make the final award, and generate the Performance-Based Agreement (PBA) contract.</li>
+    <li><strong>Project Assignment</strong> &mdash; Assign approved contracts to projects, create milestones, select districts, verification methods, and energy targets.</li>
+    <li><strong>Payment Review</strong> &mdash; Review vendor payment claims, verify supporting evidence, and mark claims paid as the first step in the disbursement chain.</li>
+    <li><strong>Blacklisting</strong> &mdash; Initiate blacklist cases and review them.</li>
+    <li><strong>Portfolio &amp; Reporting</strong> &mdash; Oversee the RBF portfolio, manage issues &amp; findings, and view reports and GIS maps.</li>
+  </ul>
+
+  <h3>3.3 TAC Member (Technical Advisory Committee)</h3>
+  <p>
+    The TAC provides independent technical assessment. They score bids and endorse claims based on
+    technical merit, but they cannot set financial scores or approve payments on their own.
+  </p>
+  <ul>
+    <li><strong>Technical Evaluation</strong> &mdash; Score bids on the technical matrix (70 points) covering technical quality, feasibility, O&amp;M plan, KPIs, gender, and environmental impact for both Stage 1 and Stage 2.</li>
+    <li><strong>Hardware &amp; Tier Review</strong> &mdash; Review device brand, model, and technology tier, and confirm the proposed tier does not exceed the vendor&rsquo;s approved pre-qualification tier. Tier 3 or higher is treated as the preferred technical tier.</li>
+    <li><strong>GPS &amp; Field Readiness</strong> &mdash; Check that proposed sites have valid GPS coordinates and that the implementation plan is feasible before endorsing a technical score.</li>
+    <li><strong>Payment Endorsement</strong> &mdash; Endorse vendor payment claims as the second step in the multi-tier disbursement chain (after RMT verification).</li>
+    <li><strong>Project Technical Oversight</strong> &mdash; View projects in technical mode and participate in blacklist case reviews.</li>
+  </ul>
+
+  <h3>3.4 DoE Officer (Department of Energy)</h3>
+  <p>
+    DoE Officers provide government-side regional oversight. They monitor implementation in their
+    districts and escalate concerns to the RMT and PSC.
+  </p>
+  <ul>
+    <li><strong>Regional Monitoring</strong> &mdash; View a dashboard of projects and installations in their region/district.</li>
+    <li><strong>Raise Concerns</strong> &mdash; Flag issues or concerns about a project to the RMT and PSC through the concern modal.</li>
+    <li><strong>Regional Map</strong> &mdash; Use the GIS map to review installation sites and coverage in their area.</li>
+    <li><strong>Project Oversight</strong> &mdash; Read-only access to projects for monitoring purposes.</li>
+    <li><strong>Blacklisting</strong> &mdash; Review and confirm blacklist cases.</li>
+    <li><strong>Reporting</strong> &mdash; Generate regional reports and view the vendor directory.</li>
+  </ul>
+
+  <h3>3.5 Field Verifier</h3>
+  <p>
+    Field Verifiers perform on-the-ground verification of installations. They work from a task list
+    scoped to their verification zone and record evidence at each site.
+  </p>
+  <ul>
+    <li><strong>Inspections</strong> &mdash; Conduct site visits and complete verification checklists for each assigned installation.</li>
+    <li><strong>Evidence Capture</strong> &mdash; Record GPS coordinates, site photos, device serial numbers, and household counts.</li>
+    <li><strong>Outcome Recording</strong> &mdash; Mark each inspection as verified, partial, or flagged based on the evidence gathered.</li>
+    <li><strong>GIS &amp; Reporting</strong> &mdash; View the GIS map and generate verification reports for their assigned area.</li>
+  </ul>
+
+  <h3>3.6 Project Steering Committee (PSC / UNDP Donor)</h3>
+  <p>
+    The PSC provides donor-level oversight. They do not run day-to-day operations but approve the
+    final disbursement of funds and review overall programme progress.
+  </p>
+  <ul>
+    <li><strong>Oversight Dashboard</strong> &mdash; View a high-level portfolio dashboard. Vendor identities are masked for confidentiality.</li>
+    <li><strong>Final Payment Approval</strong> &mdash; Give the final approval in the disbursement chain (RMT &rarr; TAC &rarr; PSC) before payment is disbursed, and flag issues on claims.</li>
+    <li><strong>Issues &amp; Findings</strong> &mdash; Comment on and resolve PSC-level issues and findings.</li>
+    <li><strong>Projects &amp; Reports</strong> &mdash; Review aggregate project data and PSC-specific reports.</li>
+  </ul>
+
+  <h3>3.7 Auditor</h3>
+  <p>
+    Auditors independently review financial and compliance records. They do not change operational
+    data, but they raise findings and flag anomalies for follow-up.
+  </p>
+  <ul>
+    <li><strong>Audit Logs</strong> &mdash; Review the full audit trail of system activity.</li>
+    <li><strong>Anomaly Reports</strong> &mdash; Review automatically detected anomalies from meter and KPI data.</li>
+    <li><strong>Claims Audit</strong> &mdash; Audit payment claims and the Prospect sync log for discrepancies.</li>
+    <li><strong>Audit Findings</strong> &mdash; Raise findings against projects for the RMT to resolve.</li>
+    <li><strong>Audit Packages</strong> &mdash; Export audit packages for projects.</li>
+    <li><strong>Blacklisting</strong> &mdash; Initiate blacklist cases, review them, and review vendor appeals.</li>
+    <li><strong>Vendor Directory</strong> &mdash; View vendor records with financial and document visibility for audit purposes.</li>
+  </ul>
+
+  <h3>3.8 Vendor</h3>
+  <p>
+    Vendors are the only self-registering role. They participate in tenders and deliver the
+    renewable energy projects.
+  </p>
+  <ul>
+    <li><strong>Registration &amp; Pre-Qualification</strong> &mdash; Register the organization and submit a pre-qualification application (company profile, technical &amp; financial capacity, technology types, tier, inclusion targets, and declaration).</li>
+    <li><strong>Bidding</strong> &mdash; View open tenders, submit Stage 1 concept notes, and &mdash; if shortlisted &mdash; submit Stage 2 site-specific bids with BOQ, project sites, device details, and PAYGO options. Revise bids when marked &ldquo;Revision Required&rdquo;.</li>
+    <li><strong>Award &amp; Contract</strong> &mdash; Track intent-to-award and award status, and sign the Performance-Based Agreement.</li>
+    <li><strong>Project Setup</strong> &mdash; Configure assigned projects: field team roster, equipment plan, device brand/model/tier, meter API credentials, compliance documents, and work schedule.</li>
+    <li><strong>Installation Reporting</strong> &mdash; Log installations, upload geo-tagged photos, and report device readings.</li>
+    <li><strong>Payment Claims</strong> &mdash; Submit milestone-based claims and track their status through the approval chain.</li>
+    <li><strong>Appeals</strong> &mdash; Appeal a blacklisting decision with a rebuttal and supporting document.</li>
+  </ul>
+
+  <h3>3.9 Cross-Role Approval Chains</h3>
+  <p>Several workflows require multiple roles to act in sequence. The two most important chains are:</p>
+  <h4>Payment Disbursement Chain</h4>
+  <table>
+    <thead>
+      <tr><th>Step</th><th>Role</th><th>Action</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>1</td><td>Vendor</td><td>Submits a milestone-based payment claim with supporting evidence.</td></tr>
+      <tr><td>2</td><td>RBF Management Team</td><td>Verifies the claim evidence and marks it verified / eligible for payment.</td></tr>
+      <tr><td>3</td><td>TAC Member</td><td>Endorses the claim from a technical standpoint.</td></tr>
+      <tr><td>4</td><td>Project Steering Committee</td><td>Gives the final approval for disbursement.</td></tr>
+      <tr><td>5</td><td>Platform Administrator</td><td>Confirms and initiates the actual disbursement.</td></tr>
+    </tbody>
+  </table>
+  <h4>Vendor Blacklisting Chain</h4>
+  <table>
+    <thead>
+      <tr><th>Step</th><th>Role</th><th>Action</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>1</td><td>RMT / Auditor</td><td>Initiates a blacklist case with a reason and justification document.</td></tr>
+      <tr><td>2</td><td>TAC / DoE / Auditor</td><td>Reviews the case and records review notes.</td></tr>
+      <tr><td>3</td><td>Admin / DoE</td><td>Confirms or rejects the blacklisting decision.</td></tr>
+      <tr><td>4</td><td>Vendor</td><td>May submit an appeal with a rebuttal and supporting documents.</td></tr>
+      <tr><td>5</td><td>Auditor / Admin</td><td>Reviews the appeal and resolves it (reinstated / requalified / upheld).</td></tr>
+    </tbody>
+  </table>
 
   <!-- ============================================================ -->
   <h2 id="login">4. Sign In &amp; Registration</h2>
