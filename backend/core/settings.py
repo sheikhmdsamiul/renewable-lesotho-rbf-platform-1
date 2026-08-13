@@ -16,6 +16,7 @@ DEBUG = env.bool('DJANGO_DEBUG')
 SECRET_KEY = env('SECRET_KEY', default='dev-secret-key')
 ALLOWED_HOSTS = env.list('ALLOWED_HOSTS', default=['localhost', '127.0.0.1'])
 API_REQUIRE_AUTH = env.bool('API_REQUIRE_AUTH', default=False)
+FRONTEND_BASE_URL = env('FRONTEND_BASE_URL', default='http://localhost:5173')
 
 INSTALLED_APPS = [
     'django.contrib.admin',
