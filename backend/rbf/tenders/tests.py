@@ -721,7 +721,7 @@ class TenderBidSubmissionTests(APITestCase):
         self.assertIn("inclusion_commitment_confirmed", response.data)
         self.assertNotIn("sites", response.data)
 
-    def test_stage_one_submission_requires_minimum_concept_note_words(self):
+    def test_stage_one_submission_requires_minimum_concept_note_characters(self):
         response = self.client.post(
             "/api/tender-bids/",
             {
@@ -740,6 +740,52 @@ class TenderBidSubmissionTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("concept_note", response.data)
+
+    def test_stage_one_submission_rejects_concept_note_under_200_characters(self):
+        response = self.client.post(
+            "/api/tender-bids/",
+            {
+                "tender": str(self.prequal_tender.id),
+                "bid_amount": "125000.00",
+                **self._submission_basics(),
+                "concept_note": "A" * 199,
+                "female_target_pct": 50,
+                "vulnerable_target_pct": 30,
+                "low_income_target_pct": 60,
+                "inclusion_commitment_confirmed": "true",
+                "status": BidStatus.SUBMITTED,
+            },
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("concept_note", response.data)
+
+    def test_stage_one_submission_accepts_concept_note_at_200_characters(self):
+        response = self.client.post(
+            "/api/tender-bids/",
+            {
+                "tender": str(self.prequal_tender.id),
+                "bid_amount": "125000.00",
+                **self._submission_basics(),
+                "concept_note": "A" * 200,
+                "female_target_pct": 50,
+                "vulnerable_target_pct": 30,
+                "low_income_target_pct": 60,
+                "inclusion_commitment_confirmed": "true",
+                "sites": json.dumps([
+                    {
+                        "site_name": "Pilot Village",
+                        "district": "Maseru",
+                        "number_of_households": 25,
+                    }
+                ]),
+                "status": BidStatus.SUBMITTED,
+            },
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 
     def test_site_specific_submission_rejects_coordinates_outside_lesotho(self):
         response = self.client.post(
@@ -1879,6 +1925,99 @@ class TenderBidSubmissionTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("locked", str(response.data["detail"]).lower())
+
+    def test_non_owner_cannot_delete_bid(self):
+        other_vendor = User.objects.create_user(
+            username="other_bid_vendor",
+            password="securePass123",
+            role=UserRole.VENDOR,
+            status="Active",
+            full_name="Other Vendor",
+            email="other-vendor@example.com",
+        )
+        VendorPrequalification.objects.create(
+            vendor=other_vendor,
+            company_name="Other Vendor Ltd",
+            status=PrequalificationStatus.APPROVED,
+            tech_tier="Tier 2",
+        )
+        bid = TenderBid.objects.create(
+            tender=self.prequal_tender,
+            vendor_id=str(self.vendor.id),
+            vendor_name=self.vendor.full_name,
+            vendor_email=self.vendor.email,
+            bid_amount=100000,
+            subsidy_requested=50000,
+            status=BidStatus.DRAFT,
+        )
+
+        self.client.force_authenticate(other_vendor)
+        response = self.client.delete(f"/api/tender-bids/{bid.id}/")
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_vendor_cannot_delete_submitted_bid(self):
+        bid = TenderBid.objects.create(
+            tender=self.prequal_tender,
+            vendor_id=str(self.vendor.id),
+            vendor_name=self.vendor.full_name,
+            vendor_email=self.vendor.email,
+            bid_amount=100000,
+            subsidy_requested=50000,
+            status=BidStatus.SUBMITTED,
+        )
+
+        response = self.client.delete(f"/api/tender-bids/{bid.id}/")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("detail", response.data)
+
+    def test_vendor_can_delete_own_draft_bid(self):
+        bid = TenderBid.objects.create(
+            tender=self.prequal_tender,
+            vendor_id=str(self.vendor.id),
+            vendor_name=self.vendor.full_name,
+            vendor_email=self.vendor.email,
+            bid_amount=100000,
+            subsidy_requested=50000,
+            status=BidStatus.DRAFT,
+        )
+
+        response = self.client.delete(f"/api/tender-bids/{bid.id}/")
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(TenderBid.objects.filter(id=bid.id).exists())
+
+    def test_stage_two_final_submit_requires_required_files(self):
+        response = self.client.post(
+            "/api/tender-bids/",
+            {
+                "tender": str(self.site_specific_tender.id),
+                "bid_amount": "180000.00",
+                **self._submission_basics(),
+                "concept_note": "",
+                "technical_proposal": "",
+                "financial_proposal": "",
+                "female_target_pct": 50,
+                "vulnerable_target_pct": 30,
+                "low_income_target_pct": 60,
+                "inclusion_commitment_confirmed": "true",
+                "om_strategy_summary": "Regular maintenance schedule with local technicians.",
+                "sites": json.dumps([
+                    {
+                        "site_name": "Roma Cluster",
+                        "district": "Maseru",
+                        "latitude": -29.45,
+                        "longitude": 27.71,
+                        "number_of_households": 40,
+                    }
+                ]),
+                "status": BidStatus.SUBMITTED,
+            },
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("technical_proposal_file", response.data)
+        self.assertIn("financial_proposal_file", response.data)
+        self.assertIn("boq_file", response.data)
 
 
 class TenderContractPdfTests(APITestCase):

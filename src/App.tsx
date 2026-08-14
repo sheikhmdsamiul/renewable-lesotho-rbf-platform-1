@@ -442,6 +442,44 @@ const toFriendlyApiMessage = (raw: string): string => {
   return cleaned;
 };
 
+const BID_ERROR_MAP: Record<string, string> = {
+  "Only vendors can submit bids.": "Only vendor accounts can submit bids. Please log in with a vendor account.",
+  "Your vendor account is suspended or blacklisted. Bid submission is disabled.": "Your vendor account has been suspended or blacklisted. Please contact the RBF Management Team for assistance.",
+  "Complete pre-qualification first": "Please complete the pre-qualification process before submitting bids.",
+  "Tender is not open for bidding.": "This tender is no longer accepting bids.",
+  "Bidding deadline has passed.": "The bidding deadline has passed. No further submissions can be accepted for this tender.",
+  "Only shortlisted vendors can submit Stage 2 proposals.": "Only shortlisted vendors are eligible to submit Stage 2 proposals.",
+  "You have already submitted a bid for this tender.": "You have already submitted a bid for this tender.",
+  "Submitted bids are locked. Create or edit a draft before final submission.": "This bid has been submitted and cannot be edited directly. Please create or edit a draft instead.",
+  "Only draft or revision-required bids can be submitted.": "Only draft or revision-required bids can be submitted for final review.",
+  "Technical and financial proposal files are required for site-specific bids.": "Please upload the Technical Proposal and Financial Proposal documents before submitting.",
+  "BOQ file is required for site-specific bids.": "Please upload the Bill of Quantities document before submitting.",
+  "Bill of Quantities is required for site-specific submissions.": "A Bill of Quantities is required for Stage 2 submissions.",
+  "O&M strategy summary is required for site-specific submissions.": "An O&M strategy summary is required for Stage 2 submissions.",
+  "PAYGO platform is required when PAYGO is offered.": "Please select a PAYGO platform when offering PAYGO payment terms.",
+  "Minimum daily payment is required when PAYGO is offered.": "Please enter the minimum daily payment amount when offering PAYGO payment terms.",
+  "Collection method is required when PAYGO is offered.": "Please select a collection method when offering PAYGO payment terms.",
+  "You must confirm the inclusion commitment before submitting.": "Please confirm the inclusion commitment checkbox before submitting.",
+  "At least 1 project site is required.": "Please add at least one project site before submitting.",
+  "Site name, district, primary beneficiary type, and number of households are required before submitting.": "Please complete all required site fields (name, district, beneficiary type, and households).",
+  "Latitude and longitude are required before submitting.": "GPS coordinates are required for Stage 2 sites. Please enter latitude and longitude or use \"Use My Location\".",
+  "Site coordinates must fall within Lesotho.": "The site coordinates are outside Lesotho. Please verify the latitude and longitude.",
+};
+
+const friendlyBidError = (raw: string): string => {
+  const cleaned = toFriendlyApiMessage(raw);
+  if (!cleaned) return "";
+  for (const [pattern, friendly] of Object.entries(BID_ERROR_MAP)) {
+    if (cleaned.includes(pattern) || raw.includes(pattern)) return friendly;
+  }
+  const fieldStripped = cleaned
+    .replace(/^(tender|detail|sites|boq_items|concept_note|technical_proposal_file|financial_proposal_file|boq_file|tech_tier|om_strategy_summary|status):\s*/i, "")
+    .replace(/^[^:]+:\s*/, "")
+    .trim();
+  if (fieldStripped.length > 10 && fieldStripped.length < cleaned.length) return fieldStripped;
+  return cleaned;
+};
+
 const createEmptyProjectSetupDraft = () => ({
   siteStatus: "not_started",
   workScheduleStart: "",
@@ -10321,6 +10359,7 @@ const VendorDashboard = ({
     });
     setEditingBidId(null);
     setEditingBidStatus(null);
+    setBidFileErrors({});
     setBidFiles({
       technicalProposal: null,
       financialProposal: null,
@@ -10329,6 +10368,7 @@ const VendorDashboard = ({
       implementationPlan: null,
       omPlan: null,
       distributionMap: null,
+      tenderSecurity: null,
     });
     setBidConfirmOpen(false);
     setBidSubmissionConfirmed(false);
@@ -10336,7 +10376,7 @@ const VendorDashboard = ({
 
   const openBidForm = async (tender: Tender, selectedBidId?: string | null, syncUrl = true) => {
     if (!isPreQualified || !latestApprovedPrequal) {
-      setBidMessage("Complete pre-qualification first");
+      setBidMessage("Please complete the pre-qualification process before submitting bids.");
       onGoToPrequal?.();
       return;
     }
@@ -10481,6 +10521,7 @@ const VendorDashboard = ({
       implementationPlan: null,
       omPlan: null,
       distributionMap: null,
+      tenderSecurity: null,
     });
     setBidConfirmOpen(false);
     setBidSubmissionConfirmed(false);
@@ -10704,6 +10745,69 @@ const VendorDashboard = ({
     }));
   };
 
+  const ALLOWED_BID_DOC_EXTENSIONS = [".pdf", ".docx", ".xlsx"];
+  const MAX_BID_FILE_SIZE_BYTES = 10 * 1024 * 1024;
+
+  const [bidFileErrors, setBidFileErrors] = useState<Record<string, string>>({});
+
+  const handleBidFileChange = (key: string, file: File | null) => {
+    if (!file) {
+      setBidFiles(prev => ({ ...prev, [key]: null }));
+      setBidFileErrors(prev => { const next = { ...prev }; delete next[key]; return next; });
+      return;
+    }
+    const ext = "." + file.name.split(".").pop()?.toLowerCase();
+    if (!ALLOWED_BID_DOC_EXTENSIONS.includes(ext)) {
+      setBidFileErrors(prev => ({ ...prev, [key]: `Invalid file type (${ext || "unknown"}). Accepted formats: PDF, DOCX, XLSX.` }));
+      setBidFiles(prev => ({ ...prev, [key]: null }));
+      return;
+    }
+    if (file.size > MAX_BID_FILE_SIZE_BYTES) {
+      setBidFileErrors(prev => ({ ...prev, [key]: `File is too large (${(file.size / 1024 / 1024).toFixed(1)}MB). Maximum size is 10MB.` }));
+      setBidFiles(prev => ({ ...prev, [key]: null }));
+      return;
+    }
+    setBidFiles(prev => ({ ...prev, [key]: file }));
+    setBidFileErrors(prev => { const next = { ...prev }; delete next[key]; return next; });
+  };
+
+  const bidSectionErrors: Record<string, string> = {};
+  if (bidSubmitError) {
+    const lower = bidSubmitError.toLowerCase();
+    if (lower.includes("bid amount") || lower.includes("subsidy") || lower.includes("co-financing") || lower.includes("boq grand total") || lower.includes("boq") || lower.includes("financial")) {
+      bidSectionErrors["financial"] = bidSubmitError;
+    }
+    if (lower.includes("technology tier") || lower.includes("hardware") || lower.includes("device brand") || lower.includes("device model") || lower.includes("tech tier")) {
+      bidSectionErrors["technical"] = bidSubmitError;
+    }
+    if (lower.includes("site") || lower.includes("gps") || lower.includes("latitude") || lower.includes("longitude") || lower.includes("district") || lower.includes("beneficiary") || lower.includes("household")) {
+      bidSectionErrors["geography"] = bidSubmitError;
+    }
+    if (lower.includes("inclusion") || lower.includes("female") || lower.includes("vulnerable") || lower.includes("low-income") || lower.includes("gender action")) {
+      bidSectionErrors["inclusion"] = bidSubmitError;
+    }
+    if (lower.includes("concept note") || lower.includes("narrative") || lower.includes("200 character")) {
+      bidSectionErrors["narrative"] = bidSubmitError;
+    }
+    if (lower.includes("document") || lower.includes("technical proposal file") || lower.includes("financial proposal file") || lower.includes("boq file") || lower.includes("upload")) {
+      bidSectionErrors["documents"] = bidSubmitError;
+    }
+  }
+
+  const scrollToFirstSectionError = () => {
+    const firstSection = Object.keys(bidSectionErrors)[0];
+    if (firstSection) {
+      const el = document.getElementById(`bid-section-${firstSection}`);
+      if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  };
+
+  React.useEffect(() => {
+    if (bidSubmitError) {
+      requestAnimationFrame(() => scrollToFirstSectionError());
+    }
+  }, [bidSubmitError]);
+
   const getBidGeolocationErrorMessage = (error: GeolocationPositionError) => {
     if (error.code === error.PERMISSION_DENIED) {
       return "Location access was denied. Please allow location access in your browser and try again.";
@@ -10734,15 +10838,15 @@ const VendorDashboard = ({
     );
   };
 
-  const submitBid = async (status: BidStatus) => {
+  const submitBid = async (status: BidStatus, forceConfirm = false) => {
     if (!bidTender) return;
     setBidSubmitError(null);
     if (editingBidStatus && editingBidStatus !== BidStatus.DRAFT && editingBidStatus !== BidStatus.REVISION_REQUIRED && editingBidStatus !== BidStatus.SUBMITTED) {
-      setBidMessage(`Bid status "${editingBidStatus}" cannot be edited.`);
+      setBidMessage("This bid has been locked and cannot be edited. Please contact the RBF Management Team if you need to make changes.");
       return;
     }
     if (!isPreQualified) {
-      setBidMessage("Complete pre-qualification first");
+      setBidMessage("Please complete the pre-qualification process before submitting bids.");
       onGoToPrequal?.();
       return;
     }
@@ -10750,7 +10854,7 @@ const VendorDashboard = ({
       setBidMessage(vendorRestrictionMessage);
       return;
     }
-    if (status === BidStatus.SUBMITTED && !bidSubmissionConfirmed) {
+    if (status === BidStatus.SUBMITTED && !forceConfirm && !bidSubmissionConfirmed) {
       setBidConfirmOpen(true);
       return;
     }
@@ -10968,7 +11072,7 @@ const VendorDashboard = ({
       setBidSubmissionConfirmed(false);
     } catch (err: any) {
       const raw = String(err?.message || "");
-      setBidSubmitError(isConnectivityError(raw) ? `Cannot connect to backend (${API_BASE}).` : (toFriendlyApiMessage(raw) || "Failed to submit bid."));
+      setBidSubmitError(isConnectivityError(raw) ? `Cannot connect to backend (${API_BASE}).` : (friendlyBidError(raw) || "Failed to submit bid. Please check all required fields and try again."));
     } finally {
       setIsBidSubmitting(false);
     }
@@ -11177,7 +11281,7 @@ const VendorDashboard = ({
               </div>
             </div>
 
-            <div className="card overflow-hidden border-slate-200">
+            <div id="bid-section-financial" className="card overflow-hidden border-slate-200">
               <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
                 <div className="flex items-center justify-between gap-4">
                   <div className="flex items-center gap-3">
@@ -11193,6 +11297,11 @@ const VendorDashboard = ({
                 </div>
               </div>
               <div className="space-y-6 p-6">
+                {bidSectionErrors["financial"] && (
+                  <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 font-medium">
+                    {bidSectionErrors["financial"]}
+                  </div>
+                )}
                 <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
                   <div className="space-y-1">
                     <label className="text-sm font-bold text-slate-700 ml-1">Bid Amount (LSL) *</label>
@@ -11229,7 +11338,8 @@ const VendorDashboard = ({
                         <p className="mt-1 text-xs text-slate-500">Accepted formats: PDF, DOCX, or XLSX</p>
                         <p className="mt-3 text-xs font-medium text-slate-500">{bidFiles.boq?.name || existingStageTwoDocuments.boq ? "Uploaded and ready" : "Click to upload supporting BoQ"}</p>
                       </label>
-                      <input id="bid-doc-boq" type="file" accept=".pdf,.docx,.xlsx" className="hidden" onChange={(e) => setBidFiles(prev => ({ ...prev, boq: e.target.files?.[0] || null }))} />
+                      <input id="bid-doc-boq" type="file" accept=".pdf,.docx,.xlsx" className="hidden" onChange={(e) => handleBidFileChange("boq", e.target.files?.[0] || null)} />
+                      {bidFileErrors["boq"] && <p className="mt-2 text-xs font-semibold text-rose-600">{bidFileErrors["boq"]}</p>}
                     </div>
                   ) : (
                     <div className="rounded-3xl border border-slate-200 bg-slate-50 p-5">
@@ -11271,7 +11381,7 @@ const VendorDashboard = ({
               </div>
             </div>
 
-            <div className="card overflow-hidden border-slate-200">
+            <div id="bid-section-geography" className="card overflow-hidden border-slate-200">
               <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
                 <div className="flex items-center justify-between gap-4">
                   <div className="flex items-center gap-3">
@@ -11287,6 +11397,11 @@ const VendorDashboard = ({
                 </div>
               </div>
               <div className="p-6">
+                {bidSectionErrors["geography"] && (
+                  <div className="mb-4 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 font-medium">
+                    {bidSectionErrors["geography"]}
+                  </div>
+                )}
                 <div className="space-y-5">
                   <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                     <div className="space-y-1">
@@ -11416,7 +11531,7 @@ const VendorDashboard = ({
             </div>
 
             {isSiteSpecificStage && (
-              <div className="card overflow-hidden border-slate-200">
+              <div id="bid-section-technical" className="card overflow-hidden border-slate-200">
                 <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
                   <div className="flex items-center justify-between gap-4">
                     <div className="flex items-center gap-3">
@@ -11432,6 +11547,11 @@ const VendorDashboard = ({
                   </div>
                 </div>
                 <div className="grid grid-cols-1 gap-4 p-6 md:grid-cols-2">
+                  {bidSectionErrors["technical"] && (
+                    <div className="col-span-full rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 font-medium">
+                      {bidSectionErrors["technical"]}
+                    </div>
+                  )}
                   <div className="space-y-1">
                     <label className="text-sm font-bold text-slate-700 ml-1">Technology Type *</label>
                     <select
@@ -11594,7 +11714,7 @@ const VendorDashboard = ({
               </div>
             )}
 
-            <div className="card overflow-hidden border-slate-200">
+            <div id="bid-section-inclusion" className="card overflow-hidden border-slate-200">
               <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
                 <div className="flex items-center justify-between gap-4">
                   <div className="flex items-center gap-3">
@@ -11610,6 +11730,11 @@ const VendorDashboard = ({
                 </div>
               </div>
               <div className="space-y-5 p-6">
+                {bidSectionErrors["inclusion"] && (
+                  <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 font-medium">
+                    {bidSectionErrors["inclusion"]}
+                  </div>
+                )}
                 <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
                   <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
                     <label className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Female-Headed Household Target *</label>
@@ -11649,7 +11774,8 @@ const VendorDashboard = ({
                       <p className="mt-1 text-xs text-slate-500">Upload the file showing how these commitments will be reached and verified.</p>
                       <p className="mt-3 text-xs font-medium text-slate-500">{genderActionPlanUploaded ? "Uploaded and ready" : "Click to upload"}</p>
                     </label>
-                    <input id="bid-doc-gap" type="file" accept=".pdf,.docx,.xlsx" className="hidden" onChange={(e) => setBidFiles(prev => ({ ...prev, genderActionPlan: e.target.files?.[0] || null }))} />
+                    <input id="bid-doc-gap" type="file" accept=".pdf,.docx,.xlsx" className="hidden" onChange={(e) => handleBidFileChange("genderActionPlan", e.target.files?.[0] || null)} />
+                    {bidFileErrors["genderActionPlan"] && <p className="mt-2 text-xs font-semibold text-rose-600">{bidFileErrors["genderActionPlan"]}</p>}
                   </div>
                 )}
                 <label className="flex items-start gap-3 rounded-3xl border border-slate-200 bg-slate-50 p-4">
@@ -11660,7 +11786,7 @@ const VendorDashboard = ({
             </div>
 
             {isSiteSpecificStage && (
-              <div className="card overflow-hidden border-slate-200">
+              <div id="bid-section-documents" className="card overflow-hidden border-slate-200">
                 <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
                   <div className="flex items-center justify-between gap-4">
                     <div className="flex items-center gap-3">
@@ -11676,6 +11802,11 @@ const VendorDashboard = ({
                   </div>
                 </div>
                 <div className="space-y-4 p-6">
+                  {bidSectionErrors["documents"] && (
+                    <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 font-medium">
+                      {bidSectionErrors["documents"]}
+                    </div>
+                  )}
                   <div className="flex items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
                     <span className="text-sm font-medium text-slate-700">Stage 2 document checklist</span>
                     <span className="text-xs font-bold text-slate-500">{uploadedStageTwoDocumentCount} of {stageTwoDocuments.length} uploaded</span>
@@ -11701,8 +11832,9 @@ const VendorDashboard = ({
                             type="file"
                             accept=".pdf,.docx,.xlsx"
                             className="hidden"
-                            onChange={(e) => setBidFiles(prev => ({ ...prev, [doc.key]: e.target.files?.[0] || null }))}
+                            onChange={(e) => handleBidFileChange(doc.key, e.target.files?.[0] || null)}
                           />
+                          {bidFileErrors[doc.key] && <p className="mt-2 text-xs font-semibold text-rose-600">{bidFileErrors[doc.key]}</p>}
                         </div>
                       );
                     })}
@@ -11711,7 +11843,7 @@ const VendorDashboard = ({
               </div>
             )}
 
-            <div className="card">
+            <div id="bid-section-narrative" className="card">
               <div className="border-b border-slate-100 p-6">
                 <div className="flex items-center justify-between gap-4">
                   <div className="flex items-center gap-3">
@@ -11727,6 +11859,11 @@ const VendorDashboard = ({
                 </div>
               </div>
               <div className="space-y-4 p-6">
+                {bidSectionErrors["narrative"] && (
+                  <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 font-medium">
+                    {bidSectionErrors["narrative"]}
+                  </div>
+                )}
                 <div className="flex items-center justify-between gap-3">
                   <label className="text-sm font-bold text-slate-700 ml-1">Concept Note {isPreQualificationStage ? "*" : ""}</label>
                   <span className={`inline-flex rounded-full px-3 py-1 text-xs font-bold ${implementationStrategyCharCount >= 200 ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
@@ -11772,6 +11909,7 @@ const VendorDashboard = ({
               </button>
               <button
                 onClick={() => {
+                  setBidSubmitError(null);
                   setBidSubmissionConfirmed(false);
                   setBidConfirmOpen(true);
                 }}
@@ -11888,12 +12026,17 @@ const VendorDashboard = ({
                   <div className="flex items-center justify-between"><span>Bid Amount</span><span className="font-bold text-slate-900">LSL {totalProjectValue.toLocaleString()}</span></div>
                   <div className="mt-2 flex items-center justify-between"><span>Stage</span><span className="font-bold text-slate-900">{bidStageLabel}</span></div>
                   <div className="mt-2 flex items-center justify-between"><span>Sites</span><span className="font-bold text-slate-900">{bidSiteCount}</span></div>
-                  <div className="mt-2 flex items-center justify-between"><span>Documents</span><span className="font-bold text-slate-900">{uploadedStageTwoDocumentCount} of 6 uploaded</span></div>
+                  <div className="mt-2 flex items-center justify-between"><span>Documents</span><span className="font-bold text-slate-900">{uploadedStageTwoDocumentCount} of {stageTwoDocuments.length} uploaded</span></div>
                   <div className="mt-2 flex items-center justify-between"><span>Inclusion</span><span className="font-bold text-slate-900">{bidForm.femaleTargetPct || 0}% / {bidForm.vulnerableTargetPct || 0}% / {bidForm.lowIncomeTargetPct || 0}%</span></div>
                 </div>
-                {isSiteSpecificStage && uploadedStageTwoDocumentCount < 6 && (
+                {isSiteSpecificStage && stageTwoDocuments.filter(doc => !(bidFiles as any)[doc.key] && !(existingStageTwoDocuments as any)[doc.key]).length > 0 && (
                   <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-amber-800">
-                    Warning: some required documents are still missing.
+                    <p className="font-medium mb-1">The following required documents are missing:</p>
+                    <ul className="list-disc list-inside space-y-0.5">
+                      {stageTwoDocuments.filter(doc => !(bidFiles as any)[doc.key] && !(existingStageTwoDocuments as any)[doc.key]).map(doc => (
+                        <li key={doc.key}>{doc.label}</li>
+                      ))}
+                    </ul>
                   </div>
                 )}
                 <label className="flex items-start gap-3 rounded-xl border border-slate-200 p-3">
@@ -11910,7 +12053,7 @@ const VendorDashboard = ({
                 </button>
                 <button
                   onClick={() => {
-                    submitBid(BidStatus.SUBMITTED);
+                    submitBid(BidStatus.SUBMITTED, true);
                   }}
                   disabled={!bidSubmissionConfirmed}
                   className="flex-1 btn-primary"

@@ -2221,6 +2221,17 @@ class TenderBidViewSet(viewsets.ModelViewSet):
             self._record_bid_submission(request, bid)
         return Response(TenderBidSerializer(bid, context=self.get_serializer_context()).data, status=status.HTTP_200_OK)
 
+    def destroy(self, request, *args, **kwargs):
+        bid = self.get_object()
+        if request.user.role != UserRole.VENDOR or bid.vendor_id != str(request.user.id):
+            raise PermissionDenied('Only the submitting vendor can delete this bid.')
+        if bid.status not in {BidStatus.DRAFT, BidStatus.REVISION_REQUIRED, BidStatus.WITHDRAWN}:
+            return Response(
+                {'detail': 'Only draft or withdrawn bids can be deleted. Please contact the RBF Management Team to withdraw a submitted bid.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return super().destroy(request, *args, **kwargs)
+
     def _is_submitting(self, bid: TenderBid, request) -> bool:
         target_status = request.data.get('status')
         return target_status == BidStatus.SUBMITTED and bid.status in {BidStatus.DRAFT, BidStatus.REVISION_REQUIRED, BidStatus.SUBMITTED}

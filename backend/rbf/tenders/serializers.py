@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
@@ -539,6 +540,49 @@ class TenderBidSerializer(serializers.ModelSerializer):
             attrs['financial_proposal'] = ''
         if not attrs.get('boq_details') and attrs.get('boq_items'):
             attrs['boq_details'] = attrs['boq_items']
+
+        bid_status = attrs.get('status', getattr(instance, 'status', None) if instance else None)
+
+        # Stage 1: enforce concept note minimum length on final submission
+        if stage_key == 'pre_qualification' and bid_status == BidStatus.SUBMITTED:
+            concept_note = str(attrs.get('concept_note', getattr(instance, 'concept_note', '') if instance else '') or '').strip()
+            if len(concept_note) < 200:
+                errors['concept_note'] = 'Concept note must be at least 200 characters before submission.'
+
+        # Stage 2: enforce tech tier ceiling on final submission
+        if stage_key == 'site_specific' and bid_status == BidStatus.SUBMITTED:
+            request = self.context.get('request')
+            if request and hasattr(request, 'user') and request.user.role == UserRole.VENDOR:
+                latest_prequal = (
+                    VendorPrequalification.objects.filter(vendor_id=str(request.user.id))
+                    .order_by('-submitted_at', '-id')
+                    .first()
+                )
+                if (
+                    latest_prequal
+                    and latest_prequal.status == PrequalificationStatus.APPROVED
+                    and latest_prequal.tech_tier
+                ):
+                    approved_match = re.search(r'\d+', str(latest_prequal.tech_tier))
+                    bid_tier_raw = attrs.get('tech_tier', getattr(instance, 'tech_tier', '') if instance else '')
+                    bid_match = re.search(r'\d+', str(bid_tier_raw))
+                    if approved_match and bid_match:
+                        approved_num = int(approved_match.group())
+                        bid_num = int(bid_match.group())
+                        if bid_num > approved_num:
+                            errors['tech_tier'] = f'Technical tier cannot exceed your approved pre-qualification tier (Tier {approved_num}).'
+
+        # Stage 2: enforce required files on final submission
+        if stage_key == 'site_specific' and bid_status == BidStatus.SUBMITTED:
+            required_file_fields = [
+                ('technical_proposal_file', 'Technical Proposal'),
+                ('financial_proposal_file', 'Financial Proposal'),
+                ('boq_file', 'Bill of Quantities'),
+            ]
+            for field_name, label in required_file_fields:
+                file_obj = attrs.get(field_name, getattr(instance, field_name, None) if instance else None)
+                if not file_obj:
+                    errors[field_name] = f'{label} document is required for Stage 2 submissions.'
 
         if errors:
             raise serializers.ValidationError(errors)
