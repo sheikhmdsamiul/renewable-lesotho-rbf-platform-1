@@ -473,10 +473,10 @@ const friendlyBidError = (raw: string): string => {
     if (cleaned.includes(pattern) || raw.includes(pattern)) return friendly;
   }
   const fieldStripped = cleaned
-    .replace(/^(tender|detail|sites|boq_items|concept_note|technical_proposal_file|financial_proposal_file|boq_file|tech_tier|om_strategy_summary|status):\s*/i, "")
-    .replace(/^[^:]+:\s*/, "")
+    .replace(/^(tender|detail|sites|boq_items|boq_details|concept_note|technical_proposal_file|financial_proposal_file|boq_file|tech_tier|om_strategy_summary|status|system_configuration|non_field_errors):\s*/i, "")
     .trim();
-  if (fieldStripped.length > 10 && fieldStripped.length < cleaned.length) return fieldStripped;
+  if (fieldStripped.length > 3 && fieldStripped !== cleaned && !fieldStripped.includes("[object ")) return fieldStripped;
+  if (cleaned.includes("[object ") || raw.includes("[object ")) return "";
   return cleaned;
 };
 
@@ -868,6 +868,7 @@ const Register = ({
   const [step, setStep] = useState(1);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [otp, setOtp] = useState("");
   const [otpInfo, setOtpInfo] = useState("");
   const [registrationCertName, setRegistrationCertName] = useState("");
@@ -894,28 +895,80 @@ const Register = ({
   const techOptions = ["SHS", "ICS", "GMG", "SWP", "PUE"];
   const districts = ["Maseru", "Leribe", "Berea", "Mafeteng", "Mohale's Hoek", "Quthing", "Qacha's Nek", "Mokhotlong", "Thaba-Tseka", "Butha-Buthe"];
 
+  const validateStep = (targetStep: number): Record<string, string> => {
+    const errors: Record<string, string> = {};
+    if (targetStep === 1) {
+      if (!formData.fullName.trim()) errors.fullName = "Full name is required.";
+      const username = formData.username.trim();
+      if (!username) errors.username = "Username is required.";
+      else if (username.length > 150) errors.username = "Username must be 150 characters or fewer.";
+      else if (!/^[\w.@+-]+$/.test(username)) errors.username = "Username may only contain letters, numbers, and @/./+/-/_ characters.";
+      const email = formData.email.trim();
+      if (!email) errors.email = "Email is required.";
+      else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) errors.email = "Enter a valid email address.";
+      const password = formData.password;
+      if (!password) errors.password = "This field is required.";
+      else if (password.length < 8) errors.password = "Password must be at least 8 characters.";
+      else if (/^\d+$/.test(password)) errors.password = "This password is entirely numeric.";
+      else {
+        const similarTargets: Array<[string, string]> = [
+          [username.toLowerCase(), "username"],
+          [email.toLowerCase(), "email"],
+          [formData.fullName.trim().toLowerCase(), "full name"],
+        ];
+        const pw = password.toLowerCase();
+        const match = similarTargets.find(([target]) => target.length > 0 && pw === target);
+        if (match) errors.password = `The password is too similar to the ${match[1]}.`;
+      }
+      const digits = formData.mobile.replace(/\D/g, "");
+      if (!formData.mobile) errors.mobile = "Mobile number is required.";
+      else if (!/^\d{8,15}$/.test(digits)) errors.mobile = "Mobile number must be 8-15 digits.";
+      if (!formData.nationalId.trim()) errors.nationalId = "National ID or Passport is required for vendors.";
+    }
+    if (targetStep === 2) {
+      if (!formData.orgName.trim()) errors.orgName = "Organization name is required for vendors.";
+      if (!formData.taxId.trim()) errors.taxId = "Tax ID is required for vendors.";
+      if (!formData.address.trim()) errors.address = "Address is required for vendors.";
+      if (formData.techTypes.length === 0) errors.techTypes = "At least one technology type is required for vendors.";
+      if (!registrationCertName) errors.registrationCert = "Registration certificate is required for vendors.";
+      else if (!/\.(pdf|jpe?g|png)$/i.test(registrationCertName)) errors.registrationCert = "Certificate must be a PDF or JPG/PNG file.";
+    }
+    if (targetStep === 3) {
+      if (!otp.trim()) errors.otp = "Please enter the 6-digit verification code.";
+      else if (!/^\d{6}$/.test(otp.trim())) errors.otp = "Verification code must be exactly 6 digits.";
+    }
+    return errors;
+  };
+
+  const fieldError = (name: string) => fieldErrors[name] || "";
+  const inputClass = (name: string) =>
+    `input-field ${fieldErrors[name] ? "border-rose-400 focus:border-rose-500 focus:ring-rose-200" : ""}`;
+  const clearFieldError = (name: string) => {
+    setFieldErrors((prev) => {
+      if (!(name in prev)) return prev;
+      const next = { ...prev };
+      delete next[name];
+      return next;
+    });
+  };
+  const setField = (name: string, value: string) => {
+    setFormData((prev) => ({ ...prev, [name]: value }));
+    clearFieldError(name);
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
     const normalizedEmail = formData.email.trim().toLowerCase();
 
     if (step < 3) {
-      if (step === 1) {
-        const digits = formData.mobile.replace(/\D/g, "");
-        if (!/^\d{8,15}$/.test(digits)) {
-          setError("Mobile number must be 8-15 digits.");
-          return;
-        }
+      const errors = validateStep(step);
+      setFieldErrors(errors);
+      if (Object.keys(errors).length > 0) {
+        setError("Please fix the highlighted fields below before continuing.");
+        return;
       }
       if (step === 2) {
-        if (formData.techTypes.length === 0) {
-          setError("Please select at least one technology type.");
-          return;
-        }
-        if (!registrationCertName) {
-          setError("Please upload your registration certificate.");
-          return;
-        }
         try {
           setIsSubmitting(true);
           const otpResp = await requestRegistrationOtp(normalizedEmail);
@@ -943,8 +996,10 @@ const Register = ({
       return;
     }
 
-    if (!otp.trim()) {
-      setError("Please enter the OTP sent to your email.");
+    const otpErrors = validateStep(3);
+    setFieldErrors(otpErrors);
+    if (Object.keys(otpErrors).length > 0) {
+      setError("Please enter a valid verification code.");
       return;
     }
 
@@ -1020,10 +1075,11 @@ const Register = ({
                   required
                   type="text"
                   value={formData.fullName}
-                  onChange={(e) => setFormData({ ...formData, fullName: e.target.value })}
-                  className="input-field"
+                  onChange={(e) => setField("fullName", e.target.value)}
+                  className={inputClass("fullName")}
                   placeholder="John Doe"
                 />
+                {fieldError("fullName") && <p className="text-xs text-rose-600 mt-1">{fieldError("fullName")}</p>}
               </div>
               <div className="space-y-1">
                 <label className="text-sm font-bold text-slate-700 ml-1">Username *</label>
@@ -1031,10 +1087,11 @@ const Register = ({
                   required
                   type="text"
                   value={formData.username}
-                  onChange={(e) => setFormData({ ...formData, username: e.target.value.replace(/\s/g, "") })}
-                  className="input-field"
+                  onChange={(e) => setField("username", e.target.value.replace(/\s/g, ""))}
+                  className={inputClass("username")}
                   placeholder="vendor_username"
                 />
+                {fieldError("username") && <p className="text-xs text-rose-600 mt-1">{fieldError("username")}</p>}
               </div>
               <div className="space-y-1">
                 <label className="text-sm font-bold text-slate-700 ml-1">Email Address *</label>
@@ -1043,13 +1100,14 @@ const Register = ({
                   type="email"
                   value={formData.email}
                   onChange={(e) => {
-                    setFormData({ ...formData, email: e.target.value });
+                    setField("email", e.target.value);
                     setOtp("");
                     setOtpInfo("");
                   }}
-                  className="input-field"
+                  className={inputClass("email")}
                   placeholder="john@example.com"
                 />
+                {fieldError("email") && <p className="text-xs text-rose-600 mt-1">{fieldError("email")}</p>}
               </div>
               <div className="space-y-1">
                 <label className="text-sm font-bold text-slate-700 ml-1">Password *</label>
@@ -1058,10 +1116,11 @@ const Register = ({
                   minLength={8}
                   type="password"
                   value={formData.password}
-                  onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-                  className="input-field"
+                  onChange={(e) => setField("password", e.target.value)}
+                  className={inputClass("password")}
                   placeholder="At least 8 characters"
                 />
+                {fieldError("password") && <p className="text-xs text-rose-600 mt-1">{fieldError("password")}</p>}
               </div>
               <div className="space-y-1">
                 <label className="text-sm font-bold text-slate-700 ml-1">Mobile Number *</label>
@@ -1069,14 +1128,15 @@ const Register = ({
                   required
                   type="tel"
                   value={formData.mobile}
-                  onChange={(e) => setFormData({ ...formData, mobile: e.target.value.replace(/\D/g, "") })}
-                  className="input-field"
+                  onChange={(e) => setField("mobile", e.target.value.replace(/\D/g, ""))}
+                  className={inputClass("mobile")}
                   inputMode="numeric"
                   pattern="[0-9]{8,15}"
                   minLength={8}
                   maxLength={15}
                   placeholder="Digits only"
                 />
+                {fieldError("mobile") && <p className="text-xs text-rose-600 mt-1">{fieldError("mobile")}</p>}
               </div>
               <div className="space-y-1">
                 <label className="text-sm font-bold text-slate-700 ml-1">Gender of Focal Person *</label>
@@ -1097,10 +1157,11 @@ const Register = ({
                   required
                   type="text"
                   value={formData.nationalId}
-                  onChange={(e) => setFormData({ ...formData, nationalId: e.target.value })}
-                  className="input-field"
+                  onChange={(e) => setField("nationalId", e.target.value)}
+                  className={inputClass("nationalId")}
                   placeholder="ID Number"
                 />
+                {fieldError("nationalId") && <p className="text-xs text-rose-600 mt-1">{fieldError("nationalId")}</p>}
               </div>
             </div>
           ) : step === 2 ? (
@@ -1125,10 +1186,11 @@ const Register = ({
                     required
                     type="text"
                     value={formData.orgName}
-                    onChange={(e) => setFormData({ ...formData, orgName: e.target.value })}
-                    className="input-field"
+                    onChange={(e) => setField("orgName", e.target.value)}
+                    className={inputClass("orgName")}
                     placeholder="Legal Entity Name"
                   />
+                  {fieldError("orgName") && <p className="text-xs text-rose-600 mt-1">{fieldError("orgName")}</p>}
                 </div>
                 <div className="space-y-1">
                   <label className="text-sm font-bold text-slate-700 ml-1">Organization Type *</label>
@@ -1149,10 +1211,11 @@ const Register = ({
                     required
                     type="text"
                     value={formData.taxId}
-                    onChange={(e) => setFormData({ ...formData, taxId: e.target.value })}
-                    className="input-field"
+                    onChange={(e) => setField("taxId", e.target.value)}
+                    className={inputClass("taxId")}
                     placeholder="TIN Number"
                   />
+                  {fieldError("taxId") && <p className="text-xs text-rose-600 mt-1">{fieldError("taxId")}</p>}
                 </div>
                 <div className="space-y-1">
                   <label className="text-sm font-bold text-slate-700 ml-1">HQ Address *</label>
@@ -1160,16 +1223,17 @@ const Register = ({
                     required
                     type="text"
                     value={formData.address}
-                    onChange={(e) => setFormData({ ...formData, address: e.target.value })}
-                    className="input-field"
+                    onChange={(e) => setField("address", e.target.value)}
+                    className={inputClass("address")}
                     placeholder="Physical Address"
                   />
+                  {fieldError("address") && <p className="text-xs text-rose-600 mt-1">{fieldError("address")}</p>}
                 </div>
                 <div className="space-y-1 md:col-span-2">
                   <label className="text-sm font-bold text-slate-700 ml-1">Directors / Partners</label>
                   <textarea
                     value={formData.associatedEntities}
-                    onChange={(e) => setFormData({ ...formData, associatedEntities: e.target.value })}
+                    onChange={(e) => setField("associatedEntities", e.target.value)}
                     className="input-field min-h-[96px]"
                     placeholder="Comma-separated names for directors, partners, or key principals"
                   />
@@ -1179,7 +1243,7 @@ const Register = ({
                   <input
                     type="text"
                     value={formData.deviceId}
-                    onChange={(e) => setFormData({ ...formData, deviceId: e.target.value })}
+                    onChange={(e) => setField("deviceId", e.target.value)}
                     className="input-field"
                     placeholder="Optional device identifier"
                   />
@@ -1200,6 +1264,7 @@ const Register = ({
                         } else {
                           setFormData({ ...formData, techTypes: [...current, tech] });
                         }
+                        clearFieldError("techTypes");
                       }}
                       className={`px-4 py-2 rounded-xl text-sm font-bold transition-all ${
                         formData.techTypes.includes(tech)
@@ -1211,6 +1276,7 @@ const Register = ({
                     </button>
                   ))}
                 </div>
+                {fieldError("techTypes") && <p className="text-xs text-rose-600 mt-1">{fieldError("techTypes")}</p>}
               </div>
 
               <div className="space-y-2">
@@ -1223,19 +1289,21 @@ const Register = ({
                   onChange={(e) => {
                     const file = e.target.files?.[0];
                     setRegistrationCertName(file ? file.name : "");
+                    clearFieldError("registrationCert");
                   }}
                 />
                 <button
                   type="button"
                   onClick={() => certInputRef.current?.click()}
-                  className="w-full border-2 border-dashed border-slate-200 rounded-2xl p-8 text-center hover:border-emerald-500 transition-colors"
+                  className={`w-full border-2 border-dashed rounded-2xl p-8 text-center transition-colors ${fieldErrors.registrationCert ? "border-rose-400" : "border-slate-200 hover:border-emerald-500"}`}
                 >
-                  <Plus className="mx-auto text-slate-400 mb-2" size={32} />
+                  <Plus className={`mx-auto mb-2 ${fieldErrors.registrationCert ? "text-rose-400" : "text-slate-400"}`} size={32} />
                   <p className="text-sm font-medium text-slate-600">
                     {registrationCertName || "Click to upload or drag and drop"}
                   </p>
                   <p className="text-xs text-slate-400 mt-1">Maximum file size 10MB</p>
                 </button>
+                {fieldError("registrationCert") && <p className="text-xs text-rose-600 mt-1">{fieldError("registrationCert")}</p>}
               </div>
             </div>
           ) : (
@@ -1251,11 +1319,12 @@ const Register = ({
                   type="text"
                   maxLength={6}
                   value={otp}
-                  onChange={(e) => setOtp(e.target.value)}
-                  className="text-center text-4xl tracking-[0.5em] font-black py-6 border-2 border-slate-200 rounded-2xl focus:border-emerald-500 focus:ring-0 outline-none w-full max-w-[300px]"
+                  onChange={(e) => { setOtp(e.target.value); clearFieldError("otp"); }}
+                  className={`text-center text-4xl tracking-[0.5em] font-black py-6 border-2 rounded-2xl focus:ring-0 outline-none w-full max-w-[300px] ${fieldErrors.otp ? "border-rose-400 focus:border-rose-500" : "border-slate-200 focus:border-emerald-500"}`}
                   placeholder="000000"
                 />
               </div>
+              {fieldError("otp") && <p className="text-center text-xs text-rose-600 mt-1">{fieldError("otp")}</p>}
               <div className="text-center">
                 <p className="text-sm text-slate-400">
                   Didn't receive the code?{" "}
@@ -1297,7 +1366,19 @@ const Register = ({
 
           {error && <p className="text-rose-600 text-xs font-medium">{error}</p>}
 
-          <div className="flex justify-end pt-4">
+          <div className="flex items-center justify-between pt-4">
+            {step > 1 ? (
+              <button
+                type="button"
+                onClick={() => { setFieldErrors({}); setError(""); setStep(step - 1); }}
+                disabled={isSubmitting}
+                className="btn-secondary px-8 py-3 rounded-xl disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                Back
+              </button>
+            ) : (
+              <span />
+            )}
             <button
               type="submit"
               disabled={isSubmitting}

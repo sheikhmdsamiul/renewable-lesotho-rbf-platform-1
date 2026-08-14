@@ -179,6 +179,28 @@ function normalizeTechnologyType(raw?: string): string | undefined {
   return mapping[key] || value.toUpperCase();
 }
 
+function flattenErrorValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (value == null) return "";
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const nested = flattenErrorValue(item);
+      if (nested) return nested;
+    }
+    return "";
+  }
+  if (typeof value === "object") {
+    const parts: string[] = [];
+    for (const [key, sub] of Object.entries(value as Record<string, unknown>)) {
+      const nested = flattenErrorValue(sub);
+      if (nested) parts.push(`${key}: ${nested}`);
+    }
+    return parts.join("; ");
+  }
+  return "";
+}
+
 function extractApiErrorDetail(text: string): string {
   const trimmed = (text || "").trim();
   if (!trimmed) return "";
@@ -187,14 +209,13 @@ function extractApiErrorDetail(text: string): string {
     const payload = JSON.parse(trimmed);
     if (typeof payload?.detail === "string") return payload.detail;
     if (Array.isArray(payload?.non_field_errors) && payload.non_field_errors.length) {
-      return String(payload.non_field_errors[0]);
+      return flattenErrorValue(payload.non_field_errors);
     }
     if (payload && typeof payload === "object") {
       const firstKey = Object.keys(payload)[0];
       if (firstKey) {
-        const value = payload[firstKey];
-        if (Array.isArray(value) && value.length) return `${firstKey}: ${String(value[0])}`;
-        if (typeof value === "string") return `${firstKey}: ${value}`;
+        const flattened = flattenErrorValue(payload[firstKey]);
+        if (flattened) return `${firstKey}: ${flattened}`;
       }
     }
   } catch {
