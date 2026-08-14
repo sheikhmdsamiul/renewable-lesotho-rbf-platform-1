@@ -10343,7 +10343,7 @@ const VendorDashboard = ({
       sites: [
         {
           siteName: "",
-          district: "Maseru",
+          district: bidTender?.targetDistricts?.[0] || "Maseru",
           villageSubDistrict: "",
           latitude: "",
           longitude: "",
@@ -10485,9 +10485,16 @@ const VendorDashboard = ({
       dailyPaymentAmountLsl: version.daily_payment_amount_lsl != null ? String(version.daily_payment_amount_lsl) : "",
       collectionMethod: version.collection_method ?? "Mobile Money",
       sites: (version.sites && version.sites.length > 0
-        ? version.sites.map((site) => ({
+        ? version.sites.map((site) => {
+            const validDistricts = (bidTender?.targetDistricts && bidTender.targetDistricts.length > 0)
+              ? bidTender.targetDistricts
+              : ["Maseru", "Leribe", "Berea", "Mafeteng", "Mohale's Hoek", "Quthing", "Qacha's Nek", "Mokhotlong", "Thaba-Tseka", "Butha-Buthe"];
+            const loadedDistrict = site.district ?? "";
+            return {
             siteName: site.siteName ?? "",
-            district: site.district ?? "Maseru",
+            district: validDistricts.includes(loadedDistrict)
+              ? loadedDistrict
+              : (bidTender?.targetDistricts?.[0] || "Maseru"),
             villageSubDistrict: site.villageSubDistrict ?? "",
             latitude: site.latitude != null ? String(site.latitude) : "",
             longitude: site.longitude != null ? String(site.longitude) : "",
@@ -10498,10 +10505,11 @@ const VendorDashboard = ({
             estimatedEnergyDemandKwhMonth: site.estimatedEnergyDemandKwhMonth != null ? String(site.estimatedEnergyDemandKwhMonth) : "",
             roadAccessAvailable: Boolean(site.roadAccessAvailable),
             notes: site.notes ?? "",
-          }))
+            };
+          })
         : [{
             siteName: "",
-            district: "Maseru",
+            district: bidTender?.targetDistricts?.[0] || "Maseru",
             villageSubDistrict: "",
             latitude: "",
             longitude: "",
@@ -10707,9 +10715,7 @@ const VendorDashboard = ({
   const updatePrimaryDistrict = (value: string) => {
     setBidForm(prev => ({
       ...prev,
-      sites: prev.sites.map((site, siteIndex) => (
-        siteIndex === 0 || !site.siteName.trim() ? { ...site, district: value } : site
-      )),
+      sites: prev.sites.map((site) => ({ ...site, district: value })),
     }));
   };
 
@@ -10720,7 +10726,7 @@ const VendorDashboard = ({
         ...prev.sites,
         {
           siteName: "",
-          district: "Maseru",
+          district: bidTender?.targetDistricts?.[0] || "Maseru",
           villageSubDistrict: "",
           latitude: "",
           longitude: "",
@@ -11027,9 +11033,9 @@ const VendorDashboard = ({
         gender_action_plan_file: bidFiles.genderActionPlan ?? undefined,
         implementation_plan_file: bidFiles.implementationPlan ?? undefined,
         tender_security_file: bidFiles.tenderSecurity ?? undefined,
-        gender_inclusion_target: Number(bidForm.femaleTargetPct),
-        vulnerable_group_target: Number(bidForm.vulnerableTargetPct),
-        low_income_target: Number(bidForm.lowIncomeTargetPct),
+        female_target_pct: Number(bidForm.femaleTargetPct),
+        vulnerable_target_pct: Number(bidForm.vulnerableTargetPct),
+        low_income_target_pct: Number(bidForm.lowIncomeTargetPct),
         inclusion_commitment_confirmed: bidForm.inclusionCommitmentConfirmed,
         om_strategy_summary: bidForm.omStrategySummary,
         aftersales_description: bidForm.aftersalesDescription,
@@ -11236,8 +11242,8 @@ const VendorDashboard = ({
                   <p className="mt-1 text-sm font-bold text-white">{bidTender.technologyTypes?.join(" / ") || "Not set"}</p>
                 </div>
                 <div className="rounded-2xl border border-white/10 bg-slate-950/20 px-4 py-3">
-                  <p className="text-xs uppercase tracking-[0.16em] text-slate-300">Primary District</p>
-                  <p className="mt-1 text-sm font-bold text-white">{primaryDistrict || "Maseru"}</p>
+                  <p className="text-xs uppercase tracking-[0.16em] text-slate-300">Target District{bidTender?.targetDistricts && bidTender.targetDistricts.length > 1 ? "s" : ""}</p>
+                  <p className="mt-1 text-sm font-bold text-white">{bidTender?.targetDistricts?.join(", ") || primaryDistrict || "Maseru"}</p>
                 </div>
               </div>
             </div>
@@ -11271,7 +11277,7 @@ const VendorDashboard = ({
                   { label: "Application Stage", value: bidStageLabel },
                   { label: "Deadline Timer", value: bidDeadlineCountdown },
                   { label: "Technology Type", value: bidTender.technologyTypes?.join(" / ") || "Not set" },
-                  { label: "District", value: primaryDistrict || "Maseru" },
+                  { label: `Target District${bidTender?.targetDistricts && bidTender.targetDistricts.length > 1 ? "s" : ""}`, value: bidTender?.targetDistricts?.join(", ") || primaryDistrict || "Maseru" },
                 ].map((item) => (
                   <div key={item.label} className="space-y-1">
                     <label className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">{item.label}</label>
@@ -18388,6 +18394,7 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
   const [evaluations, setEvaluations] = useState<TenderBidEvaluation[]>([]);
   const [tenderThresholds, setTenderThresholds] = useState<Record<string, number>>({});
   const [tenderSecurityRequired, setTenderSecurityRequired] = useState<Record<string, boolean>>({});
+  const [tenderDetails, setTenderDetails] = useState<Record<string, Tender>>({});
   const [expandedTender, setExpandedTender] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [notification, setNotification] = useState<string | null>(null);
@@ -18429,6 +18436,7 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
       ]);
       setTenderThresholds(Object.fromEntries(tenderRows.map((item) => [item.id, item.technicalThreshold ?? 70])));
       setTenderSecurityRequired(Object.fromEntries(tenderRows.map((item) => [item.id, item.tenderSecurityRequired ?? false])));
+      setTenderDetails(Object.fromEntries(tenderRows.map((item) => [item.id, item])));
       setBidQueue(bids.filter(b => b.status !== BidStatus.DRAFT));
       setEvaluations(evals);
     } finally {
@@ -18676,12 +18684,25 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
 
     if (isFinancialEvaluationMode && isStageOneBid) {
       const proposedBudget = Number(selectedEval.bid.bid_amount || 0);
-      const tenderBudget = 0;
+      const subsidyRequested = Number(selectedEval.bid.subsidy_requested || 0);
+      const coFinancing = Number(selectedEval.bid.system_configuration?.co_financing_amount_lsl ?? Math.max(0, proposedBudget - subsidyRequested));
+      const bidTenderDetails = tenderDetails[selectedEval.bid.tender];
+      const tenderTechTypes = bidTenderDetails?.technologyTypes || [];
+      const tenderTargetDistricts = bidTenderDetails?.targetDistricts || [];
+      const bidSiteDistricts = (selectedEval.bid.sites || []).map(s => s.district).filter(Boolean);
+      const districtMatch = tenderTargetDistricts.length === 0 || bidSiteDistricts.some(d => tenderTargetDistricts.includes(d));
+      const totalHouseholds = (selectedEval.bid.sites || []).reduce((sum, s) => sum + Number(s.estimatedHouseholds || 0), 0);
+      const statusLabel = selectedEval.bid.status === BidStatus.UNDER_REVIEW ? "Under Review"
+        : selectedEval.bid.status === BidStatus.REVISION_REQUIRED ? "Revision Required"
+        : selectedEval.bid.status === BidStatus.ACCEPTED ? "Shortlisted"
+        : selectedEval.bid.status === BidStatus.REJECTED ? "Rejected"
+        : "Submitted";
       const inclusionChecks = [
-        { label: "Female target", met: Number(selectedEval.bid.female_target_pct || 0) >= 50, value: `${selectedEval.bid.female_target_pct || 0}%` },
-        { label: "Vulnerable target", met: Number(selectedEval.bid.vulnerable_target_pct || 0) >= 30, value: `${selectedEval.bid.vulnerable_target_pct || 0}%` },
-        { label: "Low-income target", met: Number(selectedEval.bid.low_income_target_pct || 0) >= 60, value: `${selectedEval.bid.low_income_target_pct || 0}%` },
+        { label: "Female-headed households", met: Number(selectedEval.bid.female_target_pct || 0) >= 50, value: `${selectedEval.bid.female_target_pct || 0}%`, required: "≥ 50%" },
+        { label: "Vulnerable groups", met: Number(selectedEval.bid.vulnerable_target_pct || 0) >= 30, value: `${selectedEval.bid.vulnerable_target_pct || 0}%`, required: "≥ 30%" },
+        { label: "Low-income households", met: Number(selectedEval.bid.low_income_target_pct || 0) >= 60, value: `${selectedEval.bid.low_income_target_pct || 0}%`, required: "≥ 60%" },
       ];
+      const allInclusionMet = inclusionChecks.every(c => c.met);
       return (
         <>
           <AnimatePresence>
@@ -18697,34 +18718,64 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
               </motion.div>
             )}
           </AnimatePresence>
-          <div className="space-y-6 max-w-5xl mx-auto">
-            <div className="flex items-center gap-4 mb-8">
+          <div className="space-y-6 max-w-6xl mx-auto">
+            <div className="flex items-center gap-4 mb-4">
               <button onClick={() => navigateView("list")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
                 <X size={20} />
               </button>
-              <div>
+              <div className="min-w-0 flex-1">
                 <h1 className="text-2xl font-bold text-slate-900">Stage 1 Evaluation</h1>
-                <p className="text-slate-500">{selectedEval.bid.tender_name || selectedEval.bid.tender} • {selectedEval.bid.vendor_name}</p>
+                <p className="text-sm text-slate-500 truncate">{selectedEval.bid.tender_name || selectedEval.bid.tender} • {selectedEval.bid.vendor_name}</p>
               </div>
+              <span className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-bold shrink-0 ${
+                selectedEval.bid.status === BidStatus.ACCEPTED ? "bg-emerald-100 text-emerald-700" :
+                selectedEval.bid.status === BidStatus.REJECTED ? "bg-rose-100 text-rose-700" :
+                selectedEval.bid.status === BidStatus.UNDER_REVIEW ? "bg-amber-100 text-amber-700" :
+                "bg-slate-100 text-slate-700"
+              }`}>{statusLabel}</span>
             </div>
 
-            <div className="grid gap-6 lg:grid-cols-[1.2fr,0.8fr]">
-              <div className="space-y-6">
+            <div className="grid gap-6 lg:grid-cols-[1fr,380px]">
+              <div className="space-y-6 min-w-0">
                 <div className="card p-6">
                   <h3 className="text-lg font-bold text-slate-900">Concept Note</h3>
-                  <p className="mt-4 whitespace-pre-wrap text-sm text-slate-700">{selectedEval.bid.concept_note || "No concept note submitted."}</p>
+                  <p className="mt-4 whitespace-pre-wrap text-sm text-slate-700 break-words">{selectedEval.bid.concept_note || "No concept note submitted."}</p>
                 </div>
 
                 <div className="card p-6">
-                  <h3 className="text-lg font-bold text-slate-900">Proposed Sites</h3>
-                  <div className="mt-4 space-y-3">
-                    {(selectedEval.bid.sites || []).map((site, index) => (
-                      <div key={`${site.siteName}-${index}`} className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                        <p className="font-semibold text-slate-900">{site.siteName || `Site ${index + 1}`}</p>
-                        <p className="mt-1 text-sm text-slate-600">{site.district || "No district"}{site.villageSubDistrict ? ` • ${site.villageSubDistrict}` : ""}</p>
-                        <p className="mt-2 text-xs text-slate-500">GPS: {site.latitude != null && site.longitude != null ? `${site.latitude}, ${site.longitude}` : "Not provided at Stage 1"}</p>
-                      </div>
-                    ))}
+                  <div className="flex items-center justify-between gap-4 mb-4">
+                    <h3 className="text-lg font-bold text-slate-900">Proposed Sites</h3>
+                    <span className="text-sm text-slate-500">{(selectedEval.bid.sites || []).length} site{(selectedEval.bid.sites || []).length !== 1 ? "s" : ""} • {totalHouseholds.toLocaleString()} households</span>
+                  </div>
+                  <div className="space-y-3">
+                    {(selectedEval.bid.sites || []).map((site, index) => {
+                      const siteDistrictMatch = tenderTargetDistricts.length === 0 || tenderTargetDistricts.includes(site.district);
+                      return (
+                        <div key={`${site.siteName}-${index}`} className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0 flex-1">
+                              <p className="font-semibold text-slate-900 truncate">{site.siteName || `Site ${index + 1}`}</p>
+                              <div className="mt-1 flex flex-wrap items-center gap-2 text-sm">
+                                {site.district && (
+                                  <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${siteDistrictMatch ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
+                                    {siteDistrictMatch ? <CheckCircle2 size={12} /> : <AlertTriangle size={12} />}
+                                    {site.district}
+                                  </span>
+                                )}
+                                {!site.district && <span className="text-xs text-rose-600 font-medium">No district</span>}
+                                {site.villageSubDistrict && <span className="text-xs text-slate-500">• {site.villageSubDistrict}</span>}
+                              </div>
+                            </div>
+                          </div>
+                          <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
+                            {site.estimatedHouseholds != null && <span>{site.estimatedHouseholds} households</span>}
+                            {site.targetBeneficiaryType && <span className="capitalize">{site.targetBeneficiaryType.replace(/_/g, " ")}</span>}
+                            {site.latitude != null && site.longitude != null && <span>GPS: {site.latitude}, {site.longitude}</span>}
+                            {site.latitude == null && <span className="text-amber-600">GPS not provided</span>}
+                          </div>
+                        </div>
+                      );
+                    })}
                     {(selectedEval.bid.sites || []).length === 0 && (
                       <p className="text-sm text-slate-500">No sites submitted.</p>
                     )}
@@ -18733,40 +18784,64 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
               </div>
 
               <div className="space-y-6">
-                <div className="card p-6">
-                  <h3 className="text-lg font-bold text-slate-900">Tender Fit Checks</h3>
-                  <div className="mt-4 space-y-3 text-sm">
-                    <div className="flex items-center justify-between rounded-xl border border-slate-200 px-4 py-3">
-                      <span className="text-slate-600">Bid Amount</span>
-                      <span className="font-semibold text-slate-900">LSL {proposedBudget.toLocaleString()}</span>
-                    </div>
-                    <div className="flex items-center justify-between rounded-xl border border-slate-200 px-4 py-3">
-                      <span className="text-slate-600">Stage</span>
-                      <span className="font-semibold text-slate-900">Stage 1 Submitted - Awaiting Review</span>
-                    </div>
-                    {inclusionChecks.map((item) => (
-                      <div key={item.label} className="flex items-center justify-between rounded-xl border border-slate-200 px-4 py-3">
-                        <span className="text-slate-600">{item.label}</span>
-                        <span className={`font-semibold ${item.met ? "text-emerald-700" : "text-rose-700"}`}>{item.met ? `Met (${item.value})` : `Not met (${item.value})`}</span>
-                      </div>
-                    ))}
-                    <div className="rounded-xl border border-slate-200 px-4 py-3">
-                      <p className="text-slate-600">Bid amount vs budget</p>
-                      <p className="mt-1 font-semibold text-slate-900">{tenderBudget > 0 ? `LSL ${proposedBudget.toLocaleString()} against budget LSL ${tenderBudget.toLocaleString()}` : "Tender budget not displayed in this review panel."}</p>
-                    </div>
+                <div className="card p-5">
+                  <h3 className="text-base font-bold text-slate-900 mb-4">Financial Summary</h3>
+                  <div className="space-y-2 text-sm">
+                    <div className="flex justify-between"><span className="text-slate-500">Bid Amount</span><span className="font-semibold text-slate-900">LSL {proposedBudget.toLocaleString()}</span></div>
+                    <div className="flex justify-between"><span className="text-slate-500">Subsidy Requested</span><span className="font-semibold text-slate-900">LSL {subsidyRequested.toLocaleString()}</span></div>
+                    <div className="flex justify-between"><span className="text-slate-500">Co-financing</span><span className="font-semibold text-slate-900">LSL {coFinancing.toLocaleString()}</span></div>
+                    {totalHouseholds > 0 && <div className="flex justify-between"><span className="text-slate-500">Cost/connection</span><span className="font-semibold text-slate-900">LSL {subsidyRequested > 0 ? Math.round(subsidyRequested / totalHouseholds).toLocaleString() : "—"}</span></div>}
                   </div>
                 </div>
 
-                <div className="card p-6">
-                  <h3 className="text-lg font-bold text-slate-900">Review Outcome</h3>
+                <div className="card p-5">
+                  <h3 className="text-base font-bold text-slate-900 mb-4">Tender Fit</h3>
+                  <div className="space-y-3 text-sm">
+                    {tenderTechTypes.length > 0 && (
+                      <div className="flex justify-between items-center"><span className="text-slate-500">Technology</span><span className="font-medium text-slate-900">{tenderTechTypes.join(", ")}</span></div>
+                    )}
+                    {selectedEval.bid.tech_tier && (
+                      <div className="flex justify-between items-center"><span className="text-slate-500">Tech Tier</span><span className="font-medium text-slate-900">{selectedEval.bid.tech_tier}</span></div>
+                    )}
+                    {tenderTargetDistricts.length > 0 && (
+                      <div className="flex justify-between items-start gap-2">
+                        <span className="text-slate-500 shrink-0">Target Districts</span>
+                        <div className="flex flex-wrap justify-end gap-1">
+                          {tenderTargetDistricts.map(d => {
+                            const inBid = bidSiteDistricts.includes(d);
+                            return <span key={d} className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${inBid ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>{inBid && <CheckCircle2 size={10} />}{d}</span>;
+                          })}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="card p-5">
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="text-base font-bold text-slate-900">Inclusion Targets</h3>
+                    {allInclusionMet ? <CheckCircle2 size={18} className="text-emerald-600" /> : <AlertTriangle size={18} className="text-amber-500" />}
+                  </div>
+                  <div className="space-y-2 text-sm">
+                    {inclusionChecks.map((item) => (
+                      <div key={item.label} className="flex justify-between items-center">
+                        <span className="text-slate-500">{item.label}</span>
+                        <span className={`font-medium ${item.met ? "text-emerald-700" : "text-rose-700"}`}>{item.value} <span className="text-slate-400 font-normal">({item.required})</span></span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="card p-5">
+                  <h3 className="text-base font-bold text-slate-900 mb-3">Review Decision</h3>
                   <textarea
-                    className="input-field mt-4 min-h-[140px]"
+                    className="input-field min-h-[100px] text-sm"
                     placeholder="Add feedback (required for rejection)."
                     value={selectedEval.comments}
                     onChange={(e) => setSelectedEval({ ...selectedEval, comments: e.target.value })}
                   />
                   {canDecideStageOne ? (
-                    <div className="mt-4 grid gap-3">
+                    <div className="mt-3 grid grid-cols-2 gap-3">
                       <button
                         type="button"
                         onClick={() => void handleStageOneDecision("shortlist")}
@@ -18785,7 +18860,7 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
                       </button>
                     </div>
                   ) : (
-                    <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+                    <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
                       This submission has already been marked as <span className="font-semibold text-slate-900">{selectedEval.bid.status === BidStatus.ACCEPTED ? "Shortlisted" : selectedEval.bid.status}</span>.
                     </div>
                   )}

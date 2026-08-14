@@ -1191,6 +1191,7 @@ function mapTenderBidFromApi(api: any): TenderBid {
     paygo_platform: api.paygo_platform ?? undefined,
     daily_payment_amount_lsl: api.daily_payment_amount_lsl != null ? Number(api.daily_payment_amount_lsl) : undefined,
     collection_method: api.collection_method ?? undefined,
+    preferred_district: api.preferred_district ?? undefined,
     technical_summary: api.technical_summary ?? api.technical_proposal ?? undefined,
     financial_summary: api.financial_summary ?? api.financial_proposal ?? undefined,
     aftersales_description: api.aftersales_description ?? undefined,
@@ -1782,12 +1783,9 @@ export async function submitTenderBid(payload: Partial<TenderBid>): Promise<Tend
   if (payload.system_configuration) form.append('system_configuration', JSON.stringify(payload.system_configuration));
   if (payload.boq_details) form.append('boq_details', JSON.stringify(payload.boq_details));
   else if (payload.boq_items) form.append('boq_items', JSON.stringify(payload.boq_items));
-  if (payload.gender_inclusion_target != null) form.append('gender_inclusion_target', String(payload.gender_inclusion_target));
-  else if (payload.female_target_pct != null) form.append('female_target_pct', String(payload.female_target_pct));
-  if (payload.vulnerable_group_target != null) form.append('vulnerable_group_target', String(payload.vulnerable_group_target));
-  else if (payload.vulnerable_target_pct != null) form.append('vulnerable_target_pct', String(payload.vulnerable_target_pct));
-  if (payload.low_income_target != null) form.append('low_income_target', String(payload.low_income_target));
-  else if (payload.low_income_target_pct != null) form.append('low_income_target_pct', String(payload.low_income_target_pct));
+  if (payload.female_target_pct != null) form.append('female_target_pct', String(payload.female_target_pct));
+  if (payload.vulnerable_target_pct != null) form.append('vulnerable_target_pct', String(payload.vulnerable_target_pct));
+  if (payload.low_income_target_pct != null) form.append('low_income_target_pct', String(payload.low_income_target_pct));
   if (payload.inclusion_commitment_confirmed != null) form.append('inclusion_commitment_confirmed', String(payload.inclusion_commitment_confirmed));
   form.append('om_strategy_summary', payload.om_strategy_summary ?? "");
   form.append('aftersales_description', payload.aftersales_description ?? "");
@@ -1864,12 +1862,9 @@ export async function updateTenderBid(bidId: string, payload: Partial<TenderBid>
   if (payload.system_configuration != null) form.append('system_configuration', JSON.stringify(payload.system_configuration));
   if (payload.boq_details != null) form.append('boq_details', JSON.stringify(payload.boq_details));
   else if (payload.boq_items != null) form.append('boq_items', JSON.stringify(payload.boq_items));
-  if (payload.gender_inclusion_target != null) form.append('gender_inclusion_target', String(payload.gender_inclusion_target));
-  else if (payload.female_target_pct != null) form.append('female_target_pct', String(payload.female_target_pct));
-  if (payload.vulnerable_group_target != null) form.append('vulnerable_group_target', String(payload.vulnerable_group_target));
-  else if (payload.vulnerable_target_pct != null) form.append('vulnerable_target_pct', String(payload.vulnerable_target_pct));
-  if (payload.low_income_target != null) form.append('low_income_target', String(payload.low_income_target));
-  else if (payload.low_income_target_pct != null) form.append('low_income_target_pct', String(payload.low_income_target_pct));
+  if (payload.female_target_pct != null) form.append('female_target_pct', String(payload.female_target_pct));
+  if (payload.vulnerable_target_pct != null) form.append('vulnerable_target_pct', String(payload.vulnerable_target_pct));
+  if (payload.low_income_target_pct != null) form.append('low_income_target_pct', String(payload.low_income_target_pct));
   if (payload.inclusion_commitment_confirmed != null) form.append('inclusion_commitment_confirmed', String(payload.inclusion_commitment_confirmed));
   if (payload.om_strategy_summary != null) form.append('om_strategy_summary', payload.om_strategy_summary);
   if (payload.aftersales_description != null) form.append('aftersales_description', payload.aftersales_description);
