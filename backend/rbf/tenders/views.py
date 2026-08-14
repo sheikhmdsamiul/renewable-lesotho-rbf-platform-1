@@ -8,8 +8,8 @@ from django.utils import timezone
 from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from django.conf import settings
-from django.core.mail import send_mail
 from django.db import transaction
+from django.db.models.functions import Coalesce
 from django.urls import reverse
 from rest_framework.parsers import MultiPartParser, FormParser
 from django_filters.rest_framework import DjangoFilterBackend
@@ -59,7 +59,7 @@ from rbf.projects.audit import log_audit, AuditLogger
 from rbf.projects.integrations import SyncToProspectJob, queue_project_targets_sync
 from rbf.projects.serializers import ProjectSerializer
 from rbf.notifications.models import Notification, NotificationChannel, NotificationStatus
-from rbf.notifications.services import NotificationService
+from rbf.notifications.services import NotificationService, email_configured
 
 
 LESOTHO_DISTRICTS = [
@@ -85,6 +85,44 @@ def _normalized_application_type(tender: Tender) -> str:
 
 def _uses_hard_deadline(tender: Tender) -> bool:
     return _normalized_application_type(tender) == APPLICATION_WINDOW
+
+
+def _auto_close_tender_on_deadline(tender: Tender) -> bool:
+    """Automatically close a published tender once its submission deadline passes.
+
+    Only application-window tenders auto-close on their deadline; access-window
+    tenders remain published until the RMT closes them manually.
+
+    Returns True when the tender was transitioned to CLOSED.
+    """
+    if tender.status != TenderStatus.PUBLISHED:
+        return False
+    if not _uses_hard_deadline(tender):
+        return False
+    deadline = tender.last_date_submission or tender.deadline
+    if deadline and timezone.now() >= deadline:
+        tender.status = TenderStatus.CLOSED
+        tender.closed_at = tender.closed_at or timezone.now()
+        tender.save(update_fields=['status', 'closed_at', 'updated_at'])
+        return True
+    return False
+
+
+def _assert_evaluation_window_open(tender: Tender) -> None:
+    """Evaluation may only start once the tender is closed.
+
+    A published application-window tender whose submission deadline has passed
+    is automatically closed first. Raises ValidationError if evaluation is
+    attempted before the tender is closed.
+    """
+    _auto_close_tender_on_deadline(tender)
+    if tender.status not in {TenderStatus.CLOSED, TenderStatus.EVALUATION}:
+        raise ValidationError(
+            {'detail': 'Evaluation can only start when the tender status is Closed. Close the tender before starting evaluation.'}
+        )
+    if tender.status == TenderStatus.CLOSED:
+        tender.status = TenderStatus.EVALUATION
+        tender.save(update_fields=['status', 'updated_at'])
 
 
 CONTRACT_ANNEX_SPECS = (
@@ -641,20 +679,9 @@ def _backfill_stage_two_drafts_for_vendor(vendor_id: str):
 
 
 def _send_vendor_stage_one_outcome_email(bid: TenderBid, subject: str, message: str):
-    email_configured = bool(settings.EMAIL_HOST_USER and settings.EMAIL_HOST_PASSWORD) or settings.DEBUG
-    if not email_configured or not bid.vendor_email:
+    if not email_configured() or not bid.vendor_email:
         return False
-    try:
-        send_mail(
-            subject,
-            message,
-            settings.DEFAULT_FROM_EMAIL,
-            [bid.vendor_email],
-            fail_silently=False,
-        )
-        return True
-    except Exception:
-        return False
+    return NotificationService.dispatch_email(subject, message, [bid.vendor_email]) > 0
 
 
 def _notify_stage_one_outcome(bid: TenderBid, passed: bool, draft: TenderBid | None = None):
@@ -827,10 +854,7 @@ def _notify_intent_to_award(tender: Tender, ranking_payload: dict, send_email=Tr
     bids_by_vendor = {row['vendor_id']: row for row in ranking_payload.get('rows', [])}
     cooling_off_until = tender.cooling_off_until
     cooling_date_text = cooling_off_until.strftime('%Y-%m-%d %H:%M:%S') if cooling_off_until else 'N/A'
-    email_enabled = send_email and bool(
-        (settings.EMAIL_HOST_USER and settings.EMAIL_HOST_PASSWORD)
-        or str(getattr(settings, 'EMAIL_HOST', '')).lower() in {'mailhog', 'localhost'}
-    )
+    email_enabled = send_email and email_configured()
 
     vendors = User.objects.filter(id__in=list(bids_by_vendor.keys())).only('id', 'email', 'full_name', 'username')
     for vendor in vendors:
@@ -863,7 +887,7 @@ def _notify_intent_to_award(tender: Tender, ranking_payload: dict, send_email=Tr
         Notification.objects.create(
             recipient_id=str(vendor.id),
             recipient_name=vendor.full_name or vendor.username or vendor.email,
-            type=NotificationChannel.EMAIL if email_enabled else NotificationChannel.IN_APP,
+            type=NotificationChannel.IN_APP,
             event='intent_to_award',
             title=title,
             body=body,
@@ -872,16 +896,7 @@ def _notify_intent_to_award(tender: Tender, ranking_payload: dict, send_email=Tr
         )
 
         if email_enabled and vendor.email:
-            try:
-                send_mail(
-                    subject=title,
-                    message=body,
-                    from_email=settings.DEFAULT_FROM_EMAIL,
-                    recipient_list=[vendor.email],
-                    fail_silently=True,
-                )
-            except Exception:
-                pass
+            NotificationService.dispatch_email(title, body, [vendor.email])
 
 
 class IsRbfOfficialOrReadOnly(BasePermission):
@@ -927,7 +942,7 @@ class TenderPagination(PageNumberPagination):
     max_page_size = 100
 
 class TenderViewSet(viewsets.ModelViewSet):
-    queryset = Tender.objects.all().order_by('-created_at')
+    queryset = Tender.objects.all().order_by(Coalesce('published_at', 'created_at').desc())
     serializer_class = TenderSerializer
     permission_classes = [IsRbfOfficialOrReadOnly]
     pagination_class = TenderPagination
@@ -945,7 +960,7 @@ class TenderViewSet(viewsets.ModelViewSet):
         return super().get_permissions()
 
     def get_queryset(self):
-        qs = Tender.objects.all().order_by('-created_at')
+        qs = Tender.objects.all().order_by(Coalesce('published_at', 'created_at').desc())
         user = self.request.user
         # Handle unauthenticated users - return all published tenders
         if not user.is_authenticated:
@@ -1045,9 +1060,12 @@ class TenderViewSet(viewsets.ModelViewSet):
         from rbf.users.models import User, VendorPrequalification, PrequalificationStatus
 
         # Always notify approved (pre-qualified) vendors
-        vendors = User.objects.filter(role=UserRole.VENDOR)
-        vendors = vendors.filter(prequalifications__status=PrequalificationStatus.APPROVED)
-        vendors = list(vendors.distinct().only('id', 'email', 'full_name', 'username'))
+        vendors = list(
+            User.objects.filter(role=UserRole.VENDOR)
+            .filter(prequalifications__status=PrequalificationStatus.APPROVED)
+            .distinct()
+            .only('id', 'email', 'full_name', 'username', 'role')
+        )
         stakeholders = list(
             User.objects.filter(role__in={UserRole.DOE_OFFICER, UserRole.UNDP_DONOR})
             .distinct()
@@ -1055,55 +1073,61 @@ class TenderViewSet(viewsets.ModelViewSet):
         )
         recipients = vendors + stakeholders
         recipient_count = len(recipients)
-        
-        notifications = []
-        email_subject = f"Tender Published: {tender.name}"
-        email_body = (
+
+        subject = f"Tender Published: {tender.name}"
+        body = (
             f"A new tender has been published.\n\n"
             f"Reference: {tender.reference_number}\n"
             f"Name: {tender.name}\n"
             f"Category: {tender.category}\n"
             f"Deadline: {tender.deadline}\n"
-            f"View details: {build_frontend_url(f'/rbf-official/tenders?view=details&tenderId={tender.id}', request=self.request)}\n"
         )
 
-        email_enabled = send_email and bool(
-            (settings.EMAIL_HOST_USER and settings.EMAIL_HOST_PASSWORD)
-            or str(getattr(settings, 'EMAIL_HOST', '')).lower() in {'mailhog', 'localhost'}
+        vendor_link = build_frontend_url(f'/vendor/tenders?view=details&tenderId={tender.id}', request=self.request)
+        official_link = build_frontend_url(f'/rbf-official/tenders?view=details&tenderId={tender.id}', request=self.request)
+
+        # In-app notifications
+        NotificationService.notify_users(
+            users=vendors,
+            title=subject,
+            body=f"{body}View details: {vendor_link}\n",
+            event='tender_published',
+            linked_entity_id=tender.id,
+        )
+        NotificationService.notify_users(
+            users=stakeholders,
+            title=subject,
+            body=f"{body}View details: {official_link}\n",
+            event='tender_published',
+            linked_entity_id=tender.id,
         )
 
-        for recipient in recipients:
-            notifications.append(
-                Notification(
-                    recipient_id=str(recipient.id),
-                    recipient_name=recipient.full_name or recipient.username or recipient.email,
-                    type=NotificationChannel.IN_APP,
-                    event='tender_published',
-                    title=email_subject,
-                    body=email_body,
-                    status=NotificationStatus.SENT,
-                    linked_entity_id=str(tender.id),
-                )
-            )
-
-        if notifications:
-            Notification.objects.bulk_create(notifications, ignore_conflicts=True)
+        email_enabled = send_email and email_configured()
 
         email_recipients = []
         email_error = None
         if email_enabled:
-            email_recipients = list(dict.fromkeys([recipient.email for recipient in recipients if recipient.email]))
-            if email_recipients:
-                try:
-                    send_mail(
-                        subject=email_subject,
-                        message=email_body,
-                        from_email=settings.DEFAULT_FROM_EMAIL,
-                        recipient_list=email_recipients,
-                        fail_silently=False,
+            # Role-aware deep links: vendors land on the vendor portal, staff on the RBF portal.
+            groups = [
+                (vendors, vendor_link),
+                (stakeholders, official_link),
+            ]
+            for group_recipients, group_link in groups:
+                group_emails = list(
+                    dict.fromkeys(
+                        r.email for r in group_recipients if r.email
                     )
-                except Exception as exc:
-                    email_error = str(exc)
+                )
+                if not group_emails:
+                    continue
+                email_recipients.extend(group_emails)
+                sent = NotificationService.dispatch_email(
+                    subject,
+                    f"{body}View details: {group_link}\n",
+                    group_emails,
+                )
+                if sent <= 0:
+                    email_error = email_error or f'Email delivery failed for {len(group_emails)} recipient(s).'
 
         return {
             'recipient_count': recipient_count,
@@ -1844,16 +1868,7 @@ class TenderViewSet(viewsets.ModelViewSet):
         )
         # Also notify the new winner via email if possible
         if vendor.email:
-            try:
-                send_mail(
-                    subject=title,
-                    message=body,
-                    from_email=settings.DEFAULT_FROM_EMAIL,
-                    recipient_list=[vendor.email],
-                    fail_silently=True,
-                )
-            except Exception:
-                pass
+            NotificationService.dispatch_email(title, body, [vendor.email])
 
     def _notify_award(self, tender: Tender, vendor_id: str, vendor_name: str, send_email=True):
         """Send award notification to winning vendor"""
@@ -1874,16 +1889,13 @@ class TenderViewSet(viewsets.ModelViewSet):
             f"Next step: Log in, open the Contracting tab, review the generated agreement package, and sign the Performance-Based Agreement.\n"
         )
 
-        email_enabled = send_email and bool(
-            (settings.EMAIL_HOST_USER and settings.EMAIL_HOST_PASSWORD)
-            or str(getattr(settings, 'EMAIL_HOST', '')).lower() in {'mailhog', 'localhost'}
-        )
+        email_enabled = send_email and email_configured()
 
         # In-app notification
         Notification.objects.create(
             recipient_id=str(vendor.id),
             recipient_name=vendor.full_name or vendor.username or vendor.email,
-            type=NotificationChannel.EMAIL if email_enabled else NotificationChannel.IN_APP,
+            type=NotificationChannel.IN_APP,
             event='tender_awarded',
             title=email_subject,
             body=email_body,
@@ -1893,16 +1905,7 @@ class TenderViewSet(viewsets.ModelViewSet):
 
         # Email notification
         if email_enabled and vendor.email:
-            try:
-                send_mail(
-                    subject=email_subject,
-                    message=email_body,
-                    from_email=settings.DEFAULT_FROM_EMAIL,
-                    recipient_list=[vendor.email],
-                    fail_silently=True,
-                )
-            except Exception:
-                pass
+            NotificationService.dispatch_email(email_subject, email_body, [vendor.email])
 
     def _ensure_award_contract(self, tender: Tender, bid: TenderBid, vendor_id: str):
         """Create a generated contract on award if one doesn't exist."""
@@ -2072,6 +2075,7 @@ class TenderBidViewSet(viewsets.ModelViewSet):
         latest_prequalification = _latest_vendor_prequalification(str(request.user.id))
         if latest_prequalification is None or latest_prequalification.status != PrequalificationStatus.APPROVED:
             raise ValidationError({'detail': 'Complete pre-qualification first'})
+        _auto_close_tender_on_deadline(tender)
         if tender.status != TenderStatus.PUBLISHED:
             raise ValidationError({'tender': 'Tender is not open for bidding.'})
         deadline = tender.last_date_submission or tender.deadline
@@ -2267,13 +2271,12 @@ class TenderBidViewSet(viewsets.ModelViewSet):
                 module='tenders',
                 record_id=bid.id,
             )
-        Notification.objects.create(
+        NotificationService.notify_user(
             recipient_id=bid.vendor_id,
             recipient_name=bid.vendor_name,
-            type=NotificationChannel.IN_APP,
-            event='bid_submitted',
             title=f'Bid Submitted: {bid.tender.reference_number}',
             body=f'Your bid was submitted successfully. Ref: {bid.tender.reference_number} • Version {bid.version_number}.',
+            event='bid_submitted',
             linked_entity_id=str(bid.tender.id),
         )
 
@@ -2287,16 +2290,11 @@ class TenderBidViewSet(viewsets.ModelViewSet):
                 {'detail': 'Only submitted bids can be reviewed.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        
+
         bid.status = BidStatus.UNDER_REVIEW
         bid.reviewed_at = timezone.now()
         bid.reviewed_by = f"{request.user.full_name or request.user.username}"
         bid.save(update_fields=['status', 'reviewed_at', 'reviewed_by'])
-        if bid.tender.status == TenderStatus.PUBLISHED:
-            deadline = bid.tender.last_date_submission or bid.tender.deadline
-            if _uses_hard_deadline(bid.tender) and deadline and timezone.now() >= deadline:
-                bid.tender.status = TenderStatus.EVALUATION
-                bid.tender.save(update_fields=['status', 'updated_at'])
         log_audit(request.user, 'bid_under_review', bid, {'tender_id': str(bid.tender_id)})
         
         return Response(TenderBidSerializer(bid).data, status=status.HTTP_200_OK)
@@ -2338,13 +2336,12 @@ class TenderBidViewSet(viewsets.ModelViewSet):
         bid.submitted_at = timezone.now()
         bid.save(update_fields=['status', 'submitted_at', 'updated_at'])
         log_audit(request.user, 'bid_submitted', bid, {'tender_id': str(bid.tender_id), 'version': bid.version_number})
-        Notification.objects.create(
+        NotificationService.notify_user(
             recipient_id=bid.vendor_id,
             recipient_name=bid.vendor_name,
-            type=NotificationChannel.IN_APP,
-            event='bid_submitted',
             title=f'Bid Submitted: {bid.tender.reference_number}',
             body=f'Your bid was submitted successfully. Ref: {bid.tender.reference_number} • Version {bid.version_number}.',
+            event='bid_submitted',
             linked_entity_id=str(bid.tender.id),
         )
 
@@ -2495,8 +2492,18 @@ class TenderBidEvaluationViewSet(viewsets.ModelViewSet):
         if request.user.role not in {UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.TAC}:
             raise PermissionDenied('Only the RBF Management Team or TAC members can score bids.')
 
+    def _assert_tender_closed_for_evaluation(self, bid):
+        _assert_evaluation_window_open(bid.tender)
+
     def create(self, request, *args, **kwargs):
         self._assert_eval_permission(request)
+        bid_id = request.data.get('bid')
+        if bid_id:
+            try:
+                bid = TenderBid.objects.get(id=bid_id)
+            except TenderBid.DoesNotExist:
+                raise ValidationError({'bid': 'Bid not found.'})
+            self._assert_tender_closed_for_evaluation(bid)
         data = request.data.copy()
         data['evaluator'] = request.user.id
         existing = TenderBidEvaluation.objects.filter(
@@ -2521,6 +2528,7 @@ class TenderBidEvaluationViewSet(viewsets.ModelViewSet):
     def update(self, request, *args, **kwargs):
         self._assert_eval_permission(request)
         evaluation = self.get_object()
+        self._assert_tender_closed_for_evaluation(evaluation.bid)
         if request.user.role != UserRole.ADMIN and str(getattr(evaluation, 'evaluator_id', '')) != str(request.user.id):
             raise PermissionDenied('You can only edit your own evaluation record.')
         return super().update(request, *args, **kwargs)
@@ -2835,9 +2843,67 @@ class NoticeViewSet(viewsets.ModelViewSet):
             notice.status = 'published'
             notice.published_at = timezone.now()
             notice.save(update_fields=['status', 'published_at', 'updated_at'])
-            return Response(NoticeSerializer(notice).data, status=status.HTTP_200_OK)
+
+            data = NoticeSerializer(notice).data
+            if notice.send_email_notification:
+                data['notification_summary'] = self._notify_notice_recipients(notice)
+            return Response(data, status=status.HTTP_200_OK)
         except Notice.DoesNotExist:
             return Response({'error': 'Notice not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    def _notify_notice_recipients(self, notice: Notice):
+        from rbf.users.models import VendorPrequalification, PrequalificationStatus
+
+        vendors = list(
+            User.objects.filter(role=UserRole.VENDOR)
+            .filter(prequalifications__status=PrequalificationStatus.APPROVED)
+            .distinct()
+            .only('id', 'email', 'full_name', 'username', 'role')
+        )
+        stakeholders = list(
+            User.objects.filter(role__in={UserRole.DOE_OFFICER, UserRole.UNDP_DONOR})
+            .distinct()
+            .only('id', 'email', 'full_name', 'username', 'role')
+        )
+        recipients = vendors + stakeholders
+
+        subject = f"Notice Published: {notice.title}"
+        body = (
+            f"A new notice has been published.\n\n"
+            f"Title: {notice.title}\n"
+            f"Category: {notice.get_category_display()}\n"
+            f"{f'Summary: {notice.summary}\n' if notice.summary else ''}"
+        )
+        notice_link = build_frontend_url('/', request=self.request)
+
+        NotificationService.notify_users(
+            users=recipients,
+            title=subject,
+            body=f"{body}View notices: {notice_link}\n",
+            event='notice_published',
+            linked_entity_id=notice.id,
+        )
+
+        email_enabled = email_configured()
+        email_recipients = []
+        email_error = None
+        if email_enabled:
+            email_recipients = list(dict.fromkeys(r.email for r in recipients if r.email))
+            if email_recipients:
+                sent = NotificationService.dispatch_email(
+                    subject,
+                    f"{body}View notices: {notice_link}\n",
+                    email_recipients,
+                )
+                if sent <= 0:
+                    email_error = 'Email delivery failed.'
+
+        return {
+            'recipient_count': len(recipients),
+            'email_enabled': email_enabled,
+            'email_recipient_count': len(email_recipients),
+            'email_error': email_error,
+        }
 
     @action(detail=True, methods=['post'])
     def unpublish(self, request, pk=None):

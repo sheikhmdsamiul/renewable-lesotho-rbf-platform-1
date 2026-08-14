@@ -1468,6 +1468,15 @@ async function http<T>(url: string, init?: ApiRequestInit): Promise<T> {
         const text = await res.text().catch(() => "");
         const detail = extractApiErrorDetail(text);
         const statusError = new Error(`HTTP ${res.status} ${res.statusText}: ${detail || text}`);
+        (statusError as any).status = res.status;
+        try {
+          const parsed = JSON.parse((text || "").trim());
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            (statusError as any).detailPayload = parsed;
+          }
+        } catch {
+          // Non-JSON error body; only the message is available.
+        }
         if (res.status === 401 && !skipAuth) {
           const refreshed = await refreshAccessToken();
           if (refreshed) {
@@ -2555,6 +2564,20 @@ export async function verifyVerificationTask(
 export async function fetchNotifications(): Promise<Notification[]> {
   const data = await http<any>(`/api/notifications/`);
   return unwrapListResponse<any>(data).map(mapNotificationFromApi);
+}
+
+export async function fetchUnreadNotificationCount(): Promise<number> {
+  const data = await http<any>(`/api/notifications/unread_count/`);
+  return Number(data?.count ?? 0);
+}
+
+export async function markNotificationRead(id: string): Promise<void> {
+  await http<any>(`/api/notifications/${id}/mark_read/`, { method: "POST" });
+}
+
+export async function markAllNotificationsRead(): Promise<number> {
+  const data = await http<any>(`/api/notifications/mark_all_read/`, { method: "POST" });
+  return Number(data?.updated ?? 0);
 }
 
 export async function fetchVendorPrequalifications(): Promise<VendorPrequalification[]> {

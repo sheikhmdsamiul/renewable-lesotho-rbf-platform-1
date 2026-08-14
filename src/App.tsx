@@ -15,6 +15,7 @@ import {
   BarChart3, 
   Users, 
   Bell, 
+  BellRing,
   Settings, 
   LogOut, 
   ChevronRight,
@@ -47,6 +48,7 @@ import {
   Leaf,
   TrendingUp,
   Award,
+  BookOpen,
   Calendar,
   Database,
   Upload,
@@ -112,7 +114,7 @@ import {
   VendorProfile,
   VendorDirectoryEntry,
 } from "./types";
-import { MOCK_TENDERS, MOCK_NOTIFICATIONS } from "./constants";
+import { MOCK_TENDERS } from "./constants";
 import {
   fetchTenders,
   fetchTender,
@@ -123,8 +125,11 @@ import {
   awardTender,
   closeTender,
   fetchNotifications,
+  fetchUnreadNotificationCount,
   loginUser,
   logoutUser,
+  markAllNotificationsRead,
+  markNotificationRead,
   registerVendor,
   getStoredUser,
   fetchCurrentUser,
@@ -432,6 +437,9 @@ const isConnectivityError = (raw: string) => {
     lower.includes("networkerror")
   );
 };
+
+const isServerError = (err: any) =>
+  Number(err?.status) >= 500 || /^HTTP (5\d\d) /.test(String(err?.message || ""));
 
 const toFriendlyApiMessage = (raw: string): string => {
   const cleaned = raw
@@ -7337,16 +7345,28 @@ const Reports = ({ currentUser, onNavigate }: { currentUser: User | null; onNavi
   );
 };
 
+const BidFieldError = ({ message }: { message?: string }) => (
+  message ? <p className="mt-1 text-xs font-semibold text-rose-600">{message}</p> : null
+);
+
 const NotificationCenter = ({
   notifications,
   onClose,
   onViewAll,
   onSelect,
+  onMarkAllRead,
+  unreadCount = 0,
+  browserPushEnabled = false,
+  onToggleBrowserPush,
 }: {
   notifications: Notification[];
   onClose: () => void;
   onViewAll: () => void;
   onSelect?: (notification: Notification) => void;
+  onMarkAllRead?: () => void;
+  unreadCount?: number;
+  browserPushEnabled?: boolean;
+  onToggleBrowserPush?: () => void;
 }) => {
   return (
     <motion.div 
@@ -7359,10 +7379,39 @@ const NotificationCenter = ({
         <h3 className="font-bold text-slate-900 flex items-center gap-2">
           <Bell size={18} className="text-emerald-600" />
           Notifications
+          {unreadCount > 0 && (
+            <span className="bg-rose-500 text-white text-[10px] font-bold rounded-full min-w-[18px] h-[18px] px-1 flex items-center justify-center">
+              {unreadCount}
+            </span>
+          )}
         </h3>
-        <button onClick={onClose} className="text-slate-400 hover:text-slate-600">
-          <X size={18} />
-        </button>
+        <div className="flex items-center gap-2">
+          {onToggleBrowserPush && (
+            <button
+              onClick={onToggleBrowserPush}
+              className={`flex items-center gap-1.5 text-[11px] font-bold rounded-full px-2.5 py-1 transition-colors ${
+                browserPushEnabled
+                  ? "bg-emerald-100 text-emerald-700"
+                  : "bg-slate-100 text-slate-500 hover:text-slate-700"
+              }`}
+              title={browserPushEnabled ? "Browser notifications on (click to turn off)" : "Turn on browser notifications"}
+            >
+              <BellRing size={12} />
+              {browserPushEnabled ? "On" : "Off"}
+            </button>
+          )}
+          {unreadCount > 0 && onMarkAllRead && (
+            <button
+              onClick={onMarkAllRead}
+              className="text-[11px] font-bold text-emerald-600 hover:text-emerald-700"
+            >
+              Mark all as read
+            </button>
+          )}
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600">
+            <X size={18} />
+          </button>
+        </div>
       </div>
       <div className="max-h-[400px] overflow-y-auto">
         {notifications.length > 0 ? (
@@ -8393,7 +8442,9 @@ const VendorTenders = ({ onSubmitTender, onNavigate }: { onSubmitTender?: (tende
       .filter(t => selectedTech === "All Technologies" || (t.technologyTypes || []).includes(selectedTech))
       .sort((a, b) => {
         if (sortBy === "recent") {
-          return new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime();
+          const aTime = new Date(a.publishedAt || a.createdAt || 0).getTime();
+          const bTime = new Date(b.publishedAt || b.createdAt || 0).getTime();
+          return bTime - aTime;
         }
         return new Date(a.deadline || 0).getTime() - new Date(b.deadline || 0).getTime();
       });
@@ -8415,7 +8466,7 @@ const VendorTenders = ({ onSubmitTender, onNavigate }: { onSubmitTender?: (tende
   }, [tenders]);
   const newestTender = useMemo(() => {
     const list = tenders.filter(t => t.status === TenderStatus.PUBLISHED);
-    return list.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime())[0];
+    return list.sort((a, b) => new Date(b.publishedAt || b.createdAt || 0).getTime() - new Date(a.publishedAt || a.createdAt || 0).getTime())[0];
   }, [tenders]);
 
   const openTenderDetails = async (tender: Tender) => {
@@ -10015,6 +10066,7 @@ const VendorDashboard = ({
   const [bidVersions, setBidVersions] = useState<TenderBid[]>([]);
   const [bidMessage, setBidMessage] = useState<string | null>(null);
   const [bidSubmitError, setBidSubmitError] = useState<string | null>(null);
+  const [ruleBookOpen, setRuleBookOpen] = useState(false);
   const [editingBidId, setEditingBidId] = useState<string | null>(null);
   const [editingBidStatus, setEditingBidStatus] = useState<BidStatus | null>(null);
   const [bidHistory, setBidHistory] = useState<TenderBid[]>([]);
@@ -10742,6 +10794,68 @@ const VendorDashboard = ({
     ...(isSiteSpecificStage ? [{ id: "documents", label: "Documents", icon: Upload, complete: documentSectionComplete, note: `${uploadedStageTwoDocumentCount}/${stageTwoDocuments.length} uploaded` }] : []),
   ];
   const completedProposalSections = proposalSections.filter(section => section.complete).length;
+  const ruleBookSections: { heading: string; points: string[] }[] = isPreQualificationStage
+    ? [
+        { heading: "Eligibility & Submission", points: [
+          "Only vendors with an APPROVED pre-qualification status can submit a bid.",
+          "Only one final submitted bid is allowed per tender. Drafts can be saved and revised until the deadline.",
+          "Bids are accepted only during the tender's submission window. Late submissions are rejected automatically.",
+        ] },
+        { heading: "Financial Rules (Section A)", points: [
+          "Bid amount and subsidy requested are mandatory before submission.",
+          "Subsidy requested cannot exceed the bid amount - the vendor must provide the co-financing difference.",
+          "All financial values are in Lesotho Maloti (LSL).",
+        ] },
+        { heading: "Concept Note (Section E)", points: [
+          "The concept note must be at least 200 characters before submission.",
+          "Explain the implementation strategy, target communities, and expected impact.",
+        ] },
+        { heading: "Site & Geography Rules (Section C)", points: [
+          "Provide site name, district, primary beneficiary type, and estimated households for every village site.",
+          "GPS coordinates are optional at Stage 1 but recommended. If provided, they must fall within Lesotho.",
+        ] },
+        { heading: "Inclusion Targets (Section D)", points: [
+          "Commit to at least 50% female-headed, 30% vulnerable-group, and 60% low-income households.",
+          "Confirm the inclusion commitment before submitting.",
+        ] },
+        { heading: "Document Rules", points: [
+          "Accepted formats: PDF, DOCX, XLSX only. Maximum file size: 10MB per file.",
+          "Uploaded documents must be legible and written in English.",
+        ] },
+      ]
+    : [
+        { heading: "Eligibility & Submission", points: [
+          "Only shortlisted vendors who passed Stage 1 can submit a Stage 2 proposal.",
+          "Only one final submitted bid is allowed per tender. Drafts can be saved and revised until the deadline.",
+          "Bids are accepted only during the tender's submission window. Late submissions are rejected automatically.",
+        ] },
+        { heading: "Financial Rules (Section A)", points: [
+          "Bid amount and subsidy requested are mandatory before submission.",
+          "The BOQ grand total must exactly equal the bid amount.",
+          "Subsidy requested cannot exceed the bid amount - the vendor must provide the co-financing difference.",
+        ] },
+        { heading: "Technical Rules (Section B)", points: [
+          "The selected technology tier cannot exceed your approved pre-qualification tier.",
+          "Device brand, model, technology type, and system configuration must be fully specified.",
+        ] },
+        { heading: "Required Documents", points: [
+          "Stage 2 requires the Technical Proposal, Financial Proposal, and Bill of Quantities documents.",
+          "Accepted formats: PDF, DOCX, XLSX only. Maximum file size: 10MB per file.",
+        ] },
+        { heading: "Site & Geography Rules (Section C)", points: [
+          "Provide the exact village list with mandatory GPS coordinates for every project site.",
+          "All site coordinates must fall within Lesotho for field verification.",
+          "Include households, primary beneficiary type, and road access details for each site.",
+        ] },
+        { heading: "O&M & PAYGO Rules", points: [
+          "An O&M strategy summary is mandatory for Stage 2 submissions.",
+          "For SHS tenders offering PAYGO, the PAYGO platform, minimum daily payment, and collection method are required.",
+        ] },
+        { heading: "Inclusion Targets (Section D)", points: [
+          "Commit to at least 50% female-headed, 30% vulnerable-group, and 60% low-income households.",
+          "Confirm the inclusion commitment and attach the Gender Action Plan before submitting.",
+        ] },
+      ];
   const inclusionTargetWarning =
     Number(bidForm.femaleTargetPct || 0) < requiredFemaleTarget || Number(bidForm.vulnerableTargetPct || 0) < requiredVulnerableTarget || Number(bidForm.lowIncomeTargetPct || 0) < 60
       ? `Minimum submission targets are ${requiredFemaleTarget}% female-headed households, ${requiredVulnerableTarget}% vulnerable-group households, and 60% low-income households.`
@@ -10761,6 +10875,7 @@ const VendorDashboard = ({
       });
       return { ...prev, boqItems: nextItems };
     });
+    clearBidFieldError("boqItems");
   };
 
   const addBoqItem = () => {
@@ -10791,6 +10906,12 @@ const VendorDashboard = ({
       ...prev,
       sites: prev.sites.map((site, siteIndex) => siteIndex === index ? { ...site, [field]: value } : site),
     }));
+    setBidSiteErrors(prev => {
+      if (!prev[index]) return prev;
+      const next = { ...prev };
+      delete next[index];
+      return next;
+    });
   };
 
   const updatePrimaryDistrict = (value: string) => {
@@ -10821,6 +10942,7 @@ const VendorDashboard = ({
         },
       ],
     }));
+    clearBidFieldError("sites");
   };
 
   const removeBidSite = (index: number) => {
@@ -10830,12 +10952,23 @@ const VendorDashboard = ({
         ? prev.sites
         : prev.sites.filter((_, siteIndex) => siteIndex !== index),
     }));
+    setBidSiteErrors(prev => {
+      const next: Record<number, string> = {};
+      Object.keys(prev).forEach((key) => {
+        const keyIndex = Number(key);
+        if (keyIndex !== index) next[keyIndex > index ? keyIndex - 1 : keyIndex] = prev[keyIndex];
+      });
+      return next;
+    });
+    clearBidFieldError("sites");
   };
 
   const ALLOWED_BID_DOC_EXTENSIONS = [".pdf", ".docx", ".xlsx"];
   const MAX_BID_FILE_SIZE_BYTES = 10 * 1024 * 1024;
 
   const [bidFileErrors, setBidFileErrors] = useState<Record<string, string>>({});
+  const [bidFieldErrors, setBidFieldErrors] = useState<Record<string, string>>({});
+  const [bidSiteErrors, setBidSiteErrors] = useState<Record<number, string>>({});
 
   const handleBidFileChange = (key: string, file: File | null) => {
     if (!file) {
@@ -10856,6 +10989,210 @@ const VendorDashboard = ({
     }
     setBidFiles(prev => ({ ...prev, [key]: file }));
     setBidFileErrors(prev => { const next = { ...prev }; delete next[key]; return next; });
+  };
+
+  const LESOTHO_BOUNDS = { minLon: 27.02907, maxLon: 29.46576, minLat: -30.66896, maxLat: -28.57206 };
+  const pointWithinLesothoBounds = (lat: number, lng: number) =>
+    Number.isFinite(lat) && Number.isFinite(lng)
+    && lat >= LESOTHO_BOUNDS.minLat && lat <= LESOTHO_BOUNDS.maxLat
+    && lng >= LESOTHO_BOUNDS.minLon && lng <= LESOTHO_BOUNDS.maxLon;
+
+  const BACKEND_TO_FRONTEND_FIELD: Record<string, string> = {
+    bid_amount: "bidAmount",
+    subsidy_requested: "subsidyRequested",
+    concept_note: "conceptNote",
+    tech_tier: "techTier",
+    om_strategy_summary: "omStrategySummary",
+    paygo_platform: "paygoPlatform",
+    daily_payment_amount_lsl: "dailyPaymentAmountLsl",
+    collection_method: "collectionMethod",
+    inclusion_commitment_confirmed: "inclusionCommitmentConfirmed",
+    boq_items: "boqItems",
+    technical_proposal_file: "technicalProposalFile",
+    financial_proposal_file: "financialProposalFile",
+    boq_file: "boqFile",
+    gender_action_plan_file: "genderActionPlanFile",
+    implementation_plan_file: "implementationPlanFile",
+    om_plan_file: "omPlanFile",
+    tender_security_file: "tenderSecurityFile",
+  };
+
+  const parseBidServerErrors = (payload: Record<string, unknown>) => {
+    const fields: Record<string, string> = {};
+    const sites: Record<number, string> = {};
+    const files: Record<string, string> = {};
+    Object.entries(payload).forEach(([backendKey, value]) => {
+      if (backendKey === "sites" && value && typeof value === "object" && !Array.isArray(value)) {
+        Object.entries(value as Record<string, unknown>).forEach(([idx, msg]) => {
+          const text = Array.isArray(msg) ? msg.join(" ") : String(msg || "");
+          if (text) sites[Number(idx)] = text;
+        });
+        return;
+      }
+      if (backendKey === "system_configuration" && value && typeof value === "object" && !Array.isArray(value)) {
+        const cfg = value as Record<string, unknown>;
+        const messages: string[] = [];
+        Object.entries(cfg).forEach(([subKey, msg]) => {
+          const text = Array.isArray(msg) ? msg.join(" ") : String(msg || "");
+          if (text) messages.push(`${subKey.replace(/_/g, " ")}: ${text}`);
+        });
+        if (messages.length) fields.systemConfiguration = messages.join(" ");
+        return;
+      }
+      const message = typeof value === "string" ? value : Array.isArray(value) ? value.join(" ") : "";
+      if (!message) return;
+      const mapped = BACKEND_TO_FRONTEND_FIELD[backendKey];
+      if (mapped && mapped.endsWith("File")) {
+        files[mapped.slice(0, -4)] = message;
+      } else if (mapped) {
+        fields[mapped] = message;
+      } else {
+        fields[backendKey] = message;
+      }
+    });
+    return { fields, sites, files };
+  };
+
+  const clearBidFieldError = (...keys: string[]) => {
+    setBidFieldErrors(prev => {
+      const next = { ...prev };
+      keys.forEach(key => delete next[key]);
+      return next;
+    });
+  };
+
+  const validateBidForSubmit = () => {
+    const fields: Record<string, string> = {};
+    const sites: Record<number, string> = {};
+    const files: Record<string, string> = {};
+
+    if (!String(bidForm.bidAmount || "").trim()) {
+      fields.bidAmount = "Bid amount is required.";
+    } else if (Number(bidForm.bidAmount) <= 0) {
+      fields.bidAmount = "Bid amount must be greater than 0.";
+    }
+    if (!String(bidForm.subsidyRequested || "").trim()) {
+      fields.subsidyRequested = "Subsidy requested is required.";
+    } else if (Number(bidForm.subsidyRequested) < 0) {
+      fields.subsidyRequested = "Subsidy requested cannot be negative.";
+    } else if (Number(bidForm.subsidyRequested) > Number(bidForm.bidAmount || 0)) {
+      fields.subsidyRequested = "Subsidy requested must be less than or equal to the bid amount.";
+    }
+
+    if (isPreQualificationStage) {
+      if (!bidForm.conceptNote.trim()) {
+        fields.conceptNote = "Concept note is required for Stage 1 submissions.";
+      } else if (implementationStrategyCharCount < 200) {
+        fields.conceptNote = `Concept note must contain at least 200 characters before submission (currently ${implementationStrategyCharCount}).`;
+      }
+    }
+
+    if (isSiteSpecificStage) {
+      if (!bidForm.omStrategySummary.trim()) {
+        fields.omStrategySummary = "O&M strategy summary is required for Stage 2 submissions.";
+      }
+      if (isShsTender && bidForm.offerPaygo) {
+        if (!bidForm.paygoPlatform.trim()) fields.paygoPlatform = "PAYGO platform is required when PAYGO is offered.";
+        if (!String(bidForm.dailyPaymentAmountLsl || "").trim() || Number(bidForm.dailyPaymentAmountLsl) <= 0) {
+          fields.dailyPaymentAmountLsl = "Minimum daily payment must be greater than 0 when PAYGO is offered.";
+        }
+        if (!bidForm.collectionMethod.trim()) fields.collectionMethod = "Collection method is required when PAYGO is offered.";
+      }
+      if (!bidForm.systemConfiguration.technologyType.trim()) fields.technologyType = "Technology type is required.";
+      if (!bidForm.deviceBrand.trim()) fields.deviceBrand = "Device brand is required.";
+      if (!bidForm.deviceModel.trim()) fields.deviceModel = "Device model is required.";
+      if (!bidForm.techTier) fields.techTier = "Service tier is required.";
+      if (approvedTierLevel && selectedTierLevel && selectedTierLevel > approvedTierLevel) {
+        fields.techTier = `Technology tier cannot exceed your approved pre-qualification tier (${latestApprovedPrequal?.techTier}).`;
+      }
+      const numericConfigMessages: Record<string, string> = {
+        ratedPowerW: "Rated power must be greater than 0.",
+        batteryCapacityWh: "Battery capacity must be greater than 0.",
+        pvPanelSizeW: "PV panel size must be greater than 0.",
+      };
+      Object.entries(numericConfigMessages).forEach(([key, message]) => {
+        const raw = String((bidForm.systemConfiguration as Record<string, string | undefined>)[key] ?? "").trim();
+        if (raw !== "" && Number(raw) <= 0) fields[`systemConfiguration.${key}`] = message;
+      });
+
+      const boqRows = bidForm.boqItems.filter(item => item.description.trim() || item.qty || item.unit.trim() || item.unitPrice);
+      if (boqRows.length === 0) {
+        fields.boqItems = "Add at least one BOQ line item before submitting.";
+      } else {
+        const incompleteBoqRow = boqRows.find(item => !item.description.trim() || !(Number(item.qty) > 0) || !item.unit.trim() || Number(item.unitPrice || 0) < 0);
+        if (incompleteBoqRow) {
+          fields.boqItems = "Each BOQ row needs a description, quantity, unit, and unit price before submission.";
+        } else {
+          const boqTotal = roundCurrency(boqRows.reduce((sum, item) => sum + (Number(item.qty || 0) * Number(item.unitPrice || 0)), 0));
+          if (Math.abs(roundCurrency(Number(bidForm.bidAmount || 0)) - boqTotal) > 0.01) {
+            fields.boqItems = `BOQ grand total (LSL ${boqTotal.toLocaleString()}) must match the bid amount (LSL ${Number(bidForm.bidAmount || 0).toLocaleString()}).`;
+          }
+        }
+      }
+
+      const requiredStageTwoFiles: Record<string, string> = {
+        technicalProposal: "Technical Proposal",
+        financialProposal: "Financial Proposal",
+        boq: "Bill of Quantities",
+      };
+      Object.entries(requiredStageTwoFiles).forEach(([key, label]) => {
+        if (!(bidFiles as any)[key] && !(existingStageTwoDocuments as any)[key]) {
+          files[key] = `${label} document is required for Stage 2 submissions.`;
+        }
+      });
+    }
+
+    if (Number(bidForm.femaleTargetPct || 0) < requiredFemaleTarget) {
+      fields.femaleTargetPct = `Female-headed household target must be at least ${requiredFemaleTarget}%.`;
+    }
+    if (Number(bidForm.vulnerableTargetPct || 0) < requiredVulnerableTarget) {
+      fields.vulnerableTargetPct = `Vulnerable group target must be at least ${requiredVulnerableTarget}%.`;
+    }
+    if (Number(bidForm.lowIncomeTargetPct || 0) < 60) {
+      fields.lowIncomeTargetPct = "Low-income household target must be at least 60%.";
+    }
+    if (!bidForm.inclusionCommitmentConfirmed) {
+      fields.inclusionCommitmentConfirmed = "You must confirm the inclusion commitment before submitting.";
+    }
+
+    const validSites = bidForm.sites.filter(site => site.siteName.trim() || site.district?.trim() || site.estimatedHouseholds || site.numberOfHouseholds || site.targetTechnology?.trim() || site.latitude || site.longitude);
+    if (validSites.length === 0) {
+      fields.sites = `Add at least one ${isSiteSpecificStage ? "project" : "village"} site before submitting.`;
+    } else {
+      validSites.forEach((site) => {
+        const siteIndex = bidForm.sites.indexOf(site);
+        if (isSiteSpecificStage) {
+          if (!site.siteName.trim() || !site.district?.trim() || !site.targetBeneficiaryType?.trim() || !(site.estimatedHouseholds || site.numberOfHouseholds)) {
+            sites[siteIndex] = "Site name, district, primary beneficiary type, and number of households are required before submitting.";
+            return;
+          }
+          if (!String(site.latitude || "").trim() || !String(site.longitude || "").trim()) {
+            sites[siteIndex] = "Latitude and longitude are required for every Stage 2 site.";
+            return;
+          }
+          const lat = Number(site.latitude);
+          const lng = Number(site.longitude);
+          if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+            sites[siteIndex] = "Latitude and longitude must be valid numbers.";
+            return;
+          }
+          if (!pointWithinLesothoBounds(lat, lng)) {
+            sites[siteIndex] = "Site coordinates must fall within Lesotho.";
+            return;
+          }
+        } else {
+          if (!site.siteName.trim() || !site.district?.trim() || !site.targetBeneficiaryType?.trim() || !(site.estimatedHouseholds || site.numberOfHouseholds)) {
+            sites[siteIndex] = "Site name, district, primary beneficiary type, and estimated households are required before submitting.";
+            return;
+          }
+          if (String(site.latitude || "").trim() && String(site.longitude || "").trim() && !pointWithinLesothoBounds(Number(site.latitude), Number(site.longitude))) {
+            sites[siteIndex] = "Site coordinates must fall within Lesotho.";
+          }
+        }
+      });
+    }
+
+    return { fields, sites, files };
   };
 
   const bidSectionErrors: Record<string, string> = {};
@@ -10879,6 +11216,27 @@ const VendorDashboard = ({
     if (lower.includes("document") || lower.includes("technical proposal file") || lower.includes("financial proposal file") || lower.includes("boq file") || lower.includes("upload")) {
       bidSectionErrors["documents"] = bidSubmitError;
     }
+  }
+  const FIELD_TO_SECTION: Record<string, string> = {
+    bidAmount: "financial", subsidyRequested: "financial", boqItems: "financial", coFinancingAmount: "financial",
+    technologyType: "technical", deviceBrand: "technical", deviceModel: "technical", techTier: "technical",
+    ratedPowerW: "technical", batteryCapacityWh: "technical", pvPanelSizeW: "technical",
+    paygoPlatform: "technical", dailyPaymentAmountLsl: "technical", collectionMethod: "technical",
+    sites: "geography",
+    femaleTargetPct: "inclusion", vulnerableTargetPct: "inclusion", lowIncomeTargetPct: "inclusion", inclusionCommitmentConfirmed: "inclusion",
+    conceptNote: "narrative", omStrategySummary: "narrative",
+  };
+  Object.keys(bidFieldErrors).forEach((key) => {
+    const section = FIELD_TO_SECTION[key];
+    if (section && !bidSectionErrors[section]) bidSectionErrors[section] = bidFieldErrors[key];
+  });
+  if (Object.keys(bidSiteErrors).length > 0 && !bidSectionErrors["geography"]) {
+    bidSectionErrors["geography"] = "Fix the highlighted site(s) below. Each site must meet the required fields for this stage.";
+  }
+  const bidFileKeys = ["technicalProposal", "financialProposal", "boq", "genderActionPlan", "implementationPlan", "omPlan", "distributionMap", "tenderSecurity"];
+  const bidFileErrorCount = bidFileKeys.filter(key => bidFileErrors[key]).length;
+  if (bidFileErrorCount > 0 && !bidSectionErrors["documents"]) {
+    bidSectionErrors["documents"] = `${bidFileErrorCount} document issue${bidFileErrorCount > 1 ? "s" : ""} need attention before submission.`;
   }
 
   const scrollToFirstSectionError = () => {
@@ -10928,6 +11286,8 @@ const VendorDashboard = ({
   const submitBid = async (status: BidStatus, forceConfirm = false) => {
     if (!bidTender) return;
     setBidSubmitError(null);
+    setBidFieldErrors({});
+    setBidSiteErrors({});
     if (editingBidStatus && editingBidStatus !== BidStatus.DRAFT && editingBidStatus !== BidStatus.REVISION_REQUIRED && editingBidStatus !== BidStatus.SUBMITTED) {
       setBidMessage("This bid has been locked and cannot be edited. Please contact the RBF Management Team if you need to make changes.");
       return;
@@ -10941,75 +11301,21 @@ const VendorDashboard = ({
       setBidMessage(vendorRestrictionMessage);
       return;
     }
-    if (status === BidStatus.SUBMITTED && !forceConfirm && !bidSubmissionConfirmed) {
-      setBidConfirmOpen(true);
-      return;
-    }
-    if (status === BidStatus.SUBMITTED && !bidForm.bidAmount) {
-      setBidSubmitError("Bid amount is required.");
-      return;
-    }
-    if (status === BidStatus.SUBMITTED && !bidForm.subsidyRequested) {
-      setBidSubmitError("Subsidy requested is required.");
-      return;
-    }
-    if (
-      status === BidStatus.SUBMITTED
-      && Number(bidForm.subsidyRequested || 0) > Number(bidForm.bidAmount || 0)
-    ) {
-      setBidSubmitError("Subsidy requested must be less than or equal to the bid amount.");
-      return;
-    }
-    if (status === BidStatus.SUBMITTED && isPreQualificationStage && !bidForm.conceptNote.trim()) {
-      setBidSubmitError("Concept note is required for Stage 1 submissions.");
-      return;
-    }
-    if (status === BidStatus.SUBMITTED && isPreQualificationStage && implementationStrategyCharCount < 200) {
-      setBidSubmitError("Concept note must contain at least 200 characters before submission.");
-      return;
-    }
-    if (status === BidStatus.SUBMITTED && isSiteSpecificStage) {
-      const missingDocument = stageTwoDocuments.find(doc => !(bidFiles as any)[doc.key] && !(existingStageTwoDocuments as any)[doc.key]);
-      if (missingDocument) {
-        setBidSubmitError(`Upload ${missingDocument.label} before submitting the site-specific proposal.`);
+    if (status === BidStatus.SUBMITTED) {
+      const validation = validateBidForSubmit();
+      const hasErrors = Object.keys(validation.fields).length > 0 || Object.keys(validation.sites).length > 0 || Object.keys(validation.files).length > 0;
+      if (hasErrors) {
+        setBidFieldErrors(validation.fields);
+        setBidSiteErrors(validation.sites);
+        setBidFileErrors(prev => ({ ...prev, ...validation.files }));
+        setBidSubmitError("Please fix the highlighted fields below before submitting.");
+        setBidConfirmOpen(false);
         return;
       }
-      if (!bidForm.omStrategySummary.trim()) {
-        setBidSubmitError("O&M strategy summary is required for Stage 2 submissions.");
+      if (!forceConfirm && !bidSubmissionConfirmed) {
+        setBidConfirmOpen(true);
         return;
       }
-      if (isShsTender && bidForm.offerPaygo) {
-        if (!bidForm.paygoPlatform.trim() || !bidForm.dailyPaymentAmountLsl || !bidForm.collectionMethod.trim()) {
-          setBidSubmitError("Complete all PAYGO fields before submitting this SHS proposal.");
-          return;
-        }
-      }
-    }
-    if (
-      status === BidStatus.SUBMITTED
-      && isSiteSpecificStage
-      && (!bidForm.systemConfiguration.technologyType.trim() || !bidForm.deviceBrand.trim() || !bidForm.deviceModel.trim() || !bidForm.techTier)
-    ) {
-      setBidSubmitError("Complete the hardware and technology section before submitting.");
-      return;
-    }
-    if (status === BidStatus.SUBMITTED && approvedTierLevel && selectedTierLevel && selectedTierLevel > approvedTierLevel) {
-      setBidSubmitError(`Technology tier cannot exceed your approved pre-qualification tier (${latestApprovedPrequal?.techTier}).`);
-      return;
-    }
-    if (Number(bidForm.femaleTargetPct || 0) < requiredFemaleTarget || Number(bidForm.vulnerableTargetPct || 0) < requiredVulnerableTarget || Number(bidForm.lowIncomeTargetPct || 0) < 60) {
-      if (status === BidStatus.SUBMITTED) {
-        setBidSubmitError(`Inclusion targets must be at least ${requiredFemaleTarget}% female-headed, ${requiredVulnerableTarget}% vulnerable-group, and 60% low-income households.`);
-        return;
-      }
-    }
-    if (status === BidStatus.SUBMITTED && !bidForm.inclusionCommitmentConfirmed) {
-      setBidSubmitError("You must confirm the inclusion commitment before submitting.");
-      return;
-    }
-    if (status === BidStatus.SUBMITTED && bidSiteCount < 1) {
-      setBidSubmitError(`Add at least one ${isSiteSpecificStage ? "project" : "village"} site before submitting.`);
-      return;
     }
     setIsBidSubmitting(true);
     setBidMessage(null);
@@ -11159,7 +11465,26 @@ const VendorDashboard = ({
       setBidSubmissionConfirmed(false);
     } catch (err: any) {
       const raw = String(err?.message || "");
-      setBidSubmitError(isConnectivityError(raw) ? `Cannot connect to backend (${API_BASE}).` : (friendlyBidError(raw) || "Failed to submit bid. Please check all required fields and try again."));
+      const detailPayload = err?.detailPayload;
+      if (detailPayload && typeof detailPayload === "object" && !Array.isArray(detailPayload)) {
+        const parsed = parseBidServerErrors(detailPayload);
+        const hasParsedErrors = Object.keys(parsed.fields).length > 0 || Object.keys(parsed.sites).length > 0 || Object.keys(parsed.files).length > 0;
+        if (hasParsedErrors) {
+          setBidFieldErrors(parsed.fields);
+          setBidSiteErrors(parsed.sites);
+          setBidFileErrors(prev => ({ ...prev, ...parsed.files }));
+          setBidSubmitError("The server rejected the submission. Please fix the highlighted fields below and try again.");
+          setBidConfirmOpen(false);
+          return;
+        }
+      }
+      setBidSubmitError(
+        isConnectivityError(raw)
+          ? `Cannot connect to backend (${API_BASE}).`
+          : isServerError(err)
+            ? "An internal server error occurred. Your submission was not saved — please try again in a few minutes, or contact the support team if the problem persists."
+            : (friendlyBidError(raw) || "Failed to submit bid. Please check all required fields and try again."),
+      );
     } finally {
       setIsBidSubmitting(false);
     }
@@ -11269,6 +11594,14 @@ const VendorDashboard = ({
                 <span className="inline-flex items-center rounded-full border border-white/20 bg-white/10 px-3 py-1 text-xs font-bold uppercase tracking-[0.18em] text-slate-100">
                   {bidTender.technologyTypes?.join(" / ") || "Technology not set"}
                 </span>
+                <button
+                  type="button"
+                  onClick={() => setRuleBookOpen(true)}
+                  className="inline-flex items-center gap-2 rounded-full bg-emerald-400 px-4 py-2 text-xs font-bold uppercase tracking-[0.16em] text-emerald-950 shadow-lg shadow-emerald-400/20 transition hover:bg-emerald-300"
+                >
+                  <BookOpen size={14} />
+                  View Rule Book
+                </button>
               </div>
               <div>
                 <h2 className="text-3xl font-black tracking-tight">{bidTender.name}</h2>
@@ -11336,6 +11669,101 @@ const VendorDashboard = ({
           </div>
         )}
 
+        {ruleBookOpen && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/70 p-4 backdrop-blur-sm" onClick={() => setRuleBookOpen(false)}>
+            <div className="relative flex max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden rounded-[28px] bg-white shadow-2xl" onClick={(e) => e.stopPropagation()}>
+              <div className="flex items-center justify-between gap-4 border-b border-slate-800 bg-emerald-950 px-6 py-5">
+                <div className="flex items-center gap-3">
+                  <div className="rounded-2xl bg-white/10 p-3 text-emerald-100">
+                    <BookOpen size={20} />
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-bold text-white">Bid Submission Rule Book</h3>
+                    <p className="text-sm text-emerald-100/80">
+                      {bidStageLabel} rules and requirements. Read carefully to submit an error-free bid.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setRuleBookOpen(false)}
+                  className="rounded-xl bg-white/10 p-2 text-emerald-100 transition hover:bg-white/20"
+                  aria-label="Close rule book"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+              <div className="overflow-y-auto p-6">
+                <div className="mb-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                  {[
+                    { label: "Tender", value: bidTender.referenceNumber },
+                    { label: "Stage", value: bidStageLabel },
+                    { label: "Deadline", value: bidDeadlineLabel || "N/A" },
+                    { label: "Document Formats", value: "PDF, DOCX, XLSX (max 10MB)" },
+                  ].map((item) => (
+                    <div key={item.label} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                      <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-slate-500">{item.label}</p>
+                      <p className="mt-1 text-sm font-bold text-slate-900">{item.value}</p>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
+                  {ruleBookSections.map((section) => (
+                    <div key={section.heading} className="rounded-2xl border border-slate-200 bg-slate-50/60 p-4">
+                      <p className="text-xs font-bold uppercase tracking-[0.16em] text-emerald-700">{section.heading}</p>
+                      <ul className="mt-3 space-y-2">
+                        {section.points.map((point) => (
+                          <li key={point} className="flex items-start gap-2 text-sm text-slate-700">
+                            <CheckCircle2 size={15} className="mt-0.5 shrink-0 text-emerald-600" />
+                            <span>{point}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="mt-6 rounded-2xl border-2 border-emerald-200 bg-emerald-50 p-5">
+                  <p className="text-sm font-bold uppercase tracking-[0.16em] text-emerald-800">Before You Submit - Hard Checklist</p>
+                  <ul className="mt-3 grid gap-2 text-sm text-slate-700 md:grid-cols-2">
+                    {[
+                      "Bid amount and subsidy requested filled in",
+                      "Subsidy requested is not greater than the bid amount",
+                      isPreQualificationStage
+                        ? "Concept note is at least 200 characters"
+                        : "Technical Proposal, Financial Proposal and BOQ documents uploaded",
+                      isPreQualificationStage
+                        ? "Every site has a name, district, beneficiary type and estimated households"
+                        : "Every site has mandatory GPS coordinates inside Lesotho",
+                      isSiteSpecificStage ? "BOQ grand total exactly equals the bid amount" : "Co-financing difference covered by the vendor",
+                      isSiteSpecificStage ? "O&M strategy summary provided" : "Village sites target the tender districts",
+                      isSiteSpecificStage && isShsTender ? "PAYGO platform, daily payment and collection method completed" : null,
+                      "Inclusion targets meet 50% female-headed / 30% vulnerable / 60% low-income",
+                      "Inclusion commitment confirmed",
+                      isSiteSpecificStage ? "Technology tier does not exceed your approved pre-qualification tier" : null,
+                    ].filter((point): point is string => Boolean(point)).map((point) => (
+                      <li key={point} className="flex items-start gap-2">
+                        <AlertCircle size={15} className="mt-0.5 shrink-0 text-emerald-600" />
+                        <span>{point}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+              <div className="border-t border-slate-200 bg-slate-50 px-6 py-4">
+                <button
+                  type="button"
+                  onClick={() => setRuleBookOpen(false)}
+                  className="w-full rounded-2xl bg-emerald-900 px-6 py-3 text-sm font-bold text-white transition hover:bg-emerald-800"
+                >
+                  I Have Read the Rule Book
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr),320px]">
           <div className="space-y-6">
             <div className="card overflow-hidden border-slate-200">
@@ -11397,7 +11825,9 @@ const VendorDashboard = ({
                       const subsidy = Number(bidForm.subsidyRequested || 0);
                       const coFinancing = Math.max(0, bidAmount - subsidy);
                       setBidForm(prev => ({ ...prev, bidAmount: e.target.value, coFinancingAmount: String(coFinancing) }));
+                      clearBidFieldError("bidAmount");
                     }} />
+                    <BidFieldError message={bidFieldErrors["bidAmount"]} />
                   </div>
                   <div className="space-y-1">
                     <label className="text-sm font-bold text-slate-700 ml-1">Subsidy Requested (LSL) *</label>
@@ -11406,7 +11836,9 @@ const VendorDashboard = ({
                       const bidAmount = Number(bidForm.bidAmount || 0);
                       const coFinancing = Math.max(0, bidAmount - subsidy);
                       setBidForm(prev => ({ ...prev, subsidyRequested: e.target.value, coFinancingAmount: String(coFinancing) }));
+                      clearBidFieldError("subsidyRequested");
                     }} />
+                    <BidFieldError message={bidFieldErrors["subsidyRequested"]} />
                   </div>
                   {isSiteSpecificStage && (
                     <div className="space-y-1">
@@ -11526,6 +11958,7 @@ const VendorDashboard = ({
                     </div>
                   </div>
                   <div className="space-y-4">
+                    <BidFieldError message={bidFieldErrors["sites"]} />
                     {bidForm.sites.map((site, index) => {
                       const siteReady = isPreQualificationStage
                         ? Boolean(site.siteName && site.district && site.targetBeneficiaryType && site.estimatedHouseholds)
@@ -11548,6 +11981,7 @@ const VendorDashboard = ({
                               )}
                             </div>
                           </div>
+                          <BidFieldError message={bidSiteErrors[index]} />
                           <div className="mt-5 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
                             <div className="space-y-1">
                               <label className="text-sm font-bold text-slate-700 ml-1">Site Name *</label>
@@ -11644,10 +12078,13 @@ const VendorDashboard = ({
                     <select
                       className="input-field"
                       value={bidForm.systemConfiguration.technologyType || bidTechnologyTypeOptions[0] || ""}
-                      onChange={(e) => setBidForm(prev => ({
-                        ...prev,
-                        systemConfiguration: { ...prev.systemConfiguration, technologyType: e.target.value },
-                      }))}
+                      onChange={(e) => {
+                        setBidForm(prev => ({
+                          ...prev,
+                          systemConfiguration: { ...prev.systemConfiguration, technologyType: e.target.value },
+                        }));
+                        clearBidFieldError("technologyType");
+                      }}
                     >
                       {bidTechnologyTypeOptions.length === 0 ? (
                         <option value="">No technology type configured in this tender</option>
@@ -11657,22 +12094,26 @@ const VendorDashboard = ({
                         ))
                       )}
                     </select>
+                    <BidFieldError message={bidFieldErrors["technologyType"]} />
                   </div>
                   <div className="space-y-1">
                     <label className="text-sm font-bold text-slate-700 ml-1">Device Brand *</label>
-                    <input className="input-field" value={bidForm.deviceBrand} onChange={(e) => setBidForm(prev => ({ ...prev, deviceBrand: e.target.value }))} />
+                    <input className="input-field" value={bidForm.deviceBrand} onChange={(e) => { setBidForm(prev => ({ ...prev, deviceBrand: e.target.value })); clearBidFieldError("deviceBrand"); }} />
+                    <BidFieldError message={bidFieldErrors["deviceBrand"]} />
                   </div>
                   <div className="space-y-1">
                     <label className="text-sm font-bold text-slate-700 ml-1">Device Model *</label>
-                    <input className="input-field" value={bidForm.deviceModel} onChange={(e) => setBidForm(prev => ({ ...prev, deviceModel: e.target.value }))} />
+                    <input className="input-field" value={bidForm.deviceModel} onChange={(e) => { setBidForm(prev => ({ ...prev, deviceModel: e.target.value })); clearBidFieldError("deviceModel"); }} />
+                    <BidFieldError message={bidFieldErrors["deviceModel"]} />
                   </div>
                   <div className="space-y-1">
                     <label className="text-sm font-bold text-slate-700 ml-1">Service Tier *</label>
-                    <select className="input-field" value={bidForm.techTier} onChange={(e) => setBidForm(prev => ({ ...prev, techTier: e.target.value }))}>
+                    <select className="input-field" value={bidForm.techTier} onChange={(e) => { setBidForm(prev => ({ ...prev, techTier: e.target.value })); clearBidFieldError("techTier"); }}>
                       {["Tier 1", "Tier 2", "Tier 3", "Tier 4", "Tier 5"].map((tier) => (
                         <option key={tier} value={tier}>{tier}</option>
                       ))}
                     </select>
+                    <BidFieldError message={bidFieldErrors["techTier"]} />
                     {latestApprovedPrequal?.techTier && (
                       <p className={`text-xs mt-1 ${approvedTierLevel && selectedTierLevel && selectedTierLevel > approvedTierLevel ? "text-amber-700" : "text-slate-500"}`}>
                         Approved pre-qualification ceiling: {latestApprovedPrequal.techTier}
@@ -11681,15 +12122,18 @@ const VendorDashboard = ({
                   </div>
                   <div className="space-y-1">
                     <label className="text-sm font-bold text-slate-700 ml-1">Rated Power (W)</label>
-                    <input type="number" className="input-field" value={bidForm.systemConfiguration.ratedPowerW} onChange={(e) => setBidForm(prev => ({ ...prev, systemConfiguration: { ...prev.systemConfiguration, ratedPowerW: e.target.value } }))} />
+                    <input type="number" className="input-field" value={bidForm.systemConfiguration.ratedPowerW} onChange={(e) => { setBidForm(prev => ({ ...prev, systemConfiguration: { ...prev.systemConfiguration, ratedPowerW: e.target.value } })); clearBidFieldError("systemConfiguration.ratedPowerW"); }} />
+                    <BidFieldError message={bidFieldErrors["systemConfiguration.ratedPowerW"]} />
                   </div>
                   <div className="space-y-1">
                     <label className="text-sm font-bold text-slate-700 ml-1">Battery Capacity (Wh)</label>
-                    <input type="number" className="input-field" value={bidForm.systemConfiguration.batteryCapacityWh} onChange={(e) => setBidForm(prev => ({ ...prev, systemConfiguration: { ...prev.systemConfiguration, batteryCapacityWh: e.target.value } }))} />
+                    <input type="number" className="input-field" value={bidForm.systemConfiguration.batteryCapacityWh} onChange={(e) => { setBidForm(prev => ({ ...prev, systemConfiguration: { ...prev.systemConfiguration, batteryCapacityWh: e.target.value } })); clearBidFieldError("systemConfiguration.batteryCapacityWh"); }} />
+                    <BidFieldError message={bidFieldErrors["systemConfiguration.batteryCapacityWh"]} />
                   </div>
                   <div className="space-y-1">
                     <label className="text-sm font-bold text-slate-700 ml-1">PV Panel Size (W)</label>
-                    <input type="number" className="input-field" value={bidForm.systemConfiguration.pvPanelSizeW} onChange={(e) => setBidForm(prev => ({ ...prev, systemConfiguration: { ...prev.systemConfiguration, pvPanelSizeW: e.target.value } }))} />
+                    <input type="number" className="input-field" value={bidForm.systemConfiguration.pvPanelSizeW} onChange={(e) => { setBidForm(prev => ({ ...prev, systemConfiguration: { ...prev.systemConfiguration, pvPanelSizeW: e.target.value } })); clearBidFieldError("systemConfiguration.pvPanelSizeW"); }} />
+                    <BidFieldError message={bidFieldErrors["systemConfiguration.pvPanelSizeW"]} />
                   </div>
                   <div className="space-y-1">
                     <label className="text-sm font-bold text-slate-700 ml-1">Inverter Type</label>
@@ -11714,15 +12158,18 @@ const VendorDashboard = ({
                         <>
                           <div className="space-y-1">
                             <label className="text-sm font-bold text-slate-700 ml-1">PAYGO Platform *</label>
-                            <input className="input-field" value={bidForm.paygoPlatform} onChange={(e) => setBidForm(prev => ({ ...prev, paygoPlatform: e.target.value }))} />
+                            <input className="input-field" value={bidForm.paygoPlatform} onChange={(e) => { setBidForm(prev => ({ ...prev, paygoPlatform: e.target.value })); clearBidFieldError("paygoPlatform"); }} />
+                            <BidFieldError message={bidFieldErrors["paygoPlatform"]} />
                           </div>
                           <div className="space-y-1">
                             <label className="text-sm font-bold text-slate-700 ml-1">Minimum Daily Payment (LSL) *</label>
-                            <input type="number" className="input-field" value={bidForm.dailyPaymentAmountLsl} onChange={(e) => setBidForm(prev => ({ ...prev, dailyPaymentAmountLsl: e.target.value }))} />
+                            <input type="number" className="input-field" value={bidForm.dailyPaymentAmountLsl} onChange={(e) => { setBidForm(prev => ({ ...prev, dailyPaymentAmountLsl: e.target.value })); clearBidFieldError("dailyPaymentAmountLsl"); }} />
+                            <BidFieldError message={bidFieldErrors["dailyPaymentAmountLsl"]} />
                           </div>
                           <div className="space-y-1">
                             <label className="text-sm font-bold text-slate-700 ml-1">Collection Method *</label>
-                            <input className="input-field" value={bidForm.collectionMethod} onChange={(e) => setBidForm(prev => ({ ...prev, collectionMethod: e.target.value }))} />
+                            <input className="input-field" value={bidForm.collectionMethod} onChange={(e) => { setBidForm(prev => ({ ...prev, collectionMethod: e.target.value })); clearBidFieldError("collectionMethod"); }} />
+                            <BidFieldError message={bidFieldErrors["collectionMethod"]} />
                           </div>
                         </>
                       )}
@@ -11768,6 +12215,7 @@ const VendorDashboard = ({
                       </span>
                     </div>
                   </div>
+                  <BidFieldError message={bidFieldErrors["boqItems"]} />
                 </div>
               </div>
             )}
@@ -11783,7 +12231,8 @@ const VendorDashboard = ({
                 <div className="grid grid-cols-1 gap-4 p-6 md:grid-cols-2">
                   <div className="space-y-1 md:col-span-2">
                     <label className="text-sm font-bold text-slate-700 ml-1">O&amp;M Strategy Summary *</label>
-                    <textarea className="input-field min-h-[140px]" value={bidForm.omStrategySummary} onChange={(e) => setBidForm(prev => ({ ...prev, omStrategySummary: e.target.value }))} />
+                    <textarea className="input-field min-h-[140px]" value={bidForm.omStrategySummary} onChange={(e) => { setBidForm(prev => ({ ...prev, omStrategySummary: e.target.value })); clearBidFieldError("omStrategySummary"); }} />
+                    <BidFieldError message={bidFieldErrors["omStrategySummary"]} />
                   </div>
                   <div className="space-y-1">
                     <label className="text-sm font-bold text-slate-700 ml-1">Local Technicians Count</label>
@@ -11826,26 +12275,26 @@ const VendorDashboard = ({
                   <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
                     <label className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Female-Headed Household Target *</label>
                     <div className="mt-3 flex items-end gap-3">
-                      <input type="number" required min={50} className={inclusionInputClass(femaleTargetInvalid)} value={bidForm.femaleTargetPct} onChange={(e) => setBidForm(prev => ({ ...prev, femaleTargetPct: e.target.value }))} />
+                      <input type="number" required min={50} className={inclusionInputClass(femaleTargetInvalid)} value={bidForm.femaleTargetPct} onChange={(e) => { setBidForm(prev => ({ ...prev, femaleTargetPct: e.target.value })); clearBidFieldError("femaleTargetPct"); }} />
                       <span className="pb-3 text-sm font-bold text-slate-500">%</span>
                     </div>
-                    {femaleTargetInvalid && <p className="mt-2 text-xs font-semibold text-rose-600">Minimum 50% required.</p>}
+                    <BidFieldError message={bidFieldErrors["femaleTargetPct"]} />
                   </div>
                   <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
                     <label className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Vulnerable Group Inclusion *</label>
                     <div className="mt-3 flex items-end gap-3">
-                      <input type="number" required min={30} className={inclusionInputClass(vulnerableTargetInvalid)} value={bidForm.vulnerableTargetPct} onChange={(e) => setBidForm(prev => ({ ...prev, vulnerableTargetPct: e.target.value }))} />
+                      <input type="number" required min={30} className={inclusionInputClass(vulnerableTargetInvalid)} value={bidForm.vulnerableTargetPct} onChange={(e) => { setBidForm(prev => ({ ...prev, vulnerableTargetPct: e.target.value })); clearBidFieldError("vulnerableTargetPct"); }} />
                       <span className="pb-3 text-sm font-bold text-slate-500">%</span>
                     </div>
-                    {vulnerableTargetInvalid && <p className="mt-2 text-xs font-semibold text-rose-600">Minimum 30% required.</p>}
+                    <BidFieldError message={bidFieldErrors["vulnerableTargetPct"]} />
                   </div>
                   <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
                     <label className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Low-Income Household Target *</label>
                     <div className="mt-3 flex items-end gap-3">
-                      <input type="number" required min={60} className={inclusionInputClass(lowIncomeTargetInvalid)} value={bidForm.lowIncomeTargetPct} onChange={(e) => setBidForm(prev => ({ ...prev, lowIncomeTargetPct: e.target.value }))} />
+                      <input type="number" required min={60} className={inclusionInputClass(lowIncomeTargetInvalid)} value={bidForm.lowIncomeTargetPct} onChange={(e) => { setBidForm(prev => ({ ...prev, lowIncomeTargetPct: e.target.value })); clearBidFieldError("lowIncomeTargetPct"); }} />
                       <span className="pb-3 text-sm font-bold text-slate-500">%</span>
                     </div>
-                    {lowIncomeTargetInvalid && <p className="mt-2 text-xs font-semibold text-rose-600">Minimum 60% required.</p>}
+                    <BidFieldError message={bidFieldErrors["lowIncomeTargetPct"]} />
                   </div>
                 </div>
                 {isSiteSpecificStage && (
@@ -11866,9 +12315,10 @@ const VendorDashboard = ({
                   </div>
                 )}
                 <label className="flex items-start gap-3 rounded-3xl border border-slate-200 bg-slate-50 p-4">
-                  <input type="checkbox" checked={bidForm.inclusionCommitmentConfirmed} onChange={(e) => setBidForm(prev => ({ ...prev, inclusionCommitmentConfirmed: e.target.checked }))} className="mt-1" />
+                  <input type="checkbox" checked={bidForm.inclusionCommitmentConfirmed} onChange={(e) => { setBidForm(prev => ({ ...prev, inclusionCommitmentConfirmed: e.target.checked })); clearBidFieldError("inclusionCommitmentConfirmed"); }} className="mt-1" />
                   <span className="text-sm text-slate-700">I confirm these inclusion commitments are part of this proposal and will be honored if the tender is awarded.</span>
                 </label>
+                <BidFieldError message={bidFieldErrors["inclusionCommitmentConfirmed"]} />
               </div>
             </div>
 
@@ -11957,7 +12407,8 @@ const VendorDashboard = ({
                     {implementationStrategyCharCount}/200 chars
                   </span>
                 </div>
-                <textarea className="input-field min-h-[220px]" value={bidForm.conceptNote} onChange={(e) => setBidForm(prev => ({ ...prev, conceptNote: e.target.value }))} placeholder="Explain the approach, logistics, implementation sequence, and community engagement strategy for this tender." />
+                <textarea className="input-field min-h-[220px]" value={bidForm.conceptNote} onChange={(e) => { setBidForm(prev => ({ ...prev, conceptNote: e.target.value })); clearBidFieldError("conceptNote"); }} placeholder="Explain the approach, logistics, implementation sequence, and community engagement strategy for this tender." />
+                <BidFieldError message={bidFieldErrors["conceptNote"]} />
                 <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
                   {isPreQualificationStage ? "This is the main Stage 1 concept note reviewed by the RMT before detailed documents are unlocked." : "Keep the narrative aligned with the approved concept and use it to give evaluators context for the detailed submission."}
                 </div>
@@ -11990,15 +12441,23 @@ const VendorDashboard = ({
                 {bidSubmitError}
               </div>
             )}
+            <button
+              type="button"
+              onClick={() => setRuleBookOpen(true)}
+              className="flex w-full items-center justify-center gap-2 rounded-2xl border-2 border-emerald-300 bg-emerald-50 px-6 py-3 text-sm font-bold text-emerald-800 transition hover:border-emerald-400 hover:bg-emerald-100"
+            >
+              <BookOpen size={16} />
+              View Bid Submission Rule Book
+              <HelpCircle size={16} />
+            </button>
             <div className="flex flex-col gap-3 sm:flex-row">
               <button onClick={() => submitBid(BidStatus.DRAFT)} disabled={isBidSubmitting || !canEdit} className="btn-secondary flex-1 py-3 disabled:opacity-60">
                 {isBidSubmitting ? "Saving..." : "Save Draft"}
               </button>
               <button
                 onClick={() => {
-                  setBidSubmitError(null);
                   setBidSubmissionConfirmed(false);
-                  setBidConfirmOpen(true);
+                  void submitBid(BidStatus.SUBMITTED, false);
                 }}
                 disabled={isBidSubmitting || !canEdit}
                 className="btn-primary flex-1 py-3 disabled:opacity-60"
@@ -18477,6 +18936,7 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
   const [tenderSecurityRequired, setTenderSecurityRequired] = useState<Record<string, boolean>>({});
   const [tenderDetails, setTenderDetails] = useState<Record<string, Tender>>({});
   const [expandedTender, setExpandedTender] = useState<string | null>(null);
+  const [activeStage, setActiveStage] = useState<"stage1" | "stage2">(() => isFinancialEvaluationMode ? "stage1" : "stage2");
   const [isLoading, setIsLoading] = useState(false);
   const [notification, setNotification] = useState<string | null>(null);
   const [isStageOneDecisionSubmitting, setIsStageOneDecisionSubmitting] = useState(false);
@@ -18626,7 +19086,24 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
   const stageOneGroups = useMemo(() => groupByTender(stageOneReviewQueue, item => [BidStatus.SUBMITTED, BidStatus.UNDER_REVIEW].includes(item.status)), [stageOneReviewQueue]);
   const stageTwoGroups = useMemo(() => groupByTender(filteredBidQueue, item => !roleScopedEvaluationsByBid.get(item.id)), [filteredBidQueue, roleScopedEvaluationsByBid]);
 
+  const activeStageGroups = activeStage === "stage1" ? stageOneGroups : stageTwoGroups;
+  const activeStagePending = activeStage === "stage1"
+    ? stageOneReviewQueue.filter(item => [BidStatus.SUBMITTED, BidStatus.UNDER_REVIEW].includes(item.status)).length
+    : filteredBidQueue.filter(item => !roleScopedEvaluationsByBid.get(item.id)).length;
+
+  const getBidTenderStatus = (bid: TenderBid) => tenderDetails[bid.tender]?.status;
+
+  const canEvaluateBid = (bid: TenderBid) => {
+    const status = getBidTenderStatus(bid);
+    return status === undefined || [TenderStatus.CLOSED, TenderStatus.EVALUATION].includes(status);
+  };
+
   const handleStartEvaluation = (bid: TenderBid) => {
+    const status = getBidTenderStatus(bid);
+    if (status !== undefined && ![TenderStatus.CLOSED, TenderStatus.EVALUATION].includes(status)) {
+      showNotification(`Evaluation can only start when the tender status is Closed. This tender is ${status}.`);
+      return;
+    }
     const existing = roleScopedEvaluationsByBid.get(bid.id);
     setSelectedEval({
       bid,
@@ -19499,149 +19976,213 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
         </div>
       )}
 
-      {isFinancialEvaluationMode && (
-        <div className="card">
-          <div className="p-6 border-b border-slate-100 flex items-center justify-between">
-            <div>
-              <h3 className="text-lg font-bold">Bid List - Stage 1 Submissions</h3>
-              <p className="text-sm text-slate-500 mt-1">RMT reviews concept notes, proposed sites, inclusion commitments, and tender fit before shortlisting vendors to Stage 2.</p>
-            </div>
-            <span className="badge bg-amber-100 text-amber-700">
-              {stageOneReviewQueue.filter(item => [BidStatus.SUBMITTED, BidStatus.UNDER_REVIEW].includes(item.status)).length} Awaiting Review
-            </span>
-          </div>
-          <div className="divide-y divide-slate-100">
-            {stageOneGroups.map(([key, group]) => {
-              const isExpanded = expandedTender === key;
-              const pending = group.bids.filter(item => [BidStatus.SUBMITTED, BidStatus.UNDER_REVIEW].includes(item.status)).length;
-              return (
-              <div key={key}>
-                <button
-                  onClick={() => setExpandedTender(isExpanded ? null : key)}
-                  className="w-full flex items-center justify-between px-6 py-4 bg-slate-50 hover:bg-slate-100 transition-colors border-b border-slate-100"
-                >
-                  <div className="flex items-center gap-3">
-                    <ChevronDown size={16} className={`text-slate-400 transition-transform ${isExpanded ? "" : "-rotate-90"}`} />
-                    <p className="text-sm font-bold text-slate-700">{group.tenderName}</p>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <span className="text-xs text-slate-500">{group.bids.length} bid{group.bids.length !== 1 ? "s" : ""}</span>
-                    {pending > 0 && <span className="badge bg-amber-100 text-amber-700">{pending} pending</span>}
-                  </div>
-                </button>
-                {isExpanded && group.bids.map((item) => (
-                  <div key={item.id} className="p-6 flex items-center justify-between hover:bg-slate-50 transition-colors border-b border-slate-50 last:border-b-0">
-                    <div>
-                      <p className="font-bold text-slate-900">{item.vendor_name}</p>
-                      <p className="text-xs text-slate-500">Submitted {item.submitted_at ? new Date(item.submitted_at).toLocaleDateString() : "N/A"}</p>
-                    </div>
-                    <div className="flex items-center gap-4">
-                      <span className={`inline-flex rounded-full px-3 py-1 text-xs font-bold ${queueStatusTone(item)}`}>{item.status === BidStatus.ACCEPTED ? "Shortlisted" : item.status}</span>
-                      <button onClick={() => handleStartEvaluation(item)} className="btn-primary py-1.5 px-4 text-sm">{item.status === BidStatus.ACCEPTED ? "View" : "Review"}</button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )})}
-            {!stageOneReviewQueue.length && (
-              <div className="p-6 text-sm text-slate-500">No Stage 1 submissions found.</div>
-            )}
-          </div>
-        </div>
-      )}
-
       <div className="card">
-        <div className="p-6 border-b border-slate-100 flex items-center justify-between">
-          <h3 className="text-lg font-bold">{isFinancialEvaluationMode ? "Bid List - Stage 2 Submissions" : "Bid List - Stage 2 Technical Review"}</h3>
-          <span className="badge bg-rose-100 text-rose-700">
-            {filteredBidQueue.filter(item => !roleScopedEvaluationsByBid.get(item.id)).length} Pending Reviews
+        <div className="p-6 border-b border-slate-100 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+          <div>
+            <h3 className="text-lg font-bold">{isFinancialEvaluationMode ? "Bid List - Evaluation Folders" : "Bid List - Stage 2 Technical Review"}</h3>
+            <p className="text-sm text-slate-500 mt-1">Select a stage below to view its tenders as folders, then open a folder to review its submissions.</p>
+          </div>
+          <span className="badge bg-rose-100 text-rose-700 self-start lg:self-auto">
+            {activeStagePending} Pending {activeStage === "stage1" ? "Stage 1 Reviews" : "Reviews"}
           </span>
         </div>
-        <div className="divide-y divide-slate-100">
+
+        {isFinancialEvaluationMode && (
+          <div className="px-6 pt-5 flex flex-wrap gap-3">
+            <button
+              onClick={() => setActiveStage("stage1")}
+              className={`flex items-center gap-2 px-4 py-2.5 rounded-xl border text-sm font-bold transition-colors ${
+                activeStage === "stage1"
+                  ? "bg-amber-500 text-white border-amber-500 shadow-sm"
+                  : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
+              }`}
+            >
+              <FolderOpen size={16} />
+              Stage 1 Submissions
+              <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-bold ${activeStage === "stage1" ? "bg-white/20 text-white" : "bg-amber-100 text-amber-700"}`}>
+                {stageOneReviewQueue.length}
+              </span>
+            </button>
+            <button
+              onClick={() => setActiveStage("stage2")}
+              className={`flex items-center gap-2 px-4 py-2.5 rounded-xl border text-sm font-bold transition-colors ${
+                activeStage === "stage2"
+                  ? "bg-rose-500 text-white border-rose-500 shadow-sm"
+                  : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
+              }`}
+            >
+              <FolderOpen size={16} />
+              Stage 2 Submissions - Financial
+              <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-bold ${activeStage === "stage2" ? "bg-white/20 text-white" : "bg-rose-100 text-rose-700"}`}>
+                {filteredBidQueue.length}
+              </span>
+            </button>
+          </div>
+        )}
+
+        <div className="p-6">
           {isLoading && (
             <div className="p-6 text-sm text-slate-500">Loading evaluations...</div>
           )}
-          {!isLoading && stageTwoGroups.map(([key, group]) => {
-            const isExpanded = expandedTender === key;
-            const pending = group.bids.filter(item => !roleScopedEvaluationsByBid.get(item.id)).length;
-            return (
-            <div key={key}>
-              <button
-                onClick={() => setExpandedTender(isExpanded ? null : key)}
-                className="w-full flex items-center justify-between px-6 py-4 bg-slate-50 hover:bg-slate-100 transition-colors border-b border-slate-100"
-              >
-                <div className="flex items-center gap-3">
-                  <ChevronDown size={16} className={`text-slate-400 transition-transform ${isExpanded ? "" : "-rotate-90"}`} />
-                  <p className="text-sm font-bold text-slate-700">{group.tenderName}</p>
-                </div>
-                <div className="flex items-center gap-3">
-                  <span className="text-xs text-slate-500">{group.bids.length} bid{group.bids.length !== 1 ? "s" : ""}</span>
-                  {pending > 0 && <span className="badge bg-rose-100 text-rose-700">{pending} pending</span>}
-                </div>
-              </button>
-              {isExpanded && group.bids.map((item) => {
-            const existing = roleScopedEvaluationsByBid.get(item.id);
-            const technicalExisting = technicalEvaluationsByBid.get(item.id);
-            const financialExisting = financialEvaluationsByBid.get(item.id);
-            const technicalScore = item.technical_score_total ?? getTechnicalComposite(technicalExisting);
-            const financialScore = item.financial_score_total ?? getFinancialTotal(financialExisting);
-            const combinedScore = technicalScore + financialScore;
-            const threshold = tenderThresholds[item.tender] ?? 70;
-            const rowStatus =
-              item.evaluation_status === "evaluated" ? "Evaluated" :
-              item.evaluation_status === "technical_scored" ? (isFinancialEvaluationMode ? "Pending Financial" : "Evaluated") :
-              "Pending";
-            return (
-            <div key={item.id} className="p-6 flex items-center justify-between hover:bg-slate-50 transition-colors">
-              <div className="flex gap-4 items-center">
-                <div className="w-12 h-12 rounded-xl bg-slate-100 flex items-center justify-center text-slate-400">
-                  <FileText size={24} />
-                </div>
-                <div>
-                  <p className="font-bold text-slate-900">{item.vendor_name}</p>
-                  <p className="text-xs text-slate-500">Tender: {item.tender_reference || item.tender}</p>
-                  {!isFinancialEvaluationMode && (
-                    <p className="text-xs text-slate-500">
-                      Tier {item.tech_tier || item.service_tier || "N/A"} • GPS {(item.sites || []).filter((site) => site.latitude != null && site.longitude != null).length}/{(item.sites || []).length} • Energy {item.energy_target || item.energy_target_kwh_month ? `${item.energy_target || item.energy_target_kwh_month} kWh/mo` : "N/A"}
-                    </p>
-                  )}
-                  {isFinancialEvaluationMode && (
-                    <p className="text-xs text-emerald-700">Technical gate: {technicalScore}/{Math.round((threshold / 100) * 70)}</p>
-                  )}
-                </div>
-              </div>
-              <div className="flex items-center gap-6">
-                <div className="hidden md:grid grid-cols-4 gap-6 text-right">
-                  <div>
-                    <p className="text-xs font-bold text-slate-400 uppercase">Score</p>
-                    <p className="text-lg font-bold text-emerald-600">{combinedScore > 0 ? `${combinedScore}/100` : "—"}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs font-bold text-slate-400 uppercase">Technical</p>
-                    <p className="text-sm font-semibold text-slate-900">{technicalScore > 0 ? `${technicalScore}/70` : "—"}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs font-bold text-slate-400 uppercase">Financial</p>
-                    <p className="text-sm font-semibold text-slate-900">{financialScore > 0 ? `${financialScore}/30` : "—"}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs font-bold text-slate-400 uppercase">Status</p>
-                    <p className="text-sm font-semibold text-slate-900">{rowStatus}</p>
-                  </div>
-                </div>
-                <button 
-                  onClick={() => handleStartEvaluation(item)}
-                  className="btn-primary py-1.5 px-4 text-sm"
-                >
-                  {existing ? "Review" : `Start ${isFinancialEvaluationMode ? "Financial" : "Technical"} Score`}
-                </button>
-              </div>
+
+          {!isLoading && activeStageGroups.length === 0 && (
+            <div className="p-6 text-sm text-slate-500">
+              {activeStage === "stage1"
+                ? "No Stage 1 submissions found."
+                : isFinancialEvaluationMode
+                ? "No bids have passed the technical threshold for RMT financial evaluation yet."
+                : "No submitted bids awaiting evaluation."}
             </div>
-          )})}
-            </div>
-          )})}
-          {!isLoading && filteredBidQueue.length === 0 && (
-            <div className="p-6 text-sm text-slate-500">{isFinancialEvaluationMode ? "No bids have passed the technical threshold for RMT financial evaluation yet." : "No submitted bids awaiting evaluation."}</div>
+          )}
+
+          {!isLoading && activeStageGroups.length > 0 && (
+            <>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+                {activeStageGroups.map(([key, group]) => {
+                  const isExpanded = expandedTender === key;
+                  const pending = activeStage === "stage1"
+                    ? group.bids.filter(item => [BidStatus.SUBMITTED, BidStatus.UNDER_REVIEW].includes(item.status)).length
+                    : group.bids.filter(item => !roleScopedEvaluationsByBid.get(item.id)).length;
+                  return (
+                    <button
+                      key={key}
+                      onClick={() => setExpandedTender(isExpanded ? null : key)}
+                      className={`group relative text-left rounded-2xl border p-5 transition-all hover:shadow-md ${
+                        isExpanded
+                          ? "border-amber-400 bg-amber-50 ring-2 ring-amber-200"
+                          : "border-slate-200 bg-white hover:border-slate-300"
+                      }`}
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className={`w-11 h-11 rounded-xl flex items-center justify-center shrink-0 ${isExpanded ? "bg-amber-500 text-white" : "bg-[#0b1530] text-white"}`}>
+                          <FolderOpen size={20} />
+                        </div>
+                        <div className="min-w-0">
+                          <p className="font-bold text-slate-900 truncate">{group.tenderName}</p>
+                          <p className="text-xs text-slate-500">{group.bids.length} bid{group.bids.length !== 1 ? "s" : ""}{activeStage === "stage2" ? " • Financial" : ""}</p>
+                        </div>
+                      </div>
+                      <div className="mt-4 flex items-center justify-between">
+                        <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-bold ${activeStage === "stage1" ? "bg-amber-100 text-amber-700" : "bg-rose-100 text-rose-700"}`}>
+                          {pending} pending
+                        </span>
+                        <span className="text-xs font-bold text-slate-400 group-hover:text-slate-600 transition-colors">
+                          {isExpanded ? "Close folder" : "Open folder"}
+                        </span>
+                      </div>
+                      <div className="pointer-events-none absolute left-1/2 bottom-full z-50 mb-3 w-64 -translate-x-1/2 rounded-xl border border-slate-200 bg-white p-3 shadow-xl opacity-0 group-hover:opacity-100 transition-opacity duration-150">
+                        <p className="text-sm font-bold text-slate-900 break-words">{group.tenderName}</p>
+                        <p className="text-xs text-slate-500 mt-1">Tender ref: {group.bids[0]?.tender_reference || group.bids[0]?.tender || "N/A"}</p>
+                        <div className="mt-2 pt-2 border-t border-slate-100 flex flex-wrap items-center gap-1.5 text-xs">
+                          <span className="inline-flex rounded-full px-2 py-0.5 font-bold bg-slate-100 text-slate-700">{group.bids.length} bid{group.bids.length !== 1 ? "s" : ""}</span>
+                          <span className={`inline-flex rounded-full px-2 py-0.5 font-bold ${activeStage === "stage1" ? "bg-amber-100 text-amber-700" : "bg-rose-100 text-rose-700"}`}>{pending} pending</span>
+                          {activeStage === "stage2" && <span className="inline-flex rounded-full px-2 py-0.5 font-bold bg-emerald-100 text-emerald-700">Financial</span>}
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {expandedTender && (
+                <div className="mt-6 rounded-2xl border border-slate-200 overflow-hidden">
+                  {activeStageGroups
+                    .filter(([key]) => key === expandedTender)
+                    .map(([key, group]) => (
+                      <div key={key}>
+                        <div className="px-6 py-4 bg-slate-50 border-b border-slate-100 flex items-center justify-between">
+                          <div className="flex items-center gap-3">
+                            <FolderOpen size={18} className="text-amber-600" />
+                            <p className="font-bold text-slate-900">{group.tenderName}</p>
+                            {activeStage === "stage2" && <span className="badge bg-rose-100 text-rose-700">Financial</span>}
+                          </div>
+                          <span className="text-xs text-slate-500">{group.bids.length} bid{group.bids.length !== 1 ? "s" : ""}</span>
+                        </div>
+                        <div className="divide-y divide-slate-100">
+                          {activeStage === "stage1" ? group.bids.map((item) => (
+                            <div key={item.id} className="p-6 flex items-center justify-between hover:bg-slate-50 transition-colors">
+                              <div>
+                                <p className="font-bold text-slate-900">{item.vendor_name}</p>
+                                <p className="text-xs text-slate-500">Submitted {item.submitted_at ? new Date(item.submitted_at).toLocaleDateString() : "N/A"}</p>
+                              </div>
+                              <div className="flex items-center gap-4">
+                                <span className={`inline-flex rounded-full px-3 py-1 text-xs font-bold ${queueStatusTone(item)}`}>{item.status === BidStatus.ACCEPTED ? "Shortlisted" : item.status}</span>
+                                <button
+                                  onClick={() => handleStartEvaluation(item)}
+                                  disabled={!canEvaluateBid(item)}
+                                  title={canEvaluateBid(item) ? undefined : "Close the tender before starting evaluation"}
+                                  className="btn-primary py-1.5 px-4 text-sm disabled:opacity-40 disabled:cursor-not-allowed"
+                                >{!canEvaluateBid(item) ? "Tender must be Closed" : item.status === BidStatus.ACCEPTED ? "View" : "Review"}</button>
+                              </div>
+                            </div>
+                          )) : group.bids.map((item) => {
+                            const existing = roleScopedEvaluationsByBid.get(item.id);
+                            const technicalExisting = technicalEvaluationsByBid.get(item.id);
+                            const financialExisting = financialEvaluationsByBid.get(item.id);
+                            const technicalScore = item.technical_score_total ?? getTechnicalComposite(technicalExisting);
+                            const financialScore = item.financial_score_total ?? getFinancialTotal(financialExisting);
+                            const combinedScore = technicalScore + financialScore;
+                            const threshold = tenderThresholds[item.tender] ?? 70;
+                            const rowStatus =
+                              item.evaluation_status === "evaluated" ? "Evaluated" :
+                              item.evaluation_status === "technical_scored" ? (isFinancialEvaluationMode ? "Pending Financial" : "Evaluated") :
+                              "Pending";
+                            return (
+                              <div key={item.id} className="p-6 flex items-center justify-between hover:bg-slate-50 transition-colors">
+                                <div className="flex gap-4 items-center">
+                                  <div className="w-12 h-12 rounded-xl bg-slate-100 flex items-center justify-center text-slate-400">
+                                    <FileText size={24} />
+                                  </div>
+                                  <div>
+                                    <p className="font-bold text-slate-900">{item.vendor_name}</p>
+                                    <p className="text-xs text-slate-500">Tender: {item.tender_reference || item.tender}</p>
+                                    {!isFinancialEvaluationMode && (
+                                      <p className="text-xs text-slate-500">
+                                        Tier {item.tech_tier || item.service_tier || "N/A"} • GPS {(item.sites || []).filter((site) => site.latitude != null && site.longitude != null).length}/{(item.sites || []).length} • Energy {item.energy_target || item.energy_target_kwh_month ? `${item.energy_target || item.energy_target_kwh_month} kWh/mo` : "N/A"}
+                                      </p>
+                                    )}
+                                    {isFinancialEvaluationMode && (
+                                      <p className="text-xs text-emerald-700">Technical gate: {technicalScore}/{Math.round((threshold / 100) * 70)}</p>
+                                    )}
+                                  </div>
+                                </div>
+                                <div className="flex items-center gap-6">
+                                  <div className="hidden md:grid grid-cols-4 gap-6 text-right">
+                                    <div>
+                                      <p className="text-xs font-bold text-slate-400 uppercase">Score</p>
+                                      <p className="text-lg font-bold text-emerald-600">{combinedScore > 0 ? `${combinedScore}/100` : "—"}</p>
+                                    </div>
+                                    <div>
+                                      <p className="text-xs font-bold text-slate-400 uppercase">Technical</p>
+                                      <p className="text-sm font-semibold text-slate-900">{technicalScore > 0 ? `${technicalScore}/70` : "—"}</p>
+                                    </div>
+                                    <div>
+                                      <p className="text-xs font-bold text-slate-400 uppercase">Financial</p>
+                                      <p className="text-sm font-semibold text-slate-900">{financialScore > 0 ? `${financialScore}/30` : "—"}</p>
+                                    </div>
+                                    <div>
+                                      <p className="text-xs font-bold text-slate-400 uppercase">Status</p>
+                                      <p className="text-sm font-semibold text-slate-900">{rowStatus}</p>
+                                    </div>
+                                  </div>
+                                  <button
+                                    onClick={() => handleStartEvaluation(item)}
+                                    disabled={!canEvaluateBid(item)}
+                                    title={canEvaluateBid(item) ? undefined : "Close the tender before starting evaluation"}
+                                    className="btn-primary py-1.5 px-4 text-sm disabled:opacity-40 disabled:cursor-not-allowed"
+                                  >
+                                    {!canEvaluateBid(item) ? "Tender must be Closed" : existing ? "Review" : `Start ${isFinancialEvaluationMode ? "Financial" : "Technical"} Score`}
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              )}
+            </>
           )}
         </div>
       </div>
@@ -23158,7 +23699,12 @@ export default function App() {
   const [showNotifications, setShowNotifications] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [showUserManual, setShowUserManual] = useState(false);
-  const [notifications, setNotifications] = useState<Notification[]>(MOCK_NOTIFICATIONS);
+  const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [browserPushEnabled, setBrowserPushEnabled] = useState(false);
+  const browserPushEnabledRef = React.useRef(false);
+  const seenNotificationIdsRef = React.useRef<Set<string>>(new Set());
+  const initialNotificationsLoadedRef = React.useRef(false);
   const [authMessage, setAuthMessage] = useState<string | null>(null);
   const [fieldVerifierInspectionBadge, setFieldVerifierInspectionBadge] = useState<string | undefined>(undefined);
   const [viewingVendorProfile, setViewingVendorProfile] = useState<string | null>(null);
@@ -23220,16 +23766,80 @@ export default function App() {
   const [doeConcernDesc, setDoeConcernDesc] = useState("");
   const [doeConcernNotifyPsc, setDoeConcernNotifyPsc] = useState(false);
   const [doeConcernSubmitting, setDoeConcernSubmitting] = useState(false);
+  React.useEffect(() => {
+    if (typeof window === "undefined") return;
+    const stored = window.localStorage.getItem("rbf_push_enabled");
+    const enabled = stored === "1";
+    setBrowserPushEnabled(enabled);
+    browserPushEnabledRef.current = enabled;
+    if (enabled && "Notification" in window) {
+      if (window.Notification.permission === "default") {
+        window.Notification.requestPermission().catch(() => {});
+      }
+    }
+  }, []);
+
+  const toggleBrowserPush = () => {
+    if (typeof window === "undefined" || !("Notification" in window)) return;
+    const next = !browserPushEnabled;
+    if (next) {
+      if (window.Notification.permission === "granted") {
+        setBrowserPushEnabled(true);
+        browserPushEnabledRef.current = true;
+        window.localStorage.setItem("rbf_push_enabled", "1");
+        return;
+      }
+      window.Notification.requestPermission()
+        .then((permission) => {
+          const granted = permission === "granted";
+          setBrowserPushEnabled(granted);
+          browserPushEnabledRef.current = granted;
+          if (granted) window.localStorage.setItem("rbf_push_enabled", "1");
+          else window.localStorage.removeItem("rbf_push_enabled");
+        })
+        .catch(() => {});
+      return;
+    }
+    setBrowserPushEnabled(false);
+    browserPushEnabledRef.current = false;
+    window.localStorage.removeItem("rbf_push_enabled");
+  };
+
   const loadNotifications = React.useCallback(async () => {
     if (!getStoredUser()) {
-      setNotifications((prev) => (prev.length ? prev : MOCK_NOTIFICATIONS));
+      setNotifications([]);
+      setUnreadCount(0);
       return;
     }
     try {
       const data = await fetchNotifications();
       setNotifications(data);
+      if (!initialNotificationsLoadedRef.current) {
+        data.forEach((n) => seenNotificationIdsRef.current.add(n.id));
+        initialNotificationsLoadedRef.current = true;
+      } else if (browserPushEnabledRef.current) {
+        const newItems = data.filter((n) => !seenNotificationIdsRef.current.has(n.id));
+        if (newItems.length > 0 && typeof document !== "undefined" && document.visibilityState !== "visible") {
+          newItems.slice(0, 5).forEach((n) => {
+            if ("Notification" in window && window.Notification.permission === "granted") {
+              try {
+                new window.Notification(n.title, { body: n.body, tag: n.id });
+              } catch {
+                // Browser refused to show the notification; non-fatal.
+              }
+            }
+          });
+        }
+        data.forEach((n) => seenNotificationIdsRef.current.add(n.id));
+      }
+      try {
+        const count = await fetchUnreadNotificationCount();
+        setUnreadCount(count);
+      } catch {
+        setUnreadCount(data.filter((n) => n.status === NotificationStatus.SENT).length);
+      }
     } catch {
-      setNotifications((prev) => (prev.length ? prev : MOCK_NOTIFICATIONS));
+      setNotifications((prev) => prev);
     }
   }, []);
 
@@ -23471,6 +24081,23 @@ export default function App() {
       setPendingBidId(null);
     }
 
+    if (note.status === NotificationStatus.SENT) {
+      setNotifications((prev) =>
+        prev.map((n) => (n.id === note.id ? { ...n, status: NotificationStatus.READ } : n))
+      );
+      setUnreadCount((prev) => Math.max(0, prev - 1));
+      void markNotificationRead(note.id).catch(() => {});
+    }
+  };
+
+  const handleMarkAllRead = () => {
+    setNotifications((prev) =>
+      prev.map((n) => (n.status === NotificationStatus.SENT ? { ...n, status: NotificationStatus.READ } : n))
+    );
+    setUnreadCount(0);
+    void markAllNotificationsRead()
+      .then(() => void loadNotifications())
+      .catch(() => {});
   };
 
   if (showPublicPortal) {
@@ -23917,7 +24544,7 @@ case "dashboard":
       { id: "all_vendors", icon: Users, label: "All Vendors" },
       { id: "tenders", icon: FileText, label: "Tender Management" },
       { id: "notice_board", icon: Bell, label: "Notice Board" },
-      { id: "evaluations", icon: ClipboardCheck, label: "Financial Evaluation" },
+      { id: "evaluations", icon: ClipboardCheck, label: "Evaluations" },
       { id: "prequal", icon: ClipboardCheck, label: "Pre-Qualification" },
       { id: "rbf_projects", icon: FolderKanban, label: "Projects Hub" },
       { id: "blacklisting", icon: FileWarning, label: "Blacklisting" },
@@ -24039,20 +24666,26 @@ case "dashboard":
                 className="p-2 hover:bg-slate-100 rounded-lg text-slate-500 relative"
               >
                 <Bell size={20} />
-                {notifications.some(n => n.status === NotificationStatus.SENT) && (
-                  <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-rose-500 border-2 border-white" />
+                {unreadCount > 0 && (
+                  <span className="absolute top-1.5 right-1.5 min-w-[18px] h-[18px] px-1 rounded-full bg-rose-500 text-white text-[10px] font-bold flex items-center justify-center border-2 border-white">
+                    {unreadCount > 9 ? "9+" : unreadCount}
+                  </span>
                 )}
               </button>
               <AnimatePresence>
                 {showNotifications && (
                   <NotificationCenter 
                     notifications={notifications} 
+                    unreadCount={unreadCount}
+                    browserPushEnabled={browserPushEnabled}
+                    onToggleBrowserPush={toggleBrowserPush}
                     onClose={() => setShowNotifications(false)}
                     onViewAll={() => {
                       setShowNotifications(false);
                       setActiveTab("notifications");
                     }}
                     onSelect={handleNotificationSelect}
+                    onMarkAllRead={handleMarkAllRead}
                   />
                 )}
               </AnimatePresence>

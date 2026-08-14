@@ -489,6 +489,7 @@ class Notice(models.Model):
     is_pinned = models.BooleanField(default=False)
     show_countdown = models.BooleanField(default=False)
     countdown_date = models.DateTimeField(null=True, blank=True)
+    send_email_notification = models.BooleanField(default=False)
     attachments = models.JSONField(default=list, blank=True)
     status = models.CharField(max_length=20, choices=NoticeStatus.choices, default=NoticeStatus.DRAFT)
     published_at = models.DateTimeField(null=True, blank=True)

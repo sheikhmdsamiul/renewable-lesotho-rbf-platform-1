@@ -387,7 +387,7 @@ class TenderBidSerializer(serializers.ModelSerializer):
                     system_configuration[target_key] = payload.get(input_key)
             if 'aftersales_description' in payload and isinstance(system_configuration, dict):
                 system_configuration['aftersales_description'] = payload.get('aftersales_description')
-            return super().to_internal_value(payload)
+        return super().to_internal_value(payload)
 
     def _required_document_fields(self):
         return [

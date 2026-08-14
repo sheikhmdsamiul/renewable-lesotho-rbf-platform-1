@@ -90,6 +90,7 @@ from .integrations import (
 from .gis import GpsValidator
 from .kpi import KpiService, invalidate_kpi_cache, render_kpi_pdf
 from rbf.notifications.models import Notification, NotificationChannel, NotificationStatus
+from rbf.notifications.services import NotificationService
 from rbf.tenders.models import ContractStatus, TenderContract
 
 logger = logging.getLogger(__name__)
@@ -4174,24 +4175,20 @@ class ConcernViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         concern = serializer.save(raised_by=self.request.user)
         if concern.notify_rmt:
-            Notification.objects.create(
-                recipient_id="rmt",
-                recipient_name="RMT Team",
-                type=NotificationChannel.IN_APP,
-                event="doe_concern",
+            NotificationService.notify_pseudo(
+                "rmt",
                 title=f"[{concern.severity.upper()}] New concern raised by DoE",
                 body=f"{concern.linked_project.project_reference if concern.linked_project else 'General'} — {concern.get_concern_type_display()}",
-                status=NotificationStatus.SENT,
+                event="doe_concern",
+                linked_entity_id=concern.id,
             )
         if concern.notify_psc:
-            Notification.objects.create(
-                recipient_id="psc",
-                recipient_name="PSC Team",
-                type=NotificationChannel.IN_APP,
-                event="doe_concern",
+            NotificationService.notify_pseudo(
+                "psc",
                 title=f"DoE has flagged a concern",
                 body=f"Review recommended: {concern.description[:100]}",
-                status=NotificationStatus.SENT,
+                event="doe_concern",
+                linked_entity_id=concern.id,
             )
 
 
@@ -4213,14 +4210,11 @@ class ConcernResponseViewSet(viewsets.ModelViewSet):
         
         user = self.request.user
         if user.role == "Project Steering Committee" or user.role == "UNDP_DONOR":
-            Notification.objects.create(
-                recipient_id="rmt",
-                recipient_name="RMT Team",
-                type=NotificationChannel.IN_APP,
-                event="psc_comment",
+            NotificationService.notify_pseudo(
+                "rmt",
                 title=f"PSC Comment on {response.concern.id}",
                 body=f"PSC has added a comment to concern {response.concern.id}: {response.response_text[:100]}",
-                status=NotificationStatus.SENT,
+                event="psc_comment",
                 linked_entity_id=response.concern.id,
             )
 
@@ -4261,36 +4255,27 @@ class AuditFindingViewSet(viewsets.ModelViewSet):
         )
         
         if finding.rised_to_rmt:
-            Notification.objects.create(
-                recipient_id="rmt",
-                recipient_name="RMT Team",
-                type=NotificationChannel.IN_APP,
-                event="audit_finding",
+            NotificationService.notify_pseudo(
+                "rmt",
                 title=f"[{finding.risk_level.upper()} AUDIT FINDING] raised by Auditor",
                 body=f"{finding.linked_project.project_reference if finding.linked_project else 'General'} — {finding.get_finding_category_display()}",
-                status=NotificationStatus.SENT,
+                event="audit_finding",
                 linked_entity_id=finding.id,
             )
         if finding.rised_to_psc:
-            Notification.objects.create(
-                recipient_id="psc",
-                recipient_name="PSC Team",
-                type=NotificationChannel.IN_APP,
-                event="audit_finding",
+            NotificationService.notify_pseudo(
+                "psc",
                 title=f"Audit finding requires your attention",
                 body=f"A {finding.risk_level} finding has been raised on {finding.linked_project.project_reference if finding.linked_project else 'project'}.",
-                status=NotificationStatus.SENT,
+                event="audit_finding",
                 linked_entity_id=finding.id,
             )
         if finding.risk_level == 'critical':
-            Notification.objects.create(
-                recipient_id="super_admin",
-                recipient_name="Super Admin",
-                type=NotificationChannel.IN_APP,
-                event="critical_audit_finding",
+            NotificationService.notify_pseudo(
+                "super_admin",
                 title="CRITICAL AUDIT FINDING — Immediate action required",
                 body=finding.description[:200],
-                status=NotificationStatus.SENT,
+                event="critical_audit_finding",
                 linked_entity_id=finding.id,
             )
 
@@ -4312,14 +4297,11 @@ class AuditFindingViewSet(viewsets.ModelViewSet):
             finding.psc_commented_by = request.user
             finding.save()
 
-            Notification.objects.create(
-                recipient_id="rmt",
-                recipient_name="RMT Team",
-                type=NotificationChannel.IN_APP,
-                event="psc_comment",
+            NotificationService.notify_pseudo(
+                "rmt",
                 title=f"PSC Comment on {finding.id}",
                 body=f"PSC has commented on audit finding {finding.id}: {response_text[:100]}",
-                status=NotificationStatus.SENT,
+                event="psc_comment",
                 linked_entity_id=finding.id,
             )
         else:

@@ -44,6 +44,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       DB_CONN_MAX_AGE: ${DB_CONN_MAX_AGE:-60}
       API_PAGE_SIZE: ${API_PAGE_SIZE:-50}
+      EMAIL_ASYNC: ${EMAIL_ASYNC:-0}
       API_THROTTLE_ANON: ${API_THROTTLE_ANON:-120/hour}
       API_THROTTLE_USER: ${API_THROTTLE_USER:-600/hour}
       CORS_ALLOW_ALL_ORIGINS: ${CORS_ALLOW_ALL_ORIGINS:-1}
@@ -75,6 +76,31 @@ services:
       dockerfile: backend/Dockerfile
     container_name: rbf_scheduler
     command: sh -c "python manage.py migrate --noinput && python manage.py run_report_scheduler --interval 60"
+    volumes:
+      - ./backend:/app
+    env_file:
+      - ./backend/.env
+    environment:
+      DJANGO_SETTINGS_MODULE: core.settings
+      DJANGO_DEBUG: ${DJANGO_DEBUG:-1}
+      SECRET_KEY: ${SECRET_KEY:-dev-secret-key-dev-secret-key-dev-secret-key}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-localhost,127.0.0.1,192.168.68.140}
+      API_REQUIRE_AUTH: ${API_REQUIRE_AUTH:-0}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-rbf_user}:${POSTGRES_PASSWORD:-rbf_pass}@db:5432/${POSTGRES_DB:-rbf}
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: rbf_worker
+    command: sh -c "celery -A core worker --loglevel=info"
     volumes:
       - ./backend:/app
     env_file:

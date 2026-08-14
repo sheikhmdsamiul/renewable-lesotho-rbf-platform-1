@@ -213,6 +213,12 @@ OTP_EXPIRY_SECONDS = env.int('OTP_EXPIRY_SECONDS', default=600)
 # Celery
 CELERY_BROKER_URL = env('REDIS_URL', default='redis://localhost:6379/0')
 CELERY_RESULT_BACKEND = env('REDIS_URL', default='redis://localhost:6379/0')
+CELERY_TASK_ALWAYS_EAGER = env.bool('CELERY_TASK_ALWAYS_EAGER', default=False)
+
+# Email dispatch: when enabled, notification emails are delivered via the
+# Celery worker (requires a running worker + broker). Off by default so the
+# existing single-container deployment keeps sending synchronously.
+EMAIL_ASYNC = env.bool('EMAIL_ASYNC', default=False)
 
 # Prospect integration
 PROSPECT_BASE_URL = env('PROSPECT_BASE_URL', default='')
