@@ -58,6 +58,7 @@ import {
   Gavel,
   FolderKanban,
   FolderOpen,
+  Briefcase,
   RefreshCw,
   Printer,
   Paperclip,
@@ -14672,6 +14673,15 @@ const ProjectsHub = ({
     kwhReading: "",
   });
   const [reportPhotos, setReportPhotos] = useState<File[]>([]);
+  const [reportPhotoUrls, setReportPhotoUrls] = useState<string[]>([]);
+  useEffect(() => {
+    return () => {
+      setReportPhotoUrls((prev) => {
+        prev.forEach((url) => URL.revokeObjectURL(url));
+        return [];
+      });
+    };
+  }, []);
   const [reportReceipt, setReportReceipt] = useState<File | null>(null);
   const [reportSubmitting, setReportSubmitting] = useState(false);
   const [reportMessage, setReportMessage] = useState<string | null>(null);
@@ -15636,6 +15646,35 @@ const ProjectsHub = ({
     }
 
     return errors;
+  };
+
+  const addReportPhotos = (files: File[]) => {
+    const remaining = 5 - reportPhotos.length;
+    const accepted = files.slice(0, remaining);
+    if (accepted.length === 0) return;
+    const urls = accepted.map((file) => URL.createObjectURL(file));
+    setReportPhotos((prev) => [...prev, ...accepted]);
+    setReportPhotoUrls((prev) => [...prev, ...urls]);
+    clearReportError("photos");
+  };
+
+  const removeReportPhoto = (index: number) => {
+    setReportPhotos((prev) => prev.filter((_, i) => i !== index));
+    setReportPhotoUrls((prev) => {
+      const url = prev[index];
+      if (url) URL.revokeObjectURL(url);
+      return prev.filter((_, i) => i !== index);
+    });
+    clearReportError("photos");
+  };
+
+  const clearReportPhotos = () => {
+    setReportPhotoUrls((prev) => {
+      prev.forEach((url) => URL.revokeObjectURL(url));
+      return [];
+    });
+    setReportPhotos([]);
+    clearReportError("photos");
   };
 
   const handleSubmitReport = async () => {
@@ -18087,11 +18126,60 @@ const ProjectsHub = ({
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                   <div>
                     <label className="text-xs font-semibold text-slate-500">Site photos ({reportPhotos.length}/5)</label>
-                    <input
-                      className={`input-field ${reportErrors.photos ? "border-rose-400 ring-1 ring-rose-200" : ""}`}
-                      type="file" multiple
-                      onChange={(e) => { setReportPhotos(Array.from(e.target.files || [])); clearReportError("photos"); }}
-                    />
+                    {reportPhotos.length > 0 && (
+                      <div className="mt-1.5 flex flex-wrap gap-2">
+                        {reportPhotos.map((file, index) => (
+                          <div key={`${file.name}-${index}`} className="relative">
+                            <img
+                              src={reportPhotoUrls[index]}
+                              alt={`Site photo ${index + 1}`}
+                              className="h-20 w-24 rounded-lg border border-slate-200 object-cover"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => removeReportPhoto(index)}
+                              aria-label={`Remove photo ${index + 1}`}
+                              className="absolute -right-2 -top-2 flex h-5 w-5 items-center justify-center rounded-full bg-rose-500 text-[11px] font-bold text-white shadow hover:bg-rose-600"
+                            >
+                              ×
+                            </button>
+                            <p className="mt-0.5 max-w-[96px] truncate text-[10px] text-slate-400">{file.name}</p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    <div className="mt-2 flex items-center gap-3">
+                      <label
+                        className={`inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-dashed px-3 py-1.5 text-[11px] font-semibold transition ${
+                          reportPhotos.length >= 5
+                            ? "cursor-not-allowed border-slate-200 bg-slate-50 text-slate-400"
+                            : "border-slate-300 bg-slate-50 text-slate-600 hover:bg-slate-100"
+                        }`}
+                      >
+                        {reportPhotos.length === 0 ? "Add photos" : "Add more"}
+                        <input
+                          type="file"
+                          multiple
+                          accept="image/*"
+                          disabled={reportPhotos.length >= 5}
+                          className="hidden"
+                          onChange={(e) => {
+                            addReportPhotos(Array.from(e.target.files || []));
+                            e.target.value = "";
+                          }}
+                        />
+                      </label>
+                      {reportPhotos.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={clearReportPhotos}
+                          className="text-[11px] font-semibold text-rose-500 hover:text-rose-600"
+                        >
+                          Clear all
+                        </button>
+                      )}
+                    </div>
+                    <p className="mt-1 text-[11px] text-slate-400">Add up to 5 photos (10 MB each). At least 1 is required.</p>
                     {reportErrors.photos && <p className="mt-1 text-xs font-medium text-rose-600">{reportErrors.photos}</p>}
                   </div>
                   <div>
@@ -20708,6 +20796,7 @@ interface OfflineInspection {
   updatedAt: string;
   synced: boolean;
   syncAttempts: number;
+  submitted: boolean;
 }
 
 const openOfflineDB = (): Promise<IDBDatabase> => {
@@ -20754,14 +20843,16 @@ const getAllPendingInspections = async (): Promise<OfflineInspection[]> => {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(OFFLINE_STORE_NAME, "readonly");
     const store = tx.objectStore(OFFLINE_STORE_NAME);
-    const index = store.index("synced");
-    const request = index.getAll(IDBKeyRange.only(false));
-    request.onsuccess = () => resolve(request.result || []);
+    const request = store.getAll();
+    request.onsuccess = () => {
+      const all = request.result || [];
+      resolve(all.filter((item) => item.synced === false && item.submitted === true));
+    };
     request.onerror = () => reject(request.error);
   });
 };
 
-const markInspectionSynced = async (id: string): Promise<void> => {
+const incrementInspectionSyncAttempts = async (id: string): Promise<void> => {
   const db = await openOfflineDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(OFFLINE_STORE_NAME, "readwrite");
@@ -20770,7 +20861,7 @@ const markInspectionSynced = async (id: string): Promise<void> => {
     request.onsuccess = () => {
       const inspection = request.result;
       if (inspection) {
-        inspection.synced = true;
+        inspection.syncAttempts = (inspection.syncAttempts || 0) + 1;
         const putRequest = store.put(inspection);
         putRequest.onsuccess = () => resolve();
         putRequest.onerror = () => reject(putRequest.error);
@@ -20791,6 +20882,53 @@ const deleteOfflineInspection = async (id: string): Promise<void> => {
     request.onsuccess = () => resolve();
     request.onerror = () => reject(request.error);
   });
+};
+
+interface LocalSubmissionLogEntry {
+  taskId: string;
+  siteName: string;
+  status: "verified" | "flagged" | "partial";
+  submittedAt: string;
+  synced: boolean;
+  syncedAt?: string | null;
+}
+
+const OFFLINE_LOG_KEY = "lesotho-rbf-offline-log";
+
+const getSubmissionLog = (): LocalSubmissionLogEntry[] => {
+  try {
+    const raw = localStorage.getItem(OFFLINE_LOG_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+};
+
+const saveSubmissionLogEntry = (entry: LocalSubmissionLogEntry): void => {
+  try {
+    const log = getSubmissionLog();
+    const filtered = log.filter((item) => item.taskId !== entry.taskId);
+    filtered.unshift(entry);
+    localStorage.setItem(OFFLINE_LOG_KEY, JSON.stringify(filtered.slice(0, 25)));
+  } catch {
+    /* ignore storage errors */
+  }
+};
+
+const markSubmissionLogSynced = (taskId: string, syncedAt: string): void => {
+  try {
+    const log = getSubmissionLog();
+    const idx = log.findIndex((item) => item.taskId === taskId);
+    if (idx >= 0) {
+      log[idx].synced = true;
+      log[idx].syncedAt = syncedAt;
+      localStorage.setItem(OFFLINE_LOG_KEY, JSON.stringify(log));
+    }
+  } catch {
+    /* ignore storage errors */
+  }
 };
 
 const fileToBase64 = (file: File): Promise<string> => {
@@ -20862,14 +21000,17 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
   });
   const [isOnline, setIsOnline] = useState(true);
   const [pendingInspections, setPendingInspections] = useState<OfflineInspection[]>([]);
+  const [submissionLog, setSubmissionLog] = useState<LocalSubmissionLogEntry[]>(() => getSubmissionLog());
   const [syncing, setSyncing] = useState(false);
+  const syncingRef = React.useRef(false);
 
   const currentUser = getStoredUser();
   const assignedDistricts = currentUser?.districts && currentUser.districts.length > 0 
     ? currentUser.districts 
     : [currentUser?.district || currentUser?.verificationZone || currentUser?.region || ""].filter(Boolean);
   const assignedDistrict = assignedDistricts[0] || "District not assigned";
-  const [expandedTenderGroup, setExpandedTenderGroup] = useState<string | null>(null);
+  const [expandedDistrictGroup, setExpandedDistrictGroup] = useState<string | null>(null);
+  const [expandedTenderKeys, setExpandedTenderKeys] = useState<Record<string, boolean>>({});
 
   const formatDateTime = (value?: string | null) => {
     if (!value) return "N/A";
@@ -20930,57 +21071,90 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
     const loadPending = async () => {
       const pending = await getAllPendingInspections();
       setPendingInspections(pending);
+      if (navigator.onLine && pending.some((i) => !i.synced)) {
+        void syncPendingInspections(pending);
+      }
     };
     loadPending();
   }, []);
 
-  const syncPendingInspections = async () => {
-    if (!isOnline || syncing || pendingInspections.length === 0) return;
+  const syncPendingInspections = async (items?: OfflineInspection[]) => {
+    const list = items ?? pendingInspections;
+    if (!isOnline || syncingRef.current || list.length === 0) return;
+    syncingRef.current = true;
     setSyncing(true);
     setMessage("Syncing pending inspections...");
-    for (const inspection of pendingInspections) {
-      if (inspection.synced) continue;
-      try {
-        const sitePhotos = await Promise.all(
-          (inspection.data.sitePhotos as string[]).map((base64, index) => 
-            base64ToFile(base64, `photo-${index}.jpg`)
-          )
-        );
-        const form = new FormData();
-        form.append("verifier_lat", String(Number(inspection.data.gpsLat)));
-        form.append("verifier_lng", String(Number(inspection.data.gpsLong)));
-        form.append("verification_status", inspection.data.verificationStatus);
-        if (inspection.data.householdType) {
-          form.append("household_type", inspection.data.householdType);
+    let syncedAny = false;
+    try {
+      for (const inspection of list) {
+        if (inspection.synced) continue;
+        try {
+          const sitePhotos = await Promise.all(
+            (inspection.data.sitePhotos as string[]).map((base64, index) =>
+              base64ToFile(base64, `photo-${index}.jpg`)
+            )
+          );
+          const form = new FormData();
+          form.append("verifier_lat", String(Number(inspection.data.gpsLat)));
+          form.append("verifier_lng", String(Number(inspection.data.gpsLong)));
+          form.append("verification_status", inspection.data.verificationStatus);
+          if (inspection.data.householdType) {
+            form.append("household_type", inspection.data.householdType);
+          }
+          form.append("beneficiary_present", inspection.data.beneficiaryConfirmed ? "true" : "false");
+          form.append("beneficiary_gender", inspection.data.beneficiaryGender);
+          form.append("system_working", inspection.data.systemWorking ? "true" : "false");
+          form.append("serial_visible", inspection.data.serialVisible ? "true" : "false");
+          form.append("observation_notes", inspection.data.notes);
+          form.append("flag_reason", inspection.data.flagReason);
+          for (const file of sitePhotos) {
+            form.append("site_photos", file);
+          }
+          const updatedTask = await verifyVerificationTask(inspection.taskId, form);
+          await deleteOfflineInspection(inspection.id);
+          markSubmissionLogSynced(inspection.taskId, new Date().toISOString());
+          syncedAny = true;
+          setMessage(`Submitted verification for task ${inspection.taskId} (${updatedTask.status}).`);
+        } catch (err: any) {
+          const raw = String(err?.message || "");
+          if (err?.isNetworkError) {
+            setMessage(`No connection. Task ${inspection.taskId} stays saved locally and will retry automatically.`);
+          } else {
+            setError(toFriendlyApiMessage(raw) || `Failed to sync task ${inspection.taskId}. It stays saved locally and will retry.`);
+          }
+          await incrementInspectionSyncAttempts(inspection.id).catch(() => undefined);
         }
-        form.append("beneficiary_present", inspection.data.beneficiaryConfirmed ? "true" : "false");
-        form.append("beneficiary_gender", inspection.data.beneficiaryGender);
-        form.append("system_working", inspection.data.systemWorking ? "true" : "false");
-        form.append("serial_visible", inspection.data.serialVisible ? "true" : "false");
-        form.append("observation_notes", inspection.data.notes);
-        form.append("flag_reason", inspection.data.flagReason);
-        for (const file of sitePhotos) {
-          form.append("site_photos", file);
-        }
-        await verifyVerificationTask(inspection.taskId, form);
-        await markInspectionSynced(inspection.id);
-        setMessage(`Synced inspection for task ${inspection.taskId}`);
-      } catch (err: any) {
-        const raw = String(err?.message || "");
-        setError(toFriendlyApiMessage(raw) || `Failed to sync task ${inspection.taskId}`);
       }
+    } finally {
+      syncingRef.current = false;
+      setSyncing(false);
+      try {
+        const updated = await getAllPendingInspections();
+        setPendingInspections(updated);
+        setSubmissionLog(getSubmissionLog());
+        if (syncedAny) {
+          await loadVerifierData(true);
+        }
+      } catch { }
     }
-    setSyncing(false);
-    const updated = await getAllPendingInspections();
-    setPendingInspections(updated);
-    await loadVerifierData(true);
   };
 
+  const wasOfflineRef = React.useRef<boolean>(!navigator.onLine);
   React.useEffect(() => {
-    if (isOnline && pendingInspections.some(i => !i.synced)) {
+    if (isOnline && wasOfflineRef.current) {
       void syncPendingInspections();
     }
-  }, [isOnline, pendingInspections]);
+    wasOfflineRef.current = !isOnline;
+  }, [isOnline]);
+
+  React.useEffect(() => {
+    if (!isOnline || syncing) return;
+    if (!pendingInspections.some((i) => !i.synced && i.syncAttempts < 5)) return;
+    const timer = setTimeout(() => {
+      void syncPendingInspections();
+    }, 30000);
+    return () => clearTimeout(timer);
+  }, [isOnline, syncing, pendingInspections]);
 
   const reportsById = useMemo(() => Object.fromEntries(reports.map(report => [report.id, report])), [reports]);
   const projectsById = useMemo(() => Object.fromEntries(projects.map(project => [project.id, project])), [projects]);
@@ -21030,24 +21204,35 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
     });
   }, [queue, searchQuery]);
 
-  const groupedQueueByTender = useMemo(() => {
-    const groups: Record<string, { tenderName: string; tenderReference?: string; items: typeof filteredQueue }> = {};
-    
+  const groupedQueueByDistrict = useMemo(() => {
+    type TenderGroup = { tenderKey: string; tenderName: string; tenderReference?: string; items: typeof filteredQueue };
+    type DistrictGroup = { district: string; tenders: Record<string, TenderGroup> };
+    const districtMap: Record<string, DistrictGroup> = {};
+
     filteredQueue.forEach((item) => {
+      const district = item.district || "Unassigned District";
+      if (!districtMap[district]) {
+        districtMap[district] = { district, tenders: {} };
+      }
       const tenderKey = item.project?.tenderId || item.project?.tenderReferenceNumber || "no-tender";
       const tenderName = item.project?.tenderName || item.project?.tenderReferenceNumber || "Other / Direct Projects";
-      
-      if (!groups[tenderKey]) {
-        groups[tenderKey] = {
+      if (!districtMap[district].tenders[tenderKey]) {
+        districtMap[district].tenders[tenderKey] = {
+          tenderKey,
           tenderName,
           tenderReference: item.project?.tenderReferenceNumber,
           items: [],
         };
       }
-      groups[tenderKey].items.push(item);
+      districtMap[district].tenders[tenderKey].items.push(item);
     });
-    
-    return Object.values(groups).sort((a, b) => a.tenderName.localeCompare(b.tenderName));
+
+    return Object.values(districtMap)
+      .map((districtGroup) => ({
+        district: districtGroup.district,
+        tenders: Object.values(districtGroup.tenders).sort((a, b) => a.tenderName.localeCompare(b.tenderName)),
+      }))
+      .sort((a, b) => a.district.localeCompare(b.district));
   }, [filteredQueue]);
 
   const pendingCount = queue.filter(({ task }) => task.status === "Pending").length;
@@ -21163,7 +21348,7 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
   const handleNextStep = async () => {
     if (!selectedTask) return;
 
-    const saveDraft = async (step: number) => {
+    const saveDraft = async (step: number, submitted: boolean) => {
       try {
         const sitePhotosBase64 = await Promise.all(
           inspectionData.sitePhotos.map((file) => fileToBase64(file))
@@ -21190,6 +21375,7 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
           updatedAt: new Date().toISOString(),
           synced: false,
           syncAttempts: 0,
+          submitted,
         };
         await saveOfflineInspection(offlineInspection);
         const updated = await getAllPendingInspections();
@@ -21212,7 +21398,7 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
         return;
       }
       setError(null);
-      await saveDraft(2);
+      await saveDraft(2, false);
       setInspectionStep(2);
       if (!isOnline) setMessage("Saved draft locally (offline mode)");
       return;
@@ -21228,9 +21414,19 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
         return;
       }
       setError(null);
-      await saveDraft(3);
+      await saveDraft(3, false);
       setInspectionStep(3);
       if (!isOnline) setMessage("Saved draft locally (offline mode)");
+      return;
+    }
+
+    if (inspectionData.beneficiaryConfirmed === false && inspectionData.verificationStatus === "verified") {
+      setError("The beneficiary was not confirmed on site. Set the outcome to Flagged or Partial before submitting.");
+      return;
+    }
+
+    if ((inspectionData.verificationStatus === "flagged" || inspectionData.verificationStatus === "partial") && !inspectionData.flagReason.trim()) {
+      setError("A reason is required for flagged or partial verification decisions. Enter it in the Reason for Flagged/Partial Outcome field.");
       return;
     }
 
@@ -21239,10 +21435,21 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
       return;
     }
 
-    await saveDraft(3);
+    await saveDraft(3, true);
+
+    const logEntry: LocalSubmissionLogEntry = {
+      taskId: selectedTask.id,
+      siteName: selectedQueueItem?.siteName || "the assigned site",
+      status: inspectionData.verificationStatus,
+      submittedAt: new Date().toISOString(),
+      synced: false,
+      syncedAt: null,
+    };
 
     if (!isOnline) {
-      setMessage("Inspection saved offline. Will sync when online.");
+      saveSubmissionLogEntry(logEntry);
+      setSubmissionLog(getSubmissionLog());
+      setMessage(`Inspection saved on this device. It will auto-submit when you're back online.`);
       navigateView("dashboard");
       return;
     }
@@ -21265,6 +21472,8 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
       form.append("flag_reason", inspectionData.flagReason);
       inspectionData.sitePhotos.forEach((file) => form.append("site_photos", file));
       const updatedTask = await verifyVerificationTask(selectedTask.id, form);
+      saveSubmissionLogEntry({ ...logEntry, synced: true, syncedAt: new Date().toISOString(), status: updatedTask.status.toLowerCase() as "verified" | "flagged" | "partial" });
+      setSubmissionLog(getSubmissionLog());
       setMessage(`Verification submitted for ${selectedQueueItem?.siteName || "the assigned site"} with status ${updatedTask.status}.`);
       await loadVerifierData(true);
       await deleteOfflineInspection(`offline-${selectedTask.id}`);
@@ -21274,7 +21483,24 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
       navigateView("dashboard");
     } catch (err: any) {
       const raw = String(err?.message || "");
-      setError(toFriendlyApiMessage(raw) || "Unable to submit this verification. Saved locally for later sync.");
+      saveSubmissionLogEntry(logEntry);
+      setSubmissionLog(getSubmissionLog());
+      if (err?.isNetworkError) {
+        setMessage("No network connection. The verification is saved on this device and will auto-submit when you're back online.");
+        navigateView("dashboard");
+        return;
+      }
+      const detailPayload = err?.detailPayload;
+      let serverDetail = "";
+      if (detailPayload && typeof detailPayload === "object") {
+        if (typeof detailPayload.detail === "string") {
+          serverDetail = detailPayload.detail;
+        } else {
+          const firstValue = Object.values(detailPayload).find((value) => typeof value === "string");
+          if (firstValue) serverDetail = String(firstValue);
+        }
+      }
+      setError(toFriendlyApiMessage(serverDetail || raw) || "The server rejected this verification. It was not submitted and has been saved locally.");
       if (!isOnline) {
         navigateView("dashboard");
       }
@@ -21374,6 +21600,18 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
 
   if (view === "inspect" && selectedTask && selectedReport) {
     const lockedStatus = selectedTask.status === "Paused" || selectedTask.status === "Terminated";
+    const submittedGisBadge =
+      selectedReport.gisStatus === "green"
+        ? "bg-emerald-100 text-emerald-700"
+        : selectedReport.gisStatus === "red"
+        ? "bg-rose-100 text-rose-700"
+        : selectedReport.gisStatus === "yellow"
+        ? "bg-amber-100 text-amber-700"
+        : "bg-slate-100 text-slate-600";
+    const householdLabel =
+      ({ standard: "Standard", female_headed: "Female-headed", vulnerable: "Vulnerable", low_income: "Low Income" } as Record<string, string>)[selectedReport.householdType || ""] ||
+      selectedReport.householdType ||
+      "Not provided";
 
     return (
       <div className="space-y-6 max-w-5xl mx-auto pb-20">
@@ -21430,6 +21668,121 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2 card p-8">
             <div className="space-y-8">
+              <div className="rounded-2xl border border-slate-200 bg-slate-50/60 p-5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wide">Submitted Installation Details</h3>
+                  <span className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-bold uppercase ${submittedGisBadge}`}>
+                    GIS {selectedReport.gisStatus || "Pending"}
+                  </span>
+                </div>
+                <div className="mt-4 grid grid-cols-2 gap-4 md:grid-cols-3">
+                  <div>
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Serial Number</p>
+                    <p className="mt-1 text-sm font-semibold text-slate-900">{selectedReport.serialNumber || "Not provided"}</p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Meter ID</p>
+                    <p className="mt-1 text-sm font-semibold text-slate-900">{selectedReport.meterId || "Not provided"}</p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">kWh Reading</p>
+                    <p className="mt-1 text-sm font-semibold text-slate-900">{selectedReport.kwhReading != null ? String(selectedReport.kwhReading) : "Not provided"}</p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Beneficiary Name</p>
+                    <p className="mt-1 text-sm font-semibold text-slate-900">{selectedReport.beneficiaryName || "Not provided"}</p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Beneficiary NID</p>
+                    <p className="mt-1 text-sm font-semibold text-slate-900">{selectedReport.beneficiaryId || "Not provided"}</p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Household Type</p>
+                    <p className="mt-1 text-sm font-semibold text-slate-900">{householdLabel}</p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Installation Date</p>
+                    <p className="mt-1 text-sm font-semibold text-slate-900">{selectedReport.installationDate ? new Date(selectedReport.installationDate).toLocaleDateString() : "Not provided"}</p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Submitted At</p>
+                    <p className="mt-1 text-sm font-semibold text-slate-900">{formatDateTime(selectedReport.submittedAt)}</p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Vendor-Submitted GPS</p>
+                    <p className="mt-1 text-sm font-semibold text-slate-900">{selectedReport.gpsLat.toFixed(6)}, {selectedReport.gpsLng.toFixed(6)}</p>
+                  </div>
+                </div>
+                <div className="mt-5 border-t border-slate-200 pt-4">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Submitted Site Photos ({selectedReport.photoFiles?.length || 0})</p>
+                  {selectedReport.photoFiles && selectedReport.photoFiles.length > 0 ? (
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {selectedReport.photoFiles.map((url, index) => (
+                        <a key={`${url}-${index}`} href={url} target="_blank" rel="noreferrer" title={`Open submitted site photo ${index + 1}`}>
+                          <img
+                            src={url}
+                            alt={`Submitted site photo ${index + 1}`}
+                            className="h-20 w-24 rounded-lg border border-slate-200 object-cover transition hover:border-blue-400 hover:shadow"
+                          />
+                        </a>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="mt-1 text-xs text-slate-500">No site photos attached.</p>
+                  )}
+                  {selectedReport.receiptFileUrl && (
+                    <div className="mt-4 flex items-center gap-2">
+                      <FileText size={14} className="text-slate-400" />
+                      <a
+                        href={selectedReport.receiptFileUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex text-xs font-semibold text-blue-600 hover:text-blue-700"
+                      >
+                        Open proof-of-sale receipt
+                      </a>
+                    </div>
+                  )}
+                </div>
+                {selectedTask.fieldVerification && (
+                  <div className="mt-5 border-t border-slate-200 pt-4">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Verification Outcome</p>
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      <span className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-bold ${statusTone(selectedTask.status)}`}>
+                        {selectedTask.status}
+                      </span>
+                      {selectedTask.fieldVerification.verifiedAt && (
+                        <span className="text-xs text-slate-500">Verified {formatDateTime(selectedTask.fieldVerification.verifiedAt)}</span>
+                      )}
+                    </div>
+                    {selectedTask.fieldVerification.observationNotes && (
+                      <p className="mt-2 text-sm text-slate-600">{selectedTask.fieldVerification.observationNotes}</p>
+                    )}
+                    {selectedTask.fieldVerification.flagReason && (
+                      <p className="mt-2 text-sm text-rose-600">Reason: {selectedTask.fieldVerification.flagReason}</p>
+                    )}
+                    <p className="mt-4 text-[10px] font-bold uppercase tracking-widest text-slate-400">
+                      Verification Site Photos ({selectedTask.fieldVerification.sitePhotos.length})
+                    </p>
+                    {selectedTask.fieldVerification.sitePhotos.length > 0 ? (
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {selectedTask.fieldVerification.sitePhotos.map((url, index) => (
+                          <a key={`${url}-${index}`} href={url} target="_blank" rel="noreferrer" title={`Open verification photo ${index + 1}`}>
+                            <img
+                              src={url}
+                              alt={`Verification site photo ${index + 1}`}
+                              className="h-20 w-24 rounded-lg border border-slate-200 object-cover transition hover:border-blue-400 hover:shadow"
+                            />
+                          </a>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="mt-1 text-xs text-slate-500">No verification photos attached.</p>
+                    )}
+                  </div>
+                )}
+              </div>
+
               {inspectionStep === 1 && (
                 <div className="space-y-6">
                   <h3 className="text-lg font-bold text-slate-900 border-b border-slate-100 pb-2">Verifier Coordinates and Device Check</h3>
@@ -21506,11 +21859,27 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
                       <label className="text-sm font-bold text-slate-700 ml-1">Beneficiary Present on Site? *</label>
                       <div className="flex gap-4 p-2">
                         <label className="flex items-center gap-2 cursor-pointer">
-                          <input type="radio" checked={inspectionData.beneficiaryConfirmed} onChange={() => setInspectionData((prev) => ({ ...prev, beneficiaryConfirmed: true }))} />
+                          <input
+                            type="radio"
+                            checked={inspectionData.beneficiaryConfirmed}
+                            onChange={() => setInspectionData((prev) => ({
+                              ...prev,
+                              beneficiaryConfirmed: true,
+                              verificationStatus: prev.verificationStatus === "flagged" ? "verified" : prev.verificationStatus,
+                            }))}
+                          />
                           <span className="text-sm">Yes</span>
                         </label>
                         <label className="flex items-center gap-2 cursor-pointer">
-                          <input type="radio" checked={!inspectionData.beneficiaryConfirmed} onChange={() => setInspectionData((prev) => ({ ...prev, beneficiaryConfirmed: false }))} />
+                          <input
+                            type="radio"
+                            checked={!inspectionData.beneficiaryConfirmed}
+                            onChange={() => setInspectionData((prev) => ({
+                              ...prev,
+                              beneficiaryConfirmed: false,
+                              verificationStatus: prev.verificationStatus === "verified" ? "flagged" : prev.verificationStatus,
+                            }))}
+                          />
                           <span className="text-sm">No</span>
                         </label>
                       </div>
@@ -21715,6 +22084,19 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
         </button>
       </div>
 
+      {!isOnline && (
+        <div className="flex items-center gap-3 rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          <WifiOff size={18} />
+          <div>
+            <p className="font-bold">You're offline</p>
+            <p className="text-amber-700">
+              Inspections are saved on this device and will auto-submit when you're back online.
+              {pendingInspections.length > 0 && ` ${pendingInspections.length} inspection${pendingInspections.length === 1 ? "" : "s"} waiting to sync.`}
+            </p>
+          </div>
+        </div>
+      )}
+
       {(message || error) && (
         <div className={`rounded-2xl border px-4 py-3 text-sm ${error ? "border-rose-200 bg-rose-50 text-rose-700" : "border-emerald-200 bg-emerald-50 text-emerald-700"}`}>
           {error || message}
@@ -21781,6 +22163,33 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
             <div className="rounded-xl bg-white/10 px-3 py-3">
               <p className="text-lg font-bold">{completedCount}</p>
               <p className="text-[10px] uppercase tracking-widest text-slate-400">Verified</p>
+            </div>
+          </div>
+          <div className="mt-5 border-t border-white/10 pt-4">
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-xs font-bold uppercase tracking-widest text-slate-400">Submissions from this device</p>
+              <p className="text-[11px] text-slate-400">
+                {submissionLog.filter((entry) => entry.synced).length} submitted / {submissionLog.filter((entry) => !entry.synced).length} pending
+              </p>
+            </div>
+            <div className="divide-y divide-white/10">
+              {submissionLog.map((entry) => (
+                <div key={entry.taskId} className="flex items-center justify-between gap-3 py-2">
+                  <div className="min-w-0">
+                    <p className="text-xs font-semibold text-white truncate">{entry.siteName}</p>
+                    <p className="text-[11px] text-slate-400">Task {entry.taskId} • {formatDateTime(entry.submittedAt)}</p>
+                  </div>
+                  <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-bold shrink-0 ${
+                    entry.synced ? "bg-emerald-500/20 text-emerald-400" : "bg-amber-500/20 text-amber-400"
+                  }`}>
+                    {entry.synced ? <CheckCircle2 size={11} /> : <Clock size={11} />}
+                    {entry.synced ? "Submitted" : "Pending sync"}
+                  </span>
+                </div>
+              ))}
+              {submissionLog.length === 0 && (
+                <p className="pt-2 text-xs text-slate-400">No inspections submitted from this device yet.</p>
+              )}
             </div>
           </div>
         </div>
@@ -21881,95 +22290,131 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
 
         {loading ? (
           <div className="p-8 text-center text-slate-500">Loading assigned verification tasks...</div>
-        ) : groupedQueueByTender.length === 0 ? (
+        ) : groupedQueueByDistrict.length === 0 ? (
           <div className="p-8 text-center text-slate-500">No verification tasks matched your search.</div>
         ) : (
           <div className="border border-slate-200 rounded-xl overflow-hidden">
-            {groupedQueueByTender.map((group) => {
-              const isExpanded = expandedTenderGroup === group.tenderName;
+            {groupedQueueByDistrict.map((group) => {
+              const isExpanded = expandedDistrictGroup === group.district;
+              const districtTaskCount = group.tenders.reduce((sum, tender) => sum + tender.items.length, 0);
               return (
-                <div key={group.tenderName} className="border-b border-slate-200 last:border-b-0">
+                <div key={group.district} className="border-b border-slate-200 last:border-b-0">
                   <button
-                    onClick={() => setExpandedTenderGroup(isExpanded ? null : group.tenderName)}
+                    onClick={() => setExpandedDistrictGroup(isExpanded ? null : group.district)}
                     className="w-full px-6 py-3 bg-slate-50 hover:bg-slate-100 transition-colors border-b border-slate-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 text-left"
                   >
                     <div className="flex items-center gap-3">
                       <ChevronDown size={16} className={isExpanded ? "text-slate-400 transition-transform" : "text-slate-400 transition-transform -rotate-90"} />
                       <FolderOpen className="text-slate-500" size={20} />
                       <div>
-                        <p className="font-bold text-slate-900">{group.tenderName}</p>
-                        {group.tenderReference && (
-                          <p className="text-xs text-slate-500">{group.tenderReference}</p>
-                        )}
+                        <p className="font-bold text-slate-900">{group.district}</p>
                       </div>
                     </div>
                     <span className="inline-flex rounded-full bg-slate-200 text-slate-700 px-3 py-1 text-xs font-semibold">
-                      {group.items.length} task{group.items.length === 1 ? "" : "s"}
+                      {districtTaskCount} task{districtTaskCount === 1 ? "" : "s"}
                     </span>
                   </button>
                   {isExpanded && (
                     <div className="divide-y divide-slate-100">
-                      {group.items.map((item) => {
-                        const isLocked = item.task.status === "Paused" || item.task.status === "Terminated";
-                        const actionLabel =
-                          item.task.status === "Verified" ? "View" :
-                          item.task.status === "Flagged" || item.task.status === "Partial" ? "Resume" :
-                          isLocked ? "View" : "Verify";
+                      {group.tenders.map((tender) => {
+                        const isTenderExpanded = Boolean(expandedTenderKeys[tender.tenderKey]);
                         return (
-                          <div key={item.task.id} className="p-6 flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
-                            <div className="flex gap-4 items-start">
-                              <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${
-                                item.task.status === "Verified" ? "bg-emerald-100 text-emerald-600" :
-                                item.task.status === "Flagged" ? "bg-rose-100 text-rose-600" :
-                                item.task.status === "Partial" ? "bg-amber-100 text-amber-600" :
-                                "bg-slate-100 text-slate-400"
-                              }`}>
-                                {item.task.status === "Verified" ? <CheckCircle2 size={20} /> : item.task.status === "Flagged" ? <AlertTriangle size={20} /> : <Clock size={20} />}
-                              </div>
-                              <div>
-                                <div className="flex flex-wrap items-center gap-2">
-                                  <p className="font-bold text-slate-900">{item.siteName}</p>
-                                  <span className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-bold ${statusTone(item.task.status)}`}>
-                                    {item.task.status}
-                                  </span>
-                                </div>
-                                <p className="text-xs text-slate-500 mt-1">
-                                  {item.technology} • {item.vendorName} • {item.district}
-                                </p>
-                                <p className="text-xs text-slate-500">
-                                  Task {item.task.id} • Beneficiary: {item.beneficiaryName} • Serial: {item.report?.serialNumber || "N/A"}
-                                </p>
-                                <div className="mt-2 flex items-center gap-3">
-                                  <button
-                                    type="button"
-                                    onClick={() => focusQueueItemOnGisMap(item)}
-                                    className="inline-flex text-xs font-semibold text-emerald-700 hover:text-emerald-800"
-                                  >
-                                    GIS map pin
-                                  </button>
-                                  <a
-                                    href={`https://www.google.com/maps?q=${item.report?.gpsLat},${item.report?.gpsLng}`}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    className="inline-flex text-xs font-semibold text-blue-600 hover:text-blue-700"
-                                  >
-                                    Google map pin
-                                  </a>
+                          <div key={tender.tenderKey} className="border-b border-slate-100 last:border-b-0">
+                            <button
+                              onClick={() => setExpandedTenderKeys((prev) => ({ ...prev, [tender.tenderKey]: !prev[tender.tenderKey] }))}
+                              className="w-full px-6 py-2.5 bg-slate-50/60 hover:bg-slate-100 transition-colors flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 text-left"
+                            >
+                              <div className="flex items-center gap-3">
+                                <ChevronRight size={15} className={isTenderExpanded ? "text-slate-400 rotate-90 transition-transform" : "text-slate-400 transition-transform"} />
+                                <Briefcase size={16} className="text-slate-500" />
+                                <div>
+                                  <p className="font-semibold text-slate-800">{tender.tenderName}</p>
+                                  {tender.tenderReference && (
+                                    <p className="text-[11px] text-slate-500">{tender.tenderReference}</p>
+                                  )}
                                 </div>
                               </div>
-                            </div>
+                              <span className="inline-flex rounded-full bg-white text-slate-600 px-2.5 py-1 text-[11px] font-semibold border border-slate-200">
+                                {tender.items.length} task{tender.items.length === 1 ? "" : "s"}
+                              </span>
+                            </button>
+                            {isTenderExpanded && (
+                              <div className="divide-y divide-slate-100">
+                                {tender.items.map((item) => {
+                                  const isLocked = item.task.status === "Paused" || item.task.status === "Terminated";
+                                  const localEntry = submissionLog.find((entry) => entry.taskId === item.task.id);
+                                  const actionLabel =
+                                    item.task.status === "Verified" ? "View" :
+                                    item.task.status === "Flagged" || item.task.status === "Partial" ? "Resume" :
+                                    isLocked ? "View" : "Verify";
+                                  return (
+                                    <div key={item.task.id} className="p-6 flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+                                      <div className="flex gap-4 items-start">
+                                        <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${
+                                          item.task.status === "Verified" ? "bg-emerald-100 text-emerald-600" :
+                                          item.task.status === "Flagged" ? "bg-rose-100 text-rose-600" :
+                                          item.task.status === "Partial" ? "bg-amber-100 text-amber-600" :
+                                          "bg-slate-100 text-slate-400"
+                                        }`}>
+                                          {item.task.status === "Verified" ? <CheckCircle2 size={20} /> : item.task.status === "Flagged" ? <AlertTriangle size={20} /> : <Clock size={20} />}
+                                        </div>
+                                        <div>
+                                          <div className="flex flex-wrap items-center gap-2">
+                                            <p className="font-bold text-slate-900">{item.siteName}</p>
+                                            <span className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-bold ${statusTone(item.task.status)}`}>
+                                              {item.task.status}
+                                            </span>
+                                            {localEntry && (
+                                              <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-bold ${
+                                                localEntry.synced ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"
+                                              }`}>
+                                                {localEntry.synced ? <CheckCircle2 size={12} /> : <Clock size={12} />}
+                                                {localEntry.synced ? "Submitted" : "Saved offline"}
+                                              </span>
+                                            )}
+                                          </div>
+                                          <p className="text-xs text-slate-500 mt-1">
+                                            {item.technology} • {item.vendorName}
+                                          </p>
+                                          <p className="text-xs text-slate-500">
+                                            Task {item.task.id} • Beneficiary: {item.beneficiaryName} • Serial: {item.report?.serialNumber || "N/A"}
+                                          </p>
+                                          <div className="mt-2 flex items-center gap-3">
+                                            <button
+                                              type="button"
+                                              onClick={() => focusQueueItemOnGisMap(item)}
+                                              className="inline-flex text-xs font-semibold text-emerald-700 hover:text-emerald-800"
+                                            >
+                                              GIS map pin
+                                            </button>
+                                            <a
+                                              href={`https://www.google.com/maps?q=${item.report?.gpsLat},${item.report?.gpsLng}`}
+                                              target="_blank"
+                                              rel="noreferrer"
+                                              className="inline-flex text-xs font-semibold text-blue-600 hover:text-blue-700"
+                                            >
+                                              Google map pin
+                                            </a>
+                                          </div>
+                                        </div>
+                                      </div>
 
-                            <div className="flex items-center gap-4">
-                              <div className="text-right">
-                                <p className="text-sm text-slate-500">{formatDateTime(item.submittedAt)}</p>
-                                {item.task.distanceMeters != null && (
-                                  <p className="text-xs text-slate-400">{item.task.distanceMeters.toFixed(1)} m from vendor pin</p>
-                                )}
+                                      <div className="flex items-center gap-4">
+                                        <div className="text-right">
+                                          <p className="text-sm text-slate-500">{formatDateTime(item.submittedAt)}</p>
+                                          {item.task.distanceMeters != null && (
+                                            <p className="text-xs text-slate-400">{item.task.distanceMeters.toFixed(1)} m from vendor pin</p>
+                                          )}
+                                        </div>
+                                        <button onClick={() => openInspection(item.task.id)} className="btn-primary py-1.5 px-4 text-xs">
+                                          {actionLabel}
+                                        </button>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
                               </div>
-                              <button onClick={() => openInspection(item.task.id)} className="btn-primary py-1.5 px-4 text-xs">
-                                {actionLabel}
-                              </button>
-                            </div>
+                            )}
                           </div>
                         );
                       })}

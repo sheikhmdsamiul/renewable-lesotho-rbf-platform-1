@@ -11,6 +11,7 @@ import {
   InstallationReport,
   SmartMeterReading,
   VerificationTask,
+  FieldVerificationRecord,
   VendorPrequalification,
   VendorPrequalificationSubmission,
   VendorBankDetails,
@@ -153,8 +154,13 @@ function normalizeFileUrl(raw?: string): string | undefined {
   if (raw.startsWith('/')) {
     const apiOrigin = getConfiguredApiOrigin();
     if (apiOrigin) return `${apiOrigin}${raw}`;
+    return raw;
   }
-  return raw;
+  const clean = raw.replace(/^\/+/, "");
+  const mediaPath = clean.startsWith("media/") ? `/${clean}` : `/media/${clean}`;
+  const apiOrigin = getConfiguredApiOrigin();
+  if (apiOrigin) return `${apiOrigin}${mediaPath}`;
+  return mediaPath;
 }
 
 function normalizeTechnologyType(raw?: string): string | undefined {
@@ -955,6 +961,7 @@ function mapInstallationReportFromApi(api: any): InstallationReport {
     submittedAt: api.submitted_at ?? "",
     beneficiaryName: api.beneficiary_name ?? undefined,
     householdType: api.household_type ?? undefined,
+    installationDate: api.installation_date ?? undefined,
     verificationStatus: api.verification_status ?? undefined,
     verifiedBy: api.verified_by_username ?? api.verified_by ?? undefined,
     gisStatus: api.gis_status ?? undefined,
@@ -996,6 +1003,27 @@ function mapVerificationTaskFromApi(api: any): VerificationTask {
     createdAt: api.created_at ?? "",
     updatedAt: api.updated_at ?? "",
     concernMessage: api.concern_message ?? undefined,
+    fieldVerification: api.field_verification ? mapFieldVerificationFromApi(api.field_verification) : undefined,
+  };
+}
+
+function mapFieldVerificationFromApi(api: any): FieldVerificationRecord {
+  return {
+    id: String(api.id ?? ""),
+    fieldOfficerUsername: api.field_officer_username ?? undefined,
+    beneficiaryPresent: Boolean(api.beneficiary_present),
+    beneficiaryGender: api.beneficiary_gender ?? "unknown",
+    systemWorking: Boolean(api.system_working),
+    officerLatitude: Number(api.officer_latitude ?? 0),
+    officerLongitude: Number(api.officer_longitude ?? 0),
+    locationMatch: Boolean(api.location_match),
+    locationDistanceMeters: Number(api.location_distance_meters ?? 0),
+    sitePhotos: Array.isArray(api.site_photos) ? api.site_photos.map((path: string) => normalizeFileUrl(path)).filter(Boolean) : [],
+    serialVisible: Boolean(api.serial_visible),
+    observationNotes: api.observation_notes ?? "",
+    verificationStatus: api.verification_status ?? "",
+    flagReason: api.flag_reason ?? undefined,
+    verifiedAt: api.verified_at ?? "",
   };
 }
 
@@ -1517,6 +1545,7 @@ async function http<T>(url: string, init?: ApiRequestInit): Promise<T> {
       } else {
         lastError = error instanceof Error ? error : new Error(String(error));
       }
+      (lastError as any).isNetworkError = true;
 
       if (isLastAttempt) {
         throw lastError;

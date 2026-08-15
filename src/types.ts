@@ -847,6 +847,7 @@ export interface InstallationReport {
   submittedAt: string;
   beneficiaryName?: string;
   householdType?: string;
+  installationDate?: string;
   verificationStatus?: string;
   verifiedBy?: string;
   gisStatus?: "green" | "yellow" | "red";
@@ -878,6 +879,25 @@ export interface VerificationTask {
   createdAt: string;
   updatedAt: string;
   concernMessage?: string;
+  fieldVerification?: FieldVerificationRecord;
+}
+
+export interface FieldVerificationRecord {
+  id: string;
+  fieldOfficerUsername?: string;
+  beneficiaryPresent: boolean;
+  beneficiaryGender: string;
+  systemWorking: boolean;
+  officerLatitude: number;
+  officerLongitude: number;
+  locationMatch: boolean;
+  locationDistanceMeters: number;
+  sitePhotos: string[];
+  serialVisible: boolean;
+  observationNotes: string;
+  verificationStatus: string;
+  flagReason?: string;
+  verifiedAt: string;
 }
 
 export interface MapInstallationRecord {

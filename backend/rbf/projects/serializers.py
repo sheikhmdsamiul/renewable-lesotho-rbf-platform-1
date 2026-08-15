@@ -621,6 +621,7 @@ class InstallationReportSerializer(serializers.ModelSerializer):
 
 class VerificationTaskSerializer(serializers.ModelSerializer):
     assigned_verifier_username = serializers.CharField(source='assigned_verifier.username', read_only=True)
+    field_verification = serializers.SerializerMethodField()
 
     class Meta:
         model = VerificationTask
@@ -634,6 +635,12 @@ class VerificationTaskSerializer(serializers.ModelSerializer):
             'created_at',
             'updated_at',
         ]
+
+    def get_field_verification(self, obj):
+        field_verification = obj.report.field_verifications.first()
+        if field_verification is None:
+            return None
+        return FieldVerificationSerializer(field_verification, context=self.context).data
 
 
 class FieldVerificationSerializer(serializers.ModelSerializer):

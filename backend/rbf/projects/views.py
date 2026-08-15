@@ -2247,15 +2247,17 @@ class VerificationTaskViewSet(viewsets.ModelViewSet):
             'Installation Verification Completed',
             f"Installation report {report.id} was {str(next_status).lower()} after field verification.",
         )
-        Notification.objects.create(
+        Notification.objects.get_or_create(
             recipient_id=str(report.vendor_id),
-            recipient_name=report.vendor.full_name or report.vendor.username,
-            type=NotificationChannel.IN_APP,
             event='installation_verification_vendor',
-            title=f'Installation #{report.id} {verification_record_status}',
-            body=f'Installation #{report.id} was {verification_record_status} by the field officer.',
-            status=NotificationStatus.SENT,
             linked_entity_id=str(report.id),
+            defaults={
+                'recipient_name': report.vendor.full_name or report.vendor.username,
+                'type': NotificationChannel.IN_APP,
+                'title': f'Installation #{report.id} {verification_record_status}',
+                'body': f'Installation #{report.id} was {verification_record_status} by the field officer.',
+                'status': NotificationStatus.SENT,
+            },
         )
         district_name = report.project.district or report.project.region or ''
         oversight_users = User.objects.filter(role__in={UserRole.RBF_OFFICIAL, UserRole.ADMIN}).only('id', 'full_name', 'username')
@@ -2275,18 +2277,21 @@ class VerificationTaskViewSet(viewsets.ModelViewSet):
                     linked_entity_id=str(report.id),
                 )
                 for user in oversight_users
-            ]
+            ],
+            ignore_conflicts=True,
         )
         if concern_message:
-            Notification.objects.create(
+            Notification.objects.get_or_create(
                 recipient_id=str(report.vendor_id),
-                recipient_name=report.vendor.full_name or report.vendor.username,
-                type=NotificationChannel.IN_APP,
                 event='verification_concern',
-                title='Installation Location Concern',
-                body=concern_message,
-                status=NotificationStatus.SENT,
                 linked_entity_id=str(report.id),
+                defaults={
+                    'recipient_name': report.vendor.full_name or report.vendor.username,
+                    'type': NotificationChannel.IN_APP,
+                    'title': 'Installation Location Concern',
+                    'body': concern_message,
+                    'status': NotificationStatus.SENT,
+                },
             )
         refresh_project_kpis(str(report.project_id))
         payload = self.get_serializer(task).data
