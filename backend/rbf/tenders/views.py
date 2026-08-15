@@ -2493,7 +2493,14 @@ class TenderBidEvaluationViewSet(viewsets.ModelViewSet):
             raise PermissionDenied('Only the RBF Management Team or TAC members can score bids.')
 
     def _assert_tender_closed_for_evaluation(self, bid):
-        _assert_evaluation_window_open(bid.tender)
+        if is_site_specific_stage(bid.tender.stage_type) or getattr(bid, 'stage_two_unlocked', False):
+            _assert_evaluation_window_open(bid.tender)
+            return
+        _auto_close_tender_on_deadline(bid.tender)
+        if bid.tender.status not in {TenderStatus.PUBLISHED, TenderStatus.CLOSED, TenderStatus.EVALUATION}:
+            raise ValidationError(
+                {'detail': 'Stage 1 evaluation requires the tender to be Published, Closed, or in Evaluation.'}
+            )
 
     def create(self, request, *args, **kwargs):
         self._assert_eval_permission(request)

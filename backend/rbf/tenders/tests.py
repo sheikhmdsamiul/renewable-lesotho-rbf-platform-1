@@ -1207,6 +1207,95 @@ class TenderBidSubmissionTests(APITestCase):
         self.site_specific_tender.refresh_from_db()
         self.assertEqual(self.site_specific_tender.status, TenderStatus.PUBLISHED)
 
+    def test_stage_one_evaluation_is_allowed_while_tender_is_published(self):
+        bid = TenderBid.objects.create(
+            tender=self.prequal_tender,
+            vendor_id=str(self.vendor.id),
+            vendor_name=self.vendor.full_name,
+            vendor_email=self.vendor.email,
+            bid_amount=150000,
+            subsidy_requested=100000,
+            concept_note="Implementation strategy " * 30,
+            status=BidStatus.SUBMITTED,
+        )
+        tac_user = User.objects.create_user(
+            username="tac_stage_one",
+            password="securePass123",
+            role=UserRole.TAC,
+            status="Active",
+            full_name="TAC Stage One",
+            email="tac-stage-one@example.com",
+        )
+
+        self.client.force_authenticate(tac_user)
+        technical_response = self.client.post(
+            "/api/tender-bid-evaluations/",
+            {
+                "bid": str(bid.id),
+                "technical_score": 16,
+                "feasibility_score": 12,
+                "kpi_score": 8,
+                "gender_score": 7,
+                "environmental_score": 4,
+                "om_score": 8,
+                "inclusivity_score": 0,
+                "comments": "Stage 1 technical score while published.",
+            },
+            format="json",
+        )
+        self.assertEqual(technical_response.status_code, status.HTTP_201_CREATED)
+
+        self.client.force_authenticate(self.rmt_user)
+        financial_response = self.client.post(
+            "/api/tender-bid-evaluations/",
+            {"bid": str(bid.id), "financial_score": 20, "comments": "Stage 1 finance review while published."},
+            format="json",
+        )
+        self.assertEqual(financial_response.status_code, status.HTTP_201_CREATED)
+
+        self.prequal_tender.refresh_from_db()
+        self.assertEqual(self.prequal_tender.status, TenderStatus.PUBLISHED)
+
+    def test_stage_two_evaluation_is_still_blocked_while_tender_is_published(self):
+        bid = TenderBid.objects.create(
+            tender=self.prequal_tender,
+            vendor_id=str(self.vendor.id),
+            vendor_name=self.vendor.full_name,
+            vendor_email=self.vendor.email,
+            bid_amount=180000,
+            subsidy_requested=120000,
+            status=BidStatus.SUBMITTED,
+            stage_two_unlocked=True,
+        )
+        tac_user = User.objects.create_user(
+            username="tac_stage_two",
+            password="securePass123",
+            role=UserRole.TAC,
+            status="Active",
+            full_name="TAC Stage Two",
+            email="tac-stage-two@example.com",
+        )
+
+        self.client.force_authenticate(tac_user)
+        technical_response = self.client.post(
+            "/api/tender-bid-evaluations/",
+            {
+                "bid": str(bid.id),
+                "technical_score": 16,
+                "feasibility_score": 12,
+                "kpi_score": 8,
+                "gender_score": 7,
+                "environmental_score": 4,
+                "om_score": 8,
+                "inclusivity_score": 0,
+                "comments": "Stage 2 technical score while published.",
+            },
+            format="json",
+        )
+        self.assertEqual(technical_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("detail", technical_response.data)
+        self.assertIn("Closed", str(technical_response.data.get("detail", "")))
+
     def test_evaluation_auto_closes_application_window_tender_when_deadline_has_passed(self):
         self.prequal_tender.application_type = "Application Window"
         self.prequal_tender.last_date_submission = timezone.now() - timedelta(days=1)

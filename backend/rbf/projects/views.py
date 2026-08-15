@@ -1934,12 +1934,21 @@ class InstallationReportViewSet(viewsets.ModelViewSet):
         if project_district_label and GpsValidator.districtBoundaryConfigured():
             is_inside = GpsValidator.isInsideProjectDistrict(latitude, longitude, project_district_label)
             if not is_inside:
+                assigned_distance = GpsValidator.distanceToAssignedDistrict(latitude, longitude, project_district_label)
+                resolved_district = GpsValidator.resolveDistrictName(latitude, longitude)
+                proximity = ""
+                if assigned_distance is not None:
+                    if assigned_distance < 1000:
+                        proximity = f" The location is {int(assigned_distance)} m beyond the assigned district boundary."
+                    else:
+                        proximity = f" The location is {round(assigned_distance / 1000, 1)} km beyond the assigned district boundary."
+                location_note = f" Per the boundary data, the location falls within {resolved_district}." if resolved_district else ""
                 return Response(
                     {
                         'success': False,
                         'errors': {
                             'gps_lat': [
-                                f'The captured GPS coordinates (Lat: {latitude}, Long: {longitude}) fall outside the assigned district: {project_district_label}. This installation cannot be saved.',
+                                f'The captured GPS coordinates (Lat: {latitude}, Long: {longitude}) fall outside the assigned district: {project_district_label}.{proximity}{location_note} This installation cannot be saved.',
                             ],
                         },
                     },

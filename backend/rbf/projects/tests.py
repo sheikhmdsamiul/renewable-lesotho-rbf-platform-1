@@ -1071,7 +1071,7 @@ class ProjectApiTests(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_422_UNPROCESSABLE_ENTITY)
-        self.assertIn("assigned project district", str(response.data["errors"]["gps_lat"][0]))
+        self.assertIn("outside the assigned district", str(response.data["errors"]["gps_lat"][0]))
         self.assertFalse(InstallationReport.objects.filter(project=project).exists())
 
     def test_installation_report_accepts_coordinates_inside_project_district(self):
@@ -1114,6 +1114,147 @@ class ProjectApiTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertTrue(InstallationReport.objects.filter(project=project, serial_number="SERIAL-DISTRICT-IN-1").exists())
+
+    def test_installation_report_accepts_coordinates_on_district_border(self):
+        self._write_district_geojson()
+        User = get_user_model()
+        vendor = User.objects.create_user(
+            username="border_vendor",
+            password="securePass123",
+            role="Vendor",
+            status="Active",
+            region="Maseru",
+            gender="Male",
+            mobile_number="26650000012",
+        )
+        project = Project.objects.create(
+            vendor_id=str(vendor.id),
+            vendor_name=vendor.username,
+            tech_type="SHS",
+            region="Maseru",
+            district="Maseru",
+            status=ProjectStatus.INSTALLATION,
+            progress=0,
+            energy_output=0,
+            uptime=0,
+            gender_impact=0,
+        )
+        self._create_completed_setup(project, vendor)
+        self.client.force_authenticate(vendor)
+
+        response = self.client.post(
+            "/api/projects/installations/",
+            {
+                "project": project.id,
+                "gps_lat": -30.0,
+                "gps_lng": 28.0,
+                "serial_number": "SERIAL-BORDER-1",
+                "beneficiary_id": "BEN-BORDER-1",
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(InstallationReport.objects.filter(project=project, serial_number="SERIAL-BORDER-1").exists())
+
+    def test_installation_report_accepts_coordinates_just_beyond_district_border(self):
+        self._write_district_geojson()
+        User = get_user_model()
+        vendor = User.objects.create_user(
+            username="near_border_vendor",
+            password="securePass123",
+            role="Vendor",
+            status="Active",
+            region="Maseru",
+            gender="Male",
+            mobile_number="26650000013",
+        )
+        project = Project.objects.create(
+            vendor_id=str(vendor.id),
+            vendor_name=vendor.username,
+            tech_type="SHS",
+            region="Maseru",
+            district="Maseru",
+            status=ProjectStatus.INSTALLATION,
+            progress=0,
+            energy_output=0,
+            uptime=0,
+            gender_impact=0,
+        )
+        self._create_completed_setup(project, vendor)
+        self.client.force_authenticate(vendor)
+
+        response = self.client.post(
+            "/api/projects/installations/",
+            {
+                "project": project.id,
+                "gps_lat": -30.0,
+                "gps_lng": 28.0001,
+                "serial_number": "SERIAL-NEAR-BORDER-1",
+                "beneficiary_id": "BEN-NEAR-BORDER-1",
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(InstallationReport.objects.filter(project=project, serial_number="SERIAL-NEAR-BORDER-1").exists())
+
+    def test_installation_report_matches_hyphenated_district_name_against_boundary(self):
+        self.geojson_path.write_text(
+            """
+            {
+              "type": "FeatureCollection",
+              "features": [
+                {
+                  "type": "Feature",
+                  "properties": {"district": "Thaba Tseka"},
+                  "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[[27.5, -29.5], [28.5, -29.5], [28.5, -28.5], [27.5, -28.5], [27.5, -29.5]]]
+                  }
+                }
+              ]
+            }
+            """.strip(),
+            encoding="utf-8",
+        )
+        GpsValidator._feature_cache = None
+        User = get_user_model()
+        vendor = User.objects.create_user(
+            username="hyphen_district_vendor",
+            password="securePass123",
+            role="Vendor",
+            status="Active",
+            region="Thaba Tseka",
+            gender="Male",
+            mobile_number="26650000011",
+        )
+        project = Project.objects.create(
+            vendor_id=str(vendor.id),
+            vendor_name=vendor.username,
+            tech_type="SHS",
+            region="Thaba Tseka",
+            district="Thaba-Tseka",
+            status=ProjectStatus.INSTALLATION,
+            progress=0,
+            energy_output=0,
+            uptime=0,
+            gender_impact=0,
+        )
+        self._create_completed_setup(project, vendor)
+        self.client.force_authenticate(vendor)
+
+        response = self.client.post(
+            "/api/projects/installations/",
+            {
+                "project": project.id,
+                "gps_lat": -29.1,
+                "gps_lng": 27.9,
+                "serial_number": "SERIAL-HYPHEN-1",
+                "beneficiary_id": "BEN-HYPHEN-1",
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(InstallationReport.objects.filter(project=project, serial_number="SERIAL-HYPHEN-1").exists())
 
     def test_map_installations_endpoint_returns_summary_and_vendor_scope(self):
         User = get_user_model()

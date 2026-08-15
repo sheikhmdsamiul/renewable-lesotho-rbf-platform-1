@@ -2508,7 +2508,9 @@ export async function createInstallationReport(payload: {
   }
   if (data?.errors) {
     const errorMessages = Object.values(data.errors).flat().join(" ");
-    throw new Error(errorMessages || "Unable to submit installation report.");
+    const err = new Error(errorMessages || "Unable to submit installation report.");
+    (err as any).fieldErrors = data.errors;
+    throw err;
   }
   return {
     report: mapInstallationReportFromApi(data),

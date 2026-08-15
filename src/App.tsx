@@ -90,6 +90,7 @@ import {
   ProjectUpdate,
   ProjectDocument,
   InstallationReport,
+  InstallationStatus,
   PaymentClaim,
   VendorPrequalification,
   Notification,
@@ -9045,6 +9046,291 @@ const VendorTenders = ({ onSubmitTender, onNavigate }: { onSubmitTender?: (tende
   );
 };
 
+const VendorApplications = ({ currentUser, onOpenBid }: { currentUser: User | null; onOpenBid: (bid: TenderBid) => void }) => {
+  const [activeTab, setActiveTab] = useState<"overview" | "prequal" | "bids" | "blacklisting" | "installations">("overview");
+  const [prequals, setPrequals] = useState<VendorPrequalification[]>([]);
+  const [bids, setBids] = useState<TenderBid[]>([]);
+  const [cases, setCases] = useState<VendorBlacklistCase[]>([]);
+  const [appeals, setAppeals] = useState<BlacklistAppeal[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [installations, setInstallations] = useState<InstallationReport[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const loadAll = React.useCallback(async () => {
+    setLoading(true);
+    try {
+      const [preqRows, bidRows, caseRows, appealRows, projectRows, installRows] = await Promise.all([
+        fetchVendorPrequalifications(),
+        fetchTenderBids(),
+        fetchBlacklistCases(),
+        fetchBlacklistAppeals(),
+        fetchProjects(),
+        fetchInstallationReports(),
+      ]);
+      setPrequals(preqRows);
+      setBids(bidRows);
+      setCases(caseRows);
+      setAppeals(appealRows);
+      setProjects(projectRows);
+      const projectIds = new Set(projectRows.map(p => p.id));
+      setInstallations(installRows.filter(r => projectIds.has(r.projectId)));
+    } catch {
+      setPrequals([]);
+      setBids([]);
+      setCases([]);
+      setAppeals([]);
+      setProjects([]);
+      setInstallations([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    void loadAll();
+  }, [loadAll]);
+
+  React.useEffect(() => {
+    const handler = () => void loadAll();
+    window.addEventListener("rbf-bid-updated", handler);
+    return () => window.removeEventListener("rbf-bid-updated", handler);
+  }, [loadAll]);
+
+  const latestPrequal = getLatestPrequalification(prequals);
+  const submittedBids = bids.filter(b => b.status !== BidStatus.DRAFT);
+  const draftBidCount = bids.length - submittedBids.length;
+  const myCaseCount = cases.length;
+  const myAppealCount = appeals.length;
+  const totalInstallations = installations.length;
+  const projectById = Object.fromEntries(projects.map(p => [p.id, p]));
+  const projectsWithInstalls = projects.filter(p => installations.some(r => r.projectId === p.id));
+
+  const prequalStatusTone = (status?: string) =>
+    status === "Approved" ? "bg-emerald-100 text-emerald-700" :
+    status === "Under Review" ? "bg-blue-100 text-blue-700" :
+    status === "Pending" ? "bg-amber-100 text-amber-700" :
+    status === "Partial (Resubmit)" ? "bg-orange-100 text-orange-700" :
+    status === "Rejected" ? "bg-rose-100 text-rose-700" :
+    "bg-slate-100 text-slate-700";
+
+  const bidStatusTone = (bid: TenderBid) =>
+    bid.status === BidStatus.SUBMITTED ? "bg-blue-100 text-blue-700" :
+    bid.status === BidStatus.UNDER_REVIEW ? "bg-amber-100 text-amber-700" :
+    bid.status === BidStatus.REVISION_REQUIRED ? "bg-orange-100 text-orange-700" :
+    bid.status === BidStatus.ACCEPTED ? "bg-emerald-100 text-emerald-700" :
+    bid.status === BidStatus.REJECTED ? "bg-rose-100 text-rose-700" :
+    bid.status === BidStatus.AWARDED ? "bg-purple-100 text-purple-700" :
+    "bg-slate-100 text-slate-700";
+
+  const caseStatusTone = (status?: string) =>
+    status === "Confirmed" ? "bg-rose-100 text-rose-700" :
+    status === "Initiated" || status === "Under Review" ? "bg-amber-100 text-amber-700" :
+    status === "Rejected" || status === "Reinstated" ? "bg-emerald-100 text-emerald-700" :
+    "bg-slate-100 text-slate-700";
+
+  const installStatusTone = (status: InstallationStatus) =>
+    status === "Verified" ? "bg-emerald-100 text-emerald-700" :
+    status === "Flagged" ? "bg-rose-100 text-rose-700" :
+    "bg-amber-100 text-amber-700";
+
+  const tabs = [
+    { key: "overview", label: "Overview", icon: LayoutDashboard, count: null as number | null },
+    { key: "prequal", label: "Pre-Qualification", icon: ClipboardCheck, count: prequals.length || null },
+    { key: "bids", label: "Tender Applications", icon: FileSearch, count: submittedBids.length || null },
+    { key: "blacklisting", label: "Blacklisting", icon: FileWarning, count: (myCaseCount + myAppealCount) || null },
+    { key: "installations", label: "Installation Submissions", icon: FolderOpen, count: totalInstallations || null },
+  ];
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-900">My Applications</h1>
+          <p className="text-slate-500 mt-1">Track every application you have submitted — pre-qualification, tender bids, blacklisting, and installation submissions.</p>
+        </div>
+        {loading && (
+          <div className="flex items-center gap-2 text-sm text-slate-500">
+            <Loader2 size={16} className="animate-spin" /> Refreshing applications...
+          </div>
+        )}
+      </div>
+
+      <div className="flex flex-wrap gap-3">
+        {tabs.map(tab => (
+          <button
+            key={tab.key}
+            onClick={() => setActiveTab(tab.key)}
+            className={`flex items-center gap-2 px-4 py-2.5 rounded-xl border text-sm font-bold transition-colors ${
+              activeTab === tab.key ? "bg-[#0b1530] text-white border-[#0b1530] shadow-sm" : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
+            }`}
+          >
+            <tab.icon size={16} />
+            {tab.label}
+            {tab.count != null && (
+              <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-bold ${activeTab === tab.key ? "bg-white/20 text-white" : "bg-slate-100 text-slate-600"}`}>{tab.count}</span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      {activeTab === "prequal" && <PreQualificationSubmission />}
+
+      {activeTab === "bids" && <VendorBids onOpenBid={onOpenBid} />}
+
+      {activeTab === "blacklisting" && <Blacklisting currentUser={currentUser} />}
+
+      {activeTab === "installations" && (
+        <div className="card">
+          <div className="p-6 border-b border-slate-100">
+            <h3 className="text-lg font-bold">Installation Submissions</h3>
+            <p className="text-sm text-slate-500 mt-1">Installation reports you have submitted across your projects.</p>
+          </div>
+          <div className="divide-y divide-slate-100">
+            {projectsWithInstalls.length === 0 && (
+              <div className="p-6 text-sm text-slate-500">No installation submissions yet. You can submit installation reports from the Projects Hub once your project reaches the installation phase.</div>
+            )}
+            {projectsWithInstalls.map(project => {
+              const rows = installations.filter(r => r.projectId === project.id);
+              return (
+                <div key={project.id}>
+                  <div className="px-6 py-4 bg-slate-50 flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <FolderOpen size={18} className="text-[#0b1530]" />
+                      <div>
+                        <p className="font-bold text-slate-900">{project.projectTitle || project.projectReference || project.tenderName || project.tenderReferenceNumber || "Project"}</p>
+                        <p className="text-xs text-slate-500">{rows.length} installation submission{rows.length !== 1 ? "s" : ""}</p>
+                      </div>
+                    </div>
+                    <span className="text-xs text-slate-500">{project.status}</span>
+                  </div>
+                  <div className="divide-y divide-slate-100">
+                    {rows.map(report => (
+                      <div key={report.id} className="px-6 py-4 flex items-center justify-between hover:bg-slate-50 transition-colors">
+                        <div className="flex items-center gap-4">
+                          <div className="w-10 h-10 rounded-xl bg-slate-100 flex items-center justify-center text-slate-400">
+                            <FileText size={18} />
+                          </div>
+                          <div>
+                            <p className="font-bold text-slate-900">{report.beneficiaryName || `Beneficiary ${report.beneficiaryId}`}</p>
+                            <p className="text-xs text-slate-500">Serial {report.serialNumber} • Submitted {new Date(report.submittedAt).toLocaleDateString()}</p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          {report.meterId && <span className="text-xs text-slate-400">{report.meterId}</span>}
+                          <span className={`inline-flex rounded-full px-3 py-1 text-xs font-bold ${installStatusTone(report.status)}`}>{report.status}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {activeTab === "overview" && (
+        <>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <button onClick={() => setActiveTab("prequal")} className="card p-5 text-left hover:shadow-md transition-shadow">
+              <div className="flex items-center justify-between">
+                <ClipboardCheck size={22} className="text-emerald-600" />
+                <span className="badge bg-emerald-100 text-emerald-700">{prequals.length}</span>
+              </div>
+              <p className="mt-3 font-bold text-slate-900">Pre-Qualification</p>
+              <p className="text-xs text-slate-500 mt-1">{latestPrequal ? `Status: ${latestPrequal.status}` : "Not submitted yet"}</p>
+            </button>
+            <button onClick={() => setActiveTab("bids")} className="card p-5 text-left hover:shadow-md transition-shadow">
+              <div className="flex items-center justify-between">
+                <FileSearch size={22} className="text-blue-600" />
+                <span className="badge bg-blue-100 text-blue-700">{submittedBids.length}</span>
+              </div>
+              <p className="mt-3 font-bold text-slate-900">Tender Applications</p>
+              <p className="text-xs text-slate-500 mt-1">{submittedBids.length} submitted bid{submittedBids.length !== 1 ? "s" : ""}{draftBidCount > 0 ? ` • ${draftBidCount} draft${draftBidCount !== 1 ? "s" : ""}` : ""}</p>
+            </button>
+            <button onClick={() => setActiveTab("blacklisting")} className="card p-5 text-left hover:shadow-md transition-shadow">
+              <div className="flex items-center justify-between">
+                <FileWarning size={22} className="text-rose-600" />
+                <span className="badge bg-rose-100 text-rose-700">{myCaseCount + myAppealCount}</span>
+              </div>
+              <p className="mt-3 font-bold text-slate-900">Blacklisting</p>
+              <p className="text-xs text-slate-500 mt-1">{myCaseCount} case{myCaseCount !== 1 ? "s" : ""} • {myAppealCount} appeal{myAppealCount !== 1 ? "s" : ""}</p>
+            </button>
+            <button onClick={() => setActiveTab("installations")} className="card p-5 text-left hover:shadow-md transition-shadow">
+              <div className="flex items-center justify-between">
+                <FolderOpen size={22} className="text-amber-600" />
+                <span className="badge bg-amber-100 text-amber-700">{totalInstallations}</span>
+              </div>
+              <p className="mt-3 font-bold text-slate-900">Installations</p>
+              <p className="text-xs text-slate-500 mt-1">{projectsWithInstalls.length} project{projectsWithInstalls.length !== 1 ? "s" : ""} with submissions</p>
+            </button>
+          </div>
+
+          <div className="card">
+            <div className="p-6 border-b border-slate-100">
+              <h3 className="text-lg font-bold">Application Activity</h3>
+              <p className="text-sm text-slate-500 mt-1">A summary of your most recent application activity across the programme.</p>
+            </div>
+            <div className="divide-y divide-slate-100">
+              {latestPrequal && (
+                <div className="px-6 py-4 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="w-9 h-9 rounded-xl bg-emerald-50 flex items-center justify-center text-emerald-600"><ClipboardCheck size={18} /></div>
+                    <div>
+                      <p className="text-sm font-bold text-slate-900">Pre-Qualification Application</p>
+                      <p className="text-xs text-slate-500">Submitted {new Date(latestPrequal.submittedAt).toLocaleDateString()}</p>
+                    </div>
+                  </div>
+                  <span className={`inline-flex rounded-full px-3 py-1 text-xs font-bold ${prequalStatusTone(latestPrequal.status)}`}>{latestPrequal.status}</span>
+                </div>
+              )}
+              {submittedBids.slice(0, 5).map(bid => (
+                <div key={bid.id} className="px-6 py-4 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="w-9 h-9 rounded-xl bg-blue-50 flex items-center justify-center text-blue-600"><FileSearch size={18} /></div>
+                    <div>
+                      <p className="text-sm font-bold text-slate-900">Tender Application - {bid.tender_name || bid.tender_reference || bid.tender}</p>
+                      <p className="text-xs text-slate-500">{bid.vendor_name} • {bid.stage_key === "site_specific" ? "Stage 2" : "Stage 1"}</p>
+                    </div>
+                  </div>
+                  <span className={`inline-flex rounded-full px-3 py-1 text-xs font-bold ${bidStatusTone(bid)}`}>{bid.status}</span>
+                </div>
+              ))}
+              {cases.slice(0, 3).map(c => (
+                <div key={c.id} className="px-6 py-4 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="w-9 h-9 rounded-xl bg-rose-50 flex items-center justify-center text-rose-600"><FileWarning size={18} /></div>
+                    <div>
+                      <p className="text-sm font-bold text-slate-900">Blacklisting Case</p>
+                      <p className="text-xs text-slate-500">{c.reason}{c.initiatedAt ? ` • ${new Date(c.initiatedAt).toLocaleDateString()}` : ""}</p>
+                    </div>
+                  </div>
+                  <span className={`inline-flex rounded-full px-3 py-1 text-xs font-bold ${caseStatusTone(c.status)}`}>{c.status}</span>
+                </div>
+              ))}
+              {totalInstallations > 0 && (
+                <div className="px-6 py-4 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="w-9 h-9 rounded-xl bg-amber-50 flex items-center justify-center text-amber-600"><FolderOpen size={18} /></div>
+                    <div>
+                      <p className="text-sm font-bold text-slate-900">Installation Submissions</p>
+                      <p className="text-xs text-slate-500">{totalInstallations} report{totalInstallations !== 1 ? "s" : ""} across {projectsWithInstalls.length} project{projectsWithInstalls.length !== 1 ? "s" : ""}</p>
+                    </div>
+                  </div>
+                  <span className="inline-flex rounded-full px-3 py-1 text-xs font-bold bg-slate-100 text-slate-600">{installations.filter(r => r.status === "Verified").length} verified</span>
+                </div>
+              )}
+              {!latestPrequal && submittedBids.length === 0 && cases.length === 0 && totalInstallations === 0 && (
+                <div className="p-6 text-sm text-slate-500">No applications yet. Browse Published Tenders to apply, or submit your Pre-Qualification application to get started.</div>
+              )}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+};
+
 const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
   const [bids, setBids] = useState<TenderBid[]>([]);
   const [loading, setLoading] = useState(false);
@@ -14389,6 +14675,8 @@ const ProjectsHub = ({
   const [reportReceipt, setReportReceipt] = useState<File | null>(null);
   const [reportSubmitting, setReportSubmitting] = useState(false);
   const [reportMessage, setReportMessage] = useState<string | null>(null);
+  const [reportMessageTone, setReportMessageTone] = useState<"success" | "error" | "info">("info");
+  const [reportErrors, setReportErrors] = useState<Record<string, string>>({});
   const [requestChangeMessage, setRequestChangeMessage] = useState("");
   const [requestChangeSubmitting, setRequestChangeSubmitting] = useState(false);
   const [meterCsvFile, setMeterCsvFile] = useState<File | null>(null);
@@ -14474,7 +14762,7 @@ const ProjectsHub = ({
     setDocumentFile(null);
     setDocumentMessage(null);
     setDocumentType("Other");
-    setReportDraft({ serialNumber: "", beneficiaryId: "", gpsLat: "", gpsLng: "", meterId: "", kwhReading: "" });
+    setReportDraft({ serialNumber: "", beneficiaryId: "", householdType: "", gpsLat: "", gpsLng: "", meterId: "", kwhReading: "" });
     setReportPhotos([]);
     setReportReceipt(null);
     setReportMessage(null);
@@ -15264,22 +15552,108 @@ const ProjectsHub = ({
     }
   };
 
+  const clearReportError = (field: string) =>
+    setReportErrors(prev => {
+      if (!prev[field]) return prev;
+      const next = { ...prev };
+      delete next[field];
+      return next;
+    });
+
+  const validateReport = (): Record<string, string> => {
+    const errors: Record<string, string> = {};
+    const serialNumber = (reportDraft.serialNumber || "").trim();
+    const beneficiaryId = (reportDraft.beneficiaryId || "").trim();
+    const householdType = (reportDraft.householdType || "").trim();
+    const gpsLatRaw = (reportDraft.gpsLat || "").trim();
+    const gpsLngRaw = (reportDraft.gpsLng || "").trim();
+    const meterId = (reportDraft.meterId || "").trim();
+    const kwhRaw = (reportDraft.kwhReading || "").trim();
+
+    if (!serialNumber) {
+      errors.serialNumber = "Serial number is required. Enter the device's unique serial number as printed on the unit.";
+    } else if (serialNumber.length < 4) {
+      errors.serialNumber = "Serial number looks too short (min 4 characters). Check it matches the label on the device.";
+    }
+
+    if (!beneficiaryId) {
+      errors.beneficiaryId = "Beneficiary ID (NID) is required. Enter the national ID of the household that received the installation.";
+    } else if (beneficiaryId.length < 6) {
+      errors.beneficiaryId = "Beneficiary ID looks too short (min 6 characters). Double-check the NID.";
+    }
+
+    if (!householdType) {
+      errors.householdType = "Select a household type. This drives the gender/inclusion KPIs for your project.";
+    }
+
+    if (!gpsLatRaw) {
+      errors.gpsLat = "GPS Latitude is required. Capture it on-site (e.g., long-press in Google Maps to copy the coordinates).";
+    } else {
+      const lat = Number(gpsLatRaw);
+      if (!Number.isFinite(lat)) {
+        errors.gpsLat = `"${gpsLatRaw}" is not a valid number. Enter a decimal like -29.3150.`;
+      } else if (lat < -90 || lat > 90) {
+        errors.gpsLat = "Latitude must be a decimal between -90 and 90.";
+      } else if (lat < -30.7 || lat > -28.5) {
+        errors.gpsLat = `Latitude ${lat} is outside Lesotho's range (-30.7 to -28.5). Confirm you captured the actual on-site location.`;
+      }
+    }
+
+    if (!gpsLngRaw) {
+      errors.gpsLng = "GPS Longitude is required. Capture it on-site (e.g., long-press in Google Maps to copy the coordinates).";
+    } else {
+      const lng = Number(gpsLngRaw);
+      if (!Number.isFinite(lng)) {
+        errors.gpsLng = `"${gpsLngRaw}" is not a valid number. Enter a decimal like 27.4600.`;
+      } else if (lng < -180 || lng > 180) {
+        errors.gpsLng = "Longitude must be a decimal between -180 and 180.";
+      } else if (lng < 27.0 || lng > 29.5) {
+        errors.gpsLng = `Longitude ${lng} is outside Lesotho's range (27.0 to 29.5). Confirm you captured the actual on-site location.`;
+      }
+    }
+
+    if (meterId && meterId.length < 3) {
+      errors.meterId = "Smart meter ID looks too short. Enter it exactly as shown on the physical meter so CSV rows can be matched later.";
+    }
+
+    if (kwhRaw) {
+      const kwh = Number(kwhRaw);
+      if (!Number.isFinite(kwh) || kwh < 0) {
+        errors.kwhReading = "kWh reading must be a non-negative number (e.g., 12.5).";
+      }
+    }
+
+    if (reportPhotos.length === 0) {
+      errors.photos = "Attach at least one site photo as proof of installation.";
+    } else if (reportPhotos.length > 5) {
+      errors.photos = "Maximum of 5 photos allowed. Remove extra files before submitting.";
+    } else if (reportPhotos.some(f => f.size > 10 * 1024 * 1024)) {
+      errors.photos = "One or more photos exceed 10 MB each. Compress them or choose smaller files.";
+    }
+
+    if (reportReceipt && reportReceipt.size > 10 * 1024 * 1024) {
+      errors.receipt = "Receipt file exceeds 10 MB. Compress it or choose a smaller file.";
+    }
+
+    return errors;
+  };
+
   const handleSubmitReport = async () => {
     if (!selectedProject) return;
+    const validationErrors = validateReport();
+    if (Object.keys(validationErrors).length > 0) {
+      setReportErrors(validationErrors);
+      setReportMessageTone("error");
+      setReportMessage("Please fix the highlighted fields below before submitting.");
+      return;
+    }
     const serialNumber = reportDraft.serialNumber.trim();
     const beneficiaryId = reportDraft.beneficiaryId.trim();
     const gpsLat = Number(reportDraft.gpsLat);
     const gpsLng = Number(reportDraft.gpsLng);
-    if (!serialNumber || !beneficiaryId) {
-      setReportMessage("Serial number and beneficiary ID are required.");
-      return;
-    }
-    if (!Number.isFinite(gpsLat) || !Number.isFinite(gpsLng)) {
-      setReportMessage("Valid GPS coordinates are required.");
-      return;
-    }
     setReportSubmitting(true);
     setReportMessage(null);
+    setReportErrors({});
     try {
       const created = await createInstallationReport({
         projectId: selectedProject.id,
@@ -15298,10 +15672,39 @@ const ProjectsHub = ({
       setReportDraft({ serialNumber: "", beneficiaryId: "", householdType: "", gpsLat: "", gpsLng: "", meterId: "", kwhReading: "" });
       setReportPhotos([]);
       setReportReceipt(null);
+      setReportMessageTone(created.warning ? "info" : "success");
       setReportMessage(created.warning || "Installation report submitted.");
     } catch (err: any) {
       const raw = String(err?.message || "");
-      setReportMessage(toFriendlyApiMessage(raw) || "Unable to submit installation report.");
+      const detailPayload = (err as any)?.detailPayload;
+      const fieldErrors =
+        detailPayload?.errors && typeof detailPayload.errors === "object"
+          ? (detailPayload.errors as Record<string, unknown>)
+          : ((err as any)?.fieldErrors as Record<string, unknown> | undefined);
+      if (fieldErrors && Object.keys(fieldErrors).length > 0) {
+        const mapped: Record<string, string> = {};
+        Object.entries(fieldErrors).forEach(([key, value]) => {
+          const message = Array.isArray(value) ? value.join(" ") : String(value);
+          const fieldKey =
+            key === "gps_lat" || key === "latitude" ? "gpsLat" :
+            key === "gps_lng" || key === "longitude" ? "gpsLng" :
+            key === "serial_number" ? "serialNumber" :
+            key === "beneficiary_id" ? "beneficiaryId" :
+            key === "household_type" ? "householdType" :
+            key === "meter_id" ? "meterId" :
+            key === "kwh_reading" ? "kwhReading" :
+            key === "photos" ? "photos" :
+            key === "receipt_file" || key === "receipt" ? "receipt" :
+            key;
+          mapped[fieldKey] = message;
+        });
+        setReportErrors(mapped);
+        setReportMessageTone("error");
+        setReportMessage("The installation could not be saved. Fix the highlighted fields below and try again.");
+      } else {
+        setReportMessageTone("error");
+        setReportMessage(toFriendlyApiMessage(raw) || "Unable to submit installation report.");
+      }
     } finally {
       setReportSubmitting(false);
     }
@@ -17549,6 +17952,8 @@ const ProjectsHub = ({
                       <th className="px-4 py-3">Installation ID</th>
                       <th className="px-4 py-3">Beneficiary</th>
                       <th className="px-4 py-3">Household</th>
+                      <th className="px-4 py-3">Serial Number</th>
+                      <th className="px-4 py-3">Meter ID</th>
                       <th className="px-4 py-3">GPS Link</th>
                       <th className="px-4 py-3">Submitted</th>
                       <th className="px-4 py-3">Verified By</th>
@@ -17558,7 +17963,7 @@ const ProjectsHub = ({
                   <tbody className="divide-y divide-slate-100 bg-white">
                     {paginatedReports.length === 0 && (
                       <tr>
-                        <td colSpan={7} className="px-4 py-6 text-center text-sm text-slate-500">No installations submitted yet.</td>
+                        <td colSpan={9} className="px-4 py-6 text-center text-sm text-slate-500">No installations submitted yet.</td>
                       </tr>
                     )}
                     {paginatedReports.map(report => (
@@ -17566,6 +17971,8 @@ const ProjectsHub = ({
                         <td className="px-4 py-3 text-slate-700">{report.id}</td>
                         <td className="px-4 py-3 text-slate-700">{report.beneficiaryName || report.beneficiaryId || "N/A"}</td>
                         <td className="px-4 py-3 text-slate-700">{report.householdType || "—"}</td>
+                        <td className="px-4 py-3 text-slate-700">{report.serialNumber || "—"}</td>
+                        <td className="px-4 py-3 text-slate-700">{report.meterId || "—"}</td>
                         <td className="px-4 py-3">
                           <a href={`https://www.google.com/maps?q=${report.gpsLat},${report.gpsLng}`} target="_blank" rel="noreferrer" className="text-emerald-700 underline">
                             Open GPS
@@ -17608,23 +18015,94 @@ const ProjectsHub = ({
                   <span className="text-[11px] text-slate-400">GPS + Photo + Receipt</span>
                 </div>
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                  <input className="input-field" placeholder="Serial number" value={reportDraft.serialNumber} onChange={(e) => setReportDraft(prev => ({ ...prev, serialNumber: e.target.value }))} />
-                  <input className="input-field" placeholder="Beneficiary ID (NID)" value={reportDraft.beneficiaryId} onChange={(e) => setReportDraft(prev => ({ ...prev, beneficiaryId: e.target.value }))} />
-                  <select className="input-field" value={reportDraft.householdType} onChange={(e) => setReportDraft(prev => ({ ...prev, householdType: e.target.value }))}>
-                    <option value="">Select Household Type</option>
-                    <option value="standard">Standard</option>
-                    <option value="female_headed">Female Headed</option>
-                    <option value="vulnerable">Vulnerable</option>
-                    <option value="low_income">Low Income</option>
-                  </select>
-                  <input className="input-field" placeholder="GPS Latitude" value={reportDraft.gpsLat} onChange={(e) => setReportDraft(prev => ({ ...prev, gpsLat: e.target.value }))} />
-                  <input className="input-field" placeholder="GPS Longitude" value={reportDraft.gpsLng} onChange={(e) => setReportDraft(prev => ({ ...prev, gpsLng: e.target.value }))} />
-                  <input className="input-field" placeholder="Smart meter ID (optional)" value={reportDraft.meterId} onChange={(e) => setReportDraft(prev => ({ ...prev, meterId: e.target.value }))} />
-                  <input className="input-field" placeholder="kWh reading (optional)" value={reportDraft.kwhReading} onChange={(e) => setReportDraft(prev => ({ ...prev, kwhReading: e.target.value }))} />
+                  <div>
+                    <input
+                      className={`input-field ${reportErrors.serialNumber ? "border-rose-400 ring-1 ring-rose-200" : ""}`}
+                      placeholder="Serial number"
+                      value={reportDraft.serialNumber}
+                      onChange={(e) => { setReportDraft(prev => ({ ...prev, serialNumber: e.target.value })); clearReportError("serialNumber"); }}
+                    />
+                    {reportErrors.serialNumber && <p className="mt-1 text-xs font-medium text-rose-600">{reportErrors.serialNumber}</p>}
+                  </div>
+                  <div>
+                    <input
+                      className={`input-field ${reportErrors.beneficiaryId ? "border-rose-400 ring-1 ring-rose-200" : ""}`}
+                      placeholder="Beneficiary ID (NID)"
+                      value={reportDraft.beneficiaryId}
+                      onChange={(e) => { setReportDraft(prev => ({ ...prev, beneficiaryId: e.target.value })); clearReportError("beneficiaryId"); }}
+                    />
+                    {reportErrors.beneficiaryId && <p className="mt-1 text-xs font-medium text-rose-600">{reportErrors.beneficiaryId}</p>}
+                  </div>
+                  <div>
+                    <select
+                      className={`input-field ${reportErrors.householdType ? "border-rose-400 ring-1 ring-rose-200" : ""}`}
+                      value={reportDraft.householdType}
+                      onChange={(e) => { setReportDraft(prev => ({ ...prev, householdType: e.target.value })); clearReportError("householdType"); }}
+                    >
+                      <option value="">Select Household Type</option>
+                      <option value="standard">Standard</option>
+                      <option value="female_headed">Female Headed</option>
+                      <option value="vulnerable">Vulnerable</option>
+                      <option value="low_income">Low Income</option>
+                    </select>
+                    {reportErrors.householdType && <p className="mt-1 text-xs font-medium text-rose-600">{reportErrors.householdType}</p>}
+                  </div>
+                  <div>
+                    <input
+                      className={`input-field ${reportErrors.gpsLat ? "border-rose-400 ring-1 ring-rose-200" : ""}`}
+                      placeholder="GPS Latitude"
+                      value={reportDraft.gpsLat}
+                      onChange={(e) => { setReportDraft(prev => ({ ...prev, gpsLat: e.target.value })); clearReportError("gpsLat"); }}
+                    />
+                    {reportErrors.gpsLat && <p className="mt-1 text-xs font-medium text-rose-600">{reportErrors.gpsLat}</p>}
+                  </div>
+                  <div>
+                    <input
+                      className={`input-field ${reportErrors.gpsLng ? "border-rose-400 ring-1 ring-rose-200" : ""}`}
+                      placeholder="GPS Longitude"
+                      value={reportDraft.gpsLng}
+                      onChange={(e) => { setReportDraft(prev => ({ ...prev, gpsLng: e.target.value })); clearReportError("gpsLng"); }}
+                    />
+                    {reportErrors.gpsLng && <p className="mt-1 text-xs font-medium text-rose-600">{reportErrors.gpsLng}</p>}
+                  </div>
+                  <div>
+                    <input
+                      className={`input-field ${reportErrors.meterId ? "border-rose-400 ring-1 ring-rose-200" : ""}`}
+                      placeholder="Smart meter ID (optional)"
+                      value={reportDraft.meterId}
+                      onChange={(e) => { setReportDraft(prev => ({ ...prev, meterId: e.target.value })); clearReportError("meterId"); }}
+                    />
+                    {reportErrors.meterId && <p className="mt-1 text-xs font-medium text-rose-600">{reportErrors.meterId}</p>}
+                  </div>
+                  <div>
+                    <input
+                      className={`input-field ${reportErrors.kwhReading ? "border-rose-400 ring-1 ring-rose-200" : ""}`}
+                      placeholder="kWh reading (optional)"
+                      value={reportDraft.kwhReading}
+                      onChange={(e) => { setReportDraft(prev => ({ ...prev, kwhReading: e.target.value })); clearReportError("kwhReading"); }}
+                    />
+                    {reportErrors.kwhReading && <p className="mt-1 text-xs font-medium text-rose-600">{reportErrors.kwhReading}</p>}
+                  </div>
                 </div>
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                  <input className="input-field" type="file" multiple onChange={(e) => setReportPhotos(Array.from(e.target.files || []))} />
-                  <input className="input-field" type="file" onChange={(e) => setReportReceipt(e.target.files?.[0] || null)} />
+                  <div>
+                    <label className="text-xs font-semibold text-slate-500">Site photos ({reportPhotos.length}/5)</label>
+                    <input
+                      className={`input-field ${reportErrors.photos ? "border-rose-400 ring-1 ring-rose-200" : ""}`}
+                      type="file" multiple
+                      onChange={(e) => { setReportPhotos(Array.from(e.target.files || [])); clearReportError("photos"); }}
+                    />
+                    {reportErrors.photos && <p className="mt-1 text-xs font-medium text-rose-600">{reportErrors.photos}</p>}
+                  </div>
+                  <div>
+                    <label className="text-xs font-semibold text-slate-500">Proof-of-sale receipt</label>
+                    <input
+                      className={`input-field ${reportErrors.receipt ? "border-rose-400 ring-1 ring-rose-200" : ""}`}
+                      type="file"
+                      onChange={(e) => { setReportReceipt(e.target.files?.[0] || null); clearReportError("receipt"); }}
+                    />
+                    {reportErrors.receipt && <p className="mt-1 text-xs font-medium text-rose-600">{reportErrors.receipt}</p>}
+                  </div>
                 </div>
                 <div className="flex items-center gap-3">
                   <button
@@ -17636,7 +18114,9 @@ const ProjectsHub = ({
                   </button>
                   <span className="text-xs text-slate-500">Provide the installation evidence above, then submit.</span>
                 </div>
-                {reportMessage && <p className="text-xs text-slate-500">{reportMessage}</p>}
+                {reportMessage && (
+                  <p className={`text-xs font-medium ${reportMessageTone === "error" ? "text-rose-600" : reportMessageTone === "success" ? "text-emerald-600" : "text-amber-600"}`}>{reportMessage}</p>
+                )}
               </div>}
 
               {canVendorManage && <div id="meter-csv-upload-section" className="rounded-2xl border border-slate-100 bg-slate-50 p-4 space-y-3">
@@ -19093,15 +19573,27 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
 
   const getBidTenderStatus = (bid: TenderBid) => tenderDetails[bid.tender]?.status;
 
+  const evaluationAllowedStatuses = (bid: TenderBid) => {
+    const isStageOne = bid.stage_key !== "site_specific";
+    return isStageOne
+      ? [TenderStatus.PUBLISHED, TenderStatus.CLOSED, TenderStatus.EVALUATION]
+      : [TenderStatus.CLOSED, TenderStatus.EVALUATION];
+  };
+
   const canEvaluateBid = (bid: TenderBid) => {
     const status = getBidTenderStatus(bid);
-    return status === undefined || [TenderStatus.CLOSED, TenderStatus.EVALUATION].includes(status);
+    return status === undefined || evaluationAllowedStatuses(bid).includes(status);
   };
 
   const handleStartEvaluation = (bid: TenderBid) => {
     const status = getBidTenderStatus(bid);
-    if (status !== undefined && ![TenderStatus.CLOSED, TenderStatus.EVALUATION].includes(status)) {
-      showNotification(`Evaluation can only start when the tender status is Closed. This tender is ${status}.`);
+    if (status !== undefined && !evaluationAllowedStatuses(bid).includes(status)) {
+      const isStageOne = bid.stage_key !== "site_specific";
+      showNotification(
+        isStageOne
+          ? `Stage 1 evaluation requires the tender to be Published, Closed, or in Evaluation. This tender is ${status}.`
+          : `Evaluation can only start when the tender status is Closed. This tender is ${status}.`
+      );
       return;
     }
     const existing = roleScopedEvaluationsByBid.get(bid.id);
@@ -20110,9 +20602,9 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
                                 <button
                                   onClick={() => handleStartEvaluation(item)}
                                   disabled={!canEvaluateBid(item)}
-                                  title={canEvaluateBid(item) ? undefined : "Close the tender before starting evaluation"}
+                                  title={canEvaluateBid(item) ? undefined : "The tender must be Published, Closed, or in Evaluation before starting Stage 1 evaluation."}
                                   className="btn-primary py-1.5 px-4 text-sm disabled:opacity-40 disabled:cursor-not-allowed"
-                                >{!canEvaluateBid(item) ? "Tender must be Closed" : item.status === BidStatus.ACCEPTED ? "View" : "Review"}</button>
+                                >{!canEvaluateBid(item) ? "Tender must be Published" : item.status === BidStatus.ACCEPTED ? "View" : "Review"}</button>
                               </div>
                             </div>
                           )) : group.bids.map((item) => {
@@ -24189,7 +24681,16 @@ export default function App() {
             onNavigate={(action, id) => navigateTo("tenders", action, id)}
           />
         );
-        case "applications": return <PreQualificationSubmission />;
+        case "applications": return (
+          <VendorApplications
+            currentUser={currentUser}
+            onOpenBid={(bid) => {
+              setPendingBidTenderId(bid.tender);
+              setPendingBidId(bid.id);
+              navigateTo("dashboard", "bid", bid.tender);
+            }}
+          />
+        );
         case "my_bids": return (
           <VendorBids
             onOpenBid={(bid) => {

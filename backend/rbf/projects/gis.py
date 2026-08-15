@@ -1,5 +1,6 @@
 import json
 import math
+import re
 from pathlib import Path
 from typing import Any
 
@@ -67,7 +68,16 @@ class GpsValidator:
 
     @classmethod
     def _normalize_district_name(cls, value: str | None) -> str:
-        return ' '.join(str(value or '').strip().lower().replace('_', ' ').split())
+        normalized = str(value or '').strip().lower()
+        for curly, straight in (
+            ('’', "'"),
+            ('‘', "'"),
+            ('`', "'"),
+            ('\u2013', '-'),
+            ('\u2014', '-'),
+        ):
+            normalized = normalized.replace(curly, straight)
+        return ' '.join(normalized.replace('-', ' ').replace('_', ' ').split())
 
     @classmethod
     def _extract_district_name(cls, feature: dict[str, Any]) -> str | None:
@@ -100,10 +110,101 @@ class GpsValidator:
         return inside
 
     @classmethod
-    def isInsideLesotho(cls, latitude: float, longitude: float) -> bool:
+    def _point_segment_distance_meters(cls, px: float, py: float, ax: float, ay: float, bx: float, by: float) -> float:
+        dx = bx - ax
+        dy = by - ay
+        length_sq = dx * dx + dy * dy
+        if length_sq == 0:
+            return math.hypot(px - ax, py - ay)
+        t = ((px - ax) * dx + (py - ay) * dy) / length_sq
+        t = max(0.0, min(1.0, t))
+        return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+    @classmethod
+    def _distance_to_polygon_meters(cls, latitude: float, longitude: float, polygon: list[Any]) -> float:
+        if not polygon or not polygon[0]:
+            return float('inf')
+        lat0, lng0 = latitude, longitude
+        meters_per_deg_lat = 110574.0
+        meters_per_deg_lng = 111320.0 * math.cos(math.radians(lat0))
+
+        def project(lat: float, lng: float) -> tuple[float, float]:
+            return (lng - lng0) * meters_per_deg_lng, (lat - lat0) * meters_per_deg_lat
+
+        exterior = polygon[0]
+        inside = cls._point_in_ring(latitude, longitude, exterior)
+        if inside:
+            for hole in polygon[1:]:
+                if cls._point_in_ring(latitude, longitude, hole):
+                    inside = False
+                    break
+        if inside:
+            return 0.0
+
+        best = float('inf')
+        for ring in [exterior, *polygon[1:]]:
+            total = len(ring)
+            if total < 2:
+                continue
+            j = total - 1
+            for i in range(total):
+                ax, ay = project(ring[i][1], ring[i][0])
+                bx, by = project(ring[j][1], ring[j][0])
+                distance = cls._point_segment_distance_meters(0.0, 0.0, ax, ay, bx, by)
+                if distance < best:
+                    best = distance
+                j = i
+        return best
+
+    @classmethod
+    def _distance_to_geometry_meters(cls, latitude: float, longitude: float, geometry: dict[str, Any]) -> float:
+        coordinates = geometry.get('coordinates') or []
+        geometry_type = geometry.get('type')
+        polygons = coordinates if geometry_type == 'MultiPolygon' else [coordinates]
+        best = float('inf')
+        for polygon in polygons:
+            distance = cls._distance_to_polygon_meters(latitude, longitude, polygon)
+            if distance < best:
+                best = distance
+        return best
+
+    @classmethod
+    def distanceToAssignedDistrict(
+        cls,
+        latitude: float,
+        longitude: float,
+        district_label: str | None,
+    ) -> float | None:
+        parts = re.split(r'[,;|/&]|\band\b', str(district_label or ''), flags=re.IGNORECASE)
+        allowed = {
+            cls._normalize_district_name(part)
+            for part in parts
+            if cls._normalize_district_name(part)
+        }
+        best: float | None = None
+        for feature in cls._iter_features():
+            geometry = feature.get('geometry') or {}
+            district_name = cls._extract_district_name(feature)
+            if not district_name or cls._normalize_district_name(district_name) not in allowed:
+                continue
+            distance = cls._distance_to_geometry_meters(latitude, longitude, geometry)
+            if best is None or distance < best:
+                best = distance
+        return best
+
+    @classmethod
+    def isInsideLesotho(cls, latitude: float, longitude: float, tolerance_meters: float | None = None) -> bool:
         for feature in cls._iter_features():
             geometry = feature.get('geometry') or {}
             if cls._geometry_contains(latitude, longitude, geometry):
+                return True
+        if tolerance_meters is None:
+            tolerance_meters = float(getattr(settings, 'GPS_DISTRICT_TOLERANCE_METERS', 150))
+        for feature in cls._iter_features():
+            geometry = feature.get('geometry') or {}
+            if not geometry:
+                continue
+            if cls._distance_to_geometry_meters(latitude, longitude, geometry) <= tolerance_meters:
                 return True
         return False
 
@@ -124,16 +225,37 @@ class GpsValidator:
         return any(cls._extract_district_name(feature) for feature in cls._iter_features())
 
     @classmethod
-    def isInsideProjectDistrict(cls, latitude: float, longitude: float, district_label: str | None) -> bool:
-        matched_district = cls.resolveDistrictName(latitude, longitude)
-        if not matched_district:
-            return False
-        allowed = [
+    def isInsideProjectDistrict(
+        cls,
+        latitude: float,
+        longitude: float,
+        district_label: str | None,
+        tolerance_meters: float | None = None,
+    ) -> bool:
+        parts = re.split(r'[,;|/&]|\band\b', str(district_label or ''), flags=re.IGNORECASE)
+        allowed = {
             cls._normalize_district_name(part)
-            for part in str(district_label or '').split(',')
+            for part in parts
             if cls._normalize_district_name(part)
-        ]
-        return cls._normalize_district_name(matched_district) in allowed
+        }
+        if not allowed:
+            return False
+
+        matched_district = cls.resolveDistrictName(latitude, longitude)
+        if matched_district and cls._normalize_district_name(matched_district) in allowed:
+            return True
+
+        if tolerance_meters is None:
+            tolerance_meters = float(getattr(settings, 'GPS_DISTRICT_TOLERANCE_METERS', 150))
+        for feature in cls._iter_features():
+            geometry = feature.get('geometry') or {}
+            district_name = cls._extract_district_name(feature)
+            if not district_name or cls._normalize_district_name(district_name) not in allowed:
+                continue
+            distance = cls._distance_to_geometry_meters(latitude, longitude, geometry)
+            if distance <= tolerance_meters:
+                return True
+        return False
 
     @staticmethod
     def _haversine_distance_meters(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
