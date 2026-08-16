@@ -9,9 +9,11 @@ import {
   Eye,
   HelpCircle,
   History,
+  Info,
   Loader2,
   Mail,
   Map,
+  MapPin,
   Plus,
   RefreshCw,
   Save,
@@ -75,6 +77,25 @@ const DISTRICTS = [
   "Thaba-Tseka",
   "Butha-Buthe",
 ];
+
+const ADMIN_DISTRICT_REQUIRED_ROLES: ReadonlyArray<{ value: UserRole; label: string; reason: string; scope: "regional" | "national" }> = [
+  { value: UserRole.FIELD_VERIFIER, label: "Field Verifier", reason: "Verification tasks, installations and KPIs are scoped to assigned districts.", scope: "regional" },
+  { value: UserRole.DOE_OFFICER, label: "DoE Officer", reason: "Regional dashboard, map, vendor directory and KPI review are scoped to assigned districts.", scope: "regional" },
+  { value: UserRole.RBF_OFFICIAL, label: "RBF Management Team", reason: "National visibility — no district assignment needed.", scope: "national" },
+  { value: UserRole.TAC, label: "TAC Member", reason: "National visibility — no district assignment needed.", scope: "national" },
+  { value: UserRole.UNDP_DONOR, label: "Project Steering Committee", reason: "National visibility — no district assignment needed.", scope: "national" },
+  { value: UserRole.AUDITOR, label: "Auditor", reason: "National read-only visibility — no district assignment needed.", scope: "national" },
+];
+
+const getAdminRoleMeta = (roleValue?: string) => {
+  const match = ADMIN_DISTRICT_REQUIRED_ROLES.find((entry) => entry.value === roleValue);
+  return match ?? {
+    value: roleValue as UserRole,
+    label: roleValue ?? "",
+    reason: "",
+    scope: "national" as const,
+  };
+};
 
 const emptyUserForm = {
   fullName: "",
@@ -739,8 +760,55 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
 
       {section === "users" && (
         <div className="space-y-6">
-          {(userView === "create" || userView === "edit") && (
-            <div className="card p-6">
+          {(userView === "create" || userView === "edit") && (() => {
+            const userRoleMeta = getAdminRoleMeta(userForm.role);
+            const userDistrictRequired = userRoleMeta.scope === "regional";
+            const allRequiredRoles = ADMIN_DISTRICT_REQUIRED_ROLES.filter((entry) => entry.scope === "regional");
+            const allNationalRoles = ADMIN_DISTRICT_REQUIRED_ROLES.filter((entry) => entry.scope === "national");
+            return (
+            <>
+              <div className="rounded-2xl border border-blue-200 bg-blue-50/60 p-5">
+                <div className="flex items-start gap-3">
+                  <HelpCircle className="mt-0.5 h-5 w-5 flex-shrink-0 text-blue-600" />
+                  <div className="flex-1 space-y-3">
+                    <div>
+                      <p className="text-sm font-bold text-slate-900">Which roles need districts?</p>
+                      <p className="mt-1 text-xs text-slate-600">District assignment controls what data the user can see. Pick the role first, then assign districts based on the rule below.</p>
+                    </div>
+                    <div className="grid gap-2 md:grid-cols-2">
+                      <div className="rounded-xl border border-emerald-200 bg-white p-3">
+                        <div className="flex items-center gap-2">
+                          <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                          <p className="text-xs font-bold uppercase tracking-widest text-emerald-700">District required</p>
+                        </div>
+                        <ul className="mt-2 space-y-1 text-xs text-slate-700">
+                          {allRequiredRoles.map((entry) => (
+                            <li key={entry.value} className="flex items-start gap-2">
+                              <span className="mt-1.5 h-1.5 w-1.5 flex-shrink-0 rounded-full bg-emerald-500" />
+                              <span><span className="font-semibold">{entry.label}</span> — {entry.reason}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                      <div className="rounded-xl border border-slate-200 bg-white p-3">
+                        <div className="flex items-center gap-2">
+                          <ShieldCheck className="h-4 w-4 text-slate-600" />
+                          <p className="text-xs font-bold uppercase tracking-widest text-slate-700">National visibility</p>
+                        </div>
+                        <ul className="mt-2 space-y-1 text-xs text-slate-700">
+                          {allNationalRoles.map((entry) => (
+                            <li key={entry.value} className="flex items-start gap-2">
+                              <span className="mt-1.5 h-1.5 w-1.5 flex-shrink-0 rounded-full bg-slate-400" />
+                              <span><span className="font-semibold">{entry.label}</span> — {entry.reason}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div className="card p-6">
               <div className="mb-5 flex items-center gap-3">
                 <button onClick={() => { setUserView("list"); onNavigate?.("list"); }} className="rounded-lg p-2 text-slate-500 hover:bg-slate-100">
                   <ChevronRight className="rotate-180" size={18} />
@@ -753,46 +821,77 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
               <form onSubmit={saveUser} className="grid grid-cols-1 gap-4 md:grid-cols-2">
                 <input className="input-field" placeholder="Full Name *" value={userForm.fullName} onChange={(e) => setUserForm((prev) => ({ ...prev, fullName: e.target.value }))} />
                 <input className="input-field" placeholder="Email *" type="email" value={userForm.email} onChange={(e) => setUserForm((prev) => ({ ...prev, email: e.target.value }))} />
-                <select className="input-field" value={userForm.role} onChange={(e) => setUserForm((prev) => ({ ...prev, role: e.target.value }))}>
-                  {roleOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-                </select>
+                <div className="space-y-2">
+                  <select className="input-field" value={userForm.role} onChange={(e) => setUserForm((prev) => ({ ...prev, role: e.target.value }))}>
+                    {roleOptions.map((option) => {
+                      const meta = getAdminRoleMeta(option.value);
+                      const suffix = meta.scope === "regional" ? " — districts required" : " — national visibility";
+                      return <option key={option.value} value={option.value}>{option.label}{suffix}</option>;
+                    })}
+                  </select>
+                  {userRoleMeta.reason && (
+                    <div className={`flex items-start gap-2 rounded-lg border px-3 py-2 text-xs ${userDistrictRequired ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-slate-200 bg-slate-50 text-slate-700"}`}>
+                      {userDistrictRequired
+                        ? <MapPin className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-emerald-700" />
+                        : <ShieldCheck className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-slate-500" />}
+                      <span><span className="font-semibold">{userRoleMeta.label}:</span> {userRoleMeta.reason}</span>
+                    </div>
+                  )}
+                </div>
                 <select className="input-field" value={userForm.gender} onChange={(e) => setUserForm((prev) => ({ ...prev, gender: e.target.value as "Male" | "Female" | "Other" }))}>
                   <option value="Male">Male</option>
                   <option value="Female">Female</option>
                   <option value="Other">Other</option>
                 </select>
-                <div className="md:col-span-2 space-y-2">
-                  <label className="text-sm font-bold text-slate-700">Assigned Districts</label>
-                  <div className="flex flex-wrap gap-1.5">
-                    {DISTRICTS.map((district) => {
-                      const isSelected = userForm.districts.includes(district);
-                      return (
-                        <button
-                          key={district}
-                          type="button"
-                          onClick={() => {
-                            if (isSelected) {
-                              setUserForm((prev) => ({ ...prev, districts: prev.districts.filter((d) => d !== district) }));
-                            } else {
-                              setUserForm((prev) => ({ ...prev, districts: [...prev.districts, district] }));
-                            }
-                          }}
-                          className={`px-2 py-1 text-xs font-medium rounded border transition-colors ${
-                            isSelected
-                              ? "bg-emerald-100 border-emerald-300 text-emerald-700"
-                              : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50"
-                          }`}
-                        >
-                          {isSelected && <span className="mr-0.5">✓</span>}
-                          {district}
-                        </button>
-                      );
-                    })}
+                {userDistrictRequired && (
+                  <div className="md:col-span-2 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <label className="text-sm font-bold text-slate-700">
+                        Assigned Districts <span className="text-rose-600">*</span>
+                      </label>
+                      <span className="text-[11px] font-semibold uppercase tracking-widest text-emerald-700">
+                        {userForm.districts.length} selected
+                      </span>
+                    </div>
+                    <div className="rounded-xl border border-emerald-200 bg-emerald-50/60 p-3">
+                      <div className="flex flex-wrap gap-2">
+                        {DISTRICTS.map((district) => {
+                          const isSelected = userForm.districts.includes(district);
+                          return (
+                            <button
+                              key={district}
+                              type="button"
+                              onClick={() => {
+                                if (isSelected) {
+                                  setUserForm((prev) => ({ ...prev, districts: prev.districts.filter((d) => d !== district) }));
+                                } else {
+                                  setUserForm((prev) => ({ ...prev, districts: [...prev.districts, district] }));
+                                }
+                              }}
+                              className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${
+                                isSelected
+                                  ? "bg-emerald-600 border-emerald-600 text-white shadow-sm"
+                                  : "bg-white border-emerald-200 text-slate-700 hover:border-emerald-400 hover:bg-emerald-50"
+                              }`}
+                            >
+                              {isSelected && <span className="mr-1">✓</span>}
+                              {district}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-emerald-800">
+                        <Info className="h-3.5 w-3.5" />
+                        <span>Pick one or more districts. The user will only see projects, verifications and KPI data for these districts.</span>
+                        {userForm.districts.length > 0 && (
+                          <button type="button" onClick={() => setUserForm((prev) => ({ ...prev, districts: [] }))} className="ml-auto font-semibold text-emerald-700 hover:underline">
+                            Clear all
+                          </button>
+                        )}
+                      </div>
+                    </div>
                   </div>
-                  {userForm.districts.length > 0 && (
-                    <p className="text-xs text-slate-500">Selected: {userForm.districts.join(", ")}</p>
-                  )}
-                </div>
+                )}
                 {userView === "edit" && (
                   <select className="input-field" value={userForm.isActive ? "active" : "inactive"} onChange={(e) => setUserForm((prev) => ({ ...prev, isActive: e.target.value === "active" }))}>
                     <option value="active">Active</option>
@@ -808,7 +907,9 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
                 </div>
               </form>
             </div>
-          )}
+            </>
+            );
+          })()}
 
           {userView === "detail" && selectedUser && (
             <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
@@ -924,12 +1025,45 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
                       {!usersLoading && visibleUsers.length === 0 && (
                         <tr><td colSpan={7} className="px-6 py-10 text-center text-slate-500">No users matched the selected filters.</td></tr>
                       )}
-                      {!usersLoading && visibleUsers.map((user) => (
+                      {!usersLoading && visibleUsers.map((user) => {
+                        const userRoleMeta = getAdminRoleMeta(user.role);
+                        const userDistricts = (user.districts && user.districts.length > 0)
+                          ? user.districts
+                          : (user.district || user.region ? [user.district || user.region] : []);
+                        const missingDistricts = userRoleMeta.scope === "regional" && userDistricts.length === 0;
+                        return (
                         <tr key={user.id} className="hover:bg-slate-50">
                           <td className="px-6 py-4 font-semibold text-slate-900">{user.fullName}</td>
                           <td className="px-6 py-4 text-sm text-slate-600">{user.email}</td>
-                          <td className="px-6 py-4 text-sm text-slate-600">{user.roleLabel || user.role}</td>
-                          <td className="px-6 py-4 text-sm text-slate-600">{user.districts && user.districts.length > 0 ? user.districts.join(", ") : (user.district || user.region || "—")}</td>
+                          <td className="px-6 py-4">
+                            <span className={`rounded px-2 py-1 text-xs font-medium ${userRoleMeta.scope === "regional" ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-600"}`}>
+                              {user.roleLabel || user.role}
+                            </span>
+                          </td>
+                          <td className="px-6 py-4">
+                            {userDistricts.length > 0 ? (
+                              <div className="flex flex-wrap gap-1">
+                                {userDistricts.map((district) => (
+                                  <span key={district} className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-semibold ${userRoleMeta.scope === "regional" ? "bg-emerald-50 text-emerald-800 border border-emerald-200" : "bg-slate-100 text-slate-700 border border-slate-200"}`}>
+                                    <MapPin className="h-3 w-3" />
+                                    {district}
+                                  </span>
+                                ))}
+                              </div>
+                            ) : (
+                              <span className="text-sm text-slate-400">—</span>
+                            )}
+                            {missingDistricts && (
+                              <button
+                                onClick={() => { onNavigate?.("edit", user.id); void openUserDetail(user.id, "edit"); }}
+                                className="mt-1 inline-flex items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-800 hover:bg-amber-100"
+                                title="This role requires district assignment. Click to fix."
+                              >
+                                <AlertTriangle className="h-3 w-3" />
+                                Needs district
+                              </button>
+                            )}
+                          </td>
                           <td className="px-6 py-4"><span className={`rounded-full px-2 py-1 text-[10px] font-bold ${(user.isActive !== false && user.status !== "Inactive") ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-600"}`}>{(user.isActive !== false && user.status !== "Inactive") ? "Active" : "Inactive"}</span></td>
                           <td className="px-6 py-4 text-sm text-slate-500">{formatDateTime(user.lastLogin)}</td>
                           <td className="px-6 py-4">
@@ -940,7 +1074,8 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
                             </div>
                           </td>
                         </tr>
-                      ))}
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
