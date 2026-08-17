@@ -227,6 +227,8 @@ import {
   uploadProjectMeterCsv,
   API_BASE,
   USER_KEY,
+  getSessionExpiredMessage,
+  clearSessionExpiredMessage,
 } from "./api";
 import GisInstallationsMap from "./components/GisInstallationsMap";
 import KpiDashboard from "./components/KpiDashboard";
@@ -441,6 +443,14 @@ const isConnectivityError = (raw: string) => {
   );
 };
 
+const isNotificationError = (msg: string) => {
+  const lower = msg.toLowerCase();
+  if (lower.includes("session expired") || lower.includes("session has expired")) return true;
+  if (lower.startsWith("failed to ") || lower.startsWith("cannot ")) return true;
+  if (lower.includes(" not valid") || lower.includes(" permission")) return true;
+  return false;
+};
+
 const isServerError = (err: any) =>
   Number(err?.status) >= 500 || /^HTTP (5\d\d) /.test(String(err?.message || ""));
 
@@ -543,11 +553,13 @@ const Login = ({
   onRegisterClick,
   onViewPublic,
   infoMessage,
+  sessionExpiredMessage,
 }: {
   onLogin: (username: string, password: string) => Promise<void>;
   onRegisterClick: () => void;
   onViewPublic: () => void;
   infoMessage?: string | null;
+  sessionExpiredMessage?: string | null;
 }) => {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -609,6 +621,13 @@ const Login = ({
           {infoMessage && (
             <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs font-medium text-emerald-700">
               {infoMessage}
+            </div>
+          )}
+
+          {sessionExpiredMessage && (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs font-medium text-amber-700 flex items-start gap-2">
+              <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+              <span>{sessionExpiredMessage}</span>
             </div>
           )}
 
@@ -1868,9 +1887,13 @@ const Tenders = ({
           initial={{ opacity: 0, y: -20 }}
           animate={{ opacity: 1, y: 0 }}
           exit={{ opacity: 0, y: -20 }}
-          className="fixed top-24 right-8 z-[200] bg-emerald-600 text-white px-6 py-3 rounded-xl shadow-xl flex items-center gap-3"
+          className={`fixed top-24 right-8 z-[200] px-6 py-3 rounded-xl shadow-xl flex items-center gap-3 ${
+            isNotificationError(notification)
+              ? "bg-red-600 text-white"
+              : "bg-emerald-600 text-white"
+          }`}
         >
-          <CheckCircle2 size={20} />
+          {isNotificationError(notification) ? <AlertTriangle size={20} /> : <CheckCircle2 size={20} />}
           <span className="font-medium">{notification}</span>
         </motion.div>
       )}
@@ -24771,6 +24794,7 @@ export default function App() {
   const seenNotificationIdsRef = React.useRef<Set<string>>(new Set());
   const initialNotificationsLoadedRef = React.useRef(false);
   const [authMessage, setAuthMessage] = useState<string | null>(null);
+  const [sessionExpiredMessage, setSessionExpiredMessage] = useState<string | null>(null);
   const [fieldVerifierInspectionBadge, setFieldVerifierInspectionBadge] = useState<string | undefined>(undefined);
   const [viewingVendorProfile, setViewingVendorProfile] = useState<string | null>(null);
   const [showDoeConcernModal, setShowDoeConcernModal] = useState(false);
@@ -24926,15 +24950,36 @@ export default function App() {
   }, [loadNotifications]);
 
   React.useEffect(() => {
+    const handler = (event: Event) => {
+      const customEvent = event as CustomEvent<{ message?: string }>;
+      const message = customEvent.detail?.message || "Your session has expired. Please log in again to continue.";
+      setCurrentUser(null);
+      setSessionExpiredMessage(message);
+      setAuthView("login");
+    };
+    window.addEventListener("rbf-session-expired", handler);
+    return () => window.removeEventListener("rbf-session-expired", handler);
+  }, []);
+
+  React.useEffect(() => {
     const cachedUser = getStoredUser();
+    const expiredMsg = getSessionExpiredMessage();
+    if (expiredMsg) {
+      setSessionExpiredMessage(expiredMsg);
+      clearSessionExpiredMessage();
+    }
     if (!cachedUser) return;
 
     setCurrentUser(cachedUser);
     fetchCurrentUser()
       .then(setCurrentUser)
-      .catch(() => {
+      .catch((err: any) => {
+        if (err?.isSessionExpired) {
+          return;
+        }
         logoutUser();
         setCurrentUser(null);
+        setSessionExpiredMessage("Your session has expired. Please log in again to continue.");
       });
   }, []);
 
@@ -25006,6 +25051,8 @@ export default function App() {
     const { user } = await loginUser(username, password);
     setCurrentUser(user);
     setAuthMessage(null);
+    setSessionExpiredMessage(null);
+    clearSessionExpiredMessage();
     navigateTo("dashboard");
   };
 
@@ -25013,6 +25060,8 @@ export default function App() {
     logoutUser();
     setCurrentUser(null);
     setAuthView("login");
+    setSessionExpiredMessage(null);
+    clearSessionExpiredMessage();
     setShowNotifications(false);
     setShowUserMenu(false);
     setShowUserManual(false);
@@ -25184,11 +25233,13 @@ export default function App() {
         onLogin={handleLogin} 
         onRegisterClick={() => {
           setAuthMessage(null);
+          setSessionExpiredMessage(null);
           setAuthView("register");
           window.history.replaceState({ __app: "rbf-spa" }, "", "/register");
         }} 
         onViewPublic={() => { setShowPublicPortal(true); window.history.pushState({ __app: "rbf-spa", showPublicPortal: true }, "", "/public"); }}
         infoMessage={authMessage}
+        sessionExpiredMessage={sessionExpiredMessage}
       />
     ) : (
       <Register onBackToLogin={() => { setAuthView("login"); window.history.replaceState({ __app: "rbf-spa" }, "", "/login"); }} onRegisterSuccess={handleRegisterSuccess} />

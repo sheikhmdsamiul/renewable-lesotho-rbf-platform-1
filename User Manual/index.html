@@ -2502,6 +2502,91 @@
     (default 50m), an anomaly flag is raised, which may delay milestone payments.
   </div>
 
+  <h3>6.5.1 Meter Data Upload (CSV)</h3>
+  <p>
+    Once installations are submitted and meters are deployed, vendors must regularly upload
+    <strong>smart meter readings</strong> to the platform. This data is the primary evidence used
+    to verify that systems are operating correctly and producing energy as expected.
+  </p>
+
+  <h4>Why the CSV Upload is Required</h4>
+  <ul>
+    <li><strong>Sustained Operation Evidence</strong> &mdash; Meter readings prove that the installed
+      systems continue to generate energy over time, which is required for <strong>Milestone 2 (80%
+      Implementation)</strong> and <strong>Milestone 3 (Final)</strong> payments.</li>
+    <li><strong>Anomaly Detection</strong> &mdash; The platform automatically checks every uploaded
+      reading for anomalies such as zero uptime, sudden output drops, or missing data. These checks
+      protect the integrity of the RBF programme.</li>
+    <li><strong>KPI Calculation</strong> &mdash; Aggregated meter data feeds the project KPI dashboard,
+      which determines milestone eligibility.</li>
+    <li><strong>Audit Trail</strong> &mdash; Every reading is timestamped and linked to a specific
+      meter and project, creating an immutable record for auditors and donors.</li>
+  </ul>
+
+  <h4>When to Upload</h4>
+  <ul>
+    <li><strong>Weekly or more frequently</strong> &mdash; Upload meter readings at least once per
+      week to ensure no installation is flagged for missing data.</li>
+    <li><strong>Within 48 hours of recording</strong> &mdash; Readings older than 48 hours may still
+      be accepted, but consistent timely uploads prevent <code>no_data</code> anomaly flags.</li>
+    <li><strong>After any meter reset or replacement</strong> &mdash; If a meter is replaced, upload
+      the final reading from the old meter and the first reading from the new meter in the same
+      batch.</li>
+    <li><strong>Before submitting a milestone claim</strong> &mdash; Ensure all recent readings are
+      uploaded so that anomaly checks do not block your payment.</li>
+  </ul>
+
+  <div class="callout callout-warning">
+    <strong>Critical:</strong> If a meter sends <strong>no reading for more than 48 hours</strong>,
+    the system automatically raises a <code>no_data</code> anomaly flag. While this flag does not
+    block Milestone 2, it <strong>does block Milestone 3</strong>. Maintain a consistent upload
+    schedule.
+  </div>
+
+  <h4>How to Upload (Correct Procedure)</h4>
+  <ol>
+    <li>Navigate to the project detail page and click the <strong>&ldquo;Device Readings&rdquo;</strong>
+      tab.</li>
+    <li>Click <strong>&ldquo;Upload Meter CSV&rdquo;</strong> or
+      <strong>&ldquo;Bulk Upload Meter Readings&rdquo;</strong>.</li>
+    <li>Prepare your CSV file with the following columns (one row per meter per reporting period):
+      <table>
+        <thead>
+          <tr><th>Column</th><th>Required?</th><th>Format / Example</th><th>Notes</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>meter_id</code></td><td>Yes</td><td>Text, e.g. <code>MTR-2025-001</code></td><td>Must match the Meter ID recorded in the installation report.</td></tr>
+          <tr><td><code>recorded_at</code></td><td>Yes</td><td>ISO 8601 timestamp, e.g. <code>2025-08-15T08:00:00Z</code></td><td>When the reading was taken. Cannot be in the future.</td></tr>
+          <tr><td><code>kwh</code></td><td>Yes</td><td>Decimal, e.g. <code>12.450</code></td><td>Cumulative energy produced since installation (kWh). Should be greater than the previous reading.</td></tr>
+          <tr><td><code>uptime_pct</code></td><td>Yes</td><td>Decimal 0&ndash;100, e.g. <code>98.5</code></td><td>Percentage of time the meter was operational. A value of <code>0</code> will raise a <code>zero_uptime</code> anomaly.</td></tr>
+        </tbody>
+      </table>
+    </li>
+    <li>Ensure the file uses <strong>UTF-8 encoding</strong> and a <strong>comma (,) delimiter</strong>.</li>
+    <li>The file size limit is <strong>10 MB</strong>. For larger datasets, split into multiple files.</li>
+    <li>Click <strong>&ldquo;Upload&rdquo;</strong>. The system will process each row and display:
+      <ul>
+        <li>The number of successful readings imported.</li>
+        <li>Any invalid rows (with row number and reason for rejection).</li>
+        <li>Any anomaly flags created (with type and affected meter).</li>
+      </ul>
+    </li>
+    <li>Review the upload summary carefully. Invalid rows are <strong>not saved</strong> &mdash; correct
+      them and re-upload.</li>
+  </ol>
+
+  <div class="tip">
+    <strong>Tip:</strong> Before uploading a large batch, test with a small CSV (5&ndash;10 rows)
+    to confirm your format is correct. Once you see &ldquo;0 invalid rows&rdquo;, proceed with
+    the full upload.
+  </div>
+
+  <div class="tip">
+    <strong>Tip:</strong> To avoid <code>output_deviation</code> anomalies, upload readings in
+    chronological order and ensure each new <code>kwh</code> value is greater than the previous.
+    Sudden jumps greater than <strong>5%</strong> from the prior reading will be flagged.
+  </div>
+
   <h3>6.6 Milestones &amp; Progress</h3>
   <p>Each project is assigned a <strong>Milestone Plan</strong> during project creation. The standard plan has three milestones based on the PBA disbursement schedule:</p>
 
@@ -2762,28 +2847,324 @@
   </table>
 
   <h3>6.8 GPS &amp; Anomaly Detection</h3>
-  <p>The platform automatically performs checks during verification:</p>
+  <p>The platform automatically performs checks during installation submission, field verification, and meter data uploads. When a check fails, an <strong>Anomaly Flag</strong> is created on the installation. Unresolved flags of certain types block milestone payments.</p>
 
   <h4>GPS Duplicate Detection</h4>
   <p>
-    Checks whether vendor-submitted GPS coordinates are within the <strong>GPS Duplicate Radius</strong>
-    (configurable, default 10m) of any other installation by the same vendor. If found, an anomaly
-    flag is raised with type <strong>&ldquo;GPS Location Fraud&rdquo;</strong>.
+    When a vendor submits an installation report, the system checks whether the submitted GPS
+    coordinates are within the <strong>GPS Duplicate Radius</strong> (configurable, default 10m)
+    of any other installation in the same project. If found, an anomaly flag of type
+    <code>duplicate_gps</code> is raised. <em>This flag does not block milestone payments</em>
+    &mdash; it is informational only and helps RMT investigate potential location fraud.
   </p>
 
   <h4>Verification Distance Check</h4>
   <p>
-    Measures distance between vendor coordinates and verifier coordinates. If it exceeds
-    <strong>GPS Verification Max Distance</strong> (configurable, default 50m), the verification
-    is flagged as anomalous.
+    During field verification, the system measures the distance between the vendor&rsquo;s reported
+    GPS and the verifier&rsquo;s on-site GPS using the Haversine formula. If the distance exceeds
+    the <strong>GPS Verification Max Distance</strong> (configurable, default 50m), the system
+    forces a <code>location_mismatch</code> flag even if the verifier manually selected
+    &ldquo;Verified&rdquo;. If the verifier flags the outcome for a different reason but distance
+    was a factor, a <code>verification_distance</code> flag is created instead. Both types block
+    <strong>Milestone 3</strong> if unresolved.
   </p>
 
-  <h4>Anomaly Flags</h4>
+  <h4>Meter Data Anomalies (CSV Upload)</h4>
+  <p>Every row in a meter CSV upload is automatically checked. The three anomaly types are:</p>
+
+  <h4>Why Anomalies Are Raised</h4>
   <p>
-    Anomaly flags are auto-created with flag type, description, status (Resolved/Unresolved),
-    and linked installation. RMT reviews and resolves or escalates flags. Unresolved flags can
-    block milestone progression and payment claims.
+    Anomalies are not punishments &mdash; they are <strong>automatic integrity checks</strong>
+    built into the platform to protect the RBF programme, its funders, and its beneficiaries.
+    Every anomaly flag exists because it answers one of four fundamental questions:
   </p>
+
+  <table>
+    <thead>
+      <tr><th>Question</th><th>Purpose</th><th>What Could Go Wrong Without It</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>&ldquo;Is the system actually running?&rdquo;</strong></td>
+        <td>Confirms that installed devices are operational and producing energy in the real world,
+            not just on paper.</td>
+        <td>Vendors could claim payment for non-functioning or abandoned installations, wasting
+            programme funds and leaving beneficiaries without power.</td>
+      </tr>
+      <tr>
+        <td><strong>&ldquo;Is the reported output plausible?&rdquo;</strong></td>
+        <td>Detects fabricated, inflated, or erroneous meter data that does not match the physical
+            reality of the installation.</td>
+        <td>Inflated kWh readings could unlock larger payouts than warranted. Erroneous data could
+            corrupt KPI reporting to donors and government partners.</td>
+      </tr>
+      <tr>
+        <td><strong>&ldquo;Is data being submitted regularly?&rdquo;</strong></td>
+        <td>Ensures ongoing engagement from the vendor and continuous evidence of operation.</td>
+        <td>A vendor could install devices and disappear, leaving no trail of whether systems
+            continue to serve beneficiaries.</td>
+      </tr>
+      <tr>
+        <td><strong>&ldquo;Is the installation where it claims to be?&rdquo;</strong></td>
+        <td>Prevents location fraud and ensures installations serve the intended communities.</td>
+        <td>Installations could be duplicated, moved, or placed in ineligible locations &mdash;
+            diverting programme benefits from vulnerable populations.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    These checks run automatically so that RMT and oversight bodies do not have to manually review
+    every reading. Anomalies surface problems that need human judgement, while routine data passes
+    through without friction.
+  </p>
+
+  <div class="callout callout-info">
+    <strong>Programme integrity principle:</strong> Results-Based Financing pays for
+    <em>verified outcomes</em>, not promises. Anomaly detection ensures that every dollar
+    disbursed is backed by evidence that the intended benefit &mdash; clean energy access for
+    Lesotho households &mdash; is actually being delivered.
+  </div>
+
+  <h4>What Each CSV Anomaly Means and Why It Triggers</h4>
+
+  <table>
+    <thead>
+      <tr><th>Anomaly Type</th><th>Trigger Condition</th><th>Why This Triggers</th><th>Blocks M2?</th><th>Blocks M3?</th><th>Typical Cause</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>zero_uptime</code></td>
+        <td>The <code>uptime_pct</code> field in the CSV row equals exactly <code>0</code>.</td>
+        <td>A device reporting 0% uptime is not generating energy. Since RBF pays for
+            <em>delivered</em> energy access, a non-operational meter cannot justify continued
+            milestone payments.</td>
+        <td><span class="badge badge-red">Yes</span></td>
+        <td><span class="badge badge-red">Yes</span></td>
+        <td>Meter is offline, faulty, or not yet commissioned. Investigate hardware immediately.</td>
+      </tr>
+      <tr>
+        <td><code>output_deviation</code></td>
+        <td>The new <code>kwh</code> value deviates by more than <strong>5%</strong> from the
+            most recent prior reading for the same meter (only when previous kWh &gt; 0).</td>
+        <td>Solar output is stable day-to-day for a working system. A sudden jump above 5%
+            almost always indicates either a meter reset, a hardware fault, or a data entry
+            error &mdash; any of which would distort KPI calculations and inflate payouts.</td>
+        <td><span class="badge badge-red">Yes</span></td>
+        <td><span class="badge badge-red">Yes</span></td>
+        <td>Meter malfunction, faulty wiring, data entry error, or meter replacement without proper handover.</td>
+      </tr>
+      <tr>
+        <td><code>no_data</code></td>
+        <td>After processing the CSV, any meter belonging to the vendor has no reading in the
+            last <strong>48 hours</strong>.</td>
+        <td>Silenced devices cannot be verified as operational. The 48-hour window balances
+            real-world connectivity gaps with the need for continuous evidence of service
+            delivery to beneficiaries.</td>
+        <td><span class="badge badge-green">No</span></td>
+        <td><span class="badge badge-red">Yes</span></td>
+        <td>Missed upload schedule, meter communication failure, or vendor inactivity.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-warning">
+    <strong>Why the 5% threshold?</strong> Small day-to-day variations in solar output are normal
+    (cloudy days, seasonal changes). A jump above 5% typically indicates either a real hardware
+    issue or a data error. The threshold prevents false positives while still catching genuine
+    anomalies.
+  </div>
+
+  <h4>Anomaly Flag Lifecycle</h4>
+  <ol>
+    <li><strong>Auto-creation</strong> &mdash; A flag is created when a trigger condition is met.
+      The flag includes a human-readable description (e.g., &ldquo;Meter MTR-001 deviated by 12.3%
+      from the previous uploaded reading.&rdquo;).</li>
+    <li><strong>De-duplication</strong> &mdash; If an unresolved flag of the same type already
+      exists for the same installation, the description is updated in place rather than creating
+      a duplicate.</li>
+    <li><strong>Notification</strong> &mdash; Both the vendor and oversight users (RMT, Admin,
+      DoE Officer) receive an in-app notification when new flags are created.</li>
+    <li><strong>GIS Impact</strong> &mdash; Any unresolved flag except <code>duplicate_gps</code>
+      turns the installation <strong>RED</strong> on the GIS map, signalling risk.</li>
+    <li><strong>Milestone Blocking</strong> &mdash; <code>zero_uptime</code> and
+      <code>output_deviation</code> block <strong>Milestone 2</strong>. All flag types block
+      <strong>Milestone 3</strong> if unresolved.</li>
+    <li><strong>Resolution</strong> &mdash; RMT (or Admin/DoE/Field Verifier) reviews the flag,
+      cross-references with meter history, field verification records, and photos, then marks it
+      as resolved.</li>
+  </ol>
+
+  <h3>6.8.1 How Anomalies Are Resolved (By Type)</h3>
+  <p>
+    Different anomaly types require different resolution paths. The table below summarises what
+    RMT should check before clicking <strong>&ldquo;Resolve&rdquo;</strong>:
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Flag Type</th><th>Resolution Path</th><th>Auto-Resolved?</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>duplicate_gps</code></td>
+        <td>RMT confirms whether two installations truly exist at the same coordinates (e.g., multi-unit
+            building). Resolved manually if legitimate.</td>
+        <td>No</td>
+      </tr>
+      <tr>
+        <td><code>location_mismatch</code> / <code>verification_distance</code></td>
+        <td>RMT reviews the verifier&rsquo;s GPS, the distance calculated, site photos, and observation
+            notes. If a subsequent verification passes (distance &le; 50m), the flag is
+            <strong>auto-resolved</strong> by the system.</td>
+        <td>Yes &mdash; when the installation is re-verified successfully</td>
+      </tr>
+      <tr>
+        <td><code>zero_uptime</code></td>
+        <td>RMT checks the installation record: is the meter online? Was the device replaced? Did
+            the vendor submit an incorrect uptime value? Coordinates with the vendor, then resolves
+            once the next CSV upload shows non-zero uptime.</td>
+        <td>No</td>
+      </tr>
+      <tr>
+        <td><code>output_deviation</code></td>
+        <td>RMT reviews the <code>SmartMeterReading</code> history for the meter &mdash; comparing the
+            flagged reading against the previous one. Determines whether the deviation is legitimate
+            (e.g., new equipment, seasonal effect) or a data error. If legitimate, resolves. If
+            erroneous, asks the vendor to correct and re-upload.</td>
+        <td>No</td>
+      </tr>
+      <tr>
+        <td><code>no_data</code></td>
+        <td>RMT confirms whether the vendor simply missed an upload or whether the meter is
+            genuinely offline. If the next successful upload arrives, RMT resolves the flag.</td>
+        <td>No</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="tip">
+    <strong>Best practice for RMT:</strong> Before resolving any flag, always cross-reference the
+    <strong>Anomaly Flags</strong> tab with the <strong>Field Verification</strong> record and
+    <strong>Device Readings</strong> history. A flag that looks like an error may actually reflect
+    a legitimate operational event.
+  </div>
+
+  <h3>6.8.2 Reaching Milestone 2 and Milestone 3 Payments</h3>
+  <p>
+    Milestones 2 and 3 are <strong>conditional</strong> &mdash; they unlock only when the project
+    meets a set of measurable criteria. Vendors who understand these conditions early can plan
+    their installation and verification schedules to avoid delays.
+  </p>
+
+  <h4>Milestone 2 (50% &mdash; 80% Implementation)</h4>
+  <p><strong>All four conditions must be met simultaneously:</strong></p>
+  <table>
+    <thead>
+      <tr><th>#</th><th>Condition</th><th>What It Means in Practice</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>1</td>
+        <td><strong>80% of installations field-verified</strong></td>
+        <td>At least 80% of your submitted installation reports must have a verification outcome
+            of <code>Verified</code>. Partial or Flagged outcomes do not count.</td>
+      </tr>
+      <tr>
+        <td>2</td>
+        <td><strong>Female-headed household target met (50%)</strong></td>
+        <td>At least 50% of verified installations must be classified as female-headed households.</td>
+      </tr>
+      <tr>
+        <td>3</td>
+        <td><strong>No unresolved blocking anomaly flags</strong></td>
+        <td>All flags of type <code>zero_uptime</code> and <code>output_deviation</code> must be
+            resolved by RMT. <code>no_data</code> flags do not block M2 but should still be addressed.</td>
+      </tr>
+      <tr>
+        <td>4</td>
+        <td><strong>Meter data present</strong></td>
+        <td>At least one valid meter reading must exist for the project (proves the meter
+            infrastructure is operational).</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h4>Milestone 3 (30% &mdash; Final)</h4>
+  <p><strong>All six conditions must be met simultaneously:</strong></p>
+  <table>
+    <thead>
+      <tr><th>#</th><th>Condition</th><th>What It Means in Practice</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>1</td>
+        <td><strong>100% of installations field-verified</strong></td>
+        <td>Every installation report must have a verification outcome of <code>Verified</code>.</td>
+      </tr>
+      <tr>
+        <td>2</td>
+        <td><strong>Female-headed household target met (50%)</strong></td>
+        <td>Same as M2.</td>
+      </tr>
+      <tr>
+        <td>3</td>
+        <td><strong>Vulnerable group target met (30%)</strong></td>
+        <td>At least 30% of verified installations must be classified as vulnerable households.</td>
+      </tr>
+      <tr>
+        <td>4</td>
+        <td><strong>Low-income target met (60%)</strong></td>
+        <td>At least 60% of verified installations must be classified as low-income households.</td>
+      </tr>
+      <tr>
+        <td>5</td>
+        <td><strong>All anomaly flags resolved</strong></td>
+        <td>Every anomaly flag of <em>any</em> type &mdash; including <code>no_data</code>,
+            <code>duplicate_gps</code>, <code>location_mismatch</code> &mdash; must be resolved.
+            This is stricter than M2.</td>
+      </tr>
+      <tr>
+        <td>6</td>
+        <td><strong>Milestone 2 paid</strong></td>
+        <td>M2 must have been fully disbursed before M3 can be claimed.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h4>Vendor Checklist for Reaching M2 and M3</h4>
+  <ol>
+    <li><strong>Upload meter readings on schedule</strong> &mdash; At least weekly, always within
+      48 hours of recording. Prevents <code>no_data</code> flags.</li>
+    <li><strong>Maintain uptime above 0%</strong> &mdash; If a meter is offline, coordinate with
+      your technical team immediately and upload a corrected reading once the meter is back online.</li>
+    <li><strong>Avoid sudden output jumps</strong> &mdash; If a reading deviates more than 5% from
+      the previous one, verify the data before uploading. Correct erroneous values in the next
+      upload rather than submitting a spike.</li>
+    <li><strong>Submit complete and accurate installation reports</strong> &mdash; Correct household
+      type classification (female-headed, vulnerable, low-income) is essential for meeting
+      inclusion targets.</li>
+    <li><strong>Ensure GPS accuracy at submission time</strong> &mdash; Stand at the actual
+      installation site when capturing GPS. A 50m error triggers a <code>location_mismatch</code>
+      flag and may require a re-verification visit.</li>
+    <li><strong>Respond promptly to anomaly notifications</strong> &mdash; When notified of an
+      anomaly, investigate and either correct the data or provide context to RMT. RMT cannot
+      resolve flags without vendor cooperation.</li>
+    <li><strong>Track progress on the KPI Dashboard</strong> &mdash; The
+      <strong>&ldquo;Milestone Eligibility&rdquo;</strong> panel shows which conditions are met
+      (green check) and which still need work (amber/red). Check it regularly.</li>
+    <li><strong>Do not let the project stall</strong> &mdash; A halted project (due to unresolved
+      flags or compliance issues) cannot claim milestones until reactivated.</li>
+  </ol>
+
+  <div class="callout callout-info">
+    <strong>How to read the KPI Dashboard:</strong> On the project detail page, open the
+    <strong>&ldquo;KPI&rdquo;</strong> tab. Under <strong>&ldquo;Milestone Eligibility&rdquo;</strong>,
+    each condition is labelled (e.g., &ldquo;installations_80_pct&rdquo;, &ldquo;female_pct_50&rdquo;,
+    &ldquo;no_blocking_anomaly_flags&rdquo;, &ldquo;all_anomaly_flags_resolved&rdquo;). A green
+    indicator means the condition is met; red means it is not. Work through the unmet conditions
+    before submitting your claim.
+  </div>
 
   <h3>6.9 RMT: Managing Verification Outcomes</h3>
   <p>After a verification report is submitted:</p>
@@ -3471,21 +3852,271 @@
   <!-- ============================================================ -->
   <h2 id="blacklist">14. Blacklisting</h2>
   <p>
-    The blacklisting module manages vendor suspensions and exclusions. The workflow:
+    The blacklisting module protects the integrity of the Renewable Lesotho RBF Programme. It is
+    used to suspend or exclude vendors who violate programme rules, engage in fraud, or fail to
+    deliver on their contractual obligations. This section explains <em>why</em> and <em>how</em>
+    vendors are blacklisted, what the consequences are, and how a vendor can apply to be removed
+    from the blacklist.
   </p>
+
+  <h3>14.1 Why Vendors Get Blacklisted</h3>
+  <p>
+    Blacklisting is not a first-line enforcement tool. It is reserved for serious or repeated
+    violations that compromise the programme&rsquo;s integrity, its beneficiaries, or its funders.
+    The platform supports two enforcement tiers before blacklisting is considered:
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Severity</th><th>Status</th><th>Effect</th><th>Reversible?</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Tier 1 &mdash; Minor issues</strong></td>
+        <td><strong>Active</strong></td>
+        <td>Normal operations. Vendor can bid, install, verify, and claim.</td>
+        <td>N/A</td>
+      </tr>
+      <tr>
+        <td><strong>Tier 2 &mdash; Under review / compliance issue</strong></td>
+        <td><strong>Suspended</strong></td>
+        <td>Field verification and new bid submissions are paused. Vendor cannot sign new contracts
+            but can still respond to existing case communications.</td>
+        <td>Yes &mdash; RMT can lift the suspension once the issue is resolved.</td>
+      </tr>
+      <tr>
+        <td><strong>Tier 3 &mdash; Serious or repeated violation</strong></td>
+        <td><strong>Blacklisted</strong></td>
+        <td>Vendor is excluded from bidding on tenders, signing contracts, receiving payments,
+            and all active projects are halted.</td>
+        <td>Only through a successful appeal or natural expiry of a temporary blacklist.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>A blacklist case is initiated when any of the following trigger conditions are observed:</p>
+
+  <h4>A. Fraud or Misrepresentation</h4>
+  <ul>
+    <li>Submitting fabricated installation reports, beneficiary data, or meter readings.</li>
+    <li>Falsifying GPS coordinates (e.g., placing multiple installations at the same GPS point to
+        inflate completion numbers &mdash; the <code>duplicate_gps</code> anomaly flag is one
+        signal).</li>
+    <li>Submitting claims for work that was not performed, or for systems that are not operational.</li>
+    <li>Falsifying pre-qualification documents (company registration, tax clearance, certifications).</li>
+  </ul>
+
+  <h4>B. Contractual Non-Performance</h4>
+  <ul>
+    <li>Failure to deliver installations within the agreed timeline without valid justification.</li>
+    <li>Abandoning an awarded project mid-implementation.</li>
+    <li>Refusing to cooperate with field verification, anomaly resolution, or RMT requests for
+        information.</li>
+  </ul>
+
+  <h4>C. Quality or Safety Failures</h4>
+  <ul>
+    <li>Installing substandard or counterfeit equipment that does not meet the agreed technical
+        specifications.</li>
+    <li>Repeated unresolved anomaly flags indicating systematic hardware or data issues
+        (e.g., persistent <code>zero_uptime</code> or <code>output_deviation</code> flags across
+        many meters).</li>
+    <li>Endangering beneficiary safety through improper installation practices.</li>
+  </ul>
+
+  <h4>D. Compliance Violations</h4>
+  <ul>
+    <li>Breach of the code of conduct (e.g., soliciting bribes, discriminatory beneficiary
+        selection).</li>
+    <li>Violation of procurement rules (collusion with other bidders, bid rigging).</li>
+    <li>Criminal conviction related to fraud, corruption, or similar offences.</li>
+  </ul>
+
+  <div class="callout callout-info">
+    <strong>Important:</strong> Single minor compliance issues do <em>not</em> result in
+    blacklisting. They are first handled through the anomaly flag system, RMT requests for
+    clarification, or temporary <em>suspension</em>. Blacklisting is reserved for cases where
+    lesser measures have failed or where the violation is severe enough to warrant immediate
+    exclusion.
+  </div>
+
+  <h3>14.2 How a Blacklist Case Is Opened and Processed</h3>
+  <p>The platform implements a five-step cross-role approval chain to ensure fairness:</p>
+
   <ol>
-    <li><strong>Initiation</strong> &mdash; RMT starts a blacklist case with reason and evidence.</li>
-    <li><strong>Notice &amp; Cooling-Off</strong> &mdash; Vendor is notified and given a cooling-off period to respond.</li>
-    <li><strong>Review</strong> &mdash; RMT reviews the vendor&rsquo;s rebuttal (if any).</li>
-    <li><strong>Confirmation</strong> &mdash; RMT confirms the blacklisting (temporary with expiry or permanent).</li>
-    <li><strong>Appeal</strong> &mdash; Vendor may appeal; RMT reviews the appeal.</li>
-    <li><strong>Reinstatement</strong> &mdash; If the blacklist expires or the appeal is upheld, the vendor is reinstated.</li>
+    <li><strong>Initiation (RMT or Auditor)</strong> &mdash; An authorised user opens a blacklist
+        case against a vendor. The case must include a clear reason, severity classification
+        (temporary or permanent), and a justification document (evidence, audit findings, or
+        incident report).</li>
+    <li><strong>Notice &amp; Cooling-Off</strong> &mdash; The vendor receives an in-app and email
+        notification of the case, along with a cooling-off period during which they may submit a
+        rebuttal and supporting documents.</li>
+    <li><strong>Review (TAC, DoE Officer, or Auditor)</strong> &mdash; A different oversight role
+        independently reviews the case, the evidence, and the vendor&rsquo;s rebuttal. They record
+        review notes that become part of the audit trail.</li>
+    <li><strong>Confirmation (Admin or DoE Officer)</strong> &mdash; A final decision-maker confirms
+        or rejects the blacklisting. If confirmed, the status becomes <strong>Suspended</strong>
+        (temporary with expiry) or <strong>Blacklisted</strong> (permanent).</li>
+    <li><strong>Appeal (Vendor)</strong> &mdash; The vendor may submit a formal appeal at any point
+        after confirmation, with a written rebuttal and supporting documents.</li>
+    <li><strong>Appeal Resolution (Auditor or Admin)</strong> &mdash; The appeal is reviewed and
+        resolved as either <em>Upheld</em> (blacklisting stands), <em>Reinstated</em> (vendor
+        returned to Active status), or <em>Requalified</em> (vendor must reapply for
+        pre-qualification).</li>
   </ol>
 
-  <div class="warn">
-    <strong>Warning:</strong> Blacklisted vendors cannot bid on tenders or receive payments.
-    Their existing projects enter a halted state.
+  <h4>Cross-Role Approval Chain (Summary)</h4>
+  <table>
+    <thead>
+      <tr><th>Step</th><th>Role</th><th>Action</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>1</td><td>RMT or Auditor</td><td>Initiates the case with reason, severity, and evidence.</td></tr>
+      <tr><td>2</td><td>TAC / DoE / Auditor</td><td>Reviews the case and records independent notes.</td></tr>
+      <tr><td>3</td><td>Admin / DoE</td><td>Confirms, modifies, or rejects the blacklisting decision.</td></tr>
+      <tr><td>4</td><td>Vendor</td><td>Submits an appeal with rebuttal and supporting documents.</td></tr>
+      <tr><td>5</td><td>Auditor / Admin</td><td>Reviews the appeal and resolves it.</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-warning">
+    <strong>Why multiple roles?</strong> No single role can both initiate and confirm a
+    blacklisting. This separation of duties protects vendors from arbitrary action and ensures
+    every decision is reviewed independently before becoming final.
   </div>
+
+  <h3>14.3 Consequences of Being Blacklisted</h3>
+  <p>When a vendor status changes to <strong>Blacklisted</strong>, the following restrictions
+    take effect immediately:</p>
+
+  <ul>
+    <li><strong>No new bids</strong> &mdash; The vendor cannot view, submit, or revise bids on any
+        active tender. Existing draft bids are locked.</li>
+    <li><strong>No new contracts</strong> &mdash; The vendor cannot sign new tender contracts or be
+        assigned new projects.</li>
+    <li><strong>Payment holds</strong> &mdash; All pending payment claims are frozen. Approved
+        claims that have not yet been disbursed are placed on hold pending resolution of the case.</li>
+    <li><strong>Projects halted</strong> &mdash; All active projects the vendor is implementing are
+        transitioned to <strong>Halted</strong> status. No new installations, verifications, or
+        meter readings can be submitted.</li>
+    <li><strong>Visibility removed</strong> &mdash; The vendor does not appear in public tender
+        opportunity lists or in RMT dropdowns for new project assignment.</li>
+    <li><strong>Audit trail</strong> &mdash; Every action taken on the case (initiation, reviews,
+        vendor rebuttals, appeal, resolution) is logged with timestamps, actor identity, and
+        attached documents.</li>
+  </ul>
+
+  <div class="warn">
+    <strong>Important:</strong> A <em>temporary</em> blacklist automatically lifts when its expiry
+    date passes, provided no further violations have been recorded. A <em>permanent</em>
+    blacklisting does not expire on its own &mdash; it can only be removed through a successful
+    appeal or formal programme decision.
+  </div>
+
+  <h3>14.4 How a Vendor Can Apply for Removal (Appeal Process)</h3>
+  <p>If you are a vendor whose status has been changed to <strong>Suspended</strong> or
+    <strong>Blacklisted</strong>, you have the right to appeal. The platform&rsquo;s appeal process
+    is designed to be fair, transparent, and well-documented.</p>
+
+  <h4>Step 1 &mdash; Review the Case Details</h4>
+  <ol>
+    <li>Log in to the platform with your vendor credentials (access is retained in read-only mode
+        for the duration of the case).</li>
+    <li>Navigate to <strong>&ldquo;My Profile&rdquo;</strong> &rarr; <strong>&ldquo;Audit
+        Trail&rdquo;</strong> tab.</li>
+    <li>Open the <strong>blacklist case</strong> entry to view the reason, severity, attached
+        evidence, and the cooling-off deadline.</li>
+    <li>If you believe the case is incorrect, gather all supporting documents (photos,
+        correspondence, corrected data, witness statements) before submitting your appeal.</li>
+  </ol>
+
+  <h4>Step 2 &mdash; Submit a Rebuttal (During Cooling-Off)</h4>
+  <p>During the cooling-off period (set when the case is initiated), you may submit a rebuttal
+    directly to the RMT:</p>
+  <ol>
+    <li>Open the case from your profile.</li>
+    <li>Click <strong>&ldquo;Submit Rebuttal&rdquo;</strong>.</li>
+    <li>Provide a clear written explanation of why the case should not proceed.</li>
+    <li>Upload any supporting documents.</li>
+    <li>Click <strong>&ldquo;Submit&rdquo;</strong>. The RMT will see your rebuttal alongside the
+        original case when making their review notes.</li>
+  </ol>
+
+  <h4>Step 3 &mdash; File a Formal Appeal (After Confirmation)</h4>
+  <p>If the case is confirmed and your status changes to Blacklisted, you may file a formal
+    appeal:</p>
+  <ol>
+    <li>Navigate to <strong>&ldquo;Blacklisting&rdquo;</strong> in the sidebar.</li>
+    <li>Find your case in the list and click <strong>&ldquo;File Appeal&rdquo;</strong>.</li>
+    <li>Complete the appeal form with:
+        <ul>
+          <li><strong>Appeal grounds</strong> &mdash; The specific reason you believe the
+              blacklisting is incorrect (e.g., new evidence, procedural error, mistaken identity,
+              data correction).</li>
+          <li><strong>Rebuttal narrative</strong> &mdash; A detailed explanation addressing each
+              point in the original case.</li>
+          <li><strong>Supporting documents</strong> &mdash; Upload files that substantiate your
+              appeal (photos, corrected meter data, correspondence, third-party verification
+              reports).</li>
+        </ul>
+    </li>
+    <li>Click <strong>&ldquo;Submit Appeal&rdquo;</strong>. The Auditor and Admin are notified
+        immediately.</li>
+  </ol>
+
+  <h4>Step 4 &mdash; Wait for Appeal Resolution</h4>
+  <p>The Auditor or Admin will review your appeal and attached documents. They may:</p>
+  <ul>
+    <li><strong>Request additional information</strong> &mdash; You will receive a notification and
+        can respond with more evidence.</li>
+    <li><strong>Uphold the blacklisting</strong> &mdash; The decision stands. You may not file a
+        second appeal on the same case.</li>
+    <li><strong>Reinstate you</strong> &mdash; Your status returns to <strong>Active</strong>. All
+        active projects resume their previous state, payment holds are released, and you can bid
+        on new tenders again.</li>
+    <li><strong>Requalify you</strong> &mdash; Your account is reinstated, but you must resubmit
+        pre-qualification documents before bidding on new tenders.</li>
+  </ul>
+
+  <div class="callout callout-info">
+    <strong>Tip for vendors:</strong> Submit your appeal as soon as possible after confirmation.
+    A well-prepared appeal with clear evidence is more likely to succeed than a late, incomplete
+    one. If you need time to gather documents, file a preliminary appeal first with the
+    information you have and add more documents as they become available.
+  </div>
+
+  <h4>Step 5 &mdash; Automatic Reinstatement (Temporary Blacklists Only)</h4>
+  <p>If your blacklisting was marked <strong>temporary</strong> with an expiry date, no action is
+    required on your part. On the expiry date:</p>
+  <ol>
+    <li>Your status automatically returns to <strong>Active</strong>.</li>
+    <li>Your projects automatically resume from their last saved state.</li>
+    <li>Payment holds are released.</li>
+    <li>You regain access to bid on new tenders.</li>
+  </ol>
+  <p>
+    If a new violation occurs during or after a temporary blacklist, the case may be escalated to
+    permanent blacklisting or a longer suspension period.
+  </p>
+
+  <h3>14.5 Best Practices for Vendors</h3>
+  <ul>
+    <li><strong>Respond promptly to RMT communications.</strong> Ignoring anomaly flags or RMT
+        requests is itself a trigger for escalation.</li>
+    <li><strong>Keep documentation organised.</strong> Photos, signed beneficiary forms, meter
+        serial labels, and installation records are your first line of defence if a case is
+        opened.</li>
+    <li><strong>Upload meter readings on schedule.</strong> Consistent weekly uploads prevent
+        <code>no_data</code> flags, which over time can contribute to a compliance review.</li>
+    <li><strong>Use accurate GPS at submission time.</strong> Stand at the actual installation
+        site. A <code>duplicate_gps</code> or <code>location_mismatch</code> flag can be
+        investigated further if recurring.</li>
+    <li><strong>Train field staff on the beneficiary verification process.</strong> Errors in
+        household classification (female-headed, vulnerable, low-income) can be flagged during
+        KPI review and trigger audits.</li>
+    <li><strong>Maintain open communication with RMT.</strong> If you anticipate delays, report
+        them early. Proactive communication is treated more favourably than silence.</li>
+  </ul>
 
   <!-- ============================================================ -->
   <h2 id="sync">15. Prospect Sync</h2>
@@ -3561,6 +4192,28 @@
     Yes, the <strong>&ldquo;Reports&rdquo;</strong> section (or
     <strong>&ldquo;Briefings &amp; Reports&rdquo;</strong> for PSC) allows downloading in CSV,
     PDF, and Excel formats. Available reports depend on your role and permissions.
+  </p>
+
+  <h4>Q: My account was blacklisted. What can I do?</h4>
+  <p>
+    You have the right to appeal. Log in (access remains in read-only mode), open the case from
+    <strong>&ldquo;My Profile&rdquo;</strong> &rarr; <strong>&ldquo;Audit Trail&rdquo;</strong>,
+    and either submit a rebuttal during the cooling-off period or file a formal appeal after
+    confirmation. Include a clear written explanation and any supporting documents (corrected
+    meter data, photos, correspondence). The Auditor or Admin will review your appeal and may
+    reinstate you, uphold the blacklisting, or require re-qualification. Temporary blacklists
+    also lift automatically on their expiry date. See <a href="#blacklist">section 14</a> for
+    the full process.
+  </p>
+
+  <h4>Q: What is the difference between &ldquo;Suspended&rdquo; and &ldquo;Blacklisted&rdquo;?</h4>
+  <p>
+    <strong>Suspended</strong> is a temporary hold used during compliance reviews &mdash; the vendor
+    pauses field verification and new bids but can still respond to communications and the
+    suspension can be lifted. <strong>Blacklisted</strong> is a formal exclusion from the
+    programme: no bidding, no payments, all projects halted. A blacklist can be temporary (with
+    an expiry date) or permanent. See <a href="#blacklist">section 14.1</a> for the full
+    severity tier comparison.
   </p>
 
   <!-- ============================================================ -->

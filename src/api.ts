@@ -64,6 +64,7 @@ const isDevMode = Boolean(env?.DEV);
 const ACCESS_TOKEN_KEY = "rbf_access_token";
 const REFRESH_TOKEN_KEY = "rbf_refresh_token";
 export const USER_KEY = "rbf_user";
+export const SESSION_EXPIRED_KEY = "rbf_session_expired";
 const DEMO_USERNAMES = new Set([
   "vendor_approved",
   "admin_user",
@@ -229,6 +230,24 @@ function extractApiErrorDetail(text: string): string {
   }
 
   return trimmed;
+}
+
+const SESSION_EXPIRED_MESSAGE = "Your session has expired. Please log in again to continue.";
+
+function dispatchSessionExpired(message: string) {
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent("rbf-session-expired", { detail: { message } }));
+  }
+}
+
+function isSessionExpiredError(raw: string): boolean {
+  const lower = raw.toLowerCase();
+  return (
+    lower.includes("token_not_valid") ||
+    lower.includes("token is expired") ||
+    lower.includes("given token not valid") ||
+    (lower.includes("no active account") && lower.includes("401"))
+  );
 }
 
 function headersInitToObject(input?: HeadersInit): Record<string, string> {
@@ -1521,6 +1540,13 @@ async function http<T>(url: string, init?: ApiRequestInit): Promise<T> {
               return (await retryRes.json()) as T;
             }
           }
+          if (isSessionExpiredError(detail || text || "")) {
+            dispatchSessionExpired(SESSION_EXPIRED_MESSAGE);
+            const expiredError = new Error(SESSION_EXPIRED_MESSAGE);
+            (expiredError as any).status = 401;
+            (expiredError as any).isSessionExpired = true;
+            throw expiredError;
+          }
         }
         // If same-origin /api path doesn't exist, try explicit backends.
         if (!isAbsolute && res.status === 404 && requestUrls.length > 1) {
@@ -1533,7 +1559,10 @@ async function http<T>(url: string, init?: ApiRequestInit): Promise<T> {
         return undefined as T;
       }
       return (await res.json()) as T;
-    } catch (error: any) {
+} catch (error: any) {
+      if (error?.isSessionExpired) {
+        throw error;
+      }
       const rawMessage = String(error?.message || "");
       if (rawMessage.startsWith("HTTP ")) {
         // Preserve real API/auth errors instead of masking them with fallback failures.
@@ -1554,7 +1583,6 @@ async function http<T>(url: string, init?: ApiRequestInit): Promise<T> {
       clearTimeout(timeoutId);
     }
   }
-
   throw lastError ?? new Error("Request failed");
 }
 
@@ -1592,10 +1620,35 @@ async function httpBlob(url: string, init?: ApiRequestInit): Promise<Blob> {
       });
       if (!res.ok) {
         const text = await res.text().catch(() => "");
-        throw new Error(`HTTP ${res.status} ${res.statusText}: ${extractApiErrorDetail(text) || text}`);
+        const detail = extractApiErrorDetail(text);
+        if (res.status === 401 && !skipAuth) {
+          const refreshed = await refreshAccessToken();
+          if (refreshed) {
+            const retryHeaders = { ...headers, Authorization: `Bearer ${refreshed}` };
+            const retryRes = await fetch(requestUrl, {
+              ...requestInit,
+              headers: retryHeaders,
+              signal: controller.signal,
+            });
+            if (retryRes.ok) {
+              return await retryRes.blob();
+            }
+          }
+          if (isSessionExpiredError(detail || text || "")) {
+            dispatchSessionExpired(SESSION_EXPIRED_MESSAGE);
+            const expiredError = new Error(SESSION_EXPIRED_MESSAGE);
+            (expiredError as any).status = 401;
+            (expiredError as any).isSessionExpired = true;
+            throw expiredError;
+          }
+        }
+        throw new Error(`HTTP ${res.status} ${res.statusText}: ${detail || text}`);
       }
       return await res.blob();
     } catch (error: any) {
+      if (error?.isSessionExpired) {
+        throw error;
+      }
       lastError = error instanceof Error ? error : new Error(String(error));
       if (i === requestUrls.length - 1) throw lastError;
     } finally {
@@ -1622,8 +1675,12 @@ async function refreshAccessToken(): Promise<string | null> {
       }
       return data.access;
     }
-  } catch {
-    logoutUser();
+  } catch (err: any) {
+    if (err?.isNetworkError) {
+      return null;
+    }
+    logoutUser(SESSION_EXPIRED_MESSAGE);
+    dispatchSessionExpired(SESSION_EXPIRED_MESSAGE);
   }
   return null;
 }
@@ -3278,11 +3335,27 @@ export async function loginUser(username: string, password: string): Promise<{ u
   return { user, access: data.access, refresh: data.refresh };
 }
 
-export function logoutUser() {
+export function logoutUser(sessionExpiredReason?: string) {
   if (typeof window !== "undefined") {
     localStorage.removeItem(ACCESS_TOKEN_KEY);
     localStorage.removeItem(REFRESH_TOKEN_KEY);
     localStorage.removeItem(USER_KEY);
+    if (sessionExpiredReason) {
+      localStorage.setItem(SESSION_EXPIRED_KEY, sessionExpiredReason);
+    } else {
+      localStorage.removeItem(SESSION_EXPIRED_KEY);
+    }
+  }
+}
+
+export function getSessionExpiredMessage(): string | null {
+  if (typeof window === "undefined") return null;
+  return localStorage.getItem(SESSION_EXPIRED_KEY);
+}
+
+export function clearSessionExpiredMessage() {
+  if (typeof window !== "undefined") {
+    localStorage.removeItem(SESSION_EXPIRED_KEY);
   }
 }
 
