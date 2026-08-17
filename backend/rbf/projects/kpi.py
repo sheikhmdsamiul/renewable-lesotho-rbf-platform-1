@@ -693,39 +693,49 @@ class KpiService:
     @classmethod
     def getPublicPortfolioSummary(cls) -> dict[str, Any]:
         projects = Project.objects.exclude(status=ProjectStatus.HALTED)
-        
+
         total_projects = projects.count()
         total_target = 0
         total_verified = 0
         female_numerator = 0
         female_denominator = 0
         total_energy_kwh = 0
-        
+
         for project in projects:
             service = cls(str(project.id))
             summary = service.getFullKpiSummary()
             installation = summary["installation_progress"]
             gender = summary["gender_kpi"]
             energy = summary.get("energy_kpi", {})
-            
+
             target = installation.get("target_installations", 0)
             verified = installation.get("verified_installations", 0)
             total_target += target
             total_verified += verified
-            
+
             female_denominator += verified
             female_numerator += int(verified * (gender.get("female_pct", 0) / 100))
-            
+
             total_energy_kwh += energy.get("total_energy_kwh", 0)
-        
+
         overall_female_pct = (female_numerator / female_denominator * 100) if female_denominator else 0
-        
+
+        from rbf.users.models import PlatformConfiguration
+        contact = PlatformConfiguration.objects.first()
+
         return {
             "total_projects": total_projects,
             "total_installations_target": total_target,
             "total_verified": total_verified,
             "overall_female_pct": round(overall_female_pct, 1),
             "total_energy_kwh_monthly": total_energy_kwh,
+            "contact": {
+                "email": contact.contact_email if contact else "rbf@energy.gov.ls",
+                "phone": contact.contact_phone if contact else "+266 2231 0000",
+                "address": contact.contact_address if contact else "Corner Constitution & Parliament Road, Maseru 100, Lesotho",
+                "office_hours": contact.contact_office_hours if contact else "Mon-Fri, 08:00-17:00 SAST",
+                "organisation_name": contact.contact_organisation_name if contact else "RBF Management Team, Ministry of Energy",
+            } if contact else None,
         }
 
 

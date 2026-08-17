@@ -642,6 +642,11 @@ export interface PlatformConfiguration {
   defaultFromEmail: string;
   maxFileSizeMb: number;
   allowedFileTypes: string[];
+  contactEmail: string;
+  contactPhone: string;
+  contactAddress: string;
+  contactOfficeHours: string;
+  contactOrganisationName: string;
   lesothoBoundary?: {
     path: string;
     exists: boolean;

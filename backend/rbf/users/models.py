@@ -349,6 +349,11 @@ class PlatformConfiguration(models.Model):
     default_from_email = models.EmailField(max_length=255, blank=True, default='')
     max_file_size_mb = models.PositiveIntegerField(default=10)
     allowed_file_types = models.JSONField(default=list, blank=True)
+    contact_email = models.EmailField(max_length=255, blank=True, default='rbf@energy.gov.ls')
+    contact_phone = models.CharField(max_length=64, blank=True, default='+266 2231 0000')
+    contact_address = models.TextField(blank=True, default='Corner Constitution & Parliament Road, Maseru 100, Lesotho')
+    contact_office_hours = models.CharField(max_length=128, blank=True, default='Mon-Fri, 08:00-17:00 SAST')
+    contact_organisation_name = models.CharField(max_length=255, blank=True, default='RBF Management Team, Ministry of Energy')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

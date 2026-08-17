@@ -7,6 +7,7 @@ import {
   ChevronRight,
   Download,
   Eye,
+  Globe,
   HelpCircle,
   History,
   Info,
@@ -1232,6 +1233,40 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
                     <p className="text-xs text-slate-500 mt-1">Separate with commas</p>
                   </div>
                 </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="card p-6 space-y-4">
+            <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+              <Globe size={18} className="text-emerald-600" />
+              Public Portal Contact Information
+              <span className="ml-2 text-xs font-medium text-slate-500 bg-slate-100 px-2 py-1 rounded-full">Shown on /public</span>
+            </h3>
+            <p className="text-sm text-slate-600">
+              Contact details displayed on the public-facing portal. Visitors will see these values on the public landing page, How-to-Apply sidebar, and FAQ section.
+            </p>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Organisation Name</label>
+                <input className="input-field" value={configuration.contactOrganisationName} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, contactOrganisationName: e.target.value } : prev)} placeholder="RBF Management Team, Ministry of Energy" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Contact Email</label>
+                <input className="input-field" type="email" value={configuration.contactEmail} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, contactEmail: e.target.value } : prev)} placeholder="rbf@energy.gov.ls" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Contact Phone</label>
+                <input className="input-field" value={configuration.contactPhone} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, contactPhone: e.target.value } : prev)} placeholder="+266 2231 0000" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Office Hours</label>
+                <input className="input-field" value={configuration.contactOfficeHours} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, contactOfficeHours: e.target.value } : prev)} placeholder="Mon-Fri, 08:00-17:00 SAST" />
+              </div>
+              <div className="col-span-2">
+                <label className="block text-sm font-medium text-slate-700 mb-1">Office Address</label>
+                <textarea className="input-field" rows={2} value={configuration.contactAddress} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, contactAddress: e.target.value } : prev)} placeholder="Corner Constitution & Parliament Road, Maseru 100, Lesotho" />
+                <p className="text-xs text-slate-500 mt-1">Full postal address shown in the public contact section</p>
               </div>
             </div>
           </div>

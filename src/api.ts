@@ -690,6 +690,11 @@ function mapPlatformConfigurationFromApi(api: any): PlatformConfiguration {
     defaultFromEmail: api.default_from_email ?? "",
     maxFileSizeMb: Number(api.max_file_size_mb ?? 0),
     allowedFileTypes: Array.isArray(api.allowed_file_types) ? api.allowed_file_types : [],
+    contactEmail: api.contact_email ?? "",
+    contactPhone: api.contact_phone ?? "",
+    contactAddress: api.contact_address ?? "",
+    contactOfficeHours: api.contact_office_hours ?? "",
+    contactOrganisationName: api.contact_organisation_name ?? "",
     lesothoBoundary: api.lesotho_boundary
       ? {
           path: api.lesotho_boundary.path ?? "",
@@ -3621,6 +3626,11 @@ export async function updatePlatformConfiguration(payload: Partial<PlatformConfi
       ...(payload.emailHostPassword ? { email_host_password: payload.emailHostPassword } : {}),
       max_file_size_mb: payload.maxFileSizeMb,
       allowed_file_types: payload.allowedFileTypes,
+      contact_email: payload.contactEmail,
+      contact_phone: payload.contactPhone,
+      contact_address: payload.contactAddress,
+      contact_office_hours: payload.contactOfficeHours,
+      contact_organisation_name: payload.contactOrganisationName,
     }),
   });
   return mapPlatformConfigurationFromApi(data);

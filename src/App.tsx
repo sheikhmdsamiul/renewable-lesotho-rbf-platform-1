@@ -65,6 +65,7 @@ import {
   Paperclip,
   Pause,
   WifiOff,
+  ArrowUpRight,
 } from "lucide-react";
 import {
   LineChart,
@@ -23344,13 +23345,7 @@ const NoticeBoardSection = ({ tenders }: { tenders: Tender[] }) => {
     general: { dot: "#888780", badgeBg: "#F1EFE8", badgeText: "#444441" },
   };
 
-  const mockNotices = React.useMemo(() => {
-    const items: any[] = [];
-    return items;
-
-    items.sort((a, b) => new Date(b.posted).getTime() - new Date(a.posted).getTime());
-    return items;
-  }, [effectiveTenders]);
+  const mockNotices = React.useMemo<any[]>(() => [], [effectiveTenders]);
 
   const allNotices = React.useMemo(() => {
     const merged = [...mockNotices, ...apiNotices];
@@ -23491,54 +23486,6 @@ const NoticeBoardSection = ({ tenders }: { tenders: Tender[] }) => {
                 </div>
               )}
             </div>
-        </div>
-      )}
-
-      {createChallengeOpen && selectedTender && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[110]">
-          <div className="bg-white rounded-2xl p-6 w-full max-w-lg shadow-2xl">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-bold text-slate-900">File Challenge / Protest</h3>
-              <button onClick={() => setCreateChallengeOpen(false)} className="p-1 hover:bg-slate-100 rounded-lg">
-                <X size={20} className="text-slate-500" />
-              </button>
-            </div>
-            <div className="space-y-4">
-              <div className="p-4 bg-rose-50 rounded-xl border border-rose-100">
-                <p className="text-sm text-rose-800 font-medium">Record a protest filed by an unsuccessful bidder.</p>
-                <p className="text-xs text-rose-700 mt-2">The award process will automatically pause and the cooling-off clock will freeze.</p>
-              </div>
-              <div className="space-y-3">
-                <div>
-                  <label className="text-sm font-bold text-slate-700">Challenger Vendor ID *</label>
-                  <input className="input-field mt-1" value={challengeFormVendorId} onChange={(e) => setChallengeFormVendorId(e.target.value)} placeholder="Vendor user ID" />
-                </div>
-                <div>
-                  <label className="text-sm font-bold text-slate-700">Challenger Vendor Name *</label>
-                  <input className="input-field mt-1" value={challengeFormVendorName} onChange={(e) => setChallengeFormVendorName(e.target.value)} placeholder="Vendor legal name" />
-                </div>
-                <div>
-                  <label className="text-sm font-bold text-slate-700">Challenger Bid</label>
-                  <select className="input-field mt-1" value={challengeFormBidId} onChange={(e) => setChallengeFormBidId(e.target.value)}>
-                    <option value="">Select a bid (optional)</option>
-                    {awardBids.map(bid => (
-                      <option key={bid.id} value={bid.id}>{bid.vendor_name} • Version {bid.version_number ?? 1}</option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="text-sm font-bold text-slate-700">Grounds for Challenge *</label>
-                  <textarea className="input-field mt-1 w-full min-h-[100px]" value={challengeFormGrounds} onChange={(e) => setChallengeFormGrounds(e.target.value)} placeholder="Describe the grounds for the protest..." />
-                </div>
-              </div>
-              <div className="flex gap-3 pt-2">
-                <button onClick={() => setCreateChallengeOpen(false)} className="btn-secondary flex-1">Cancel</button>
-                <button onClick={() => void handleCreateChallenge()} disabled={isActioning} className="btn-primary flex-1 bg-rose-600 hover:bg-rose-700 disabled:opacity-60">
-                  {isActioning ? "Filing..." : "File Challenge"}
-                </button>
-              </div>
-            </div>
-          </div>
         </div>
       )}
     </div>
@@ -23724,579 +23671,908 @@ const PublicPortal = ({ onBack, onRegisterClick, publicSubView, publicTenderId, 
   const femaleHeaded = Math.round((kpiData?.total_verified || 0) * (kpiData?.overall_female_pct || 0) / 100);
   const femalePct = Math.round(kpiData?.overall_female_pct || 0);
   const activeProjects = kpiData?.total_projects || 0;
-  
+
   const totalEnergyMonthly = kpiData?.total_energy_kwh_monthly || 0;
   const energyMonthlyFormatted = totalEnergyMonthly >= 1000 ? `${Math.round(totalEnergyMonthly / 1000)} MWh` : `${Math.round(totalEnergyMonthly)} kWh`;
 
+  const contact = kpiData?.contact;
+  const contactEmail = contact?.email || "rbf@energy.gov.ls";
+  const contactPhone = contact?.phone || "+266 2231 0000";
+  const contactAddress = contact?.address || "Corner Constitution & Parliament Road, Maseru 100, Lesotho";
+  const contactOfficeHours = contact?.office_hours || "Mon-Fri, 08:00-17:00 SAST";
+  const contactOrgName = contact?.organisation_name || "RBF Management Team, Ministry of Energy";
+
   return (
-    <div className="min-h-screen bg-white overflow-x-hidden">
+    <div className="min-h-screen bg-slate-50 overflow-x-hidden">
       {/* Public Portal Hero */}
-      <div className="relative h-[600px] mb-12 overflow-hidden">
-        <img 
-          src="https://picsum.photos/seed/lesotho-energy/1920/1080" 
-          alt="Renewable Energy in Lesotho" 
-          className="w-full h-full object-cover brightness-50"
+      <div className="relative h-[700px] overflow-hidden">
+        <div className="absolute inset-0 bg-gradient-to-br from-emerald-900 via-teal-900 to-slate-900" />
+        <div className="absolute inset-0 opacity-30" style={{
+          backgroundImage: "radial-gradient(circle at 20% 30%, rgba(16, 185, 129, 0.4) 0%, transparent 50%), radial-gradient(circle at 80% 70%, rgba(20, 184, 166, 0.4) 0%, transparent 50%)"
+        }} />
+        <img
+          src="https://picsum.photos/seed/lesotho-energy/1920/1080"
+          alt="Renewable Energy in Lesotho"
+          className="absolute inset-0 w-full h-full object-cover mix-blend-overlay opacity-40"
           referrerPolicy="no-referrer"
         />
         <div className="absolute inset-0 flex flex-col items-center justify-center text-center px-4">
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
-            className="space-y-4"
+            transition={{ duration: 0.6 }}
+            className="space-y-6 max-w-4xl"
           >
-            <span className="px-4 py-1 bg-emerald-600 text-white text-xs font-bold uppercase tracking-widest rounded-full">
+            <span className="inline-block px-5 py-2 bg-gradient-to-r from-emerald-500 to-teal-500 text-white text-xs font-bold uppercase tracking-widest rounded-full shadow-lg shadow-emerald-500/30">
               Live Impact Transparency
             </span>
-            <h1 className="text-6xl md:text-8xl font-black text-white tracking-tighter">
-              RENEWABLE <br /> LESOTHO
+            <h1 className="text-5xl md:text-7xl lg:text-8xl font-black text-white tracking-tighter leading-none">
+              <span className="bg-gradient-to-r from-white via-emerald-100 to-teal-100 bg-clip-text text-transparent">
+                RENEWABLE
+              </span>
+              <br />
+              <span className="bg-gradient-to-r from-emerald-400 to-teal-400 bg-clip-text text-transparent">
+                LESOTHO
+              </span>
             </h1>
-            <p className="text-xl text-slate-200 max-w-2xl mx-auto font-medium">
-              Empowering communities through sustainable energy. Real-time monitoring of the UNDP-led Results Based Financing program.
+            <p className="text-lg md:text-xl text-slate-200 max-w-2xl mx-auto font-medium leading-relaxed">
+              Empowering communities through sustainable energy.<br className="hidden md:block" />
+              Real-time monitoring of the UNDP-led Results Based Financing program.
             </p>
+            <div className="flex flex-wrap items-center justify-center gap-4 pt-4">
+              <button onClick={onRegisterClick} className="px-8 py-3 bg-white text-slate-900 font-bold rounded-full hover:bg-emerald-50 transition-all shadow-2xl hover:shadow-emerald-500/20 hover:-translate-y-0.5">
+                Get Started
+              </button>
+              <button onClick={() => {
+                setShowFaq(true);
+                onSubViewChange?.("faq");
+                window.history.replaceState({ __app: "rbf-spa", showPublicPortal: true, publicView: "faq" }, "", "/public/faq");
+              }} className="px-8 py-3 bg-white/10 backdrop-blur-md text-white font-bold rounded-full border border-white/20 hover:bg-white/20 transition-all">
+                Learn More
+              </button>
+            </div>
           </motion.div>
         </div>
-        
-        <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-white to-transparent h-32" />
+        <div className="absolute bottom-8 left-1/2 -translate-x-1/2 animate-bounce">
+          <div className="w-6 h-10 rounded-full border-2 border-white/40 flex items-start justify-center p-2">
+            <div className="w-1 h-2 bg-white rounded-full" />
+          </div>
+        </div>
       </div>
 
-      <div className="max-w-7xl mx-auto px-8 space-y-24 pb-24">
+      <div className="max-w-7xl mx-auto px-6 md:px-8 -mt-20 relative z-10 space-y-24 pb-24">
         {/* Stats Grid */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-100 text-center">
-            <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">Households with Energy Access</p>
-            {kpiLoading ? <p className="text-4xl font-black text-slate-300">...</p> : <p className="text-4xl font-black text-emerald-600">{householdsWithEnergy.toLocaleString()}</p>}
-          </div>
-          <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-100 text-center">
-            <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">Female-headed Households Served</p>
-            {kpiLoading ? <p className="text-4xl font-black text-slate-300">...</p> : <><p className="text-4xl font-black text-blue-600">{femaleHeaded.toLocaleString()}</p><p className="text-xs font-bold text-blue-500">({femalePct}%)</p></>}
-          </div>
-          <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-100 text-center">
-            <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">Energy Generated Monthly</p>
-            {kpiLoading ? <p className="text-4xl font-black text-slate-300">...</p> : <p className="text-4xl font-black text-amber-600">{energyMonthlyFormatted}</p>}
-          </div>
-          <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-100 text-center">
-            <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">Active Projects</p>
-            {kpiLoading ? <p className="text-4xl font-black text-slate-300">...</p> : <p className="text-4xl font-black text-purple-600">{activeProjects}</p>}
-          </div>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 md:gap-6">
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true }}
+            transition={{ duration: 0.5 }}
+            className="bg-white/90 backdrop-blur-xl rounded-3xl p-6 shadow-xl shadow-slate-900/5 border border-white/40 text-center"
+          >
+            <div className="inline-flex items-center justify-center w-12 h-12 rounded-2xl bg-gradient-to-br from-emerald-500 to-teal-500 mb-4 shadow-lg shadow-emerald-500/30">
+              <Zap size={22} className="text-white" />
+            </div>
+            <p className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-2">Households with Energy Access</p>
+            {kpiLoading ? (
+              <p className="text-4xl font-black text-slate-300">...</p>
+            ) : householdsWithEnergy > 0 ? (
+              <p className="text-4xl font-black bg-gradient-to-br from-emerald-600 to-teal-600 bg-clip-text text-transparent">{householdsWithEnergy.toLocaleString()}</p>
+            ) : (
+              <>
+                <p className="text-2xl font-black text-slate-300">—</p>
+                <p className="text-xs font-bold text-slate-400 mt-2 leading-snug">Awaiting first verified installations</p>
+              </>
+            )}
+          </motion.div>
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true }}
+            transition={{ duration: 0.5, delay: 0.1 }}
+            className="bg-white/90 backdrop-blur-xl rounded-3xl p-6 shadow-xl shadow-slate-900/5 border border-white/40 text-center"
+          >
+            <div className="inline-flex items-center justify-center w-12 h-12 rounded-2xl bg-gradient-to-br from-blue-500 to-indigo-500 mb-4 shadow-lg shadow-blue-500/30">
+              <Users size={22} className="text-white" />
+            </div>
+            <p className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-2">Female-headed Households Served</p>
+            {kpiLoading ? (
+              <p className="text-4xl font-black text-slate-300">...</p>
+            ) : femaleHeaded > 0 ? (
+              <>
+                <p className="text-4xl font-black bg-gradient-to-br from-blue-600 to-indigo-600 bg-clip-text text-transparent">{femaleHeaded.toLocaleString()}</p>
+                <p className="text-xs font-bold text-blue-500 mt-1">({femalePct}%)</p>
+              </>
+            ) : (
+              <>
+                <p className="text-2xl font-black text-slate-300">—</p>
+                <p className="text-xs font-bold text-slate-400 mt-2 leading-snug">Reporting begins with first verification</p>
+              </>
+            )}
+          </motion.div>
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true }}
+            transition={{ duration: 0.5, delay: 0.2 }}
+            className="bg-white/90 backdrop-blur-xl rounded-3xl p-6 shadow-xl shadow-slate-900/5 border border-white/40 text-center"
+          >
+            <div className="inline-flex items-center justify-center w-12 h-12 rounded-2xl bg-gradient-to-br from-amber-500 to-orange-500 mb-4 shadow-lg shadow-amber-500/30">
+              <TrendingUp size={22} className="text-white" />
+            </div>
+            <p className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-2">Energy Generated Monthly</p>
+            {kpiLoading ? (
+              <p className="text-4xl font-black text-slate-300">...</p>
+            ) : totalEnergyMonthly > 0 ? (
+              <p className="text-4xl font-black bg-gradient-to-br from-amber-600 to-orange-600 bg-clip-text text-transparent">{energyMonthlyFormatted}</p>
+            ) : (
+              <>
+                <p className="text-2xl font-black text-slate-300">—</p>
+                <p className="text-xs font-bold text-slate-400 mt-2 leading-snug">Meter data flows in via CSV uploads</p>
+              </>
+            )}
+          </motion.div>
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true }}
+            transition={{ duration: 0.5, delay: 0.3 }}
+            className="bg-white/90 backdrop-blur-xl rounded-3xl p-6 shadow-xl shadow-slate-900/5 border border-white/40 text-center"
+          >
+            <div className="inline-flex items-center justify-center w-12 h-12 rounded-2xl bg-gradient-to-br from-purple-500 to-fuchsia-500 mb-4 shadow-lg shadow-purple-500/30">
+              <Activity size={22} className="text-white" />
+            </div>
+            <p className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-2">Active Projects</p>
+            {kpiLoading ? (
+              <p className="text-4xl font-black text-slate-300">...</p>
+            ) : activeProjects > 0 ? (
+              <p className="text-4xl font-black bg-gradient-to-br from-purple-600 to-fuchsia-600 bg-clip-text text-transparent">{activeProjects}</p>
+            ) : (
+              <>
+                <p className="text-2xl font-black text-slate-300">—</p>
+                <p className="text-xs font-bold text-slate-400 mt-2 leading-snug">Tenders and contracts coming soon</p>
+              </>
+            )}
+          </motion.div>
         </div>
 
         {/* Published Tenders */}
-        <div className="bg-slate-50 rounded-3xl p-6">
-          <div className="flex items-center gap-2 mb-4"><FileText size={20} className="text-emerald-600" /><h3 className="text-xl font-bold text-slate-900">Published Tenders</h3></div>
-          {tenders.length === 0 ? <p className="text-slate-500 text-center py-4">No published tenders.</p> : <div className="space-y-3">
-            {paginatedTenders.map(t => (
-              <div key={t.id} className="bg-white p-4 rounded-xl border border-slate-200 flex justify-between items-center">
-                <div className="flex-1">
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className="text-xs font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded">Published</span>
-                    <span className="text-xs text-slate-400">{t.referenceNumber}</span>
+        <div className="space-y-6">
+          <div className="flex items-end justify-between flex-wrap gap-4">
+            <div>
+              <span className="text-xs font-bold text-emerald-600 uppercase tracking-widest">Open Opportunities</span>
+              <h3 className="text-3xl md:text-4xl font-black text-slate-900 mt-2 tracking-tight">Published Tenders</h3>
+            </div>
+            <span className="text-sm text-slate-500">{tenders.length} active opportunity{tenders.length === 1 ? "" : "ies"}</span>
+          </div>
+          {tenders.length === 0 ? (
+            <div className="bg-white rounded-3xl p-12 text-center border border-slate-200">
+              <FileText size={48} className="mx-auto text-slate-300 mb-4" />
+              <p className="text-slate-500">No published tenders at this time. Check back soon.</p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {paginatedTenders.map((t, idx) => (
+                <motion.div
+                  key={t.id}
+                  initial={{ opacity: 0, y: 20 }}
+                  whileInView={{ opacity: 1, y: 0 }}
+                  viewport={{ once: true }}
+                  transition={{ duration: 0.4, delay: idx * 0.05 }}
+                  className="group bg-white rounded-2xl p-6 border border-slate-200 hover:border-emerald-300 hover:shadow-xl hover:shadow-emerald-500/10 transition-all cursor-pointer"
+                  onClick={() => {
+                    setSelected(t);
+                    onSubViewChange?.("tender", t.id);
+                    window.history.replaceState({ __app: "rbf-spa", showPublicPortal: true, publicView: "tender", publicViewId: t.id }, "", `/public/tender/${t.id}`);
+                  }}
+                >
+                  <div className="flex items-start justify-between gap-3 mb-4">
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-emerald-50 text-emerald-700 text-xs font-bold rounded-full">
+                      <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />
+                      Published
+                    </span>
+                    <ArrowUpRight size={18} className="text-slate-400 group-hover:text-emerald-600 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-transform" />
                   </div>
-                  <p className="font-medium text-slate-900">{t.name}</p>
-                  <p className="text-sm text-slate-500 mt-1">{t.department}</p>
-                  <div className="flex items-center gap-2 mt-2">
-                    <Clock size={14} className="text-rose-500" />
-                    <span className="text-sm font-bold text-rose-600">Deadline: {t.deadline ? new Date(t.deadline).toLocaleDateString() : 'N/A'}</span>
+                  <h4 className="text-lg font-bold text-slate-900 mb-2 leading-snug line-clamp-2">{t.name}</h4>
+                  <p className="text-sm text-slate-500 mb-4 line-clamp-1">{t.department}</p>
+                  <div className="flex items-center justify-between pt-4 border-t border-slate-100">
+                    <div className="flex items-center gap-2 text-xs text-slate-500">
+                      <Clock size={14} className="text-rose-500" />
+                      <span className="font-bold text-rose-600">{t.deadline ? new Date(t.deadline).toLocaleDateString() : 'N/A'}</span>
+                    </div>
+                    <span className="text-xs text-slate-400 font-mono">{t.referenceNumber}</span>
                   </div>
-                </div>
-                <button onClick={() => {
-                  setSelected(t);
-                  onSubViewChange?.("tender", t.id);
-                  window.history.replaceState({ __app: "rbf-spa", showPublicPortal: true, publicView: "tender", publicViewId: t.id }, "", `/public/tender/${t.id}`);
-                }} className="btn-primary text-sm py-2">View</button>
-              </div>
-            ))}
-          </div>}
-          {totalPages > 1 && <div className="flex items-center justify-between mt-4 pt-4 border-t border-slate-200">
-            <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1} className="btn-secondary text-sm py-1.5 disabled:opacity-50">Previous</button>
-            <span className="text-sm text-slate-500">Page {page} of {totalPages}</span>
-            <button onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page === totalPages} className="btn-secondary text-sm py-1.5 disabled:opacity-50">Next</button>
-          </div>}
+                </motion.div>
+              ))}
+            </div>
+          )}
+          {totalPages > 1 && (
+            <div className="flex items-center justify-between pt-4">
+              <button
+                onClick={() => setPage(p => Math.max(1, p - 1))}
+                disabled={page === 1}
+                className="px-5 py-2 rounded-full bg-white border border-slate-200 text-sm font-medium hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed transition"
+              >
+                Previous
+              </button>
+              <span className="text-sm text-slate-500">Page {page} of {totalPages}</span>
+              <button
+                onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                disabled={page === totalPages}
+                className="px-5 py-2 rounded-full bg-white border border-slate-200 text-sm font-medium hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed transition"
+              >
+                Next
+              </button>
+            </div>
+          )}
         </div>
 
         {tenders.length > 0 && (
-          <div className="bg-emerald-600 rounded-2xl p-6 text-center">
-            <p className="text-white font-medium">Want to submit a bid?</p>
-            <p className="text-emerald-100 text-sm mt-1">Log in or register to access tender documents and submit your proposal</p>
+          <div className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-emerald-600 via-teal-600 to-emerald-700 p-8 md:p-12 text-center">
+            <div className="absolute inset-0 opacity-20" style={{
+              backgroundImage: "radial-gradient(circle at 10% 20%, rgba(255,255,255,0.3) 0%, transparent 50%), radial-gradient(circle at 90% 80%, rgba(255,255,255,0.3) 0%, transparent 50%)"
+            }} />
+            <div className="relative z-10 space-y-3">
+              <h3 className="text-2xl md:text-3xl font-black text-white tracking-tight">Ready to submit a bid?</h3>
+              <p className="text-emerald-50 max-w-xl mx-auto">Log in or register to access tender documents and submit your proposal.</p>
+              <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
+                <button onClick={onRegisterClick} className="px-6 py-2.5 bg-white text-emerald-700 font-bold rounded-full hover:bg-emerald-50 transition shadow-lg">
+                  Register Now
+                </button>
+                <button onClick={() => {
+                  setShowFaq(true);
+                  onSubViewChange?.("faq");
+                  window.history.replaceState({ __app: "rbf-spa", showPublicPortal: true, publicView: "faq" }, "", "/public/faq");
+                }} className="px-6 py-2.5 bg-white/10 backdrop-blur-md text-white font-bold rounded-full border border-white/30 hover:bg-white/20 transition">
+                  View FAQ
+                </button>
+              </div>
+            </div>
           </div>
         )}
 
         {/* Notice Board */}
         <NoticeBoardSection tenders={tenders} />
 
-        {selected && <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => {
-  setSelected(null);
-  onSubViewChange?.(null);
-  window.history.replaceState({ __app: "rbf-spa", showPublicPortal: true }, "", "/public");
-}}>
-          <div className="bg-white rounded-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
-            <div className="sticky top-0 bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between">
-              <h4 className="font-bold text-slate-900">Tender Details</h4>
-              <button onClick={() => {
+        {selected && (
+          <AnimatePresence>
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 bg-slate-900/70 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+              onClick={() => {
                 setSelected(null);
                 onSubViewChange?.(null);
                 window.history.replaceState({ __app: "rbf-spa", showPublicPortal: true }, "", "/public");
-              }} className="text-slate-400 hover:text-slate-600">
-                <X size={20} />
-              </button>
-            </div>
-            <div className="p-6 space-y-6">
-              {/* Basic Identity */}
-              <div>
-                <h5 className="text-xs font-bold text-emerald-600 uppercase tracking-wider mb-2">Basic Information</h5>
-                <div className="bg-slate-50 rounded-lg p-4">
-                  <p className="font-bold text-slate-900 text-lg">{selected.name}</p>
-                  <p className="text-sm text-slate-500">Tender ID: {selected.referenceNumber}</p>
-                  <p className="text-sm text-slate-600 mt-1">Department: {selected.department || "N/A"}</p>
-                </div>
-              </div>
-
-              {/* Timeline */}
-              <div>
-                <h5 className="text-xs font-bold text-emerald-600 uppercase tracking-wider mb-2">Timeline</h5>
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="bg-slate-50 rounded-lg p-3">
-                    <p className="text-xs text-slate-500">Publication Date</p>
-                    <p className="font-medium text-slate-900">{selected.publishedAt ? new Date(selected.publishedAt).toLocaleDateString() : "N/A"}</p>
-                  </div>
-                  <div className="bg-slate-50 rounded-lg p-3">
-                    <p className="text-xs text-slate-500">Submission Deadline</p>
-                    <p className="font-medium text-rose-600">{selected.deadline ? new Date(selected.deadline).toLocaleDateString() : "N/A"}</p>
-                  </div>
-                </div>
-              </div>
-
-              {/* Scope */}
-              <div>
-                <h5 className="text-xs font-bold text-emerald-600 uppercase tracking-wider mb-2">Scope</h5>
-                <div className="space-y-3">
-                  <div className="bg-slate-50 rounded-lg p-3">
-                    <p className="text-xs text-slate-500">Technology Type</p>
-                    <div className="flex flex-wrap gap-2 mt-1">
-                      {(selected.technologyTypes || []).map(tech => (
-                        <span key={tech} className="px-2 py-1 bg-emerald-50 text-emerald-700 rounded text-xs font-medium">{tech}</span>
-                      ))}
-                      {(selected.technologyTypes || []).length === 0 && <span className="text-sm text-slate-600">N/A</span>}
-                    </div>
-                  </div>
-                  <div className="bg-slate-50 rounded-lg p-3">
-                    <p className="text-xs text-slate-500">Target Districts</p>
-                    <p className="text-sm text-slate-900 mt-1">{(selected.targetDistricts || []).join(", ") || "All districts"}</p>
-                  </div>
-                  <div className="bg-slate-50 rounded-lg p-3">
-                    <p className="text-xs text-slate-500">Installation Target</p>
-                    <p className="text-sm text-slate-900 mt-1">
-                      {selected.approximateInstallationTarget ? `${selected.approximateInstallationTarget.toLocaleString()} installations` : "N/A"}
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              {/* Eligibility */}
-              <div>
-                <h5 className="text-xs font-bold text-emerald-600 uppercase tracking-wider mb-2">Eligibility Requirements</h5>
-                <div className="bg-slate-50 rounded-lg p-4">
-                  <p className="text-sm text-slate-700">{selected.biddersEligibility || "Pre-qualification required. Vendors must be registered with valid trading license and tax clearance."}</p>
-                  <p className="text-xs text-emerald-600 mt-2">View full eligibility criteria after login</p>
-                </div>
-              </div>
-
-              {/* Public Documents */}
-              <div>
-                <h5 className="text-xs font-bold text-emerald-600 uppercase tracking-wider mb-2">Public Documents</h5>
-                <div className="space-y-2">
-                  {selected.scheduleFile ? (
-                    <a href={selected.scheduleFile} target="_blank" rel="noopener noreferrer" className="flex items-center gap-3 p-3 bg-slate-50 rounded-lg hover:bg-slate-100 border border-slate-200">
-                      <FileText size={20} className="text-emerald-600" />
-                      <div>
-                        <p className="font-medium text-slate-900 text-sm">Tender Document</p>
-                        <p className="text-xs text-slate-500">Download PDF</p>
-                      </div>
-                    </a>
-                  ) : (
-                    <div className="flex items-center gap-3 p-3 bg-slate-50 rounded-lg border border-slate-200 opacity-50">
-                      <FileText size={20} className="text-slate-400" />
-                      <div>
-                        <p className="font-medium text-slate-500 text-sm">Tender Document</p>
-                        <p className="text-xs text-slate-400">Not available</p>
+              }}
+            >
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95, y: 20 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.95, y: 20 }}
+                transition={{ duration: 0.25 }}
+                className="bg-white rounded-3xl max-w-2xl w-full max-h-[90vh] overflow-hidden shadow-2xl"
+                onClick={e => e.stopPropagation()}
+              >
+                <div className="relative bg-gradient-to-br from-emerald-600 via-teal-600 to-emerald-700 px-8 py-6 overflow-hidden">
+                  <div className="absolute inset-0 opacity-20" style={{
+                    backgroundImage: "radial-gradient(circle at 90% 10%, rgba(255,255,255,0.4) 0%, transparent 50%)"
+                  }} />
+                  <div className="relative flex items-start justify-between gap-4">
+                    <div className="space-y-2 flex-1 min-w-0">
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-white/20 backdrop-blur-md text-white text-xs font-bold rounded-full">
+                        <span className="w-1.5 h-1.5 bg-white rounded-full animate-pulse" />
+                        Published Tender
+                      </span>
+                      <h4 className="text-2xl font-black text-white leading-tight">{selected.name}</h4>
+                      <div className="flex flex-wrap items-center gap-3 text-xs text-emerald-50">
+                        <span className="font-mono">{selected.referenceNumber}</span>
+                        {selected.department && <><span>•</span><span>{selected.department}</span></>}
                       </div>
                     </div>
-                  )}
-                  {selected.rfpDocumentsFile ? (
-                    <a href={selected.rfpDocumentsFile} target="_blank" rel="noopener noreferrer" className="flex items-center gap-3 p-3 bg-slate-50 rounded-lg hover:bg-slate-100 border border-slate-200">
-                      <FileText size={20} className="text-blue-600" />
-                      <div>
-                        <p className="font-medium text-slate-900 text-sm">Technical Specifications</p>
-                        <p className="text-xs text-slate-500">Download PDF</p>
+                    <button
+                      onClick={() => {
+                        setSelected(null);
+                        onSubViewChange?.(null);
+                        window.history.replaceState({ __app: "rbf-spa", showPublicPortal: true }, "", "/public");
+                      }}
+                      className="flex-shrink-0 w-9 h-9 rounded-full bg-white/20 backdrop-blur-md hover:bg-white/30 text-white flex items-center justify-center transition"
+                    >
+                      <X size={18} />
+                    </button>
+                  </div>
+                </div>
+
+                <div className="p-8 space-y-6 overflow-y-auto" style={{ maxHeight: "calc(90vh - 160px)" }}>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="rounded-2xl border border-slate-200 p-4 bg-gradient-to-br from-slate-50 to-white">
+                      <p className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Published</p>
+                      <p className="font-bold text-slate-900">{selected.publishedAt ? new Date(selected.publishedAt).toLocaleDateString() : "N/A"}</p>
+                    </div>
+                    <div className="rounded-2xl border border-rose-100 p-4 bg-gradient-to-br from-rose-50 to-white">
+                      <p className="text-xs font-bold text-rose-600 uppercase tracking-wider mb-1">Deadline</p>
+                      <p className="font-bold text-rose-600">{selected.deadline ? new Date(selected.deadline).toLocaleDateString() : "N/A"}</p>
+                    </div>
+                  </div>
+
+                  <div>
+                    <h5 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3">Scope</h5>
+                    <div className="space-y-3">
+                      <div className="flex items-start gap-3 py-2 border-b border-slate-100">
+                        <span className="text-xs font-bold text-slate-500 w-32 flex-shrink-0 pt-1">Technology</span>
+                        <div className="flex flex-wrap gap-1.5 flex-1">
+                          {(selected.technologyTypes || []).length > 0 ? (selected.technologyTypes || []).map(tech => (
+                            <span key={tech} className="px-2.5 py-1 bg-emerald-50 text-emerald-700 rounded-full text-xs font-bold">{tech}</span>
+                          )) : <span className="text-sm text-slate-500">Not specified</span>}
+                        </div>
                       </div>
-                    </a>
-                  ) : (
-                    <div className="flex items-center gap-3 p-3 bg-slate-50 rounded-lg border border-slate-200 opacity-50">
-                      <FileText size={20} className="text-slate-400" />
-                      <div>
-                        <p className="font-medium text-slate-500 text-sm">Technical Specifications</p>
-                        <p className="text-xs text-slate-400">Not available</p>
+                      <div className="flex items-start gap-3 py-2 border-b border-slate-100">
+                        <span className="text-xs font-bold text-slate-500 w-32 flex-shrink-0 pt-1">Target Districts</span>
+                        <p className="text-sm text-slate-900 flex-1">{(selected.targetDistricts || []).join(", ") || "All districts"}</p>
+                      </div>
+                      <div className="flex items-start gap-3 py-2">
+                        <span className="text-xs font-bold text-slate-500 w-32 flex-shrink-0 pt-1">Installation Target</span>
+                        <p className="text-sm text-slate-900 flex-1 font-bold">
+                          {selected.approximateInstallationTarget ? `${selected.approximateInstallationTarget.toLocaleString()} installations` : "N/A"}
+                        </p>
                       </div>
                     </div>
-                  )}
-                </div>
-              </div>
+                  </div>
 
-              {/* CTA */}
-              <div className="bg-emerald-50 rounded-xl p-4 text-center border border-emerald-100">
-                <p className="font-medium text-emerald-800">Ready to submit a bid?</p>
-                <p className="text-sm text-emerald-600 mt-1">Login or register to access full tender details and submit your proposal</p>
-                <button onClick={() => { setSelected(null); onSubViewChange?.(null); window.history.replaceState({ __app: "rbf-spa", showPublicPortal: true }, "", "/public"); alert("Redirect to login"); }} className="btn-primary mt-3">Login / Register</button>
-              </div>
-            </div>
-          </div>
-        </div>}
+                  <div>
+                    <h5 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3">Eligibility</h5>
+                    <p className="text-sm text-slate-700 leading-relaxed">{selected.biddersEligibility || "Pre-qualification required. Vendors must be registered with valid trading license and tax clearance."}</p>
+                  </div>
+
+                  <div>
+                    <h5 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3">Public Documents</h5>
+                    <div className="space-y-2">
+                      {selected.scheduleFile ? (
+                        <a href={selected.scheduleFile} target="_blank" rel="noopener noreferrer" className="flex items-center gap-3 p-4 rounded-2xl border border-slate-200 hover:border-emerald-300 hover:bg-emerald-50/50 transition group">
+                          <div className="w-10 h-10 rounded-xl bg-emerald-100 text-emerald-600 flex items-center justify-center group-hover:bg-emerald-600 group-hover:text-white transition">
+                            <FileText size={18} />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="font-bold text-slate-900 text-sm">Tender Document</p>
+                            <p className="text-xs text-slate-500">Download PDF</p>
+                          </div>
+                          <Download size={16} className="text-slate-400 group-hover:text-emerald-600" />
+                        </a>
+                      ) : (
+                        <div className="flex items-center gap-3 p-4 rounded-2xl border border-slate-200 opacity-50">
+                          <div className="w-10 h-10 rounded-xl bg-slate-100 text-slate-400 flex items-center justify-center">
+                            <FileText size={18} />
+                          </div>
+                          <div className="flex-1">
+                            <p className="font-bold text-slate-500 text-sm">Tender Document</p>
+                            <p className="text-xs text-slate-400">Not available</p>
+                          </div>
+                        </div>
+                      )}
+                      {selected.rfpDocumentsFile ? (
+                        <a href={selected.rfpDocumentsFile} target="_blank" rel="noopener noreferrer" className="flex items-center gap-3 p-4 rounded-2xl border border-slate-200 hover:border-blue-300 hover:bg-blue-50/50 transition group">
+                          <div className="w-10 h-10 rounded-xl bg-blue-100 text-blue-600 flex items-center justify-center group-hover:bg-blue-600 group-hover:text-white transition">
+                            <FileText size={18} />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="font-bold text-slate-900 text-sm">Technical Specifications</p>
+                            <p className="text-xs text-slate-500">Download PDF</p>
+                          </div>
+                          <Download size={16} className="text-slate-400 group-hover:text-blue-600" />
+                        </a>
+                      ) : (
+                        <div className="flex items-center gap-3 p-4 rounded-2xl border border-slate-200 opacity-50">
+                          <div className="w-10 h-10 rounded-xl bg-slate-100 text-slate-400 flex items-center justify-center">
+                            <FileText size={18} />
+                          </div>
+                          <div className="flex-1">
+                            <p className="font-bold text-slate-500 text-sm">Technical Specifications</p>
+                            <p className="text-xs text-slate-400">Not available</p>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-emerald-600 to-teal-600 p-6 text-center">
+                    <div className="absolute inset-0 opacity-20" style={{
+                      backgroundImage: "radial-gradient(circle at 90% 10%, rgba(255,255,255,0.4) 0%, transparent 50%)"
+                    }} />
+                    <div className="relative space-y-2">
+                      <p className="font-black text-white text-lg">Ready to submit a bid?</p>
+                      <p className="text-emerald-50 text-sm">Login or register to access full tender details and submit your proposal</p>
+                      <button
+                        onClick={() => {
+                          setSelected(null);
+                          onSubViewChange?.(null);
+                          window.history.replaceState({ __app: "rbf-spa", showPublicPortal: true }, "", "/public");
+                          alert("Redirect to login");
+                        }}
+                        className="mt-3 px-6 py-2.5 bg-white text-emerald-700 font-bold rounded-full hover:bg-emerald-50 transition shadow-lg"
+                      >
+                        Login / Register
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </motion.div>
+            </motion.div>
+          </AnimatePresence>
+        )}
 
         {/* How to Apply */}
-        <div className="space-y-12">
-          <div className="text-center max-w-3xl mx-auto">
-            <span className="text-xs font-bold text-emerald-600 uppercase tracking-widest">How to Apply</span>
-            <h3 className="text-4xl font-bold text-slate-900 mt-3 mb-4">Step-by-Step Guide for Energy Vendors</h3>
-            <p className="text-lg text-slate-600">Follow these steps to join the Renewable Lesotho RBF programme and start delivering clean energy to communities across Lesotho.</p>
+        <div className="space-y-16">
+          <div className="text-center max-w-3xl mx-auto space-y-4">
+            <span className="inline-block px-4 py-1.5 bg-emerald-50 text-emerald-700 text-xs font-bold uppercase tracking-widest rounded-full">How to Apply</span>
+            <h3 className="text-4xl md:text-5xl font-black text-slate-900 tracking-tight">Your Path to Becoming an RBF Vendor</h3>
+            <p className="text-lg text-slate-600 leading-relaxed">Follow these steps to join the Renewable Lesotho RBF programme and start delivering clean energy to communities across Lesotho.</p>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
+          <div className="relative grid grid-cols-1 md:grid-cols-5 gap-4">
+            <div className="hidden md:block absolute top-12 left-[10%] right-[10%] h-0.5 bg-gradient-to-r from-emerald-300 via-blue-300 via-purple-300 via-amber-300 to-rose-300 -z-10" />
             {[
-              { step: 1, title: "Check Eligibility", color: "bg-emerald-600", items: ["Registered business or NGO in Lesotho", "Valid trading license", "Tax clearance certificate", "Company bank account in Lesotho", "Experience in renewable energy", "Commitment to inclusion targets (50% female, 30% vulnerable)"] },
-              { step: 2, title: "Register Account", color: "bg-blue-600", items: ["Company email address", "Mobile number for OTP", "Basic company info", "~5 minutes to complete"] },
-              { step: 3, title: "Pre-Qualification", color: "bg-purple-600", items: ["Upload trading license, tax clearance, registration cert", "Provide technical capacity details", "Submit inclusion commitment declaration", "Review takes 3-5 business days"] },
-              { step: 4, title: "Browse & Bid", color: "bg-amber-600", items: ["View all open tenders", "Submit Stage 1 concept note", "Stage 2 full proposal if shortlisted", "Include gender action plan & O&M strategy"] },
-              { step: 5, title: "Implement & Get Paid", color: "bg-rose-600", items: ["Sign performance-based contract", "Deploy installations in the field", "Register each installation on platform", "Claim milestone payments: 20% → 50% → 30%"] },
-            ].map(s => (
-              <div key={s.step} className="bg-white rounded-2xl border border-slate-200 p-5 flex flex-col">
-                <div className={`w-10 h-10 rounded-full ${s.color} text-white flex items-center justify-center font-bold text-lg mb-3`}>{s.step}</div>
-                <h4 className="font-bold text-slate-900 mb-3">{s.title}</h4>
+              { step: 1, title: "Check Eligibility", gradient: "from-emerald-500 to-teal-500", shadow: "shadow-emerald-500/30", items: ["Registered business or NGO in Lesotho", "Valid trading license", "Tax clearance certificate", "Company bank account in Lesotho", "Experience in renewable energy", "Commitment to inclusion targets (50% female, 30% vulnerable)"] },
+              { step: 2, title: "Register Account", gradient: "from-blue-500 to-indigo-500", shadow: "shadow-blue-500/30", items: ["Company email address", "Mobile number for OTP", "Basic company info", "~5 minutes to complete"] },
+              { step: 3, title: "Pre-Qualification", gradient: "from-purple-500 to-fuchsia-500", shadow: "shadow-purple-500/30", items: ["Upload trading license, tax clearance, registration cert", "Provide technical capacity details", "Submit inclusion commitment declaration", "Review takes 3-5 business days"] },
+              { step: 4, title: "Browse & Bid", gradient: "from-amber-500 to-orange-500", shadow: "shadow-amber-500/30", items: ["View all open tenders", "Submit Stage 1 concept note", "Stage 2 full proposal if shortlisted", "Include gender action plan & O&M strategy"] },
+              { step: 5, title: "Implement & Get Paid", gradient: "from-rose-500 to-pink-500", shadow: "shadow-rose-500/30", items: ["Sign performance-based contract", "Deploy installations in the field", "Register each installation on platform", "Claim milestone payments: 20% → 50% → 30%"] },
+            ].map((s, idx) => (
+              <motion.div
+                key={s.step}
+                initial={{ opacity: 0, y: 20 }}
+                whileInView={{ opacity: 1, y: 0 }}
+                viewport={{ once: true }}
+                transition={{ duration: 0.5, delay: idx * 0.1 }}
+                className="bg-white rounded-3xl border border-slate-200 p-6 flex flex-col hover:shadow-xl transition-shadow"
+              >
+                <div className={`w-12 h-12 rounded-2xl bg-gradient-to-br ${s.gradient} text-white flex items-center justify-center font-black text-xl mb-4 shadow-lg ${s.shadow}`}>
+                  {s.step}
+                </div>
+                <h4 className="font-bold text-slate-900 mb-3 text-lg">{s.title}</h4>
                 <ul className="space-y-2 flex-1">
                   {s.items.map((item, i) => (
                     <li key={i} className="text-sm text-slate-600 flex items-start gap-2">
-                      <span className="text-emerald-500 mt-1 flex-shrink-0">✓</span>
+                      <Check size={14} className="text-emerald-500 mt-0.5 flex-shrink-0" />
                       <span>{item}</span>
                     </li>
                   ))}
                 </ul>
-              </div>
+              </motion.div>
             ))}
           </div>
 
-          <div className="bg-slate-50 rounded-3xl p-10">
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-10">
-              <div>
-                <h4 className="text-xl font-bold text-slate-900 mb-6">Payment Schedule</h4>
-                <div className="space-y-4">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <div className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-emerald-600 via-teal-600 to-emerald-700 p-8 text-white">
+              <div className="absolute inset-0 opacity-20" style={{
+                backgroundImage: "radial-gradient(circle at 90% 10%, rgba(255,255,255,0.3) 0%, transparent 50%)"
+              }} />
+              <div className="relative">
+                <span className="inline-block px-3 py-1 bg-white/20 backdrop-blur-md text-white text-xs font-bold uppercase tracking-widest rounded-full mb-4">Payment Schedule</span>
+                <h4 className="text-2xl font-black mb-6">Milestone-Based Payouts</h4>
+                <div className="space-y-3">
                   {[
-                    { pct: "20%", label: "On contract signing + project setup" },
-                    { pct: "50%", label: "After 80% of installations verified" },
-                    { pct: "30%", label: "After 100% verified + all KPIs met" },
+                    { pct: "20%", label: "On contract signing + project setup", color: "bg-white" },
+                    { pct: "50%", label: "After 80% of installations verified", color: "bg-white" },
+                    { pct: "30%", label: "After 100% verified + all KPIs met", color: "bg-white" },
                   ].map(p => (
-                    <div key={p.pct} className="flex items-center gap-4 bg-white rounded-xl p-4 border border-slate-200">
-                      <span className="text-2xl font-black text-emerald-600 w-16 text-center">{p.pct}</span>
-                      <span className="text-sm text-slate-700">{p.label}</span>
+                    <div key={p.pct} className="flex items-center gap-4 bg-white/10 backdrop-blur-md rounded-2xl p-4 border border-white/20">
+                      <span className="text-3xl font-black text-white w-20 text-center">{p.pct}</span>
+                      <span className="text-sm text-emerald-50 flex-1">{p.label}</span>
                     </div>
                   ))}
                 </div>
               </div>
+            </div>
+
+            <div className="rounded-3xl bg-white border border-slate-200 p-8 space-y-6">
               <div>
-                <h4 className="text-xl font-bold text-slate-900 mb-6">Need Help?</h4>
-                <div className="space-y-3 bg-white rounded-2xl p-6 border border-slate-200">
-                  <div className="flex items-start gap-3">
-                    <span className="text-sm font-medium text-slate-500 w-24 flex-shrink-0">Email:</span>
-                    <span className="text-sm text-emerald-600 font-medium">rbf@energy.gov.ls</span>
+                <span className="inline-block px-3 py-1 bg-blue-50 text-blue-700 text-xs font-bold uppercase tracking-widest rounded-full">Need Help?</span>
+                <h4 className="text-2xl font-black text-slate-900 mt-4 mb-6">Get in Touch</h4>
+                <div className="space-y-4">
+                  <div className="flex items-center gap-4 p-4 rounded-2xl bg-slate-50 hover:bg-slate-100 transition">
+                    <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-500 flex items-center justify-center text-white flex-shrink-0">
+                      <Mail size={18} />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs text-slate-500 font-bold uppercase tracking-wider">Email</p>
+                      <p className="text-sm font-bold text-emerald-600 truncate">{contactEmail}</p>
+                    </div>
                   </div>
-                  <div className="flex items-start gap-3">
-                    <span className="text-sm font-medium text-slate-500 w-24 flex-shrink-0">Phone:</span>
-                    <span className="text-sm text-slate-900">+266 2231 XXXX</span>
+                  <div className="flex items-center gap-4 p-4 rounded-2xl bg-slate-50 hover:bg-slate-100 transition">
+                    <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-500 flex items-center justify-center text-white flex-shrink-0">
+                      <Clock size={18} />
+                    </div>
+                    <div className="flex-1">
+                      <p className="text-xs text-slate-500 font-bold uppercase tracking-wider">Phone</p>
+                      <p className="text-sm font-bold text-slate-900">{contactPhone}</p>
+                    </div>
                   </div>
-                  <div className="flex items-start gap-3">
-                    <span className="text-sm font-medium text-slate-500 w-24 flex-shrink-0">Hours:</span>
-                    <span className="text-sm text-slate-900">Mon-Fri, 08:00-17:00 SAST</span>
+                  <div className="flex items-center gap-4 p-4 rounded-2xl bg-slate-50 hover:bg-slate-100 transition">
+                    <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-purple-500 to-fuchsia-500 flex items-center justify-center text-white flex-shrink-0">
+                      <Calendar size={18} />
+                    </div>
+                    <div className="flex-1">
+                      <p className="text-xs text-slate-500 font-bold uppercase tracking-wider">Hours</p>
+                      <p className="text-sm font-bold text-slate-900">{contactOfficeHours}</p>
+                    </div>
                   </div>
                 </div>
-                <div className="mt-6">
-                  <button onClick={() => {
-                    setShowFaq(true);
-                    onSubViewChange?.("faq");
-                    window.history.replaceState({ __app: "rbf-spa", showPublicPortal: true, publicView: "faq" }, "", "/public/faq");
-                  }} className="text-emerald-600 font-medium text-sm hover:underline">View Frequently Asked Questions →</button>
-                </div>
+                <button onClick={() => {
+                  setShowFaq(true);
+                  onSubViewChange?.("faq");
+                  window.history.replaceState({ __app: "rbf-spa", showPublicPortal: true, publicView: "faq" }, "", "/public/faq");
+                }} className="mt-6 w-full px-6 py-3 bg-slate-900 text-white font-bold rounded-full hover:bg-slate-800 transition flex items-center justify-center gap-2">
+                  View FAQ <ArrowUpRight size={16} />
+                </button>
               </div>
             </div>
           </div>
 
           <div className="flex justify-center">
-            <button onClick={onRegisterClick} className="btn-primary px-8 py-3 text-base">Register Now →</button>
+            <button onClick={onRegisterClick} className="px-10 py-4 bg-gradient-to-r from-emerald-600 to-teal-600 text-white font-black rounded-full hover:shadow-2xl hover:shadow-emerald-500/30 hover:-translate-y-0.5 transition-all text-base">
+              Register Now →
+            </button>
           </div>
         </div>
 
         {/* Impact Story Section */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-16 items-center">
-          <div className="space-y-6">
-            <h3 className="text-4xl font-bold text-slate-900 leading-tight">
-              Beyond the Numbers: <br />
-              <span className="text-emerald-600">Powering Education in Qacha's Nek</span>
+        <div className="grid grid-cols-1 lg:grid-cols-5 gap-12 items-center">
+          <div className="lg:col-span-3 space-y-6">
+            <span className="inline-block px-4 py-1.5 bg-rose-50 text-rose-700 text-xs font-bold uppercase tracking-widest rounded-full">Impact Story</span>
+            <h3 className="text-4xl md:text-5xl font-black text-slate-900 leading-tight tracking-tight">
+              Beyond the Numbers:{" "}
+              <span className="bg-gradient-to-r from-emerald-600 to-teal-600 bg-clip-text text-transparent">
+                Powering Communities Across Lesotho
+              </span>
             </h3>
             <p className="text-lg text-slate-600 leading-relaxed">
-              Before the RBF program, students in the remote village of Ha-Ramabanta relied on kerosene lamps for evening study. Today, a community mini-grid provides reliable, clean power to 450 homes and the local primary school.
+              The Renewable Lesotho RBF programme brings verified clean energy access to households across all 10 districts. Every installation is independently field-verified, every kilowatt-hour is metered, and every payment is tied to demonstrated results.
             </p>
-            <div className="flex gap-4 pt-4">
-              <div className="flex -space-x-2">
+            <div className="flex items-center gap-4 pt-4">
+              <div className="flex -space-x-3">
                 {[1, 2, 3, 4].map(i => (
-                  <img 
+                  <img
                     key={i}
-                    src={`https://i.pravatar.cc/100?u=${i}`} 
-                    className="w-10 h-10 rounded-full border-2 border-white"
-                    alt="User"
+                    src={`https://i.pravatar.cc/100?u=${i}`}
+                    className="w-12 h-12 rounded-full border-4 border-white shadow-md"
+                    alt="Beneficiary"
                   />
                 ))}
+                <div className="w-12 h-12 rounded-full bg-gradient-to-br from-emerald-500 to-teal-500 border-4 border-white shadow-md flex items-center justify-center text-white text-xs font-bold">
+                  {kpiLoading ? "..." : householdsWithEnergy > 0 ? `${(householdsWithEnergy / 1000).toFixed(1)}K` : "RBF"}
+                </div>
               </div>
-              <p className="text-sm text-slate-500 flex items-center">
-                Join 12,000+ others in the transition
+              <p className="text-sm text-slate-600 font-medium">
+                {kpiLoading ? "Loading..." : householdsWithEnergy > 0 ? `Join ${householdsWithEnergy.toLocaleString()}+ households in the transition` : "Be among the first households to join the transition"}
               </p>
             </div>
           </div>
-          <div className="relative">
-            <div className="aspect-square rounded-3xl overflow-hidden shadow-2xl">
-              <img 
-                src="https://picsum.photos/seed/impact-story/800/800" 
-                alt="Impact Story" 
+          <div className="lg:col-span-2 relative">
+            <div className="aspect-square rounded-3xl overflow-hidden shadow-2xl shadow-slate-900/20">
+              <img
+                src="https://picsum.photos/seed/impact-story/800/800"
+                alt="Impact Story"
                 className="w-full h-full object-cover"
                 referrerPolicy="no-referrer"
               />
             </div>
-            <div className="absolute -bottom-8 -left-8 bg-white p-6 rounded-2xl shadow-xl max-w-xs border border-slate-100">
-              <p className="text-sm italic text-slate-600 mb-2">
-                "The light has changed everything. My children can study safely, and we no longer breathe smoke from the lamps."
+            <div className="absolute -bottom-6 -left-6 md:-left-12 bg-white p-6 rounded-2xl shadow-2xl shadow-slate-900/10 max-w-xs border border-slate-100">
+              <div className="text-3xl text-emerald-500 mb-1">"</div>
+              <p className="text-sm italic text-slate-700 leading-relaxed mb-3">
+                Verified clean energy access is reaching households across all 10 districts of Lesotho — every installation is independently confirmed.
               </p>
-              <p className="text-xs font-bold text-slate-900">— Masechaba T., Beneficiary</p>
+              <div className="flex items-center gap-2 pt-2 border-t border-slate-100">
+                <div className="w-8 h-8 rounded-full bg-gradient-to-br from-emerald-500 to-teal-500 flex items-center justify-center text-white text-xs font-bold">
+                  <Users size={14} />
+                </div>
+                <p className="text-xs font-bold text-slate-900">RBF Programme Impact</p>
+              </div>
             </div>
           </div>
         </div>
 
         {/* About the Programme */}
-        <div className="space-y-20">
-          <div className="text-center max-w-3xl mx-auto">
-            <span className="text-xs font-bold text-emerald-600 uppercase tracking-widest">About the Programme</span>
-            <h3 className="text-4xl font-bold text-slate-900 mt-3 mb-4">What is Renewable Lesotho?</h3>
+        <div className="space-y-16">
+          <div className="text-center max-w-3xl mx-auto space-y-4">
+            <span className="inline-block px-4 py-1.5 bg-blue-50 text-blue-700 text-xs font-bold uppercase tracking-widest rounded-full">About the Programme</span>
+            <h3 className="text-4xl md:text-5xl font-black text-slate-900 tracking-tight">What is Renewable Lesotho?</h3>
             <p className="text-lg text-slate-600 leading-relaxed">
               Renewable Lesotho is a Results-Based Financing programme implemented by UNDP Lesotho with support from the European Union and Irish Aid. The programme supports the expansion of clean energy access across Lesotho by providing performance-based grants to pre-qualified energy developers.
             </p>
-            <p className="text-lg text-slate-600 leading-relaxed mt-4">
+            <p className="text-lg text-slate-600 leading-relaxed">
               Unlike traditional grant programmes, RBF payments are only released after results are independently verified on the ground. This ensures that every Maloti spent directly delivers clean energy to households that need it most.
             </p>
           </div>
 
-          <div className="bg-slate-50 rounded-3xl p-10">
-            <h4 className="text-2xl font-bold text-slate-900 mb-8 text-center">Programme Objectives</h4>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="space-y-6">
+            <h4 className="text-3xl font-black text-slate-900 text-center tracking-tight">Programme Objectives</h4>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {[
-                { num: 1, text: "Increase household access to clean energy across all 10 districts of Lesotho" },
-                { num: 2, text: "Prioritise female-headed households, vulnerable groups, and low-income communities" },
-                { num: 3, text: "Support the growth of a sustainable local clean energy private sector" },
-                { num: 4, text: "Contribute to Lesotho's climate goals and nationally determined contributions (NDCs)" },
+                { num: 1, title: "Energy Access for All", text: "Increase household access to clean energy across all 10 districts of Lesotho", gradient: "from-emerald-500 to-teal-500" },
+                { num: 2, title: "Inclusive Targeting", text: "Prioritise female-headed households, vulnerable groups, and low-income communities", gradient: "from-blue-500 to-indigo-500" },
+                { num: 3, title: "Local Private Sector", text: "Support the growth of a sustainable local clean energy private sector", gradient: "from-purple-500 to-fuchsia-500" },
+                { num: 4, title: "Climate Goals", text: "Contribute to Lesotho's climate goals and nationally determined contributions (NDCs)", gradient: "from-amber-500 to-orange-500" },
               ].map(obj => (
-                <div key={obj.num} className="bg-white rounded-2xl p-6 border border-slate-200 flex gap-4">
-                  <span className="flex-shrink-0 w-10 h-10 rounded-full bg-emerald-600 text-white flex items-center justify-center font-bold text-lg">{obj.num}</span>
-                  <p className="text-slate-700 leading-relaxed">{obj.text}</p>
-                </div>
+                <motion.div
+                  key={obj.num}
+                  initial={{ opacity: 0, y: 20 }}
+                  whileInView={{ opacity: 1, y: 0 }}
+                  viewport={{ once: true }}
+                  transition={{ duration: 0.4, delay: obj.num * 0.05 }}
+                  className="group bg-white rounded-3xl p-6 border border-slate-200 hover:border-emerald-300 hover:shadow-xl hover:shadow-emerald-500/10 transition-all"
+                >
+                  <div className="flex items-start gap-4">
+                    <span className={`flex-shrink-0 w-12 h-12 rounded-2xl bg-gradient-to-br ${obj.gradient} text-white flex items-center justify-center font-black text-xl shadow-lg`}>
+                      {obj.num}
+                    </span>
+                    <div className="flex-1 min-w-0">
+                      <h5 className="font-black text-slate-900 mb-1 text-lg">{obj.title}</h5>
+                      <p className="text-slate-600 leading-relaxed">{obj.text}</p>
+                    </div>
+                  </div>
+                </motion.div>
               ))}
             </div>
           </div>
 
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-12 items-start">
-            <div>
-              <h4 className="text-2xl font-bold text-slate-900 mb-6">How the Platform Works</h4>
-              <p className="text-slate-600 mb-6">The RBF Digital Platform manages the complete lifecycle of the programme:</p>
-              <div className="space-y-4">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <div className="rounded-3xl bg-white border border-slate-200 p-8 space-y-6">
+              <div>
+                <span className="inline-block px-3 py-1 bg-slate-100 text-slate-700 text-xs font-bold uppercase tracking-widest rounded-full">How It Works</span>
+                <h4 className="text-2xl font-black text-slate-900 mt-4 mb-2">The Platform Lifecycle</h4>
+                <p className="text-slate-600">The RBF Digital Platform manages the complete lifecycle of the programme.</p>
+              </div>
+              <div className="space-y-3">
                 {[
-                  "Vendor pre-qualification and registration",
-                  "Competitive tendering and bid evaluation",
-                  "Contract award and signing",
-                  "Project implementation and monitoring",
-                  "Independent field verification",
-                  "KPI assessment and payment disbursement",
+                  { label: "Vendor pre-qualification and registration", icon: UserCircle },
+                  { label: "Competitive tendering and bid evaluation", icon: Gavel },
+                  { label: "Contract award and signing", icon: FileText },
+                  { label: "Project implementation and monitoring", icon: Activity },
+                  { label: "Independent field verification", icon: ShieldCheck },
+                  { label: "KPI assessment and payment disbursement", icon: CreditCard },
                 ].map((step, i) => (
-                  <div key={i} className="flex items-start gap-4">
-                    <span className="flex-shrink-0 w-8 h-8 rounded-full bg-slate-800 text-white flex items-center justify-center text-sm font-bold">{i + 1}</span>
-                    <p className="text-slate-700 pt-1">{step}</p>
+                  <div key={i} className="flex items-center gap-4 p-3 rounded-2xl hover:bg-slate-50 transition">
+                    <span className="flex-shrink-0 w-8 h-8 rounded-xl bg-gradient-to-br from-slate-800 to-slate-900 text-white flex items-center justify-center text-sm font-bold">
+                      {i + 1}
+                    </span>
+                    <step.icon size={16} className="text-emerald-600 flex-shrink-0" />
+                    <p className="text-slate-700 text-sm flex-1">{step.label}</p>
                   </div>
                 ))}
               </div>
-              <p className="text-sm text-slate-500 mt-6 italic">All data is transparently recorded and available for independent audit at any time.</p>
+              <p className="text-sm text-slate-500 italic pt-2 border-t border-slate-100">All data is transparently recorded and available for independent audit at any time.</p>
             </div>
-            <div>
-              <h4 className="text-2xl font-bold text-slate-900 mb-6">Implementing Partners</h4>
-              <div className="space-y-3 bg-white rounded-2xl p-6 border border-slate-200">
+
+            <div className="rounded-3xl bg-gradient-to-br from-slate-900 to-slate-800 p-8 text-white space-y-6">
+              <div>
+                <span className="inline-block px-3 py-1 bg-white/10 backdrop-blur-md text-white text-xs font-bold uppercase tracking-widest rounded-full">Partners</span>
+                <h4 className="text-2xl font-black mt-4 mb-2">Implementing Partners</h4>
+                <p className="text-slate-300 text-sm">A coalition of donors, government, and builders.</p>
+              </div>
+              <div className="space-y-2">
                 {[
-                  { label: "Programme Lead", value: "UNDP Lesotho" },
-                  { label: "Technical Partner", value: "Ministry of Energy" },
-                  { label: "Funder 1", value: "European Union Delegation" },
-                  { label: "Funder 2", value: "Irish Aid" },
-                  { label: "Platform Builder", value: "Dream71 Bangladesh Ltd" },
+                  { label: "Programme Lead", value: "UNDP Lesotho", icon: Globe },
+                  { label: "Technical Partner", value: "Ministry of Energy", icon: Building2 },
+                  { label: "Funder 1", value: "European Union Delegation", icon: Award },
+                  { label: "Funder 2", value: "Irish Aid", icon: Award },
+                  { label: "Platform Builder", value: "Dream71 Bangladesh Ltd", icon: Database, logo: "/Dev%20Company%20Logo/dream71_bangladesh_ltd_logo.png" },
                 ].map(p => (
-                  <div key={p.label} className="flex justify-between items-center py-2 border-b border-slate-100 last:border-0">
-                    <span className="text-sm font-medium text-slate-500">{p.label}</span>
-                    <span className="text-sm font-bold text-slate-900">{p.value}</span>
+                  <div key={p.label} className="flex items-center gap-3 p-3 rounded-2xl bg-white/5 hover:bg-white/10 backdrop-blur-sm transition border border-white/10">
+                    {p.logo ? (
+                      <img
+                        src={p.logo}
+                        alt={`${p.value} logo`}
+                        className="flex-shrink-0 w-10 h-10 rounded-xl object-contain bg-white p-1"
+                        loading="lazy"
+                      />
+                    ) : (
+                      <span className="flex-shrink-0 w-10 h-10 rounded-xl bg-white/10 flex items-center justify-center text-emerald-400">
+                        <p.icon size={18} />
+                      </span>
+                    )}
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs text-slate-400 font-medium">{p.label}</p>
+                      <p className="text-sm font-bold truncate">{p.value}</p>
+                    </div>
                   </div>
                 ))}
               </div>
             </div>
           </div>
 
-          <div className="bg-emerald-50 rounded-3xl p-10 text-center">
-            <h4 className="text-2xl font-bold text-slate-900 mb-6">Contact</h4>
-            <div className="space-y-2 text-slate-700">
-              <p className="font-bold text-lg">RBF Management Team</p>
-              <p>Ministry of Energy, Water and Meteorology</p>
-              <p>Maseru, Lesotho</p>
-              <p className="pt-2"><span className="font-medium">Email:</span> rbf@energy.gov.ls</p>
-              <p><span className="font-medium">Phone:</span> +266 2231 XXXX</p>
-              <p><span className="font-medium">Address:</span> Corner Constitution &amp; Parliament Road, Maseru 100, Lesotho</p>
+          <div className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-emerald-600 via-teal-600 to-emerald-700 p-10 md:p-12">
+            <div className="absolute inset-0 opacity-20" style={{
+              backgroundImage: "radial-gradient(circle at 90% 10%, rgba(255,255,255,0.3) 0%, transparent 50%), radial-gradient(circle at 10% 90%, rgba(255,255,255,0.2) 0%, transparent 50%)"
+            }} />
+            <div className="relative grid grid-cols-1 md:grid-cols-2 gap-8 items-center">
+              <div className="space-y-3 text-white">
+                <span className="inline-block px-3 py-1 bg-white/20 backdrop-blur-md text-white text-xs font-bold uppercase tracking-widest rounded-full">Get in Touch</span>
+                <h4 className="text-3xl font-black tracking-tight">{contactOrgName}</h4>
+                <p className="text-emerald-50">Maseru, Lesotho</p>
+                <div className="space-y-2 pt-3">
+                  <div className="flex items-center gap-3">
+                    <Mail size={16} className="text-emerald-200" />
+                    <span className="text-sm">{contactEmail}</span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <Clock size={16} className="text-emerald-200" />
+                    <span className="text-sm">{contactPhone}</span>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <MapPin size={16} className="text-emerald-200 mt-0.5 flex-shrink-0" />
+                    <span className="text-sm">{contactAddress}</span>
+                  </div>
+                </div>
+              </div>
+              <div className="bg-white/10 backdrop-blur-md rounded-3xl p-6 border border-white/20 text-white">
+                <p className="text-sm font-bold uppercase tracking-widest text-emerald-200 mb-2">Office Hours</p>
+                <p className="text-2xl font-black mb-1 bg-gradient-to-r from-white to-emerald-100 bg-clip-text text-transparent">{contactOfficeHours}</p>
+              </div>
             </div>
           </div>
         </div>
 
         {/* FAQ Modal */}
         {showFaq && (
-          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => {
-            setShowFaq(false);
-            onSubViewChange?.(null);
-            window.history.replaceState({ __app: "rbf-spa", showPublicPortal: true }, "", "/public");
-          }}>
-            <div className="bg-white rounded-2xl max-w-2xl w-full max-h-[90vh] overflow-hidden flex flex-col" onClick={e => e.stopPropagation()}>
-              <div className="bg-emerald-600 text-white px-6 py-4 flex items-center justify-between flex-shrink-0">
-                <div>
-                  <h3 className="text-lg font-bold">Frequently Asked Questions</h3>
-                  <p className="text-emerald-100 text-xs mt-0.5">Everything you need to know about the RBF programme</p>
-                </div>
-                <button onClick={() => {
-                  setShowFaq(false);
-                  onSubViewChange?.(null);
-                  window.history.replaceState({ __app: "rbf-spa", showPublicPortal: true }, "", "/public");
-                }} className="text-white/80 hover:text-white"><X size={24} /></button>
-              </div>
-              <div className="overflow-y-auto flex-1 p-6 space-y-6">
-                {/* About the Programme */}
-                <div>
-                  <h4 className="text-sm font-bold text-emerald-600 uppercase tracking-widest mb-3">About the Programme</h4>
-                  <div className="space-y-4">
-                    <div>
-                      <p className="font-medium text-slate-900 text-sm">Q: What is Results-Based Financing?</p>
-                      <p className="text-sm text-slate-600 mt-1">RBF is a funding model where payments are only released after results are independently verified. You install first, get verified, then receive payment.</p>
+          <AnimatePresence>
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 bg-slate-900/70 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+              onClick={() => {
+                setShowFaq(false);
+                onSubViewChange?.(null);
+                window.history.replaceState({ __app: "rbf-spa", showPublicPortal: true }, "", "/public");
+              }}
+            >
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95, y: 20 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.95, y: 20 }}
+                transition={{ duration: 0.25 }}
+                className="bg-white rounded-3xl max-w-2xl w-full max-h-[90vh] overflow-hidden shadow-2xl flex flex-col"
+                onClick={e => e.stopPropagation()}
+              >
+                <div className="relative bg-gradient-to-br from-emerald-600 via-teal-600 to-emerald-700 px-8 py-6 overflow-hidden">
+                  <div className="absolute inset-0 opacity-20" style={{
+                    backgroundImage: "radial-gradient(circle at 90% 10%, rgba(255,255,255,0.4) 0%, transparent 50%)"
+                  }} />
+                  <div className="relative flex items-start justify-between gap-4">
+                    <div className="space-y-1">
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-white/20 backdrop-blur-md text-white text-xs font-bold rounded-full">
+                        <HelpCircle size={12} />
+                        Help Center
+                      </span>
+                      <h3 className="text-2xl font-black text-white">Frequently Asked Questions</h3>
+                      <p className="text-emerald-50 text-sm">Everything you need to know about the RBF programme</p>
                     </div>
-                    <div>
-                      <p className="font-medium text-slate-900 text-sm">Q: Who funds this programme?</p>
-                      <p className="text-sm text-slate-600 mt-1">The programme is funded by the European Union and Irish Aid, implemented by UNDP Lesotho in partnership with the Ministry of Energy.</p>
-                    </div>
-                    <div>
-                      <p className="font-medium text-slate-900 text-sm">Q: Which districts are covered?</p>
-                      <p className="text-sm text-slate-600 mt-1">The programme covers all 10 districts of Lesotho, with priority areas announced through each tender.</p>
-                    </div>
+                    <button onClick={() => {
+                      setShowFaq(false);
+                      onSubViewChange?.(null);
+                      window.history.replaceState({ __app: "rbf-spa", showPublicPortal: true }, "", "/public");
+                    }} className="flex-shrink-0 w-9 h-9 rounded-full bg-white/20 backdrop-blur-md hover:bg-white/30 text-white flex items-center justify-center transition">
+                      <X size={18} />
+                    </button>
                   </div>
                 </div>
 
-                <div className="border-t border-slate-200" />
+                <div className="overflow-y-auto flex-1 p-8 space-y-6">
+                  {[
+                    {
+                      section: "About the Programme",
+                      color: "from-emerald-500 to-teal-500",
+                      questions: [
+                        { q: "What is Results-Based Financing?", a: "RBF is a funding model where payments are only released after results are independently verified. You install first, get verified, then receive payment." },
+                        { q: "Who funds this programme?", a: "The programme is funded by the European Union and Irish Aid, implemented by UNDP Lesotho in partnership with the Ministry of Energy." },
+                        { q: "Which districts are covered?", a: "The programme covers all 10 districts of Lesotho, with priority areas announced through each tender." },
+                      ],
+                    },
+                    {
+                      section: "About Applying",
+                      color: "from-blue-500 to-indigo-500",
+                      questions: [
+                        { q: "Does it cost anything to register?", a: "No. Registration and pre-qualification are completely free." },
+                        { q: "How long does pre-qualification approval take?", a: "The RMT team reviews submissions within 3 to 5 business days." },
+                        { q: "Can I apply for multiple tenders?", a: "Yes. Once pre-qualified you can apply for any open tender that matches your technology type." },
+                        { q: "What if my pre-qualification is rejected?", a: "You will receive specific feedback explaining why. You can correct the issues and resubmit." },
+                      ],
+                    },
+                    {
+                      section: "About Payments",
+                      color: "from-purple-500 to-fuchsia-500",
+                      questions: [
+                        { q: "When do I receive payment?", a: "Payments are milestone-based: 20% after setup and contract signing, 50% after 80% of installations are independently verified, 30% after 100% verified and all KPI targets are met." },
+                        { q: "Who verifies my installations?", a: "Independent field officers from the Department of Energy physically visit each installation site." },
+                        { q: "What are the gender inclusion targets?", a: "At least 50% of your installations must benefit female-headed households. At least 30% must benefit vulnerable groups (elderly, disabled, HIV-affected)." },
+                      ],
+                    },
+                    {
+                      section: "Technical Questions",
+                      color: "from-amber-500 to-orange-500",
+                      questions: [
+                        { q: "Do I need smart meters?", a: "Smart meters are optional. You can also submit meter data manually using our CSV upload template." },
+                        { q: "What file formats are accepted for documents?", a: "PDF and DOCX for documents. JPG and PNG for photos. Maximum 10MB per file." },
+                      ],
+                    },
+                  ].map(group => (
+                    <div key={group.section} className="space-y-3">
+                      <div className="flex items-center gap-3">
+                        <span className={`inline-flex items-center justify-center w-8 h-8 rounded-xl bg-gradient-to-br ${group.color} text-white`}>
+                          <Info size={14} />
+                        </span>
+                        <h4 className="text-xs font-black text-slate-700 uppercase tracking-widest">{group.section}</h4>
+                      </div>
+                      <div className="space-y-2 pl-11">
+                        {group.questions.map((item, i) => (
+                          <details key={i} className="group rounded-xl border border-slate-200 bg-white hover:border-emerald-300 transition">
+                            <summary className="cursor-pointer p-3 flex items-start gap-3 list-none">
+                              <span className="text-emerald-600 font-bold text-sm flex-shrink-0 mt-0.5">Q</span>
+                              <span className="text-sm font-bold text-slate-900 flex-1">{item.q}</span>
+                              <ChevronDown size={16} className="text-slate-400 group-open:rotate-180 transition-transform flex-shrink-0" />
+                            </summary>
+                            <div className="px-3 pb-3 pl-8 flex items-start gap-3">
+                              <span className="text-slate-400 font-bold text-sm flex-shrink-0 mt-0.5">A</span>
+                              <p className="text-sm text-slate-600 leading-relaxed">{item.a}</p>
+                            </div>
+                          </details>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
 
-                {/* About Applying */}
-                <div>
-                  <h4 className="text-sm font-bold text-emerald-600 uppercase tracking-widest mb-3">About Applying</h4>
-                  <div className="space-y-4">
-                    <div>
-                      <p className="font-medium text-slate-900 text-sm">Q: Does it cost anything to register?</p>
-                      <p className="text-sm text-slate-600 mt-1">No. Registration and pre-qualification are completely free.</p>
-                    </div>
-                    <div>
-                      <p className="font-medium text-slate-900 text-sm">Q: How long does pre-qualification approval take?</p>
-                      <p className="text-sm text-slate-600 mt-1">The RMT team reviews submissions within 3 to 5 business days.</p>
-                    </div>
-                    <div>
-                      <p className="font-medium text-slate-900 text-sm">Q: Can I apply for multiple tenders?</p>
-                      <p className="text-sm text-slate-600 mt-1">Yes. Once pre-qualified you can apply for any open tender that matches your technology type.</p>
-                    </div>
-                    <div>
-                      <p className="font-medium text-slate-900 text-sm">Q: What if my pre-qualification is rejected?</p>
-                      <p className="text-sm text-slate-600 mt-1">You will receive specific feedback explaining why. You can correct the issues and resubmit.</p>
+                  <div className="rounded-2xl bg-gradient-to-br from-slate-900 to-slate-800 p-6 text-white space-y-3">
+                    <p className="text-sm font-bold uppercase tracking-widest text-emerald-400">Still have questions?</p>
+                    <p className="text-sm text-slate-300">Our team is happy to help with anything not covered above.</p>
+                    <div className="flex flex-wrap gap-3 pt-2">
+                      <a href={`mailto:${contactEmail}`} className="inline-flex items-center gap-2 px-4 py-2 bg-white/10 hover:bg-white/20 backdrop-blur-md rounded-full text-sm font-medium transition">
+                        <Mail size={14} />
+                        {contactEmail}
+                      </a>
+                      <span className="inline-flex items-center gap-2 px-4 py-2 bg-white/10 backdrop-blur-md rounded-full text-sm font-medium">
+                        <Clock size={14} />
+                        {contactPhone}
+                      </span>
                     </div>
                   </div>
                 </div>
-
-                <div className="border-t border-slate-200" />
-
-                {/* About Payments */}
-                <div>
-                  <h4 className="text-sm font-bold text-emerald-600 uppercase tracking-widest mb-3">About Payments</h4>
-                  <div className="space-y-4">
-                    <div>
-                      <p className="font-medium text-slate-900 text-sm">Q: When do I receive payment?</p>
-                      <p className="text-sm text-slate-600 mt-1">Payments are milestone-based: 20% after setup and contract signing, 50% after 80% of installations are independently verified, 30% after 100% verified and all KPI targets are met.</p>
-                    </div>
-                    <div>
-                      <p className="font-medium text-slate-900 text-sm">Q: Who verifies my installations?</p>
-                      <p className="text-sm text-slate-600 mt-1">Independent field officers from the Department of Energy physically visit each installation site.</p>
-                    </div>
-                    <div>
-                      <p className="font-medium text-slate-900 text-sm">Q: What are the gender inclusion targets?</p>
-                      <p className="text-sm text-slate-600 mt-1">At least 50% of your installations must benefit female-headed households. At least 30% must benefit vulnerable groups (elderly, disabled, HIV-affected).</p>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="border-t border-slate-200" />
-
-                {/* Technical Questions */}
-                <div>
-                  <h4 className="text-sm font-bold text-emerald-600 uppercase tracking-widest mb-3">Technical Questions</h4>
-                  <div className="space-y-4">
-                    <div>
-                      <p className="font-medium text-slate-900 text-sm">Q: Do I need smart meters?</p>
-                      <p className="text-sm text-slate-600 mt-1">Smart meters are optional. You can also submit meter data manually using our CSV upload template.</p>
-                    </div>
-                    <div>
-                      <p className="font-medium text-slate-900 text-sm">Q: What file formats are accepted for documents?</p>
-                      <p className="text-sm text-slate-600 mt-1">PDF and DOCX for documents. JPG and PNG for photos. Maximum 10MB per file.</p>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="border-t border-slate-200" />
-
-                {/* Contact */}
-                <div>
-                  <h4 className="text-sm font-bold text-emerald-600 uppercase tracking-widest mb-3">Contact</h4>
-                  <p className="text-sm text-slate-600 mb-3">Still have questions?</p>
-                  <div className="space-y-2 bg-slate-50 rounded-xl p-4">
-                    <p className="text-sm"><span className="font-medium">Email:</span> rbf@energy.gov.ls</p>
-                    <p className="text-sm"><span className="font-medium">Phone:</span> +266 2231 XXXX</p>
-                  </div>
-                </div>
-              </div>
-              <div className="px-6 py-4 border-t border-slate-200 flex justify-end flex-shrink-0">
-                <button onClick={() => {
-                  setShowFaq(false);
-                  onSubViewChange?.(null);
-                  window.history.replaceState({ __app: "rbf-spa", showPublicPortal: true }, "", "/public");
-                }} className="btn-primary text-sm py-2">Close</button>
-              </div>
-            </div>
-          </div>
+              </motion.div>
+            </motion.div>
+          </AnimatePresence>
         )}
 
         {/* Footer / CTA */}
-        <div className="text-center py-24 space-y-8 border-t border-slate-100">
-          <div className="flex justify-center gap-8 items-center opacity-50 grayscale hover:grayscale-0 transition-all">
-            <img src="https://upload.wikimedia.org/wikipedia/commons/b/bb/UNDP_logo.svg" alt="UNDP" className="h-12" />
-            <div className="h-8 w-px bg-slate-300" />
-            <p className="font-bold text-slate-900">Government of Lesotho</p>
+        <div className="text-center py-20 space-y-8 border-t border-slate-200">
+          <div className="flex flex-wrap justify-center gap-4 md:gap-6 items-center opacity-70 hover:opacity-100 transition-all">
+            <div className="px-6 py-3 bg-white rounded-2xl shadow-md border border-slate-100">
+              <p className="text-xs font-bold text-slate-500 uppercase tracking-widest">Programme Lead</p>
+              <p className="text-sm font-black text-slate-900">UNDP Lesotho</p>
+            </div>
+            <div className="px-6 py-3 bg-white rounded-2xl shadow-md border border-slate-100">
+              <p className="text-xs font-bold text-slate-500 uppercase tracking-widest">Government Partner</p>
+              <p className="text-sm font-black text-slate-900">Ministry of Energy</p>
+            </div>
+            <div className="px-6 py-3 bg-white rounded-2xl shadow-md border border-slate-100 flex items-center gap-3">
+              <img
+                src="/Dev%20Company%20Logo/dream71_bangladesh_ltd_logo.png"
+                alt="Dream71 Bangladesh Ltd logo"
+                className="h-8 w-auto object-contain"
+                loading="lazy"
+              />
+              <div className="text-left">
+                <p className="text-xs font-bold text-slate-500 uppercase tracking-widest">Platform Builder</p>
+                <p className="text-sm font-black text-slate-900">Dream71 Bangladesh Ltd</p>
+              </div>
+            </div>
           </div>
           <div className="space-y-4">
-            <h4 className="text-2xl font-bold text-slate-900">Ready to dive deeper?</h4>
-            <p className="text-slate-500">Access the full technical dashboard and audit logs.</p>
+            <h4 className="text-3xl font-black text-slate-900 tracking-tight">Ready to dive deeper?</h4>
+            <p className="text-slate-500 max-w-md mx-auto">Access the full technical dashboard, KPI reports, and audit logs.</p>
             {onBack && (
-              <button 
+              <button
                 onClick={onBack}
-                className="btn-primary px-8 py-3 rounded-full"
+                className="mt-2 px-8 py-3 bg-slate-900 text-white font-bold rounded-full hover:bg-slate-800 transition shadow-lg hover:shadow-xl"
               >
                 Back to Portal
               </button>
