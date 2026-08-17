@@ -227,8 +227,13 @@ import {
   uploadProjectMeterCsv,
   API_BASE,
   USER_KEY,
+  IDLE_TIMEOUT_MS,
+  IDLE_WARNING_MS,
+  IDLE_EVENT_NAME,
+  IDLE_WARNING_EVENT_NAME,
   getSessionExpiredMessage,
   clearSessionExpiredMessage,
+  triggerIdleLogout,
 } from "./api";
 import GisInstallationsMap from "./components/GisInstallationsMap";
 import KpiDashboard from "./components/KpiDashboard";
@@ -24960,6 +24965,91 @@ export default function App() {
     window.addEventListener("rbf-session-expired", handler);
     return () => window.removeEventListener("rbf-session-expired", handler);
   }, []);
+
+  React.useEffect(() => {
+    const handler = (event: Event) => {
+      const customEvent = event as CustomEvent<{ deferred?: boolean }>;
+      if (!customEvent.detail?.deferred) return;
+      if (document.hidden) return;
+      triggerIdleLogout();
+    };
+    window.addEventListener(IDLE_EVENT_NAME, handler);
+    return () => window.removeEventListener(IDLE_EVENT_NAME, handler);
+  }, []);
+
+  React.useEffect(() => {
+    if (!currentUser) return;
+
+    let warningTimer: ReturnType<typeof setTimeout> | null = null;
+    let logoutTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastActivity = Date.now();
+    let isHidden = document.hidden;
+
+    const clearTimers = () => {
+      if (warningTimer) {
+        clearTimeout(warningTimer);
+        warningTimer = null;
+      }
+      if (logoutTimer) {
+        clearTimeout(logoutTimer);
+        logoutTimer = null;
+      }
+    };
+
+    const scheduleTimers = () => {
+      clearTimers();
+      const elapsed = Date.now() - lastActivity;
+      const remainingToWarning = Math.max(0, IDLE_WARNING_MS - elapsed);
+      const remainingToLogout = Math.max(0, IDLE_TIMEOUT_MS - elapsed);
+
+      warningTimer = setTimeout(() => {
+        if (!document.hidden) {
+          window.dispatchEvent(new CustomEvent(IDLE_WARNING_EVENT_NAME));
+        }
+      }, remainingToWarning);
+
+      logoutTimer = setTimeout(() => {
+        if (document.hidden) {
+          window.dispatchEvent(new CustomEvent(IDLE_EVENT_NAME, { detail: { deferred: true } }));
+        } else {
+          triggerIdleLogout();
+        }
+      }, remainingToLogout);
+    };
+
+    const handleActivity = () => {
+      lastActivity = Date.now();
+      if (!isHidden) {
+        scheduleTimers();
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      isHidden = document.hidden;
+      if (!isHidden) {
+        lastActivity = Date.now();
+        scheduleTimers();
+      } else {
+        clearTimers();
+      }
+    };
+
+    const activityEvents = ["mousedown", "keydown", "scroll", "touchstart", "click"];
+    activityEvents.forEach((evt) => {
+      window.addEventListener(evt, handleActivity, { passive: true });
+    });
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    scheduleTimers();
+
+    return () => {
+      clearTimers();
+      activityEvents.forEach((evt) => {
+        window.removeEventListener(evt, handleActivity);
+      });
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [currentUser]);
 
   React.useEffect(() => {
     const cachedUser = getStoredUser();

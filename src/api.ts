@@ -234,10 +234,28 @@ function extractApiErrorDetail(text: string): string {
 
 const SESSION_EXPIRED_MESSAGE = "Your session has expired. Please log in again to continue.";
 
+export const IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+export const IDLE_WARNING_MS = 28 * 60 * 1000;
+export const IDLE_EVENT_NAME = "rbf-idle-timeout";
+export const IDLE_WARNING_EVENT_NAME = "rbf-idle-warning";
+
 function dispatchSessionExpired(message: string) {
   if (typeof window !== "undefined") {
     window.dispatchEvent(new CustomEvent("rbf-session-expired", { detail: { message } }));
   }
+}
+
+function dispatchIdleEvent(eventName: string) {
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent(eventName));
+  }
+}
+
+export function triggerIdleLogout(message?: string) {
+  const finalMessage = message || "You were logged out due to inactivity. Please log in again to continue.";
+  logoutUser(finalMessage);
+  dispatchSessionExpired(finalMessage);
+  dispatchIdleEvent(IDLE_EVENT_NAME);
 }
 
 function isSessionExpiredError(raw: string): boolean {
