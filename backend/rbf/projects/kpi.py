@@ -337,15 +337,17 @@ class KpiService:
                 milestone.save(update_fields=["status", "unlocked_at", "updated_at"])
             else:
                 milestone.save(update_fields=["status", "updated_at"])
-            Notification.objects.create(
+            Notification.objects.update_or_create(
                 recipient_id=str(self.project.vendor_id),
-                recipient_name=self.project.vendor_name,
-                type=NotificationChannel.IN_APP,
                 event="milestone_claimable",
-                title=f"Milestone {milestone_number} Claimable",
-                body=f"Milestone {milestone_number} for Project {self.project.id} is now claimable. Log in to submit your claim.",
-                status=NotificationStatus.SENT,
                 linked_entity_id=str(self.project.id),
+                defaults={
+                    "recipient_name": self.project.vendor_name,
+                    "type": NotificationChannel.IN_APP,
+                    "title": f"Milestone {milestone_number} Claimable",
+                    "body": f"Milestone {milestone_number} for Project {self.project.id} is now claimable. Log in to submit your claim.",
+                    "status": NotificationStatus.SENT,
+                },
             )
             log_audit(
                 None,
