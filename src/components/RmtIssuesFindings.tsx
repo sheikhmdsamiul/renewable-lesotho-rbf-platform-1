@@ -32,10 +32,10 @@ const formatDate = (value?: string | null) => {
 };
 
 const getSeverityIcon = (severity: string | undefined) => {
-  if (severity === "critical") return "⛔";
-  if (severity === "high") return "🔴";
-  if (severity === "medium") return "🟠";
-  return "🟡";
+  if (severity === "critical") return <AlertCircle size={14} className="text-rose-600" />;
+  if (severity === "high") return <AlertTriangle size={14} className="text-rose-500" />;
+  if (severity === "medium") return <AlertTriangle size={14} className="text-orange-500" />;
+  return <AlertCircle size={14} className="text-amber-500" />;
 };
 
 const getSeverityLabel = (severity: string | undefined) => {
@@ -376,7 +376,7 @@ const mappedFindings = findings.map((f: any) => {
           <div className="space-y-3">
             {urgentItems.map((item: any) => (
               <div key={item.id} className="flex items-start gap-4 p-4 bg-white rounded-xl border border-rose-200">
-                <span className="text-2xl">{getSeverityIcon(item.severity)}</span>
+                <span className="flex items-center justify-center w-8 h-8 rounded-full bg-slate-50">{getSeverityIcon(item.severity)}</span>
                 <div className="flex-1">
                   <div className="flex items-center gap-2 mb-1">
                     <span className="font-bold text-rose-900">{item.id}</span>
@@ -704,8 +704,8 @@ function RmtIssueDetail({ item, project, claim, onClose, onRespond }: { item: an
                 <div>
                   <p className="text-slate-500 text-xs">Notified</p>
                   <p className="font-medium flex items-center gap-1">
-                    {item.notify_rmt && <span className="text-emerald-600">RMT ✅</span>}
-                    {item.notify_psc && <span className="text-emerald-600">PSC ✅</span>}
+                    {item.notify_rmt && <span className="text-emerald-600 flex items-center gap-1"><CheckCircle2 size={12} /> RMT</span>}
+                    {item.notify_psc && <span className="text-emerald-600 flex items-center gap-1"><CheckCircle2 size={12} /> PSC</span>}
                     {!item.notify_rmt && !item.notify_psc && <span className="text-slate-400">—</span>}
                   </p>
                 </div>

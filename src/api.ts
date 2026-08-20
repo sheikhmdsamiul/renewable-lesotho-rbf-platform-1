@@ -873,6 +873,7 @@ function mapProjectFromApi(api: any): Project {
     techType: api.tech_type ?? "",
     region: api.region ?? "",
     district: api.district ?? undefined,
+    assignedDistrict: api.assigned_district ?? undefined,
     status: api.status ?? "Pre-Qualification",
     progress: Number(api.progress ?? 0),
     startDate: api.start_date ?? undefined,

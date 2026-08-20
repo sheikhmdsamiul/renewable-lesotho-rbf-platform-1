@@ -759,17 +759,62 @@
 
   <h3>3.4 DoE Officer (Department of Energy)</h3>
   <p>
-    DoE Officers provide government-side regional oversight. They monitor implementation in their
-    districts and escalate concerns to the RMT and PSC.
+    DoE Officers provide government-side regional oversight on behalf of the Department of Energy.
+    They monitor implementation inside their assigned districts, raise concerns about specific
+    installations or vendors, and review blacklist cases. Their scope is automatically filtered by
+    their user account's <strong>region</strong> assignment &mdash; they only see projects, installations,
+    and reports within the districts they are responsible for.
   </p>
+
+  <h4>Sidebar Items</h4>
   <ul>
-    <li><strong>Regional Monitoring</strong> &mdash; View a dashboard of projects and installations in their region/district.</li>
-    <li><strong>Raise Concerns</strong> &mdash; Flag issues or concerns about a project to the RMT and PSC through the concern modal.</li>
-    <li><strong>Regional Map</strong> &mdash; Use the GIS map to review installation sites and coverage in their area.</li>
-    <li><strong>Project Oversight</strong> &mdash; Read-only access to projects for monitoring purposes.</li>
-    <li><strong>Blacklisting</strong> &mdash; Review and confirm blacklist cases.</li>
-    <li><strong>Reporting</strong> &mdash; Generate regional reports and view the vendor directory.</li>
+    <li><strong>Dashboard</strong> &mdash; <code>DoeDashboard</code> showing regional KPI summary: target vs verified, gender &amp; vulnerable inclusion, energy generated, top projects by progress, recent activity, and quick stats.</li>
+    <li><strong>Regional Map</strong> &mdash; <code>DoeRegionalMap</code> GIS view of all installation sites in the officer's region with status filters.</li>
+    <li><strong>Reports</strong> &mdash; <code>DoeReports</code> showing reports applicable to the officer's role: Regional Progress, Verification Summary, Regional KPI, and Technology Breakdown. All are scoped to the officer's region.</li>
+    <li><strong>Projects</strong> &mdash; read-only project hub filtered to assigned districts.</li>
+    <li><strong>Blacklisting</strong> &mdash; review and confirm blacklist cases initiated by RMT or Auditors.</li>
+    <li><strong>Vendor Directory</strong> &mdash; read-only vendor profiles visible at the regional level.</li>
+    <li><strong>Notifications</strong> &mdash; in-platform alerts for concerns raised, project milestones reached in the region, and assignments.</li>
   </ul>
+
+  <h4>What DoE Officers See in Detail</h4>
+  <ul>
+    <li><strong>Regional Dashboard</strong> &mdash; The officer lands on a KPI panel scoped to their districts. Cards show total target installations vs verified, gender and vulnerable-head inclusion percentages, energy generated this month, active projects, and at-risk projects. Below the cards, a recent-activity feed shows the latest verifications, blacklist events, and concern posts for the region.</li>
+    <li><strong>Regional Map</strong> &mdash; GIS map markers coloured by installation status: green (verified), amber (partial / pending), red (flagged). Clicking a marker opens the installation detail with all field-verification evidence.</li>
+    <li><strong>Verification Reports</strong> &mdash; aggregated verification outcomes by district and technology, drilling down to per-project verification log.</li>
+    <li><strong>Technology Breakdown</strong> &mdash; shows distribution of installed systems (SHS, mini-grid, etc.) within the region.</li>
+    <li><strong>Project View</strong> &mdash; tabs for Overview, Milestones, Installations, KPI, and Documents; all write actions disabled (DoE is read-only on projects).</li>
+  </ul>
+
+  <h4>Key Workflows</h4>
+
+  <h5>Raising a Concern</h5>
+  <ol>
+    <li>Open any project in the region from the dashboard or map.</li>
+    <li>From the project detail page, click <strong>&ldquo;Raise Concern&rdquo;</strong>.</li>
+    <li>Select concern type (Compliance, Safety, Quality, Documentation, Other).</li>
+    <li>Select severity (Low / Medium / High / Critical).</li>
+    <li>Write a clear description &mdash; facts, observations, evidence. Optionally check <strong>&ldquo;Also notify PSC&rdquo;</strong> to escalate to donor oversight immediately.</li>
+    <li>Submit. The RMT is notified; the PSC sees the concern if escalation was ticked. The concern appears in the project's Audit Trail.</li>
+  </ol>
+
+  <h5>Reviewing a Blacklist Case (as Reviewer)</h5>
+  <ol>
+    <li>Open <strong>&ldquo;Blacklisting&rdquo;</strong> in the sidebar.</li>
+    <li>Select a case from the list (your region's vendors first, then all).</li>
+    <li>Review the RMT's reason, justification document, vendor rebuttal, and any earlier reviewer notes.</li>
+    <li>Add your own reviewer note (visible in the audit trail) and submit.</li>
+  </ol>
+  <p>
+    DoE Officers do not have confirmation authority &mdash; the Admin or final DoE confirmation role
+    applies. Your reviewer note feeds into the decision chain shown in section 14.
+  </p>
+
+  <div class="callout callout-info">
+    <strong>Tip:</strong> Region assignment is set when the Super Admin creates or edits your
+    user account. If you cannot see the projects you expect, ask the Super Admin to verify your
+    <code>region</code> field matches the districts you oversee.
+  </div>
 
   <h3>3.5 Field Verifier</h3>
   <p>
@@ -785,30 +830,207 @@
 
   <h3>3.6 Project Steering Committee (PSC / UNDP Donor)</h3>
   <p>
-    The PSC provides donor-level oversight. They do not run day-to-day operations but approve the
-    final disbursement of funds and review overall programme progress.
+    The PSC represents the donor (UNDP Lesotho and partners). PSC members provide donor-level
+    strategic oversight, give the <strong>final approval</strong> in the payment chain, and review
+    programme-wide progress across all districts. PSC has full portfolio visibility &mdash; including
+    cross-district, cross-vendor comparisons &mdash; but cannot edit operational data.
   </p>
+
+  <h4>Sidebar Items</h4>
   <ul>
-    <li><strong>Oversight Dashboard</strong> &mdash; View a high-level portfolio dashboard. Vendor identities are masked for confidentiality.</li>
-    <li><strong>Final Payment Approval</strong> &mdash; Give the final approval in the disbursement chain (RMT &rarr; TAC &rarr; PSC) before payment is disbursed, and flag issues on claims.</li>
-    <li><strong>Issues &amp; Findings</strong> &mdash; Comment on and resolve PSC-level issues and findings.</li>
-    <li><strong>Projects &amp; Reports</strong> &mdash; Review aggregate project data and PSC-specific reports.</li>
+    <li><strong>Dashboard</strong> &mdash; <code>PscDashboard</code> portfolio overview with national funding pacing, district-level progress, verification compliance, and anomaly rollup.</li>
+    <li><strong>Projects</strong> &mdash; read-only <code>ProjectsHub</code> view of every awarded project.</li>
+    <li><strong>Payments</strong> &mdash; claims awaiting PSC approval plus history; PSC's primary action area.</li>
+    <li><strong>Reports</strong> &mdash; <code>PscReports</code> showing PSC-specific exports (Quarterly Progress, Portfolio KPI, Financial Disbursement Summary, Anomaly Rollup).</li>
+    <li><strong>Issues &amp; Findings</strong> &mdash; <code>PscIssuesView</code>; raised issues that require PSC attention and a discussion thread.</li>
+    <li><strong>Notifications</strong> &mdash; alerts when claims reach the PSC queue or when concerns are escalated by RMT/DoE.</li>
   </ul>
+
+  <h4>What PSC Members See in Detail</h4>
+  <ul>
+    <li><strong>National KPI Dashboard</strong> &mdash; Macro KPI tiles (target vs verified, inclusion percentages, energy output, budget pacing) followed by a leaderboard of all projects across all districts. PSC sees vendor names visible to maintain transparency at the donor level.</li>
+    <li><strong>Payment Claims Queue</strong> &mdash; A dedicated view of claims that have passed RMT verification and TAC endorsement and are awaiting PSC approval. Each row shows vendor, project, milestone, amount, evidence summary, and the supporting claim history.</li>
+    <li><strong>Financial Reports</strong> &mdash; pre-built export templates combining portfolio budget, contracted amounts, disbursed amounts, pending amounts, by project and milestone. These feed donor reporting and audits.</li>
+    <li><strong>Project Browser</strong> &mdash; read-only tabs for KPI, Milestones, Installations, Payments, Documents, Audit Trail; no write actions.</li>
+    <li><strong>Issues &amp; Findings</strong> &mdash; combined PSC thread listing concerns escalated to PSC plus PSC-originated findings for RMT or vendor action.</li>
+  </ul>
+
+  <h4>Key Workflows</h4>
+
+  <h5>Approving or Rejecting a Payment Claim (final step in the chain)</h5>
+  <ol>
+    <li>Open <strong>&ldquo;Payments&rdquo;</strong> from the sidebar.</li>
+    <li>Filter for claims with status <code>Awaiting PSC Approval</code>.</li>
+    <li>Open a claim. Review: vendor profile, contract terms, milestone evidence (verified installations, KPI snapshot, anomaly status), RMT's notes, TAC's endorsement.</li>
+    <li>Choose one of:
+        <ul>
+          <li><strong>Approve</strong> &mdash; claim status becomes <code>PSC Approved</code>, queued for Admin disbursement.</li>
+          <li><strong>Reject</strong> &mdash; returns to RMT with your reason; the chain restarts.</li>
+          <li><strong>Flag</strong> &mdash; opens an issue in the Issues &amp; Findings view; the claim stays in PSC queue pending resolution.</li>
+        </ul>
+    </li>
+    <li>All PSC decisions are recorded in the audit trail with your identity and timestamp.</li>
+  </ol>
+
+  <h5>Reading the Portfolio KPI</h5>
+  <ol>
+    <li>Open <strong>&ldquo;Dashboard&rdquo;</strong>.</li>
+    <li>The top section shows national-level numbers (target / verified / overdue).</li>
+    <li>The district breakdown shows each district's contribution &mdash; useful for spotting geographic gaps.</li>
+    <li>Click any district tile to drill into the project list within it.</li>
+    <li>The bottom shows project-level detail with budget vs actual disbursed amounts.</li>
+  </ol>
+
+  <h5>Issuing PSC Findings on Issues</h5>
+  <ol>
+    <li>Open <strong>&ldquo;Issues &amp; Findings&rdquo;</strong>.</li>
+    <li>Click <strong>&ldquo;New Finding&rdquo;</strong>.</li>
+    <li>Choose the project or claim, severity, and category (Compliance / Performance / Process / Financial).</li>
+    <li>Write the finding narrative. The RMT and (if flagged) the vendor are notified and can respond in-thread.</li>
+  </ol>
+
+  <div class="callout callout-warning">
+    <strong>Note on payment authority:</strong> PSC approval is the LAST programmatic step before
+    disbursement. The Platform Admin then records the bank transaction reference to complete the
+    chain. PSC cannot skip the Admin step &mdash; this separation of duties protects the programme.
+  </div>
 
   <h3>3.7 Auditor</h3>
   <p>
-    Auditors independently review financial and compliance records. They do not change operational
-    data, but they raise findings and flag anomalies for follow-up.
+    Auditors are an independent oversight role. They have <strong>read-only access to every project,
+    vendor, payment claim, anomaly, and audit log</strong> on the platform plus the ability to:
   </p>
   <ul>
-    <li><strong>Audit Logs</strong> &mdash; Review the full audit trail of system activity.</li>
-    <li><strong>Anomaly Reports</strong> &mdash; Review automatically detected anomalies from meter and KPI data.</li>
-    <li><strong>Claims Audit</strong> &mdash; Audit payment claims and the Prospect sync log for discrepancies.</li>
-    <li><strong>Audit Findings</strong> &mdash; Raise findings against projects for the RMT to resolve.</li>
-    <li><strong>Audit Packages</strong> &mdash; Export audit packages for projects.</li>
-    <li><strong>Blacklisting</strong> &mdash; Initiate blacklist cases, review them, and review vendor appeals.</li>
-    <li><strong>Vendor Directory</strong> &mdash; View vendor records with financial and document visibility for audit purposes.</li>
+    <li><strong>Initiate blacklist cases</strong> &mdash; open cases against vendors they identify through audit work.</li>
+    <li><strong>Review blacklist cases</strong> &mdash; add independent reviewer notes at every stage.</li>
+    <li><strong>Review vendor appeals</strong> &mdash; make the final reinstatement / requalification decision (together with Admin).</li>
+    <li><strong>Raise audit findings</strong> &mdash; structured issues against projects for RMT to resolve.</li>
   </ul>
+  <p>
+    Auditors do NOT change operational data (no approval authority on claims, no edits to
+    installations, no edits to vendors). Their value is the independent-eye view.
+  </p>
+
+  <h4>Sidebar Items</h4>
+  <ul>
+    <li><strong>Dashboard</strong> &mdash; <code>AuditorDashboard</code>: Compliance Summary (total projects, projects with active flags, vendors below inclusion target, failed Prospect syncs); Anomaly Rollup (total / resolved / unresolved, breakdown by type).</li>
+    <li><strong>GIS Map</strong> &mdash; <code>AuditorGisMap</code>: read-only GIS view of all installations across all districts.</li>
+    <li><strong>KPI Dashboard</strong> &mdash; <code>AuditorKpiDashboard</code>: full portfolio KPI view, can slice by district, vendor, technology.</li>
+    <li><strong>Audit Logs</strong> &mdash; <code>AuditorAuditLogs</code>: chronological audit trail with filters by actor, action, module, date range.</li>
+    <li><strong>Anomaly Report</strong> &mdash; <code>AuditorAnomalyReport</code>: all anomaly flags across all projects with filters by type, project, district, resolved status. Export to CSV.</li>
+    <li><strong>Claims Audit</strong> &mdash; <code>AuditorClaimsAudit</code>: list of all payment claims and their chain state (vendor submitted / RMT verified / TAC endorsed / PSC approved / Admin paid). Export to CSV.</li>
+    <li><strong>Prospect Sync Log</strong> &mdash; <code>AuditorProspectSyncLog</code>: success / failure of each sync job pushing data to the external M&amp;E system (Prospect). Used to detect gaps in external reporting.</li>
+    <li><strong>Audit Findings</strong> &mdash; <code>AuditorAuditFindings</code>: structured findings raised against projects.</li>
+    <li><strong>Reports</strong> &mdash; all available exports (Anomaly Rollup, Claims Audit, RMT Audit, Vendor Audit, Audit Packages for projects).</li>
+    <li><strong>All Vendors</strong> &mdash; read-only <code>VendorDirectory</code> with full visibility into vendor financial and document data.</li>
+    <li><strong>Notifications</strong> &mdash; alerts on relevant audit events.</li>
+    <li><strong>Blacklisting</strong> &mdash; full blacklisting access (initiate / review / appeal resolution).</li>
+  </ul>
+
+  <h4>What Auditors See in Detail</h4>
+  <ul>
+    <li><strong>Compliance Summary</strong> &mdash; 4 stat cards: total projects, projects with active anomaly flags, vendors below inclusion target, failed Prospect syncs. Below, a recent-activity panel logs audit-relevant system events.</li>
+    <li><strong>Anomaly Report</strong> &mdash; filterable table of every anomaly flag (type, project, installation, raised date, resolved date, description). Clicking a flag opens the installation's full context.</li>
+    <li><strong>Audit Logs</strong> &mdash; full system activity log. Each entry: timestamp, actor name + role, action code, module, record ID, before/after status, notes. Filter by any field.</li>
+    <li><strong>Claims Audit</strong> &mdash; every payment claim with its full chain (RMT verified timestamp, TAC endorsed timestamp, PSC approved timestamp, Admin disbursed timestamp, transaction reference). Mismatches between chain steps are highlighted.</li>
+    <li><strong>Prospect Sync Log</strong> &mdash; each sync job (agents, customers, installations, targets, reports) with success / failure / pending status and last attempt timestamp. Failed jobs can be retried (Admin only).</li>
+    <li><strong>Vendor Directory</strong> &mdash; every vendor with full pre-qualification data, bank details, blacklist status, and project history.</li>
+  </ul>
+
+  <h4>Key Workflows</h4>
+
+  <h5>Raising an Audit Finding</h5>
+  <ol>
+    <li>From any project page or the Audit Findings tab, click <strong>&ldquo;New Finding&rdquo;</strong>.</li>
+    <li>Choose the affected project (or claim / vendor / scope), severity, and category (Financial / Compliance / Performance / Documentation / Other).</li>
+    <li>Reference the underlying evidence (cite anomaly flag IDs, claim IDs, log entries).</li>
+    <li>State the expected correction and a target date.</li>
+    <li>Submit. The RMT is notified and must respond with a corrective action.</li>
+  </ol>
+
+  <h5>Initiating a Blacklist Case (against a vendor)</h5>
+  <ol>
+    <li>Open the vendor profile from <strong>&ldquo;All Vendors&rdquo;</strong>.</li>
+    <li>Click <strong>&ldquo;Initiate Blacklisting&rdquo;</strong> (only available to RMT / Auditor).</li>
+    <li>Provide the reason, description, and optionally attach a justification document (audit findings, claim irregularities, etc.).</li>
+    <li>Submit &mdash; the case is created with cooling-off period. Other reviewers (TAC / DoE / Auditor / Admin) add their notes. Admin / DoE makes the final confirmation. If confirmed, your role (Auditor / Admin) reviews any vendor appeal.</li>
+  </ol>
+
+  <h5>Reviewing a Vendor Appeal</h5>
+  <ol>
+    <li>Open <strong>&ldquo;Blacklisting&rdquo;</strong>.</li>
+    <li>Find the case marked <code>Awaiting Appeal Review</code>.</li>
+    <li>Review the appeal text and attached supporting documents.</li>
+    <li>Decide:
+        <ul>
+          <li><strong>Upheld</strong> &mdash; blacklisting stands, vendor stays suspended/blacklisted.</li>
+          <li><strong>Reinstated</strong> &mdash; vendor returns to <code>Active</code>, projects resume.</li>
+          <li><strong>Requalified</strong> &mdash; vendor reinstated but must re-submit pre-qualification before bidding again.</li>
+        </ul>
+    </li>
+  </ol>
+
+  <h5>Exporting an Audit Package</h5>
+  <ol>
+    <li>Open any project from <strong>&ldquo;Projects&rdquo;</strong>.</li>
+    <li>Click <strong>&ldquo;Export Audit Package&rdquo;</strong> (where available) or use Reports &rarr; Audit exports.</li>
+    <li>Select formats: CSV, Excel, PDF.</li>
+    <li>Receive a ZIP / single-file bundle including: project metadata, installation list, verification log, meter readings, claim history, audit log, anomaly report, blacklist history.</li>
+  </ol>
+
+  <div class="callout callout-info">
+    <strong>Read-only by design:</strong> Even though you see every project and vendor, you cannot
+    approve claims, edit installations, or change anomaly resolutions. That preserves the
+    independence of your oversight. To influence outcomes, use Findings and Blacklisting.
+  </div>
+
+  <h3>3.7.1 Cross-Role Workflow Examples</h3>
+  <p>
+    PSC, DoE, and Auditor all work on the same programme data but from different angles. The table
+    below shows how a typical event flows through the three roles:
+  </p>
+
+  <table>
+    <thead><tr><th>Scenario</th><th>PSC</th><th>DoE</th><th>Auditor</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>Vendor submits M2 claim</td>
+        <td>Waits for claim to reach the queue</td>
+        <td>No action &mdash; RMT/TAC process first</td>
+        <td>Reviews the claim via Claims Audit</td>
+      </tr>
+      <tr>
+        <td>Installation flagged for GPS mismatch</td>
+        <td>Sees it on the KPI Dashboard</td>
+        <td>Can raise a Concern against the project</td>
+        <td>Reviews under Anomaly Report, may raise a Finding</td>
+      </tr>
+      <tr>
+        <td>Vendor's kWh readings deviate &gt; 5% from previous</td>
+        <td>Sees it in the Portfolio KPI</td>
+        <td>Sees it in Regional KPI Report</td>
+        <td>Reviews under Anomaly Report; can raise a Finding about the vendor</td>
+      </tr>
+      <tr>
+        <td>Vendor is suspected of fraud</td>
+        <td>Can flag the claim or escalate via Issues &amp; Findings</td>
+        <td>Cannot initiate blacklisting, but adds regional context via Concern</td>
+        <td>Can initiate a Blacklist case with audit evidence</td>
+      </tr>
+      <tr>
+        <td>Quarterly donor reporting</td>
+        <td>Generates / consumes the report (primary audience)</td>
+        <td>Provides regional context for the report</td>
+        <td>Verifies report data against Audit Logs and Claims Audit</td>
+      </tr>
+      <tr>
+        <td>External M&amp;E system (Prospect) sync fails</td>
+        <td>Sees backlog in Dashboard metrics</td>
+        <td>May notice project data missing in external systems</td>
+        <td>Owns the Prospect Sync Log view, alerts Super Admin to failures</td>
+      </tr>
+    </tbody>
+  </table>
 
   <h3>3.8 Vendor</h3>
   <p>
@@ -3790,10 +4012,16 @@
     (RMT) shows flags per project. The system automatically detects:
   </p>
   <ul>
-    <li>GPS coordinate duplicates</li>
-    <li>Verification distance threshold violations</li>
-    <li>Data integrity issues</li>
+    <li><strong>GPS coordinate duplicates</strong> &mdash; flagged as <code>duplicate_gps</code>; not payment-blocking.</li>
+    <li><strong>Verification distance threshold violations</strong> &mdash; flagged as <code>location_mismatch</code> / <code>verification_distance</code>; blocks M3 if unresolved.</li>
+    <li><strong>Zero uptime reported</strong> &mdash; flagged as <code>zero_uptime</code>; blocks M2 and M3.</li>
+    <li><strong>Output deviation &gt; 5% from previous reading</strong> &mdash; flagged as <code>output_deviation</code>; blocks M2 and M3.</li>
+    <li><strong>No data uploaded in 48 hours</strong> &mdash; flagged as <code>no_data</code>; blocks M3 only.</li>
+    <li>Other data integrity issues surfaced from the audit pipeline.</li>
   </ul>
+  <p>
+    See section <a href="#workflow-b">6.8</a> for the full anomaly lifecycle and resolution rules.
+  </p>
 
   <h3>11.3 Audit Findings</h3>
   <p>

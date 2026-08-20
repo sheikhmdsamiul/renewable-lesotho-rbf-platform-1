@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   Bell,
   CheckCircle2,
+  ChevronLeft,
   ChevronRight,
   Download,
   Eye,
@@ -196,6 +197,8 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
 
   const [dashboard, setDashboard] = useState<SuperAdminDashboardSummary | null>(null);
   const [dashboardLoading, setDashboardLoading] = useState(false);
+  const [recentActivityPage, setRecentActivityPage] = useState(1);
+  const recentActivityPerPage = 8;
 
   const [users, setUsers] = useState<User[]>([]);
   const [selectedUser, setSelectedUser] = useState<User | null>(null);
@@ -733,26 +736,70 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
 
               <div className="card p-6">
                 <h3 className="text-lg font-bold text-slate-900">Recent Activity</h3>
-                <div className="mt-4 space-y-3">
-                  {dashboard.recentActivity.map((item) => (
-                    <div key={item.id} className="rounded-xl border border-slate-100 px-4 py-3">
-                      <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-                        <div>
-                          <p className="font-semibold text-slate-900">{item.action}</p>
-                          <p className="text-xs text-slate-500">
-                            {item.actor} {item.role ? `• ${item.role}` : ""} {item.module ? `• ${item.module}` : ""} {item.record ? `• ${item.record}` : ""}
-                          </p>
-                        </div>
-                        <span className="text-xs text-slate-400">{formatDateTime(item.timestamp)}</span>
+                {(() => {
+                  const recentActivityTotalPages = Math.max(1, Math.ceil(dashboard.recentActivity.length / recentActivityPerPage));
+                  const recentActivitySafePage = Math.min(Math.max(1, recentActivityPage), recentActivityTotalPages);
+                  const paginatedRecentActivity = dashboard.recentActivity.slice(
+                    (recentActivitySafePage - 1) * recentActivityPerPage,
+                    recentActivitySafePage * recentActivityPerPage,
+                  );
+                  return (
+                    <>
+                      <div className="mt-4 space-y-3">
+                        {paginatedRecentActivity.map((item) => (
+                          <div key={item.id} className="rounded-xl border border-slate-100 px-4 py-3">
+                            <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                              <div>
+                                <p className="font-semibold text-slate-900">{item.action}</p>
+                                <p className="text-xs text-slate-500">
+                                  {item.actor} {item.role ? `• ${item.role}` : ""} {item.module ? `• ${item.module}` : ""} {item.record ? `• ${item.record}` : ""}
+                                </p>
+                              </div>
+                              <span className="text-xs text-slate-400">{formatDateTime(item.timestamp)}</span>
+                            </div>
+                            {(item.notes || item.oldStatus || item.newStatus) && (
+                              <p className="mt-2 text-xs text-slate-600">
+                                {[item.oldStatus && `Old: ${item.oldStatus}`, item.newStatus && `New: ${item.newStatus}`, item.notes].filter(Boolean).join(" • ")}
+                              </p>
+                            )}
+                          </div>
+                        ))}
                       </div>
-                      {(item.notes || item.oldStatus || item.newStatus) && (
-                        <p className="mt-2 text-xs text-slate-600">
-                          {[item.oldStatus && `Old: ${item.oldStatus}`, item.newStatus && `New: ${item.newStatus}`, item.notes].filter(Boolean).join(" • ")}
-                        </p>
+                      {dashboard.recentActivity.length > recentActivityPerPage && (
+                        <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-3">
+                          <p className="text-xs text-slate-500">
+                            Showing <span className="font-semibold text-slate-700">{((recentActivitySafePage - 1) * recentActivityPerPage) + 1}</span>
+                            {"–"}
+                            <span className="font-semibold text-slate-700">{Math.min(recentActivitySafePage * recentActivityPerPage, dashboard.recentActivity.length)}</span>
+                            {" of "}
+                            <span className="font-semibold text-slate-700">{dashboard.recentActivity.length}</span>
+                          </p>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => setRecentActivityPage((p) => Math.max(1, p - 1))}
+                              disabled={recentActivitySafePage <= 1}
+                              className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:border-emerald-300 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-slate-200 disabled:hover:bg-white"
+                            >
+                              <ChevronLeft size={14} /> Previous
+                            </button>
+                            <span className="text-xs font-bold text-slate-600">
+                              Page {recentActivitySafePage} of {recentActivityTotalPages}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => setRecentActivityPage((p) => Math.min(recentActivityTotalPages, p + 1))}
+                              disabled={recentActivitySafePage >= recentActivityTotalPages}
+                              className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:border-emerald-300 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-slate-200 disabled:hover:bg-white"
+                            >
+                              Next <ChevronRight size={14} />
+                            </button>
+                          </div>
+                        </div>
                       )}
-                    </div>
-                  ))}
-                </div>
+                    </>
+                  );
+                })()}
               </div>
             </>
           )}

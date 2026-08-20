@@ -3,6 +3,8 @@ import {
   Activity,
   AlertTriangle,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   Clock3,
   CreditCard,
   FileText,
@@ -300,6 +302,10 @@ export function MacroKpiPortal({
   const [meterReadings, setMeterReadings] = useState<SmartMeterReading[]>([]);
   const [projectSummaries, setProjectSummaries] = useState<ProjectKpiSummary[]>([]);
   const [tenders, setTenders] = useState<Tender[]>([]);
+  const [activeTendersPage, setActiveTendersPage] = useState(1);
+  const activeTendersPerPage = 5;
+  const [systemAlertsPage, setSystemAlertsPage] = useState(1);
+  const systemAlertsPerPage = 8;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -497,7 +503,7 @@ export function MacroKpiPortal({
       const days = Math.ceil((deadline - Date.now()) / (1000 * 60 * 60 * 24));
       return days >= 0 && days <= 7;
     });
-    const newest = [...published].sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()).slice(0, 5);
+    const newest = [...published].sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
     return { published: published.length, closingSoon: closingSoon.length, total: tenders.length, newest };
   }, [tenders]);
 
@@ -741,98 +747,180 @@ export function MacroKpiPortal({
               </div>
             </SectionCard>
 
-            <SectionCard
-              title="System Alert"
-              description="Projects where meter data has not arrived within 30 days or multiple operational risks are stacking up."
-            >
-              <div className="space-y-3">
-                {redFlags.slice(0, 8).map((item) => (
-                  <div key={item.id} className="rounded-2xl border border-rose-200 bg-rose-50 p-4">
-                    <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
-                      <div>
-                        <p className="font-semibold text-rose-900">{item.projectReference}</p>
-                        <p className="text-sm text-rose-700">{item.vendorName} • {item.district}</p>
+            {(() => {
+              const systemAlertsTotalPages = Math.max(1, Math.ceil(redFlags.length / systemAlertsPerPage));
+              const systemAlertsSafePage = Math.min(Math.max(1, systemAlertsPage), systemAlertsTotalPages);
+              const paginatedRedFlags = redFlags.slice(
+                (systemAlertsSafePage - 1) * systemAlertsPerPage,
+                systemAlertsSafePage * systemAlertsPerPage,
+              );
+              return (
+                <SectionCard
+                  title="System Alert"
+                  description="Projects where meter data has not arrived within 30 days or multiple operational risks are stacking up."
+                >
+                  <div className="space-y-3">
+                    {paginatedRedFlags.map((item) => (
+                      <div key={item.id} className="rounded-2xl border border-rose-200 bg-rose-50 p-4">
+                        <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+                          <div>
+                            <p className="font-semibold text-rose-900">{item.projectReference}</p>
+                            <p className="text-sm text-rose-700">{item.vendorName} • {item.district}</p>
+                          </div>
+                          <span className="rounded-full border border-rose-200 bg-white px-3 py-1 text-xs font-semibold text-rose-700">
+                            {item.daysSince == null ? "No meter feed" : `${item.daysSince} days stale`}
+                          </span>
+                        </div>
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {item.reasons.map((reason) => (
+                            <span key={reason} className="rounded-full border border-rose-200 bg-white px-2.5 py-1 text-xs text-rose-800">
+                              {reason}
+                            </span>
+                          ))}
+                        </div>
                       </div>
-                      <span className="rounded-full border border-rose-200 bg-white px-3 py-1 text-xs font-semibold text-rose-700">
-                        {item.daysSince == null ? "No meter feed" : `${item.daysSince} days stale`}
-                      </span>
-                    </div>
-                    <div className="mt-3 flex flex-wrap gap-2">
-                      {item.reasons.map((reason) => (
-                        <span key={reason} className="rounded-full border border-rose-200 bg-white px-2.5 py-1 text-xs text-rose-800">
-                          {reason}
-                        </span>
-                      ))}
-                    </div>
+                    ))}
+                    {redFlags.length === 0 && <EmptyState message="No projects are currently breaching the live red-flag threshold." />}
                   </div>
-                ))}
-                {redFlags.length === 0 && <EmptyState message="No projects are currently breaching the live red-flag threshold." />}
-              </div>
-            </SectionCard>
+                  {redFlags.length > systemAlertsPerPage && (
+                    <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-3">
+                      <p className="text-xs text-slate-500">
+                        Showing <span className="font-semibold text-slate-700">{((systemAlertsSafePage - 1) * systemAlertsPerPage) + 1}</span>
+                        {"–"}
+                        <span className="font-semibold text-slate-700">{Math.min(systemAlertsSafePage * systemAlertsPerPage, redFlags.length)}</span>
+                        {" of "}
+                        <span className="font-semibold text-slate-700">{redFlags.length}</span>
+                      </p>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setSystemAlertsPage((p) => Math.max(1, p - 1))}
+                          disabled={systemAlertsSafePage <= 1}
+                          className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:border-rose-300 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-slate-200 disabled:hover:bg-white"
+                        >
+                          <ChevronLeft size={14} /> Previous
+                        </button>
+                        <span className="text-xs font-bold text-slate-600">
+                          Page {systemAlertsSafePage} of {systemAlertsTotalPages}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setSystemAlertsPage((p) => Math.min(systemAlertsTotalPages, p + 1))}
+                          disabled={systemAlertsSafePage >= systemAlertsTotalPages}
+                          className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:border-rose-300 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-slate-200 disabled:hover:bg-white"
+                        >
+                          Next <ChevronRight size={14} />
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </SectionCard>
+              );
+            })()}
           </div>
 
-          {portalType === "rbf" && (
-            <div className="grid grid-cols-1 gap-6">
-              <SectionCard
-                title="Active Tenders Overview"
-                description="Current open tenders, upcoming deadlines, and procurement activity."
-              >
-                {tenderStats.published === 0 ? (
-                  <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-8 text-center">
-                    <FileText size={32} className="mx-auto mb-3 text-slate-300" />
-                    <p className="text-sm font-medium text-slate-600">No active tenders</p>
-                    <p className="mt-1 text-xs text-slate-400">Published tenders will appear here.</p>
-                  </div>
-                ) : (
-                  <div className="space-y-3">
-                    {tenderStats.newest.map((t) => {
-                      const deadline = t.lastDateSubmission || t.deadline;
-                      const deadlineMs = deadline ? Date.parse(deadline) : NaN;
-                      const daysLeft = Number.isNaN(deadlineMs) ? null : Math.ceil((deadlineMs - Date.now()) / (1000 * 60 * 60 * 24));
-                      const isClosingSoon = daysLeft !== null && daysLeft >= 0 && daysLeft <= 7;
-                      const isExpired = daysLeft !== null && daysLeft < 0;
-                      const deadlineLabel = daysLeft === null ? "N/A" : isExpired ? "Closed" : daysLeft === 0 ? "Today" : daysLeft === 1 ? "Tomorrow" : `${daysLeft}d left`;
-                      const deadlineColor = isExpired ? "text-rose-600" : isClosingSoon ? "text-amber-600" : "text-emerald-600";
-                      const deadlineBg = isExpired ? "border-rose-100 bg-rose-50" : isClosingSoon ? "border-amber-100 bg-amber-50" : "border-emerald-100 bg-emerald-50";
-
-                      return (
-                        <div key={t.id} className="rounded-xl border border-slate-100 bg-white p-4 transition-all hover:border-emerald-200 hover:shadow-sm">
-                          <div className="mb-2 flex items-start justify-between gap-3">
-                            <div className="min-w-0 flex-1">
-                              <div className="mb-1 flex items-center gap-2">
-                                <span className="text-[10px] font-mono text-slate-400">{t.referenceNumber}</span>
-                                <span className="rounded border border-emerald-100 bg-emerald-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-emerald-700">Published</span>
-                                {isClosingSoon && (
-                                  <span className="rounded border border-amber-100 bg-amber-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-amber-700">Urgent</span>
-                                )}
-                              </div>
-                              <p className="truncate text-sm font-bold text-slate-900">{t.name}</p>
-                              <p className="mt-0.5 text-xs text-slate-500">{t.department}</p>
-                            </div>
-                            <div className={`flex-shrink-0 rounded-lg border px-3 py-2 text-center ${deadlineBg}`}>
-                              <p className={`text-xs font-black ${deadlineColor}`}>{deadlineLabel}</p>
-                            </div>
-                          </div>
-                          <div className="mt-2 flex flex-wrap gap-1.5">
-                            {(t.technologyTypes || []).slice(0, 3).map((tech) => (
-                              <span key={tech} className="rounded border border-slate-100 bg-slate-50 px-2 py-0.5 text-[10px] font-bold uppercase text-slate-500">{tech}</span>
-                            ))}
-                            <span className="rounded border border-blue-100 bg-blue-50 px-2 py-0.5 text-[10px] font-bold uppercase text-blue-600">{t.category}</span>
-                          </div>
-                          {t.budget != null && (
-                            <p className="mt-2 text-xs text-slate-500">Est. Budget: <span className="font-bold text-slate-900">M {t.budget.toLocaleString()}</span></p>
-                          )}
-                        </div>
-                      );
-                    })}
-                    <div className="flex items-center justify-between border-t border-slate-100 pt-2">
-                      <p className="text-xs text-slate-500">{tenderStats.published} active · {tenderStats.closingSoon} closing soon</p>
+          {portalType === "rbf" && (() => {
+            const activeTendersTotalPages = Math.max(1, Math.ceil(tenderStats.newest.length / activeTendersPerPage));
+            const activeTendersSafePage = Math.min(Math.max(1, activeTendersPage), activeTendersTotalPages);
+            const paginatedActiveTenders = tenderStats.newest.slice(
+              (activeTendersSafePage - 1) * activeTendersPerPage,
+              activeTendersSafePage * activeTendersPerPage,
+            );
+            return (
+              <div className="grid grid-cols-1 gap-6">
+                <SectionCard
+                  title="Active Tenders Overview"
+                  description="Current open tenders, upcoming deadlines, and procurement activity."
+                >
+                  {tenderStats.published === 0 ? (
+                    <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-8 text-center">
+                      <FileText size={32} className="mx-auto mb-3 text-slate-300" />
+                      <p className="text-sm font-medium text-slate-600">No active tenders</p>
+                      <p className="mt-1 text-xs text-slate-400">Published tenders will appear here.</p>
                     </div>
-                  </div>
-                )}
-              </SectionCard>
-            </div>
-          )}
+                  ) : (
+                    <>
+                      <div className="space-y-3">
+                        {paginatedActiveTenders.map((t) => {
+                          const deadline = t.lastDateSubmission || t.deadline;
+                          const deadlineMs = deadline ? Date.parse(deadline) : NaN;
+                          const daysLeft = Number.isNaN(deadlineMs) ? null : Math.ceil((deadlineMs - Date.now()) / (1000 * 60 * 60 * 24));
+                          const isClosingSoon = daysLeft !== null && daysLeft >= 0 && daysLeft <= 7;
+                          const isExpired = daysLeft !== null && daysLeft < 0;
+                          const deadlineLabel = daysLeft === null ? "N/A" : isExpired ? "Closed" : daysLeft === 0 ? "Today" : daysLeft === 1 ? "Tomorrow" : `${daysLeft}d left`;
+                          const deadlineColor = isExpired ? "text-rose-600" : isClosingSoon ? "text-amber-600" : "text-emerald-600";
+                          const deadlineBg = isExpired ? "border-rose-100 bg-rose-50" : isClosingSoon ? "border-amber-100 bg-amber-50" : "border-emerald-100 bg-emerald-50";
+
+                          return (
+                            <div key={t.id} className="rounded-xl border border-slate-100 bg-white p-4 transition-all hover:border-emerald-200 hover:shadow-sm">
+                              <div className="mb-2 flex items-start justify-between gap-3">
+                                <div className="min-w-0 flex-1">
+                                  <div className="mb-1 flex items-center gap-2">
+                                    <span className="text-[10px] font-mono text-slate-400">{t.referenceNumber}</span>
+                                    <span className="rounded border border-emerald-100 bg-emerald-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-emerald-700">Published</span>
+                                    {isClosingSoon && (
+                                      <span className="rounded border border-amber-100 bg-amber-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-amber-700">Urgent</span>
+                                    )}
+                                  </div>
+                                  <p className="truncate text-sm font-bold text-slate-900">{t.name}</p>
+                                  <p className="mt-0.5 text-xs text-slate-500">{t.department}</p>
+                                </div>
+                                <div className={`flex-shrink-0 rounded-lg border px-3 py-2 text-center ${deadlineBg}`}>
+                                  <p className={`text-xs font-black ${deadlineColor}`}>{deadlineLabel}</p>
+                                </div>
+                              </div>
+                              <div className="mt-2 flex flex-wrap gap-1.5">
+                                {(t.technologyTypes || []).slice(0, 3).map((tech) => (
+                                  <span key={tech} className="rounded border border-slate-100 bg-slate-50 px-2 py-0.5 text-[10px] font-bold uppercase text-slate-500">{tech}</span>
+                                ))}
+                                <span className="rounded border border-blue-100 bg-blue-50 px-2 py-0.5 text-[10px] font-bold uppercase text-blue-600">{t.category}</span>
+                              </div>
+                              {t.budget != null && (
+                                <p className="mt-2 text-xs text-slate-500">Est. Budget: <span className="font-bold text-slate-900">M {t.budget.toLocaleString()}</span></p>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-3">
+                        <p className="text-xs text-slate-500">
+                          Showing <span className="font-semibold text-slate-700">{((activeTendersSafePage - 1) * activeTendersPerPage) + 1}</span>
+                          {"–"}
+                          <span className="font-semibold text-slate-700">{Math.min(activeTendersSafePage * activeTendersPerPage, tenderStats.newest.length)}</span>
+                          {" of "}
+                          <span className="font-semibold text-slate-700">{tenderStats.newest.length}</span>
+                          <span className="ml-2 text-slate-400">· {tenderStats.closingSoon} closing soon</span>
+                        </p>
+                        {tenderStats.newest.length > activeTendersPerPage && (
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => setActiveTendersPage((p) => Math.max(1, p - 1))}
+                              disabled={activeTendersSafePage <= 1}
+                              className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:border-emerald-300 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-slate-200 disabled:hover:bg-white"
+                            >
+                              <ChevronLeft size={14} /> Previous
+                            </button>
+                            <span className="text-xs font-bold text-slate-600">
+                              Page {activeTendersSafePage} of {activeTendersTotalPages}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => setActiveTendersPage((p) => Math.min(activeTendersTotalPages, p + 1))}
+                              disabled={activeTendersSafePage >= activeTendersTotalPages}
+                              className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:border-emerald-300 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-slate-200 disabled:hover:bg-white"
+                            >
+                              Next <ChevronRight size={14} />
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </>
+                  )}
+                </SectionCard>
+              </div>
+            );
+          })()}
         </>
       )}
     </DashboardFrame>
@@ -850,6 +938,8 @@ export function VendorKpiPanel({
   const [meterReadings, setMeterReadings] = useState<SmartMeterReading[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [milestonePage, setMilestonePage] = useState(1);
+  const milestonePerPage = 4;
 
   useEffect(() => {
     let active = true;
@@ -934,6 +1024,13 @@ export function VendorKpiPanel({
       })
       .sort((a, b) => Number(b.milestoneEligible) - Number(a.milestoneEligible) || b.verifiedPct - a.verifiedPct);
   }, [projectSummaries]);
+
+  const milestoneReadinessTotalPages = Math.max(1, Math.ceil(milestoneReadiness.length / milestonePerPage));
+  const milestoneReadinessSafePage = Math.min(Math.max(1, milestonePage), milestoneReadinessTotalPages);
+  const paginatedMilestoneReadiness = useMemo(() => {
+    const start = (milestoneReadinessSafePage - 1) * milestonePerPage;
+    return milestoneReadiness.slice(start, start + milestonePerPage);
+  }, [milestoneReadiness, milestoneReadinessSafePage]);
 
   const inclusion = useMemo(() => {
     const totalVerified = projectSummaries.reduce((sum, item) => sum + item.gender_kpi.total_verified, 0);
@@ -1105,7 +1202,7 @@ export function VendorKpiPanel({
           description="Project-by-project payment readiness against Milestone 2 conditions and the 80% verification threshold."
         >
           <div className="space-y-4">
-            {milestoneReadiness.map((item) => (
+            {paginatedMilestoneReadiness.map((item) => (
               <div key={item.projectId} className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                 <div className="flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
                   <div>
@@ -1137,6 +1234,38 @@ export function VendorKpiPanel({
             ))}
             {milestoneReadiness.length === 0 && <EmptyState message="Milestone readiness will appear once your project KPI summaries are available." />}
           </div>
+          {milestoneReadiness.length > milestonePerPage && (
+            <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-4">
+              <p className="text-xs text-slate-500">
+                Showing <span className="font-semibold text-slate-700">{((milestoneReadinessSafePage - 1) * milestonePerPage) + 1}</span>
+                {"–"}
+                <span className="font-semibold text-slate-700">{Math.min(milestoneReadinessSafePage * milestonePerPage, milestoneReadiness.length)}</span>
+                {" of "}
+                <span className="font-semibold text-slate-700">{milestoneReadiness.length}</span>
+              </p>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setMilestonePage((p) => Math.max(1, p - 1))}
+                  disabled={milestoneReadinessSafePage <= 1}
+                  className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:border-emerald-300 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-slate-200 disabled:hover:bg-white"
+                >
+                  <ChevronLeft size={14} /> Previous
+                </button>
+                <span className="text-xs font-bold text-slate-600">
+                  Page {milestoneReadinessSafePage} of {milestoneReadinessTotalPages}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setMilestonePage((p) => Math.min(milestoneReadinessTotalPages, p + 1))}
+                  disabled={milestoneReadinessSafePage >= milestoneReadinessTotalPages}
+                  className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:border-emerald-300 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-slate-200 disabled:hover:bg-white"
+                >
+                  Next <ChevronRight size={14} />
+                </button>
+              </div>
+            </div>
+          )}
         </SectionCard>
 
         <div className="space-y-6">

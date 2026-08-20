@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-
+import { Circle } from "lucide-react";
 import { fetchMapBoundaryGeoJson, fetchMapInstallations } from "../api";
 import { MapInstallationsResponse } from "../types";
 
@@ -307,9 +307,9 @@ export function GisInstallationsMap({
     layerControlRef.current = L.control.layers(
       {},
       {
-        [`✅ Verified (${mapData.summary.verified})`]: verifiedLayer,
-        [`✅ Pending (${mapData.summary.pending})`]: pendingLayer,
-        [`✅ Flagged (${mapData.summary.flagged})`]: flaggedLayer,
+        [`✓ Verified (${mapData.summary.verified})`]: verifiedLayer,
+        [`◉ Pending (${mapData.summary.pending})`]: pendingLayer,
+        [`✗ Flagged (${mapData.summary.flagged})`]: flaggedLayer,
       },
       { collapsed: false, position: "topright" },
     ).addTo(mapRef.current);
@@ -413,11 +413,11 @@ export function GisInstallationsMap({
         <div>
           <p className="font-semibold text-slate-900">Showing {mapData.summary.total} installations</p>
           <p className="text-slate-500">
-            <span className="font-semibold text-[#1D9E75]">🟢 {mapData.summary.verified} Verified</span>
+            <span className="font-semibold text-[#1D9E75] flex items-center gap-1"><Circle size={10} fill="#1D9E75" stroke="#1D9E75" /> {mapData.summary.verified} Verified</span>
             {"  "}
-            <span className="font-semibold text-[#BA7517]">🟡 {mapData.summary.pending} Pending</span>
+            <span className="font-semibold text-[#BA7517] flex items-center gap-1"><Circle size={10} fill="#BA7517" stroke="#BA7517" /> {mapData.summary.pending} Pending</span>
             {"  "}
-            <span className="font-semibold text-[#A32D2D]">🔴 {mapData.summary.flagged} Flagged</span>
+            <span className="font-semibold text-[#A32D2D] flex items-center gap-1"><Circle size={10} fill="#A32D2D" stroke="#A32D2D" /> {mapData.summary.flagged} Flagged</span>
           </p>
         </div>
         {mapData.truncated && (

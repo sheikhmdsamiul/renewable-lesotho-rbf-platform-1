@@ -389,6 +389,7 @@ export interface Project {
   techType: string;
   region: string;
   district?: string;
+  assignedDistrict?: string;
   status: ProjectStatus;
   progress: number;
   startDate?: string;

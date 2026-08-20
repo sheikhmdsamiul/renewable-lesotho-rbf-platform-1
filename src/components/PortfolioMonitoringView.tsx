@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 
 import { fetchPortfolioKpiSummary, fetchProjects } from "../api";
 import { PortfolioKpiSummary, Project } from "../types";
@@ -27,6 +28,8 @@ export default function PortfolioMonitoringView({
   const [selectedProjectId, setSelectedProjectId] = useState<string>("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [projectsHubPage, setProjectsHubPage] = useState(1);
+  const projectsHubPerPage = 10;
 
   useEffect(() => {
     let active = true;
@@ -123,49 +126,91 @@ export default function PortfolioMonitoringView({
             <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-6 text-sm text-slate-500">
               {emptyProjectsMessage || "No scoped projects are available for this user."}
             </div>
-          ) : (
-            <div className="max-h-[500px] overflow-auto">
-              <table className="min-w-full text-sm">
-                <thead className="sticky top-0 bg-white">
-                  <tr className="border-b border-slate-200 text-left text-slate-500">
-                    <th className="py-2 pr-4">Project</th>
-                    <th className="py-2 pr-4">Vendor</th>
-                    <th className="py-2 pr-4">District</th>
-                    <th className="py-2 pr-4">Progress</th>
-                    <th className="py-2 pr-4">Female %</th>
-                    <th className="py-2 pr-4">Uptime</th>
-                    <th className="py-2">Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {summary.projects.map((project) => {
-                    const selected = selectedProjectId === project.project_id;
-                    return (
-                      <tr
-                        key={project.project_id}
-                        className={`cursor-pointer border-b border-slate-100 ${selected ? "bg-emerald-50" : "hover:bg-slate-50"}`}
-                        onClick={() => setSelectedProjectId(project.project_id)}
-                      >
-                        <td className="py-3 pr-4 font-medium text-slate-900">{project.project_reference}</td>
-                        <td className="py-3 pr-4 text-slate-600">{project.vendor_name}</td>
-                        <td className="py-3 pr-4 text-slate-600">{project.district || "N/A"}</td>
-                        <td className="py-3 pr-4 text-slate-600">{project.progress_pct}%</td>
-                        <td className="py-3 pr-4 text-slate-600">{project.female_pct}%</td>
-                        <td className="py-3 pr-4 text-slate-600">{project.uptime_pct}%</td>
-                        <td className={`py-3 font-medium ${
-                          project.status === "On Track" ? "text-emerald-700" :
-                          project.status === "At Risk" ? "text-rose-700" :
-                          "text-slate-600"
-                        }`}>
-                          {project.status}
-                        </td>
+          ) : (() => {
+            const projectsHubTotalPages = Math.max(1, Math.ceil(summary.projects.length / projectsHubPerPage));
+            const projectsHubSafePage = Math.min(Math.max(1, projectsHubPage), projectsHubTotalPages);
+            const paginatedProjects = summary.projects.slice(
+              (projectsHubSafePage - 1) * projectsHubPerPage,
+              projectsHubSafePage * projectsHubPerPage,
+            );
+            return (
+              <>
+                <div className="max-h-[500px] overflow-auto">
+                  <table className="min-w-full text-sm">
+                    <thead className="sticky top-0 bg-white">
+                      <tr className="border-b border-slate-200 text-left text-slate-500">
+                        <th className="py-2 pr-4">Project</th>
+                        <th className="py-2 pr-4">Vendor</th>
+                        <th className="py-2 pr-4">District</th>
+                        <th className="py-2 pr-4">Progress</th>
+                        <th className="py-2 pr-4">Female %</th>
+                        <th className="py-2 pr-4">Uptime</th>
+                        <th className="py-2">Status</th>
                       </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
+                    </thead>
+                    <tbody>
+                      {paginatedProjects.map((project) => {
+                        const selected = selectedProjectId === project.project_id;
+                        return (
+                          <tr
+                            key={project.project_id}
+                            className={`cursor-pointer border-b border-slate-100 ${selected ? "bg-emerald-50" : "hover:bg-slate-50"}`}
+                            onClick={() => setSelectedProjectId(project.project_id)}
+                          >
+                            <td className="py-3 pr-4 font-medium text-slate-900">{project.project_reference}</td>
+                            <td className="py-3 pr-4 text-slate-600">{project.vendor_name}</td>
+                            <td className="py-3 pr-4 text-slate-600">{project.district || "N/A"}</td>
+                            <td className="py-3 pr-4 text-slate-600">{project.progress_pct}%</td>
+                            <td className="py-3 pr-4 text-slate-600">{project.female_pct}%</td>
+                            <td className="py-3 pr-4 text-slate-600">{project.uptime_pct}%</td>
+                            <td className={`py-3 font-medium ${
+                              project.status === "On Track" ? "text-emerald-700" :
+                              project.status === "At Risk" ? "text-rose-700" :
+                              "text-slate-600"
+                            }`}>
+                              {project.status}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                {summary.projects.length > projectsHubPerPage && (
+                  <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-3">
+                    <p className="text-xs text-slate-500">
+                      Showing <span className="font-semibold text-slate-700">{((projectsHubSafePage - 1) * projectsHubPerPage) + 1}</span>
+                      {"–"}
+                      <span className="font-semibold text-slate-700">{Math.min(projectsHubSafePage * projectsHubPerPage, summary.projects.length)}</span>
+                      {" of "}
+                      <span className="font-semibold text-slate-700">{summary.projects.length}</span>
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setProjectsHubPage((p) => Math.max(1, p - 1))}
+                        disabled={projectsHubSafePage <= 1}
+                        className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:border-emerald-300 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-slate-200 disabled:hover:bg-white"
+                      >
+                        <ChevronLeft size={14} /> Previous
+                      </button>
+                      <span className="text-xs font-bold text-slate-600">
+                        Page {projectsHubSafePage} of {projectsHubTotalPages}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setProjectsHubPage((p) => Math.min(projectsHubTotalPages, p + 1))}
+                        disabled={projectsHubSafePage >= projectsHubTotalPages}
+                        className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:border-emerald-300 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-slate-200 disabled:hover:bg-white"
+                      >
+                        Next <ChevronRight size={14} />
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </>
+            );
+          })()}
         </div>
       </div>
 

@@ -17,7 +17,8 @@ import {
   Bell, 
   BellRing,
   Settings, 
-  LogOut, 
+  LogOut,
+  ChevronLeft,
   ChevronRight,
   ChevronDown,
   Search,
@@ -246,7 +247,7 @@ import { DoeDashboard, DoeRegionalMap, DoeReports } from "./components/DoePortal
 import RmtIssuesFindings from "./components/RmtIssuesFindings";
 import RmtNoticeManagement from "./components/RmtNoticeManagement";
 import { PscReports, PscDashboard, default as PscIssuesView } from "./components/PscPortal";
-import { TacReports } from "./components/TacPortal";
+import { TacDashboard, TacReports } from "./components/TacPortal";
 import { ReportsHub } from "./components/ReportsHub";
 import {
   AuditorDashboard,
@@ -5031,6 +5032,8 @@ const Blacklisting = ({ currentUser }: { currentUser: User | null }) => {
   const [appealResolution, setAppealResolution] = useState("");
   const [appealFile, setAppealFile] = useState<File | null>(null);
   const caseDetailsRef = React.useRef<HTMLDivElement | null>(null);
+  const [casePage, setCasePage] = useState(1);
+  const casePerPage = 8;
 
   const role = currentUser?.role;
   const canInitiate = role === UserRole.RBF_OFFICIAL || role === UserRole.AUDITOR;
@@ -5078,6 +5081,10 @@ const Blacklisting = ({ currentUser }: { currentUser: User | null }) => {
 
   const selectedVendorRecord = vendors.find(v => String(v.vendorId) === initiateForm.vendorId);
   const activeCaseAppeals = appeals.filter(item => item.case === selectedCase?.id);
+
+  const caseTotalPages = Math.ceil(cases.length / casePerPage);
+  const caseSafePage = Math.min(Math.max(1, casePage), caseTotalPages || 1);
+  const paginatedCases = cases.slice((caseSafePage - 1) * casePerPage, caseSafePage * casePerPage);
 
   const openCase = (item: VendorBlacklistCase) => {
     setSelectedCase(item);
@@ -5356,7 +5363,7 @@ const Blacklisting = ({ currentUser }: { currentUser: User | null }) => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {cases.map(item => {
+                {paginatedCases.map(item => {
                   const isSelected = selectedCase?.id === item.id;
                   return (
                     <React.Fragment key={item.id}>
@@ -5390,7 +5397,7 @@ const Blacklisting = ({ currentUser }: { currentUser: User | null }) => {
                           <td colSpan={5} className="px-6 py-3 text-sm text-slate-700">
                             <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
                               <span>
-                                Selected case: <span className="font-semibold">{item.vendorUsername || item.vendor}</span> • {item.status}
+                                Selected case: <span className="font-semibold">{item.vendorUsername || item.vendor}</span> &bull; {item.status}
                               </span>
                               <span className="text-slate-500">
                                 Details are shown in the Case Details panel.
@@ -5410,6 +5417,30 @@ const Blacklisting = ({ currentUser }: { currentUser: User | null }) => {
               </tbody>
             </table>
           </div>
+          {cases.length > casePerPage && (
+            <div className="flex items-center justify-between px-6 py-3 border-t border-slate-100 bg-slate-50/50">
+              <p className="text-xs text-slate-500">
+                Showing {((caseSafePage - 1) * casePerPage) + 1}\u2013{Math.min(caseSafePage * casePerPage, cases.length)} of {cases.length}
+              </p>
+              <div className="flex items-center gap-2">
+                <button
+                  disabled={caseSafePage <= 1}
+                  onClick={() => setCasePage(p => Math.max(1, p - 1))}
+                  className="px-3 py-1 text-xs rounded-lg border border-slate-200 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  Previous
+                </button>
+                <span className="text-xs text-slate-500">Page {caseSafePage} of {caseTotalPages}</span>
+                <button
+                  disabled={caseSafePage >= caseTotalPages}
+                  onClick={() => setCasePage(p => Math.min(caseTotalPages, p + 1))}
+                  className="px-3 py-1 text-xs rounded-lg border border-slate-200 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          )}
         </div>
 
         <div ref={caseDetailsRef} className="card p-6 space-y-4">
@@ -10372,7 +10403,7 @@ const VendorDashboard = ({
   onViewProfile?: () => void;
   onNavigate?: (action: string, id?: string) => void;
 }) => {
-  const [view, setView] = useState<"dashboard" | "new-application" | "new-claim" | "details" | "bid">("dashboard");
+  const [view, setView] = useState<"dashboard" | "new-claim" | "details" | "bid">("dashboard");
   const navigateView = (newView: typeof view, id?: string | null) => { setView(newView); onNavigate?.(newView, id ?? undefined); };
   const [isPreQualified, setIsPreQualified] = useState(false);
   const [selectedMilestone, setSelectedMilestone] = useState<(Milestone & { projectName?: string }) | null>(null);
@@ -10469,7 +10500,6 @@ const VendorDashboard = ({
   });
   const [bidConfirmOpen, setBidConfirmOpen] = useState(false);
   const [bidSubmissionConfirmed, setBidSubmissionConfirmed] = useState(false);
-  const [applicationStep, setApplicationStep] = useState(1);
   const [claimStep, setClaimStep] = useState(1);
   const [isClaimSubmitting, setIsClaimSubmitting] = useState(false);
   const [formData, setFormData] = useState({
@@ -10727,15 +10757,6 @@ const VendorDashboard = ({
       return { label: "Under Review", color: "bg-amber-100 text-amber-700" };
     }
     return { label: display.status, color: getDashboardBidStatusColor(display) };
-  };
-
-  const handleStartApplication = () => {
-    if (!isPreQualified) {
-      alert("You must complete the Pre-Qualification process before submitting new applications.");
-      return;
-    }
-    navigateView("new-application");
-    setApplicationStep(1);
   };
 
   const handleStartClaim = (milestone: Milestone & { projectName?: string }) => {
@@ -11804,17 +11825,6 @@ const VendorDashboard = ({
       );
     } finally {
       setIsBidSubmitting(false);
-    }
-  };
-
-  const handleSubmitApplication = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (applicationStep < 3) {
-      setApplicationStep(applicationStep + 1);
-    } else {
-      // Final submission
-      alert("Application submitted successfully! It is now pending review.");
-      navigateView("dashboard");
     }
   };
 
@@ -13074,184 +13084,6 @@ const VendorDashboard = ({
     );
   }
 
-  if (view === "new-application") {
-    return (
-      <div className="space-y-6 max-w-4xl mx-auto pb-20">
-        <div className="flex items-center gap-4 mb-8">
-          <button onClick={() => navigateView("dashboard")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
-            <ChevronRight className="rotate-180" size={20} />
-          </button>
-          <div>
-            <h1 className="text-2xl font-bold text-slate-900">New RBF Application</h1>
-            <p className="text-slate-500">Submit a new project for subsidy funding</p>
-          </div>
-        </div>
-
-        <div className="flex items-center justify-between mb-8 px-4">
-          {[
-            { step: 1, label: "Project Info" },
-            { step: 2, label: "Technical & Social" },
-            { step: 3, label: "Financials & Docs" },
-          ].map((s, i) => (
-            <React.Fragment key={s.step}>
-              <div className="flex flex-col items-center gap-2">
-                <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold text-sm transition-all ${
-                  applicationStep >= s.step ? "bg-emerald-600 text-white shadow-lg shadow-emerald-600/20" : "bg-slate-200 text-slate-500"
-                }`}>
-                  {s.step}
-                </div>
-                <span className={`text-xs font-bold ${applicationStep >= s.step ? "text-slate-900" : "text-slate-400"}`}>{s.label}</span>
-              </div>
-              {i < 2 && <div className={`flex-1 h-0.5 mx-4 ${applicationStep > s.step ? "bg-emerald-600" : "bg-slate-200"}`} />}
-            </React.Fragment>
-          ))}
-        </div>
-
-        <div className="card p-8">
-          <form onSubmit={handleSubmitApplication} className="space-y-8">
-            {applicationStep === 1 && (
-              <div className="space-y-6">
-                <h3 className="text-lg font-bold text-slate-900 border-b border-slate-100 pb-2">Basic Project Information</h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                  <div className="space-y-1">
-                    <label className="text-sm font-bold text-slate-700 ml-1">Select Active Tender *</label>
-                    <select className="input-field" required>
-                      <option value="">-- Choose a Tender --</option>
-                      <option value="1">RL-2025-SHS-01: Solar Home Systems for Rural Households</option>
-                      <option value="2">RL-2025-MG-04: Mini-Grid Development in Mokhotlong</option>
-                    </select>
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-sm font-bold text-slate-700 ml-1">Project Name *</label>
-                    <input 
-                      required type="text" className="input-field" placeholder="e.g. Thaba-Tseka Solar Village"
-                      value={formData.projectName} onChange={(e) => setFormData({...formData, projectName: e.target.value})}
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-sm font-bold text-slate-700 ml-1">District *</label>
-                    <select 
-                      className="input-field" required
-                      value={formData.district} onChange={(e) => setFormData({...formData, district: e.target.value})}
-                    >
-                      {districts.map(d => <option key={d} value={d}>{d}</option>)}
-                    </select>
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-sm font-bold text-slate-700 ml-1">Specific Location/Village *</label>
-                    <input 
-                      required type="text" className="input-field" placeholder="Village name or coordinates"
-                      value={formData.location} onChange={(e) => setFormData({...formData, location: e.target.value})}
-                    />
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {applicationStep === 2 && (
-              <div className="space-y-6">
-                <h3 className="text-lg font-bold text-slate-900 border-b border-slate-100 pb-2">Technical & Social Impact</h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                  <div className="space-y-1">
-                    <label className="text-sm font-bold text-slate-700 ml-1">Technology Type *</label>
-                    <select 
-                      className="input-field" required
-                      value={formData.techType} onChange={(e) => setFormData({...formData, techType: e.target.value})}
-                    >
-                      {techTypes.map(t => <option key={t} value={t}>{t}</option>)}
-                    </select>
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-sm font-bold text-slate-700 ml-1">Proposed Capacity (kW/units) *</label>
-                    <input 
-                      required type="text" className="input-field" placeholder="e.g. 50kW or 500 units"
-                      value={formData.capacity} onChange={(e) => setFormData({...formData, capacity: e.target.value})}
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-sm font-bold text-slate-700 ml-1">Total Estimated Beneficiaries *</label>
-                    <input 
-                      required type="number" className="input-field" placeholder="Total households/people"
-                      value={formData.beneficiaries} onChange={(e) => setFormData({...formData, beneficiaries: e.target.value})}
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-sm font-bold text-slate-700 ml-1">Female Beneficiaries *</label>
-                    <input 
-                      required type="number" className="input-field" placeholder="Number of women/girls"
-                      value={formData.femaleBeneficiaries} onChange={(e) => setFormData({...formData, femaleBeneficiaries: e.target.value})}
-                    />
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {applicationStep === 3 && (
-              <div className="space-y-6">
-                <h3 className="text-lg font-bold text-slate-900 border-b border-slate-100 pb-2">Financials & Documentation</h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                  <div className="space-y-1">
-                    <label className="text-sm font-bold text-slate-700 ml-1">Total Project Cost (LSL) *</label>
-                    <input 
-                      required type="number" className="input-field" placeholder="M 0.00"
-                      value={formData.totalCost} onChange={(e) => setFormData({...formData, totalCost: e.target.value})}
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-sm font-bold text-slate-700 ml-1">Requested RBF Subsidy (LSL) *</label>
-                    <input 
-                      required type="number" className="input-field" placeholder="M 0.00"
-                      value={formData.requestedSubsidy} onChange={(e) => setFormData({...formData, requestedSubsidy: e.target.value})}
-                    />
-                  </div>
-                </div>
-
-                <div className="space-y-4 pt-4">
-                  <label className="text-sm font-bold text-slate-700 ml-1">Required Documents *</label>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {[
-                      "Technical Proposal",
-                      "Financial Model",
-                      "Environmental Impact Assessment",
-                      "Community Engagement Report"
-                    ].map(doc => (
-                      <div key={doc} className="p-4 border border-slate-200 rounded-xl flex items-center justify-between bg-slate-50">
-                        <div className="flex items-center gap-3">
-                          <FileText className="text-slate-400" size={20} />
-                          <span className="text-sm font-medium text-slate-700">{doc}</span>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => triggerDownload(`${doc.replace(/[^a-z0-9]+/gi, "_").toLowerCase()}.txt`, `${doc}\nUpload placeholder`)}
-                          className="text-emerald-600 hover:text-emerald-700"
-                        >
-                          <Plus size={18} />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            )}
-
-            <div className="flex justify-between pt-8 border-t border-slate-100">
-              <button 
-                type="button" 
-                onClick={() => applicationStep > 1 ? setApplicationStep(applicationStep - 1) : navigateView("dashboard")}
-                className="btn-secondary px-8"
-              >
-                {applicationStep === 1 ? "Cancel" : "Previous"}
-              </button>
-              <button type="submit" className="btn-primary px-12">
-                {applicationStep === 3 ? "Submit Application" : "Next Step"}
-              </button>
-            </div>
-          </form>
-        </div>
-      </div>
-    );
-  }
-
   const contractingSection = (
       <section
         className="rounded-3xl border border-slate-200/80 bg-[linear-gradient(135deg,#ffffff_0%,#f8fafc_55%,#eef2ff_100%)] shadow-[0_18px_50px_-32px_rgba(15,23,42,0.7)]"
@@ -13415,7 +13247,7 @@ const VendorDashboard = ({
               <div key={project.id} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 rounded-xl border border-slate-100 p-4">
                 <div>
                   <p className="text-sm font-bold text-slate-900">{project.projectReference || `Project ${project.id}`}</p>
-                  <p className="text-xs text-slate-500">{project.techType} • {project.region}</p>
+                  <p className="text-xs text-slate-500">{project.techType} • {project.assignedDistrict || project.district || project.region}</p>
                 </div>
                 <div className="flex items-center gap-3">
                   <span className="badge bg-slate-100 text-slate-700">{project.status}</span>
@@ -13431,6 +13263,44 @@ const VendorDashboard = ({
 
   return (
     <div className="space-y-8">
+      <div className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-emerald-600 via-teal-600 to-emerald-700 p-6 md:p-10 text-white shadow-lg shadow-emerald-500/20">
+        <div className="absolute inset-0 opacity-20" style={{
+          backgroundImage: "radial-gradient(circle at 90% 10%, rgba(255,255,255,0.4) 0%, transparent 50%), radial-gradient(circle at 10% 90%, rgba(255,255,255,0.3) 0%, transparent 50%)"
+        }} />
+        <div className="relative flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+          <div className="space-y-2">
+            <span className="inline-flex items-center gap-2 px-3 py-1 bg-white/15 backdrop-blur-md text-xs font-bold rounded-full">
+              <span className="w-1.5 h-1.5 bg-emerald-200 rounded-full animate-pulse" />
+              Vendor Workspace
+            </span>
+            <h2 className="text-3xl md:text-4xl font-black tracking-tight">
+              Welcome back, {currentUser?.fullName || currentUser?.username || "Vendor"}
+            </h2>
+            <p className="text-emerald-50 text-sm md:text-base max-w-xl">
+              {projects.length > 0
+                ? `You're managing ${projects.length} active project${projects.length === 1 ? "" : "s"}. Track bids, installations, and claims from this dashboard.`
+                : isPreQualified
+                  ? "You're pre-qualified. Browse open tenders and submit your first bid whenever you're ready."
+                  : "Complete your pre-qualification to start bidding on tenders and managing projects."}
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              onClick={() => onNavigate?.("tenders")}
+              className="px-5 py-2.5 bg-white text-emerald-700 font-bold rounded-full hover:bg-emerald-50 shadow-md transition"
+            >
+              Browse Tenders
+            </button>
+            <button
+              onClick={() => onNavigate?.("projects_hub")}
+              className="px-5 py-2.5 bg-white/10 backdrop-blur-md text-white font-bold rounded-full border border-white/30 hover:bg-white/20 transition"
+            >
+              My Projects
+            </button>
+          </div>
+        </div>
+      </div>
+
       {!isPreQualified && (
         <div className="p-6 bg-amber-50 border border-amber-200 rounded-2xl flex items-start gap-4">
           <div className="p-3 bg-amber-100 text-amber-600 rounded-xl">
@@ -13465,20 +13335,6 @@ const VendorDashboard = ({
         </div>
       )}
 
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900">Vendor Portal</h1>
-          <p className="text-slate-500">Manage your energy projects and payment claims</p>
-        </div>
-        <button 
-          onClick={handleStartApplication} 
-          disabled={!isPreQualified || vendorRestricted}
-          className={`btn-primary flex items-center gap-2 ${(!isPreQualified || vendorRestricted) ? "opacity-50 cursor-not-allowed" : ""}`}
-        >
-          <Plus size={18} /> New Application
-        </button>
-      </div>
-
       <VendorKpiPanel projects={projects} installationReports={installationReports} />
 
       <div className="card p-6">
@@ -13489,130 +13345,65 @@ const VendorDashboard = ({
         <GisInstallationsMap showFilters={false} height="400px" />
       </div>
 
-      <div className="card overflow-hidden">
-        <div className="border-b border-slate-100 bg-[linear-gradient(120deg,#f8fafc_0%,#f1f5f9_45%,#ffffff_100%)] p-6">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-            <div>
-              <h3 className="text-lg font-bold text-slate-900">Published Tenders</h3>
-              <p className="text-sm text-slate-500">Open opportunities you can submit or continue from this workspace.</p>
-            </div>
-            <button
-              onClick={() => {
-                if (!isPreQualified) {
-                  alert("You must be pre-qualified to submit bids.");
-                  return;
-                }
-                if (vendorRestricted) {
-                  alert(vendorRestrictionMessage);
-                  return;
-                }
-                if (activeTenders.length > 0) {
-                  const latest = activeTenders[0];
-                  const deadline = latest.lastDateSubmission || latest.deadline;
-                  const usesHardDeadline = String(latest.applicationType || "").toLowerCase() === "application window";
-                  const deadlineOk = !usesHardDeadline || !deadline || new Date(deadline) > new Date();
-                  const statusOk = latest.status === TenderStatus.PUBLISHED;
-                  if (!deadlineOk || !statusOk) {
-                    alert("This tender is no longer open for bidding.");
-                    return;
-                  }
-                  void openBidForm(latest);
-                }
-              }}
-              className="btn-secondary text-sm"
-              disabled={vendorRestricted}
-            >
-              Open Latest
-            </button>
-          </div>
-          <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-4">
-            <div className="rounded-xl border border-slate-200 bg-white px-3 py-2">
-              <p className="text-[10px] uppercase tracking-wide text-slate-400">Active</p>
-              <p className="mt-1 text-sm font-semibold text-slate-900">{activeTenders.length}</p>
-            </div>
-            <div className="rounded-xl border border-slate-200 bg-white px-3 py-2">
-              <p className="text-[10px] uppercase tracking-wide text-slate-400">Stage 2 Ready</p>
-              <p className="mt-1 text-sm font-semibold text-emerald-700">{activeTenders.filter((t) => stageTwoDraftsByTender.get(t.id)).length}</p>
-            </div>
-            <div className="rounded-xl border border-slate-200 bg-white px-3 py-2">
-              <p className="text-[10px] uppercase tracking-wide text-slate-400">Awaiting Review</p>
-              <p className="mt-1 text-sm font-semibold text-amber-700">{activeTenders.filter((t) => !stageTwoDraftsByTender.get(t.id) && latestBidByTender.get(t.id)?.status === BidStatus.SUBMITTED).length}</p>
-            </div>
-            <div className="rounded-xl border border-slate-200 bg-white px-3 py-2">
-              <p className="text-[10px] uppercase tracking-wide text-slate-400">Restricted</p>
-              <p className="mt-1 text-sm font-semibold text-rose-700">{vendorRestricted ? "Yes" : "No"}</p>
-            </div>
-          </div>
+      {/* Quick Action Cards */}
+      <div>
+        <div className="mb-4">
+          <h3 className="text-lg font-bold text-slate-900">Quick Actions</h3>
+          <p className="text-sm text-slate-500">Jump to the tools you need most.</p>
         </div>
-
-        <div className="p-6">
-          {activeTenders.length === 0 && (
-            <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 p-6 text-sm text-slate-500">
-              No published tenders available right now.
+        <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+          <button
+            type="button"
+            onClick={() => onNavigate?.("tenders")}
+            className="group flex flex-col items-start gap-2 rounded-2xl border border-slate-200 bg-white p-4 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-emerald-300 hover:shadow-md"
+          >
+            <span className="inline-flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-emerald-500 to-teal-500 text-white shadow-md shadow-emerald-500/30">
+              <Gavel size={18} />
+            </span>
+            <div>
+              <p className="text-sm font-bold text-slate-900">Browse Tenders</p>
+              <p className="text-xs text-slate-500">{activeTenders.length} active</p>
             </div>
-          )}
-
-          {activeTenders.length > 0 && (
-            <div className="grid gap-4 md:grid-cols-2">
-              {activeTenders.map((tender) => {
-                const deadline = tender.lastDateSubmission || tender.deadline;
-                const usesHardDeadline = String(tender.applicationType || "").toLowerCase() === "application window";
-                const deadlineMs = deadline ? Date.parse(deadline) : NaN;
-                const daysLeft = Number.isNaN(deadlineMs) ? null : Math.ceil((deadlineMs - Date.now()) / (1000 * 60 * 60 * 24));
-                const canBid =
-                  !vendorRestricted &&
-                  isPreQualified &&
-                  (tender.status === TenderStatus.PUBLISHED) &&
-                  (!usesHardDeadline || !deadline || new Date(deadline) > new Date());
-
-                return (
-                  <div key={tender.id} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition hover:border-emerald-200 hover:shadow-md">
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <p className="text-xs font-mono text-slate-400">{tender.referenceNumber}</p>
-                        <p className="mt-1 font-bold text-slate-900">{tender.name}</p>
-                        <p className="mt-1 text-xs text-slate-500">{tender.department || "Department not specified"}</p>
-                      </div>
-                      <span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${
-                        !usesHardDeadline ? "bg-blue-100 text-blue-700" :
-                        daysLeft == null ? "bg-slate-100 text-slate-700" :
-                        daysLeft < 0 ? "bg-rose-100 text-rose-700" :
-                        daysLeft <= 7 ? "bg-amber-100 text-amber-700" :
-                        "bg-emerald-100 text-emerald-700"
-                      }`}>
-                        {!usesHardDeadline ? "Open until RMT closes" : (daysLeft == null ? "No deadline" : daysLeft < 0 ? "Closed" : `${daysLeft}d left`)}
-                      </span>
-                    </div>
-
-                    <div className="mt-4 flex flex-wrap gap-2">
-                      <span className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-[10px] font-semibold text-slate-600">{tender.stageType || "Stage N/A"}</span>
-                      <span className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-[10px] font-semibold text-slate-600">{tender.category || "Category N/A"}</span>
-                      {stageTwoDraftsByTender.get(tender.id) && (
-                        <span className="rounded-lg border border-emerald-200 bg-emerald-50 px-2 py-1 text-[10px] font-semibold text-emerald-700">Stage 2 unlocked</span>
-                      )}
-                    </div>
-
-                    {!stageTwoDraftsByTender.get(tender.id) && latestBidByTender.get(tender.id)?.status === BidStatus.SUBMITTED && (
-                      <p className="mt-3 text-xs text-amber-700">Stage 1 submitted. Awaiting technical review to unlock Stage 2.</p>
-                    )}
-
-                    <div className="mt-4 flex items-center justify-between gap-3">
-                      <p className="text-xs text-slate-500">
-                        {usesHardDeadline ? `Deadline: ${deadline || "N/A"}` : `Deadline: ${deadline || "N/A"}`}
-                      </p>
-                      <button
-                        onClick={() => openBidForm(tender)}
-                        disabled={!canBid}
-                        className="btn-primary py-1.5 px-4 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        {stageTwoDraftsByTender.get(tender.id) ? "Continue Stage 2" : "Submit Proposal"}
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
+          </button>
+          <button
+            type="button"
+            onClick={() => onNavigate?.("my_bids")}
+            className="group flex flex-col items-start gap-2 rounded-2xl border border-slate-200 bg-white p-4 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-blue-300 hover:shadow-md"
+          >
+            <span className="inline-flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500 to-indigo-500 text-white shadow-md shadow-blue-500/30">
+              <FileText size={18} />
+            </span>
+            <div>
+              <p className="text-sm font-bold text-slate-900">My Bids</p>
+              <p className="text-xs text-slate-500">{dashboardBidGroups.length} submission{dashboardBidGroups.length === 1 ? "" : "s"}</p>
             </div>
-          )}
+          </button>
+          <button
+            type="button"
+            onClick={() => onNavigate?.("projects_hub")}
+            className="group flex flex-col items-start gap-2 rounded-2xl border border-slate-200 bg-white p-4 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-purple-300 hover:shadow-md"
+          >
+            <span className="inline-flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-purple-500 to-fuchsia-500 text-white shadow-md shadow-purple-500/30">
+              <Briefcase size={18} />
+            </span>
+            <div>
+              <p className="text-sm font-bold text-slate-900">My Projects</p>
+              <p className="text-xs text-slate-500">{projects.length} active</p>
+            </div>
+          </button>
+          <button
+            type="button"
+            onClick={() => onNavigate?.("claims")}
+            className="group flex flex-col items-start gap-2 rounded-2xl border border-slate-200 bg-white p-4 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-amber-300 hover:shadow-md"
+          >
+            <span className="inline-flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-amber-500 to-orange-500 text-white shadow-md shadow-amber-500/30">
+              <Award size={18} />
+            </span>
+            <div>
+              <p className="text-sm font-bold text-slate-900">Submit Claim</p>
+              <p className="text-xs text-slate-500">{milestones.filter((m) => m.status === "claimable" || m.status === "Claimable").length} ready</p>
+            </div>
+          </button>
         </div>
       </div>
 
@@ -13657,29 +13448,58 @@ const VendorDashboard = ({
         </div>
       </div>
 
-      {contractingSection}
-
-      <div className="card">
-        <div className="p-6 border-b border-slate-100">
-          <h3 className="text-lg font-bold">Ongoing Projects</h3>
-          <p className="text-sm text-slate-500">View active implementations linked to your awarded tenders</p>
+      <div className="card overflow-hidden">
+        <div className="border-b border-slate-100 bg-[linear-gradient(120deg,#f8fafc_0%,#f1f5f9_45%,#ffffff_100%)] p-6 flex items-center justify-between gap-4">
+          <div>
+            <h3 className="text-lg font-bold text-slate-900">Ongoing Projects</h3>
+            <p className="text-sm text-slate-500">Active implementations linked to your awarded tenders</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => onNavigate?.("projects_hub")}
+            className="text-xs font-bold text-emerald-700 hover:text-emerald-900 hover:underline"
+          >
+            View all →
+          </button>
         </div>
-        <div className="p-6 space-y-4">
+        <div className="p-6 space-y-3">
           {projects.length === 0 && (
-            <p className="text-sm text-slate-500">No ongoing projects yet.</p>
-          )}
-          {projects.map(project => (
-            <div key={project.id} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 rounded-xl border border-slate-100 p-4">
-              <div>
-                <p className="text-sm font-bold text-slate-900">{project.projectReference || `Project ${project.id}`}</p>
-                <p className="text-xs text-slate-500">{project.techType} • {project.region}</p>
-              </div>
-              <div className="flex items-center gap-3">
-                <span className="badge bg-slate-100 text-slate-700">{project.status}</span>
-                <span className="text-xs text-slate-500">Progress {project.progress}%</span>
-              </div>
+            <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 p-6 text-sm text-slate-500">
+              No ongoing projects yet.
             </div>
-          ))}
+          )}
+          {projects.slice(0, 5).map(project => {
+            const progressNum = Number(project.progress || 0);
+            const progressTone = progressNum >= 80 ? "bg-emerald-500" : progressNum >= 50 ? "bg-amber-500" : "bg-slate-400";
+            return (
+              <div
+                key={project.id}
+                onClick={() => onNavigate?.("projects_hub")}
+                className="group flex flex-col gap-3 rounded-xl border border-slate-100 bg-white p-4 shadow-sm transition hover:border-emerald-300 hover:shadow-md cursor-pointer"
+              >
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                  <div>
+                    <p className="text-sm font-bold text-slate-900">{project.projectReference || `Project ${project.id}`}</p>
+                    <p className="text-xs text-slate-500">{project.techType || "Technology"} • {project.assignedDistrict || project.assignedDistrict || project.district || project.region || "District not set"}</p>
+                  </div>
+                  <span className="inline-flex items-center self-start sm:self-auto rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold text-slate-700">
+                    {project.status || "Active"}
+                  </span>
+                </div>
+                <div className="flex items-center gap-3">
+                  <div className="flex-1 h-1.5 rounded-full bg-slate-100 overflow-hidden">
+                    <div className={`h-full ${progressTone} transition-all`} style={{ width: `${Math.min(100, Math.max(0, progressNum))}%` }} />
+                  </div>
+                  <span className="text-xs font-bold text-slate-700 w-12 text-right">{progressNum}%</span>
+                </div>
+              </div>
+            );
+          })}
+          {projects.length > 5 && (
+            <p className="text-center text-xs text-slate-500 pt-2">
+              Showing 5 of {projects.length} projects. <button onClick={() => onNavigate?.("projects_hub")} className="font-bold text-emerald-700 hover:underline">View all</button>
+            </p>
+          )}
         </div>
       </div>
     </div>
@@ -13704,6 +13524,8 @@ const VendorProfileView = ({ vendorId, viewerRole, onClose, embedded = false, us
   const [profile, setProfile] = useState<VendorProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [activityLogPage, setActivityLogPage] = useState(1);
+  const activityLogPerPage = 10;
 
   const isVendor = viewerRole === UserRole.VENDOR;
   const isRmt = viewerRole === UserRole.RBF_OFFICIAL;
@@ -14073,7 +13895,7 @@ const VendorProfileView = ({ vendorId, viewerRole, onClose, embedded = false, us
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <div>
                           <p className="font-medium text-slate-900">{project.projectReference || project.projectTitle || project.tenderName || project.id}</p>
-                          <p className="text-xs text-slate-500">{project.techType} | {project.district || project.region} | Progress {project.progress}%</p>
+                          <p className="text-xs text-slate-500">{project.techType} | {project.assignedDistrict || project.district || project.region} | Progress {project.progress}%</p>
                         </div>
                         <span className="badge bg-slate-100 text-slate-700">{project.status}</span>
                       </div>
@@ -14242,37 +14064,78 @@ const VendorProfileView = ({ vendorId, viewerRole, onClose, embedded = false, us
 
       case "audit":
         if (!canViewAudit) return <div className="p-8 text-center text-slate-500">Access denied</div>;
+        const activityLogEntries = auditTrail?.entries ?? [];
+        const activityLogTotalPages = Math.max(1, Math.ceil(activityLogEntries.length / activityLogPerPage));
+        const activityLogSafePage = Math.min(Math.max(1, activityLogPage), activityLogTotalPages);
+        const paginatedActivityLog = activityLogEntries.slice(
+          (activityLogSafePage - 1) * activityLogPerPage,
+          activityLogSafePage * activityLogPerPage,
+        );
         return (
           <div className="space-y-6">
             <div className="card p-4">
               <h4 className="font-bold text-slate-900 border-b pb-2 mb-3">Activity Log</h4>
-              {(auditTrail?.entries ?? []).length === 0 ? (
+              {activityLogEntries.length === 0 ? (
                 <div className="text-sm text-slate-500 text-center py-8">{auditTrail?.limited ? "No activity recorded yet." : "No audit events recorded for this vendor."}</div>
               ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead className="bg-slate-50">
-                      <tr>
-                        <th className="text-left p-3">Timestamp</th>
-                        <th className="text-left p-3">Actor</th>
-                        <th className="text-left p-3">Action</th>
-                        <th className="text-left p-3">Module</th>
-                        {!auditTrail?.limited && <th className="text-left p-3">IP</th>}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {(auditTrail?.entries ?? []).map((log) => (
-                        <tr key={log.id} className="border-t">
-                          <td className="p-3">{log.createdAt ? new Date(log.createdAt).toLocaleString() : "N/A"}</td>
-                          <td className="p-3">{log.actor || log.actorUsername || "System"}</td>
-                          <td className="p-3">{log.action}</td>
-                          <td className="p-3">{log.module || log.recordType || log.entityType}</td>
-                          {!auditTrail?.limited && <td className="p-3">{(log.details as any)?.ip_address || "N/A"}</td>}
+                <>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead className="bg-slate-50">
+                        <tr>
+                          <th className="text-left p-3">Timestamp</th>
+                          <th className="text-left p-3">Actor</th>
+                          <th className="text-left p-3">Action</th>
+                          <th className="text-left p-3">Module</th>
+                          {!auditTrail?.limited && <th className="text-left p-3">IP</th>}
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                      </thead>
+                      <tbody>
+                        {paginatedActivityLog.map((log) => (
+                          <tr key={log.id} className="border-t">
+                            <td className="p-3">{log.createdAt ? new Date(log.createdAt).toLocaleString() : "N/A"}</td>
+                            <td className="p-3">{log.actor || log.actorUsername || "System"}</td>
+                            <td className="p-3">{log.action}</td>
+                            <td className="p-3">{log.module || log.recordType || log.entityType}</td>
+                            {!auditTrail?.limited && <td className="p-3">{(log.details as any)?.ip_address || "N/A"}</td>}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  {activityLogEntries.length > activityLogPerPage && (
+                    <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-4">
+                      <p className="text-xs text-slate-500">
+                        Showing <span className="font-semibold text-slate-700">{((activityLogSafePage - 1) * activityLogPerPage) + 1}</span>
+                        {"–"}
+                        <span className="font-semibold text-slate-700">{Math.min(activityLogSafePage * activityLogPerPage, activityLogEntries.length)}</span>
+                        {" of "}
+                        <span className="font-semibold text-slate-700">{activityLogEntries.length}</span>
+                      </p>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setActivityLogPage((p) => Math.max(1, p - 1))}
+                          disabled={activityLogSafePage <= 1}
+                          className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:border-emerald-300 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-slate-200 disabled:hover:bg-white"
+                        >
+                          <ChevronLeft size={14} /> Previous
+                        </button>
+                        <span className="text-xs font-bold text-slate-600">
+                          Page {activityLogSafePage} of {activityLogTotalPages}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setActivityLogPage((p) => Math.min(activityLogTotalPages, p + 1))}
+                          disabled={activityLogSafePage >= activityLogTotalPages}
+                          className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:border-emerald-300 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-slate-200 disabled:hover:bg-white"
+                        >
+                          Next <ChevronRight size={14} />
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </>
               )}
             </div>
           </div>
@@ -15000,7 +14863,7 @@ const ProjectsHub = ({
       const searchableVendorName = isUndpPortal ? "" : project.vendorName;
       const matchesSearch = !search || `${project.projectReference || ""} ${project.id} ${project.techType} ${project.region} ${searchableVendorName}`.toLowerCase().includes(search.toLowerCase());
       const matchesTech = techFilter === "All" || project.techType === techFilter;
-      const matchesDistrict = districtFilter === "All" || (project.district || project.region) === districtFilter;
+      const matchesDistrict = districtFilter === "All" || (project.assignedDistrict || project.district || project.region) === districtFilter;
       const matchesWindow = windowFilter === "All" || projectWindowLabel(project) === windowFilter;
       const matchesStatus =
         statusFilter === "All" ||
@@ -15379,7 +15242,7 @@ const ProjectsHub = ({
         project.projectReference || project.id,
         project.vendorName,
         project.techType,
-        project.district || project.region,
+        project.assignedDistrict || project.district || project.region,
         projectWindowLabel(project),
         String(kpiSnapshot.target),
         String(kpiSnapshot.verified),
@@ -16036,7 +15899,7 @@ const ProjectsHub = ({
             <div><p className="text-xs text-slate-500">Contract ID</p><p className="font-semibold text-slate-900">{project.contractReference || contract?.referenceNumber || "N/A"}</p></div>
             <div><p className="text-xs text-slate-500">Technology</p><p className="font-semibold text-slate-900">{project.techType || "N/A"}</p></div>
             <div><p className="text-xs text-slate-500">Window</p><p className="font-semibold text-slate-900">{projectWindowLabel(project)}</p></div>
-            <div><p className="text-xs text-slate-500">Assigned District</p><p className="font-semibold text-slate-900">{project.district || project.region || "N/A"}</p></div>
+            <div><p className="text-xs text-slate-500">Assigned District</p><p className="font-semibold text-slate-900">{project.assignedDistrict || project.district || project.region || "N/A"}</p></div>
             <div><p className="text-xs text-slate-500">Duration</p><p className="font-semibold text-slate-900">{formatDuration(startDateForProject(project), endDateForProject(project))}</p></div>
             <div><p className="text-xs text-slate-500">Start Date</p><p className="font-semibold text-slate-900">{formatDate(startDateForProject(project))}</p></div>
             <div><p className="text-xs text-slate-500">End Date</p><p className="font-semibold text-slate-900">{formatDate(endDateForProject(project))}</p></div>
@@ -16256,7 +16119,7 @@ const ProjectsHub = ({
                 <h3 className="mt-1 text-2xl font-semibold text-slate-900">{project.projectReference || `PRJ-${project.id}`}</h3>
                 <p className="mt-1 text-base text-slate-700">{project.tenderName || project.projectTitle || "Project"}</p>
                 <p className="mt-1 text-sm text-slate-500">
-                  {[!isUndpPortal ? project.vendorName : null, project.techType || "N/A", project.district || project.region || "N/A"].filter(Boolean).join("  |  ")}
+                  {[!isUndpPortal ? project.vendorName : null, project.techType || "N/A", project.assignedDistrict || project.district || project.region || "N/A"].filter(Boolean).join("  |  ")}
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-3">
@@ -16298,7 +16161,7 @@ const ProjectsHub = ({
           <div className="grid grid-cols-2 gap-3 text-[11px] text-slate-500 sm:grid-cols-3 xl:grid-cols-6">
             <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">Contract</p><p className="font-semibold text-slate-700">{project.contractReference || "N/A"}</p></div>
             <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">Tender</p><p className="font-semibold text-slate-700">{project.tenderReferenceNumber || "N/A"}</p></div>
-            <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">District</p><p className="font-semibold text-slate-700">{project.district || project.region || "N/A"}</p></div>
+            <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">District</p><p className="font-semibold text-slate-700">{project.assignedDistrict || project.district || project.region || "N/A"}</p></div>
             <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">Start</p><p className="font-semibold text-slate-700">{formatDate(startDateForProject(project))}</p></div>
             <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">End</p><p className="font-semibold text-slate-700">{formatDate(endDateForProject(project))}</p></div>
             <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">Value</p><p className="font-semibold text-slate-700">{canSeeFinancials ? formatCurrency(contractValue) : "Restricted"}</p></div>
@@ -16998,7 +16861,7 @@ const ProjectsHub = ({
                                       METER READINGS - {selectedDeviceReading.installationLabel} / {selectedDeviceReading.meterId}
                                     </h4>
                                     <p className="mt-1 text-sm text-slate-600">
-                                      {selectedReport?.beneficiaryName || "Unknown Beneficiary"} | {selectedReport?.householdType || "N/A"} | {project.district || project.region}
+                                      {selectedReport?.beneficiaryName || "Unknown Beneficiary"} | {selectedReport?.householdType || "N/A"} | {project.assignedDistrict || project.district || project.region}
                                     </p>
                                   </div>
 
@@ -17527,7 +17390,7 @@ const ProjectsHub = ({
                 <p className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Project ID</p>
                 <h3 className="mt-1 text-2xl font-semibold text-slate-900">{project.projectReference || `PRJ-${project.id}`}</h3>
                 <p className="mt-1 text-base text-slate-700">{project.tenderName || project.projectTitle || "Project"}</p>
-                <p className="mt-1 text-sm text-slate-500">{project.techType || "N/A"} • District: {project.district || project.region || "N/A"}</p>
+                <p className="mt-1 text-sm text-slate-500">{project.techType || "N/A"} • District: {project.assignedDistrict || project.district || project.region || "N/A"}</p>
               </div>
               <div className="flex flex-wrap items-center gap-3">
                 <div className="h-3 w-56 overflow-hidden rounded-full bg-slate-100">
@@ -17564,7 +17427,7 @@ const ProjectsHub = ({
           <div className="grid grid-cols-2 gap-3 text-[11px] text-slate-500 sm:grid-cols-3 xl:grid-cols-6">
             <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">Start</p><p className="font-semibold text-slate-700">{formatDate(startDateForProject(project))}</p></div>
             <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">End</p><p className="font-semibold text-slate-700">{formatDate(endDateForProject(project))}</p></div>
-            <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">District</p><p className="font-semibold text-slate-700">{project.district || project.region || "N/A"}</p></div>
+            <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">District</p><p className="font-semibold text-slate-700">{project.assignedDistrict || project.district || project.region || "N/A"}</p></div>
             <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">Budget</p><p className="font-semibold text-slate-700">{canSeeFinancials ? formatCurrency(project.budget ?? null) : "Restricted"}</p></div>
             <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">Tender</p><p className="font-semibold text-slate-700">{project.tenderReferenceNumber || "N/A"}</p></div>
             <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">Value</p><p className="font-semibold text-slate-700">{canSeeFinancials ? formatCurrency(contractValue || null) : "Restricted"}</p></div>
@@ -18644,7 +18507,7 @@ const ProjectsHub = ({
                                       METER READINGS - {selectedDeviceReading.installationLabel} / {selectedDeviceReading.meterId}
                                     </h4>
                                     <p className="mt-1 text-sm text-slate-600">
-                                      {selectedReport?.beneficiaryName || "Unknown Beneficiary"} | {selectedReport?.householdType || "N/A"} | {project.district || project.region}
+                                      {selectedReport?.beneficiaryName || "Unknown Beneficiary"} | {selectedReport?.householdType || "N/A"} | {project.assignedDistrict || project.district || project.region}
                                     </p>
                                   </div>
 
@@ -19378,7 +19241,7 @@ const ProjectsHub = ({
                           <td className="px-4 py-3 font-semibold text-slate-900">{project.projectReference || `PRJ-${project.id}`}</td>
                           {!isUndpPortal && <td className="px-4 py-3">{project.vendorName || "N/A"}</td>}
                           <td className="px-4 py-3">{project.techType || "N/A"}</td>
-                          <td className="px-4 py-3">{project.district || project.region || "N/A"}</td>
+                          <td className="px-4 py-3">{project.assignedDistrict || project.district || project.region || "N/A"}</td>
                           <td className="px-4 py-3">{formatMetricValue(kpiSnapshot.target)}</td>
                           <td className="px-4 py-3">{kpiDisplay.verifiedLabel}</td>
                           <td className="px-4 py-3">{kpiDisplay.genderLabel}</td>
@@ -19424,7 +19287,7 @@ const ProjectsHub = ({
               <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
                 <div className="pl-2">
                   <p className="text-base font-semibold text-slate-900">{project.projectReference || `PRJ-${project.id}`}</p>
-                  <p className="text-xs text-slate-500 mt-1">{project.techType || "N/A"} • {project.district || project.region || "Unassigned district"}</p>
+                  <p className="text-xs text-slate-500 mt-1">{project.techType || "N/A"} • {project.assignedDistrict || project.district || project.region || "Unassigned district"}</p>
                   <div className="flex flex-wrap gap-2 mt-3 text-[11px]">
                     <span className="badge bg-slate-100 text-slate-700">Target {formatMetricValue(project.targetInstallations)}</span>
                     <span className="badge bg-slate-100 text-slate-700">Duration {project.projectDurationMonths ? `${project.projectDurationMonths} months` : "N/A"}</span>
@@ -19469,7 +19332,7 @@ const ProjectsHub = ({
                 </div>
                 <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
                   <p className="uppercase tracking-wider text-slate-400">District</p>
-                  <p className="font-semibold text-slate-700">{project.district || project.region || "N/A"}</p>
+                  <p className="font-semibold text-slate-700">{project.assignedDistrict || project.district || project.region || "N/A"}</p>
                 </div>
                 <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
                   <p className="uppercase tracking-wider text-slate-400">Installation Target</p>
@@ -22267,35 +22130,70 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
         <div className="card">
           <div className="p-6 border-b border-slate-100">
             <h3 className="text-lg font-bold text-slate-900">Recently Verified</h3>
+            <p className="text-sm text-slate-500">Your latest site inspections with verification outcomes and observations.</p>
           </div>
-          <div className="overflow-x-auto">
-            <table className="min-w-full text-sm">
-              <thead className="bg-slate-50 text-slate-500">
-                <tr>
-                  <th className="px-4 py-3 text-left font-semibold">INS ID</th>
-                  <th className="px-4 py-3 text-left font-semibold">Beneficiary</th>
-                  <th className="px-4 py-3 text-left font-semibold">Technology</th>
-                  <th className="px-4 py-3 text-left font-semibold">Outcome</th>
-                  <th className="px-4 py-3 text-left font-semibold">Time</th>
-                </tr>
-              </thead>
-              <tbody>
-                {recentlyVerified.map((item) => (
-                  <tr key={item.task.id} className="border-t border-slate-100">
-                    <td className="px-4 py-3 font-medium text-slate-900">{item.task.id}</td>
-                    <td className="px-4 py-3 text-slate-700">{item.beneficiaryName}</td>
-                    <td className="px-4 py-3 text-slate-700">{item.technology}</td>
-                    <td className="px-4 py-3"><span className={`rounded-full px-2.5 py-1 text-[11px] font-bold ${statusTone(item.task.status)}`}>{item.task.status}</span></td>
-                    <td className="px-4 py-3 text-slate-700">{formatDateTime(item.task.updatedAt)}</td>
-                  </tr>
-                ))}
-                {recentlyVerified.length === 0 && (
-                  <tr>
-                    <td colSpan={5} className="px-4 py-8 text-center text-slate-500">No recent verification activity yet.</td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
+          <div className="p-4 space-y-3">
+            {recentlyVerified.map((item) => {
+              const fv = item.task.fieldVerification;
+              return (
+                <button
+                  key={item.task.id}
+                  type="button"
+                  onClick={() => openInspection(item.task.id)}
+                  className="w-full rounded-xl border border-slate-200 bg-white p-4 text-left transition hover:border-emerald-300 hover:shadow-sm"
+                >
+                  <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="font-bold text-slate-900">{item.siteName}</p>
+                        <span className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-bold ${statusTone(item.task.status)}`}>
+                          {item.task.status}
+                        </span>
+                      </div>
+                      <p className="mt-1 text-xs text-slate-500">
+                        {item.project?.projectReference && <span className="font-semibold">{item.project.projectReference}</span>}
+                        {item.project?.projectReference && " • "}
+                        {item.technology} • {item.vendorName} • {item.district}
+                      </p>
+                      <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
+                        <span>Beneficiary: <span className="font-medium text-slate-700">{item.beneficiaryName}</span></span>
+                        {item.report?.serialNumber && (
+                          <span>Serial: <span className="font-medium text-slate-700">{item.report.serialNumber}</span></span>
+                        )}
+                        {item.task.distanceMeters != null && (
+                          <span>{item.task.distanceMeters.toFixed(1)}m from vendor pin</span>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex flex-col items-start gap-1.5 md:items-end md:text-right">
+                      <p className="text-xs text-slate-500">{formatDateTime(item.task.updatedAt)}</p>
+                      {fv && (
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold ${
+                            fv.systemWorking ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700"
+                          }`}>
+                            {fv.systemWorking ? "System OK" : "System Down"}
+                          </span>
+                          {fv.sitePhotos.length > 0 && (
+                            <span className="inline-flex items-center gap-1 rounded-full bg-blue-50 px-2 py-0.5 text-[11px] font-semibold text-blue-700">
+                              {fv.sitePhotos.length} photo{fv.sitePhotos.length === 1 ? "" : "s"}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                      {fv?.observationNotes && (
+                        <p className="mt-1 max-w-xs truncate text-xs text-slate-500" title={fv.observationNotes}>
+                          {fv.observationNotes}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+            {recentlyVerified.length === 0 && (
+              <p className="px-4 py-8 text-center text-sm text-slate-500">No recent verification activity yet.</p>
+            )}
           </div>
         </div>
       )}
@@ -23851,7 +23749,7 @@ const PublicPortal = ({ onBack, onRegisterClick, publicSubView, publicTenderId, 
               <p className="text-slate-500">No published tenders at this time. Check back soon.</p>
             </div>
           ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="space-y-4">
               {paginatedTenders.map((t, idx) => (
                 <motion.div
                   key={t.id}
@@ -23859,28 +23757,99 @@ const PublicPortal = ({ onBack, onRegisterClick, publicSubView, publicTenderId, 
                   whileInView={{ opacity: 1, y: 0 }}
                   viewport={{ once: true }}
                   transition={{ duration: 0.4, delay: idx * 0.05 }}
-                  className="group bg-white rounded-2xl p-6 border border-slate-200 hover:border-emerald-300 hover:shadow-xl hover:shadow-emerald-500/10 transition-all cursor-pointer"
+                  className="group bg-white rounded-2xl border border-slate-200 hover:border-emerald-300 hover:shadow-xl hover:shadow-emerald-500/10 transition-all cursor-pointer overflow-hidden"
                   onClick={() => {
                     setSelected(t);
                     onSubViewChange?.("tender", t.id);
                     window.history.replaceState({ __app: "rbf-spa", showPublicPortal: true, publicView: "tender", publicViewId: t.id }, "", `/public/tender/${t.id}`);
                   }}
                 >
-                  <div className="flex items-start justify-between gap-3 mb-4">
-                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-emerald-50 text-emerald-700 text-xs font-bold rounded-full">
-                      <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />
-                      Published
-                    </span>
-                    <ArrowUpRight size={18} className="text-slate-400 group-hover:text-emerald-600 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-transform" />
-                  </div>
-                  <h4 className="text-lg font-bold text-slate-900 mb-2 leading-snug line-clamp-2">{t.name}</h4>
-                  <p className="text-sm text-slate-500 mb-4 line-clamp-1">{t.department}</p>
-                  <div className="flex items-center justify-between pt-4 border-t border-slate-100">
-                    <div className="flex items-center gap-2 text-xs text-slate-500">
-                      <Clock size={14} className="text-rose-500" />
-                      <span className="font-bold text-rose-600">{t.deadline ? new Date(t.deadline).toLocaleDateString() : 'N/A'}</span>
+                  <div className="p-6">
+                    <div className="flex items-start justify-between gap-4 mb-3">
+                      <div className="flex items-center gap-3 flex-wrap">
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-emerald-50 text-emerald-700 text-xs font-bold rounded-full">
+                          <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />
+                          Published
+                        </span>
+                        {t.category && (
+                          <span className="px-2.5 py-1 bg-slate-100 text-slate-600 text-xs font-bold rounded-full">{t.category}</span>
+                        )}
+                        {t.procurementMethod && (
+                          <span className="px-2.5 py-1 bg-blue-50 text-blue-700 text-xs font-bold rounded-full">{t.procurementMethod}</span>
+                        )}
+                      </div>
+                      <ArrowUpRight size={18} className="text-slate-400 group-hover:text-emerald-600 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-transform shrink-0" />
                     </div>
-                    <span className="text-xs text-slate-400 font-mono">{t.referenceNumber}</span>
+                    <div className="mb-2">
+                      <span className="text-xs font-mono font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded">{t.referenceNumber}</span>
+                    </div>
+                    <h4 className="text-lg font-bold text-slate-900 mb-1 leading-snug">{t.name}</h4>
+                    <p className="text-sm text-slate-500 mb-3">{t.department}</p>
+                    <div className="flex flex-wrap gap-1.5 mb-4">
+                      {(t.technologyTypes || []).slice(0, 3).map(tech => (
+                        <span key={tech} className="px-2 py-0.5 bg-teal-50 text-teal-700 rounded text-xs font-medium">{tech}</span>
+                      ))}
+                      {(t.technologyTypes || []).length > 3 && (
+                        <span className="px-2 py-0.5 bg-slate-100 text-slate-500 rounded text-xs">+{(t.technologyTypes || []).length - 3}</span>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-4 border-t border-slate-100">
+                      <div>
+                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Deadline</p>
+                        <p className="text-sm font-bold text-rose-600 flex items-center gap-1 mt-0.5">
+                          <Clock size={12} />
+                          {t.deadline ? new Date(t.deadline).toLocaleDateString() : "N/A"}
+                        </p>
+                      </div>
+                      {t.budget ? (
+                        <div>
+                          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Budget</p>
+                          <p className="text-sm font-bold text-slate-900 mt-0.5">LSL {(t.budget / 1000).toFixed(0)}K</p>
+                        </div>
+                      ) : t.targetDistricts && t.targetDistricts.length > 0 ? (
+                        <div>
+                          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Districts</p>
+                          <p className="text-sm font-bold text-slate-900 mt-0.5">{t.targetDistricts.length} district{t.targetDistricts.length !== 1 ? "s" : ""}</p>
+                        </div>
+                      ) : (
+                        <div>
+                          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Target</p>
+                          <p className="text-sm font-bold text-slate-900 mt-0.5">{t.approximateInstallationTarget ? `${t.approximateInstallationTarget} units` : "N/A"}</p>
+                        </div>
+                      )}
+                      {t.approximateInstallationTarget ? (
+                        <div>
+                          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Installations</p>
+                          <p className="text-sm font-bold text-slate-900 mt-0.5">{t.approximateInstallationTarget.toLocaleString()}</p>
+                        </div>
+                      ) : t.targetSiteType ? (
+                        <div>
+                          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Site Type</p>
+                          <p className="text-sm font-bold text-slate-900 mt-0.5">{t.targetSiteType}</p>
+                        </div>
+                      ) : (
+                        <div>
+                          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Published</p>
+                          <p className="text-sm font-bold text-slate-900 mt-0.5">{t.publishedAt ? new Date(t.publishedAt).toLocaleDateString() : "Recently"}</p>
+                        </div>
+                      )}
+                      {t.targetDistricts && t.targetDistricts.length > 0 ? (
+                        <div>
+                          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Districts</p>
+                          <p className="text-sm font-bold text-slate-900 mt-0.5 truncate" title={t.targetDistricts.join(", ")}>{t.targetDistricts[0]}{t.targetDistricts.length > 1 ? ` +${t.targetDistricts.length - 1}` : ""}</p>
+                        </div>
+                      ) : t.fundingSource ? (
+                        <div>
+                          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Funding</p>
+                          <p className="text-sm font-bold text-slate-900 mt-0.5 truncate">{t.fundingSource}</p>
+                        </div>
+                      ) : (
+                        <div>
+                          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Status</p>
+                          <p className="text-sm font-bold text-emerald-600 mt-0.5">Open</p>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </motion.div>
               ))}
@@ -23952,7 +23921,7 @@ const PublicPortal = ({ onBack, onRegisterClick, publicSubView, publicTenderId, 
                 animate={{ opacity: 1, scale: 1, y: 0 }}
                 exit={{ opacity: 0, scale: 0.95, y: 20 }}
                 transition={{ duration: 0.25 }}
-                className="bg-white rounded-3xl max-w-2xl w-full max-h-[90vh] overflow-hidden shadow-2xl"
+                className="bg-white rounded-3xl max-w-3xl w-full max-h-[90vh] overflow-hidden shadow-2xl"
                 onClick={e => e.stopPropagation()}
               >
                 <div className="relative bg-gradient-to-br from-emerald-600 via-teal-600 to-emerald-700 px-8 py-6 overflow-hidden">
@@ -23961,14 +23930,23 @@ const PublicPortal = ({ onBack, onRegisterClick, publicSubView, publicTenderId, 
                   }} />
                   <div className="relative flex items-start justify-between gap-4">
                     <div className="space-y-2 flex-1 min-w-0">
-                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-white/20 backdrop-blur-md text-white text-xs font-bold rounded-full">
-                        <span className="w-1.5 h-1.5 bg-white rounded-full animate-pulse" />
-                        Published Tender
-                      </span>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-white/20 backdrop-blur-md text-white text-xs font-bold rounded-full">
+                          <span className="w-1.5 h-1.5 bg-white rounded-full animate-pulse" />
+                          Published Tender
+                        </span>
+                        {selected.category && (
+                          <span className="px-2.5 py-1 bg-white/15 backdrop-blur-md text-white text-xs font-bold rounded-full">{selected.category}</span>
+                        )}
+                        {selected.procurementMethod && (
+                          <span className="px-2.5 py-1 bg-white/15 backdrop-blur-md text-white text-xs font-bold rounded-full">{selected.procurementMethod}</span>
+                        )}
+                      </div>
                       <h4 className="text-2xl font-black text-white leading-tight">{selected.name}</h4>
                       <div className="flex flex-wrap items-center gap-3 text-xs text-emerald-50">
-                        <span className="font-mono">{selected.referenceNumber}</span>
-                        {selected.department && <><span>•</span><span>{selected.department}</span></>}
+                        <span className="font-mono font-bold">{selected.referenceNumber}</span>
+                        {selected.department && <><span>&bull;</span><span>{selected.department}</span></>}
+                        {selected.fundingSource && <><span>&bull;</span><span>Funded: {selected.fundingSource}</span></>}
                       </div>
                     </div>
                     <button
@@ -23985,22 +23963,72 @@ const PublicPortal = ({ onBack, onRegisterClick, publicSubView, publicTenderId, 
                 </div>
 
                 <div className="p-8 space-y-6 overflow-y-auto" style={{ maxHeight: "calc(90vh - 160px)" }}>
-                  <div className="grid grid-cols-2 gap-3">
-                    <div className="rounded-2xl border border-slate-200 p-4 bg-gradient-to-br from-slate-50 to-white">
-                      <p className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Published</p>
-                      <p className="font-bold text-slate-900">{selected.publishedAt ? new Date(selected.publishedAt).toLocaleDateString() : "N/A"}</p>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    <div className="rounded-2xl border border-slate-200 p-3 bg-gradient-to-br from-slate-50 to-white">
+                      <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Published</p>
+                      <p className="text-sm font-bold text-slate-900">{selected.publishedAt ? new Date(selected.publishedAt).toLocaleDateString() : "Recently"}</p>
                     </div>
-                    <div className="rounded-2xl border border-rose-100 p-4 bg-gradient-to-br from-rose-50 to-white">
-                      <p className="text-xs font-bold text-rose-600 uppercase tracking-wider mb-1">Deadline</p>
-                      <p className="font-bold text-rose-600">{selected.deadline ? new Date(selected.deadline).toLocaleDateString() : "N/A"}</p>
+                    <div className="rounded-2xl border border-rose-100 p-3 bg-gradient-to-br from-rose-50 to-white">
+                      <p className="text-[10px] font-bold text-rose-500 uppercase tracking-wider mb-1">Deadline</p>
+                      <p className="text-sm font-bold text-rose-600">{selected.deadline ? new Date(selected.deadline).toLocaleDateString() : "N/A"}</p>
+                    </div>
+                    {selected.dateOpening && (
+                      <div className="rounded-2xl border border-blue-100 p-3 bg-gradient-to-br from-blue-50 to-white">
+                        <p className="text-[10px] font-bold text-blue-500 uppercase tracking-wider mb-1">Opening Date</p>
+                        <p className="text-sm font-bold text-blue-700">{new Date(selected.dateOpening).toLocaleDateString()}</p>
+                      </div>
+                    )}
+                    {selected.timeForCompletion && (
+                      <div className="rounded-2xl border border-violet-100 p-3 bg-gradient-to-br from-violet-50 to-white">
+                        <p className="text-[10px] font-bold text-violet-500 uppercase tracking-wider mb-1">Completion</p>
+                        <p className="text-sm font-bold text-violet-700">{selected.timeForCompletion}</p>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="rounded-2xl border border-slate-200 p-5 bg-gradient-to-br from-slate-50 to-white">
+                    <h5 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-4">Tender Information</h5>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3">
+                      <div className="flex items-center justify-between py-1.5 border-b border-slate-100">
+                        <span className="text-xs text-slate-500">Category</span>
+                        <span className="text-sm font-bold text-slate-900">{selected.category || "N/A"}</span>
+                      </div>
+                      <div className="flex items-center justify-between py-1.5 border-b border-slate-100">
+                        <span className="text-xs text-slate-500">Procurement Method</span>
+                        <span className="text-sm font-bold text-slate-900">{selected.procurementMethod || "Open Tendering"}</span>
+                      </div>
+                      {selected.applicationType && (
+                        <div className="flex items-center justify-between py-1.5 border-b border-slate-100">
+                          <span className="text-xs text-slate-500">Application Type</span>
+                          <span className="text-sm font-bold text-slate-900">{selected.applicationType}</span>
+                        </div>
+                      )}
+                      {selected.stageType && (
+                        <div className="flex items-center justify-between py-1.5 border-b border-slate-100">
+                          <span className="text-xs text-slate-500">Stage</span>
+                          <span className="text-sm font-bold text-slate-900">{selected.stageType}</span>
+                        </div>
+                      )}
+                      {selected.fundingSource && (
+                        <div className="flex items-center justify-between py-1.5 border-b border-slate-100">
+                          <span className="text-xs text-slate-500">Funding Source</span>
+                          <span className="text-sm font-bold text-slate-900">{selected.fundingSource}</span>
+                        </div>
+                      )}
+                      {selected.invitedBy && (
+                        <div className="flex items-center justify-between py-1.5 border-b border-slate-100">
+                          <span className="text-xs text-slate-500">Invited By</span>
+                          <span className="text-sm font-bold text-slate-900">{selected.invitedBy}</span>
+                        </div>
+                      )}
                     </div>
                   </div>
 
-                  <div>
-                    <h5 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3">Scope</h5>
+                  <div className="rounded-2xl border border-slate-200 p-5">
+                    <h5 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-4">Scope &amp; Requirements</h5>
                     <div className="space-y-3">
                       <div className="flex items-start gap-3 py-2 border-b border-slate-100">
-                        <span className="text-xs font-bold text-slate-500 w-32 flex-shrink-0 pt-1">Technology</span>
+                        <span className="text-xs font-bold text-slate-500 w-36 flex-shrink-0 pt-1">Technology Types</span>
                         <div className="flex flex-wrap gap-1.5 flex-1">
                           {(selected.technologyTypes || []).length > 0 ? (selected.technologyTypes || []).map(tech => (
                             <span key={tech} className="px-2.5 py-1 bg-emerald-50 text-emerald-700 rounded-full text-xs font-bold">{tech}</span>
@@ -24008,24 +24036,134 @@ const PublicPortal = ({ onBack, onRegisterClick, publicSubView, publicTenderId, 
                         </div>
                       </div>
                       <div className="flex items-start gap-3 py-2 border-b border-slate-100">
-                        <span className="text-xs font-bold text-slate-500 w-32 flex-shrink-0 pt-1">Target Districts</span>
-                        <p className="text-sm text-slate-900 flex-1">{(selected.targetDistricts || []).join(", ") || "All districts"}</p>
+                        <span className="text-xs font-bold text-slate-500 w-36 flex-shrink-0 pt-1">Target Districts</span>
+                        <div className="flex flex-wrap gap-1.5 flex-1">
+                          {(selected.targetDistricts || []).length > 0 ? (selected.targetDistricts || []).map(d => (
+                            <span key={d} className="px-2.5 py-1 bg-blue-50 text-blue-700 rounded-full text-xs font-bold">{d}</span>
+                          )) : <span className="text-sm text-slate-500">All districts</span>}
+                        </div>
                       </div>
-                      <div className="flex items-start gap-3 py-2">
-                        <span className="text-xs font-bold text-slate-500 w-32 flex-shrink-0 pt-1">Installation Target</span>
-                        <p className="text-sm text-slate-900 flex-1 font-bold">
-                          {selected.approximateInstallationTarget ? `${selected.approximateInstallationTarget.toLocaleString()} installations` : "N/A"}
-                        </p>
+                      {selected.targetSiteType && (
+                        <div className="flex items-center gap-3 py-2 border-b border-slate-100">
+                          <span className="text-xs font-bold text-slate-500 w-36 flex-shrink-0">Site Type</span>
+                          <span className="text-sm font-bold text-slate-900">{selected.targetSiteType}</span>
+                        </div>
+                      )}
+                      <div className="flex items-center gap-3 py-2 border-b border-slate-100">
+                        <span className="text-xs font-bold text-slate-500 w-36 flex-shrink-0">Installation Target</span>
+                        <span className="text-sm font-bold text-slate-900">{selected.approximateInstallationTarget ? `${selected.approximateInstallationTarget.toLocaleString()} installations` : "N/A"}</span>
                       </div>
+                      {selected.minimumServiceTier && (
+                        <div className="flex items-center gap-3 py-2">
+                          <span className="text-xs font-bold text-slate-500 w-36 flex-shrink-0">Minimum Service Tier</span>
+                          <span className="text-sm font-bold text-slate-900">{selected.minimumServiceTier}</span>
+                        </div>
+                      )}
                     </div>
                   </div>
 
-                  <div>
-                    <h5 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3">Eligibility</h5>
+                  {selected.budget && (
+                    <div className="rounded-2xl border border-emerald-200 p-5 bg-gradient-to-br from-emerald-50 to-white">
+                      <h5 className="text-xs font-bold text-emerald-600 uppercase tracking-widest mb-4">Financial Information</h5>
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                        <div className="text-center p-3 bg-white rounded-xl border border-emerald-100">
+                          <p className="text-[10px] font-bold text-emerald-500 uppercase tracking-wider mb-1">Estimated Budget</p>
+                          <p className="text-lg font-black text-emerald-700">LSL {selected.budget.toLocaleString()}</p>
+                        </div>
+                        {selected.biddingCurrency && (
+                          <div className="text-center p-3 bg-white rounded-xl border border-emerald-100">
+                            <p className="text-[10px] font-bold text-emerald-500 uppercase tracking-wider mb-1">Currency</p>
+                            <p className="text-lg font-black text-emerald-700">{selected.biddingCurrency}</p>
+                          </div>
+                        )}
+                        {selected.approximateInstallationTarget && selected.budget && (
+                          <div className="text-center p-3 bg-white rounded-xl border border-emerald-100">
+                            <p className="text-[10px] font-bold text-emerald-500 uppercase tracking-wider mb-1">Per Unit (Est.)</p>
+                            <p className="text-lg font-black text-emerald-700">LSL {Math.round(selected.budget / selected.approximateInstallationTarget).toLocaleString()}</p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="rounded-2xl border border-slate-200 p-5">
+                    <h5 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3">Eligibility Criteria</h5>
                     <p className="text-sm text-slate-700 leading-relaxed">{selected.biddersEligibility || "Pre-qualification required. Vendors must be registered with valid trading license and tax clearance."}</p>
                   </div>
 
-                  <div>
+                  {(selected.lastDateSubmission || selected.lastDateSecurity || selected.addressForDocument || selected.placeForOpening) && (
+                    <div className="rounded-2xl border border-slate-200 p-5">
+                      <h5 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-4">Submission Details</h5>
+                      <div className="space-y-3">
+                        {selected.lastDateSubmission && (
+                          <div className="flex items-center gap-3 py-2 border-b border-slate-100">
+                            <span className="text-xs font-bold text-slate-500 w-36 flex-shrink-0">Last Submission Date</span>
+                            <span className="text-sm font-bold text-rose-600">{new Date(selected.lastDateSubmission).toLocaleDateString()}</span>
+                          </div>
+                        )}
+                        {selected.lastDateSecurity && (
+                          <div className="flex items-center gap-3 py-2 border-b border-slate-100">
+                            <span className="text-xs font-bold text-slate-500 w-36 flex-shrink-0">Security Deadline</span>
+                            <span className="text-sm font-bold text-slate-900">{new Date(selected.lastDateSecurity).toLocaleDateString()}</span>
+                          </div>
+                        )}
+                        {selected.addressForDocument && (
+                          <div className="flex items-start gap-3 py-2 border-b border-slate-100">
+                            <span className="text-xs font-bold text-slate-500 w-36 flex-shrink-0 pt-1">Document Address</span>
+                            <span className="text-sm text-slate-700 flex-1">{selected.addressForDocument}</span>
+                          </div>
+                        )}
+                        {selected.placeForOpening && (
+                          <div className="flex items-start gap-3 py-2">
+                            <span className="text-xs font-bold text-slate-500 w-36 flex-shrink-0 pt-1">Opening Venue</span>
+                            <span className="text-sm text-slate-700 flex-1">{selected.placeForOpening}</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {(selected.technicalWeight || selected.financialWeight || selected.technicalThreshold) && (
+                    <div className="rounded-2xl border border-slate-200 p-5">
+                      <h5 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-4">Evaluation Criteria</h5>
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                        {selected.technicalWeight ? (
+                          <div className="text-center p-3 bg-slate-50 rounded-xl border border-slate-200">
+                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Technical</p>
+                            <p className="text-lg font-black text-slate-900">{selected.technicalWeight}%</p>
+                          </div>
+                        ) : null}
+                        {selected.financialWeight ? (
+                          <div className="text-center p-3 bg-slate-50 rounded-xl border border-slate-200">
+                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Financial</p>
+                            <p className="text-lg font-black text-slate-900">{selected.financialWeight}%</p>
+                          </div>
+                        ) : null}
+                        {selected.technicalThreshold ? (
+                          <div className="text-center p-3 bg-amber-50 rounded-xl border border-amber-200">
+                            <p className="text-[10px] font-bold text-amber-500 uppercase tracking-wider mb-1">Min. Technical Score</p>
+                            <p className="text-lg font-black text-amber-700">{selected.technicalThreshold}%</p>
+                          </div>
+                        ) : null}
+                      </div>
+                    </div>
+                  )}
+
+                  {selected.instruction && (
+                    <div className="rounded-2xl border border-slate-200 p-5">
+                      <h5 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3">Instructions to Bidders</h5>
+                      <div className="text-sm text-slate-700 leading-relaxed whitespace-pre-wrap">{selected.instruction}</div>
+                    </div>
+                  )}
+
+                  {selected.preTenderMeetingInfo && (
+                    <div className="rounded-2xl border border-blue-200 p-5 bg-blue-50/50">
+                      <h5 className="text-xs font-bold text-blue-600 uppercase tracking-widest mb-3">Pre-Tender Meeting</h5>
+                      <p className="text-sm text-blue-800 leading-relaxed">{selected.preTenderMeetingInfo}</p>
+                    </div>
+                  )}
+
+                  <div className="rounded-2xl border border-slate-200 p-5">
                     <h5 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3">Public Documents</h5>
                     <div className="space-y-2">
                       {selected.scheduleFile ? (
@@ -24056,7 +24194,7 @@ const PublicPortal = ({ onBack, onRegisterClick, publicSubView, publicTenderId, 
                             <FileText size={18} />
                           </div>
                           <div className="flex-1 min-w-0">
-                            <p className="font-bold text-slate-900 text-sm">Technical Specifications</p>
+                            <p className="font-bold text-slate-900 text-sm">Technical Specifications / RFP</p>
                             <p className="text-xs text-slate-500">Download PDF</p>
                           </div>
                           <Download size={16} className="text-slate-400 group-hover:text-blue-600" />
@@ -24067,13 +24205,68 @@ const PublicPortal = ({ onBack, onRegisterClick, publicSubView, publicTenderId, 
                             <FileText size={18} />
                           </div>
                           <div className="flex-1">
-                            <p className="font-bold text-slate-500 text-sm">Technical Specifications</p>
+                            <p className="font-bold text-slate-500 text-sm">Technical Specifications / RFP</p>
+                            <p className="text-xs text-slate-400">Not available</p>
+                          </div>
+                        </div>
+                      )}
+                      {selected.milestonePaymentScheduleFile ? (
+                        <a href={selected.milestonePaymentScheduleFile} target="_blank" rel="noopener noreferrer" className="flex items-center gap-3 p-4 rounded-2xl border border-slate-200 hover:border-violet-300 hover:bg-violet-50/50 transition group">
+                          <div className="w-10 h-10 rounded-xl bg-violet-100 text-violet-600 flex items-center justify-center group-hover:bg-violet-600 group-hover:text-white transition">
+                            <FileText size={18} />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="font-bold text-slate-900 text-sm">Milestone Payment Schedule</p>
+                            <p className="text-xs text-slate-500">Download PDF</p>
+                          </div>
+                          <Download size={16} className="text-slate-400 group-hover:text-violet-600" />
+                        </a>
+                      ) : (
+                        <div className="flex items-center gap-3 p-4 rounded-2xl border border-slate-200 opacity-50">
+                          <div className="w-10 h-10 rounded-xl bg-slate-100 text-slate-400 flex items-center justify-center">
+                            <FileText size={18} />
+                          </div>
+                          <div className="flex-1">
+                            <p className="font-bold text-slate-500 text-sm">Payment Schedule</p>
                             <p className="text-xs text-slate-400">Not available</p>
                           </div>
                         </div>
                       )}
                     </div>
                   </div>
+
+                  {(selected.tenderSecurityRequired || selected.biddersSchedulePurchase || selected.coolingOffDays) && (
+                    <div className="rounded-2xl border border-slate-200 p-5">
+                      <h5 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-4">Additional Requirements</h5>
+                      <div className="space-y-2">
+                        {selected.tenderSecurityRequired && (
+                          <div className="flex items-center gap-3 py-2 border-b border-slate-100">
+                            <span className="text-xs font-bold text-slate-500 w-44 flex-shrink-0">Tender Security</span>
+                            <span className="px-2.5 py-0.5 bg-amber-100 text-amber-700 rounded-full text-xs font-bold">Required</span>
+                          </div>
+                        )}
+                        {selected.biddersSchedulePurchase && (
+                          <div className="flex items-center gap-3 py-2 border-b border-slate-100">
+                            <span className="text-xs font-bold text-slate-500 w-44 flex-shrink-0">Schedule Purchase</span>
+                            <span className="px-2.5 py-0.5 bg-blue-100 text-blue-700 rounded-full text-xs font-bold">Required</span>
+                          </div>
+                        )}
+                        {selected.coolingOffDays && (
+                          <div className="flex items-center gap-3 py-2">
+                            <span className="text-xs font-bold text-slate-500 w-44 flex-shrink-0">Cooling-Off Period</span>
+                            <span className="text-sm font-bold text-slate-900">{selected.coolingOffDays} days</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {selected.contactDetails && (
+                    <div className="rounded-2xl border border-slate-200 p-5 bg-slate-50">
+                      <h5 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3">Contact Information</h5>
+                      <p className="text-sm text-slate-700 leading-relaxed whitespace-pre-wrap">{selected.contactDetails}</p>
+                    </div>
+                  )}
 
                   <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-emerald-600 to-teal-600 p-6 text-center">
                     <div className="absolute inset-0 opacity-20" style={{
@@ -24086,12 +24279,11 @@ const PublicPortal = ({ onBack, onRegisterClick, publicSubView, publicTenderId, 
                         onClick={() => {
                           setSelected(null);
                           onSubViewChange?.(null);
-                          window.history.replaceState({ __app: "rbf-spa", showPublicPortal: true }, "", "/public");
-                          alert("Redirect to login");
+                          onRegisterClick?.();
                         }}
                         className="mt-3 px-6 py-2.5 bg-white text-emerald-700 font-bold rounded-full hover:bg-emerald-50 transition shadow-lg"
                       >
-                        Login / Register
+                        Login / Register to Bid
                       </button>
                     </div>
                   </div>
@@ -25459,7 +25651,11 @@ export default function App() {
       setActiveTab("portfolio");
       return;
     }
-    if (role === UserRole.TAC || role === UserRole.DOE_OFFICER || role === UserRole.AUDITOR || role === UserRole.FIELD_VERIFIER) {
+    if (role === UserRole.DOE_OFFICER) {
+      setActiveTab("dashboard");
+      return;
+    }
+    if (role === UserRole.TAC || role === UserRole.AUDITOR || role === UserRole.FIELD_VERIFIER) {
       setActiveTab("projects");
     }
   }, [role]);
@@ -25479,7 +25675,11 @@ export default function App() {
       setActiveTab("portfolio");
       return;
     }
-    if (role === UserRole.TAC || role === UserRole.DOE_OFFICER || role === UserRole.AUDITOR || role === UserRole.FIELD_VERIFIER) {
+    if (role === UserRole.DOE_OFFICER) {
+      setActiveTab("dashboard");
+      return;
+    }
+    if (role === UserRole.TAC || role === UserRole.AUDITOR || role === UserRole.FIELD_VERIFIER) {
       setActiveTab("projects");
     }
   }, [role]);
@@ -25641,7 +25841,7 @@ export default function App() {
               setPendingBidTenderId(null);
               setPendingBidId(null);
             }}
-            onNavigate={(action, id) => navigateTo("dashboard", action, id)}
+            onNavigate={(action, id) => navigateTo(action, undefined, id)}
           />
         );
         case "contracting": return (
@@ -25656,7 +25856,7 @@ export default function App() {
               setPendingBidTenderId(null);
               setPendingBidId(null);
             }}
-            onNavigate={(action, id) => navigateTo("dashboard", action, id)}
+            onNavigate={(action, id) => navigateTo(action, undefined, id)}
           />
         );
         case "prequal": return <PreQualificationSubmission />;
@@ -25694,26 +25894,27 @@ export default function App() {
         case "claims": return <Disbursements onOpenProjectKpi={openProjectKpiView} onOpenProject={openProjectHubView} />;
         case "my_profile":
           return <VendorProfileView viewerRole={currentUser.role} useOwnProfile embedded />;
-        default: return <VendorDashboard onNavigate={(action, id) => navigateTo("dashboard", action, id)} />;
+        default: return <VendorDashboard onNavigate={(action, id) => navigateTo(action, undefined, id)} />;
       }
     }
     if (role === UserRole.TAC) {
       switch (activeTab) {
+        case "dashboard":
+          return <TacDashboard currentUser={currentUser} onNavigate={(action) => navigateTo(action)} />;
         case "projects":
           return <ProjectsHub mode="tac" externalProjectId={selectedProjectId} externalProjectTab={selectedProjectTab} />;
-        case "dashboard":
         case "payments":
+          return <Disbursements onOpenProjectKpi={openProjectKpiView} onOpenProject={openProjectHubView} />;
         case "evaluations":
+          return <TACView mode="technical" onNavigate={(action, id) => navigateTo("evaluations", action, id)} />;
         case "blacklisting":
+          return <Blacklisting currentUser={currentUser} />;
         case "all_vendors":
+          return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={(vendorId) => { setViewingVendorProfile(vendorId); navigateTo("all_vendors", "view", vendorId); }} />;
         case "reports":
-          if (activeTab === "all_vendors") return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={(vendorId) => { setViewingVendorProfile(vendorId); navigateTo("all_vendors", "view", vendorId); }} />;
-          if (activeTab === "blacklisting") return <Blacklisting currentUser={currentUser} />;
-          if (activeTab === "payments") return <Disbursements onOpenProjectKpi={openProjectKpiView} onOpenProject={openProjectHubView} />;
-          if (activeTab === "reports") return <TacReports />;
-          return <TACView mode="technical" onNavigate={(action, id) => navigateTo("evaluations", action, id)} />;
+          return <TacReports />;
         default:
-          return <TACView mode="technical" onNavigate={(action, id) => navigateTo("evaluations", action, id)} />;
+          return <TacDashboard currentUser={currentUser} onNavigate={(action) => navigateTo(action)} />;
       }
     }
     if (role === UserRole.FIELD_VERIFIER) {
@@ -25825,24 +26026,17 @@ if (activeTab === "reports") {
         case "portfolio":
           return <ProjectsHub mode="psc" externalProjectId={selectedProjectId} externalProjectTab={selectedProjectTab} />;
         case "dashboard":
+          return <PscDashboard currentUser={currentUser} onNavigate={(tab) => setActiveTab(tab as any)} />;
         case "impact":
         case "funding":
         case "compliance":
+          return <PscDashboard currentUser={currentUser} onNavigate={(tab) => setActiveTab(tab as any)} />;
         case "all_vendors":
+          return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={(vendorId) => { setViewingVendorProfile(vendorId); navigateTo("all_vendors", "view", vendorId); }} />;
         case "reports":
+          return <PscReports currentUser={currentUser} />;
         case "issues":
-          if (activeTab === "all_vendors") {
-            return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={(vendorId) => { setViewingVendorProfile(vendorId); navigateTo("all_vendors", "view", vendorId); }} />;
-          }
-          if (activeTab === "reports") {
-            return <PscReports currentUser={currentUser} />;
-          }
-          if (activeTab === "issues") {
-            return <PscIssuesView currentUser={currentUser} />;
-          }
-          return (
-            <PscDashboard currentUser={currentUser} />
-          );
+          return <PscIssuesView currentUser={currentUser} />;
         case "payments":
           return <Disbursements onOpenProjectKpi={openProjectKpiView} onOpenProject={openProjectHubView} />;
         default:
@@ -25858,35 +26052,30 @@ if (activeTab === "reports") {
       switch (activeTab) {
         case "projects":
           return <ProjectsHub mode="auditor" externalProjectId={selectedProjectId} externalProjectTab={selectedProjectTab} />;
-case "dashboard":
-            return <AuditorDashboard />;
-          case "gis":
-            return <AuditorGisMap />;
-          case "kpi_dashboard":
-            return <AuditorKpiDashboard />;
-          case "audit_logs":
-            return <AuditorAuditLogs />;
-          case "anomaly_report":
-            return <AuditorAnomalyReport />;
-          case "claims_audit":
-            return <AuditorClaimsAudit />;
-          case "prospect_sync":
-            return <AuditorProspectSyncLog />;
-          case "reports":
-            return <Reports currentUser={currentUser} onNavigate={(action, id) => navigateTo("reports", action, id)} />;
-          case "audit_findings":
-            return <AuditorAuditFindings currentUser={currentUser} />;
+        case "dashboard":
+          return <AuditorDashboard onNavigate={(tab) => setActiveTab(tab as any)} />;
+        case "gis":
+          return <AuditorGisMap />;
+        case "kpi_dashboard":
+          return <AuditorKpiDashboard />;
+        case "audit_logs":
+          return <AuditorAuditLogs />;
+        case "anomaly_report":
+          return <AuditorAnomalyReport />;
+        case "claims_audit":
+          return <AuditorClaimsAudit />;
+        case "prospect_sync":
+          return <AuditorProspectSyncLog />;
+        case "reports":
+          return <Reports currentUser={currentUser} onNavigate={(action, id) => navigateTo("reports", action, id)} />;
+        case "audit_findings":
+          return <AuditorAuditFindings currentUser={currentUser} />;
         case "notifications":
           return <NotificationLogs logs={notifications} onSelect={handleNotificationSelect} />;
         case "all_vendors":
           return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={(vendorId) => { setViewingVendorProfile(vendorId); navigateTo("all_vendors", "view", vendorId); }} />;
         default:
-          return (
-            <PortfolioMonitoringView
-              title="Auditor Portal"
-              description="Read-only GIS, KPI, and project evidence monitoring for compliance and anomaly review."
-            />
-          );
+          return <AuditorDashboard onNavigate={(tab) => setActiveTab(tab as any)} />;
       }
     }
 
