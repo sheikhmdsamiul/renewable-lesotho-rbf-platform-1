@@ -14,6 +14,10 @@
   body {
     @apply font-sans bg-slate-50 text-slate-900;
   }
+
+  button, a[href], [role="button"], summary, [tabindex]:not([tabindex="-1"]) {
+    cursor: pointer;
+  }
 }
 
 @layer components {
@@ -22,11 +26,11 @@
   }
   
   .btn-primary {
-    @apply px-4 py-2 bg-emerald-600 text-white rounded-lg font-medium hover:bg-emerald-700 transition-colors disabled:opacity-50;
+    @apply px-4 py-2 bg-emerald-600 text-white rounded-lg font-medium hover:bg-emerald-700 transition-colors disabled:opacity-50 cursor-pointer;
   }
   
   .btn-secondary {
-    @apply px-4 py-2 bg-white text-slate-700 border border-slate-200 rounded-lg font-medium hover:bg-slate-50 transition-colors;
+    @apply px-4 py-2 bg-white text-slate-700 border border-slate-200 rounded-lg font-medium hover:bg-slate-50 transition-colors cursor-pointer;
   }
   
   .input-field {

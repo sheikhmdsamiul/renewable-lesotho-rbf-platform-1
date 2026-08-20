@@ -2895,7 +2895,7 @@ const Tenders = ({
                         <Check size={14} className="text-white" />
                       </div>
                     )}
-                    <div onClick={() => document.getElementById(`docUpload-${idx}`)?.click()} className="block">
+                    <div onClick={() => document.getElementById(`docUpload-${idx}`)?.click()} className="block cursor-pointer">
                       {doc.file || doc.existing ? (
                         <CheckCircle2 size={22} className="mx-auto text-emerald-500 mb-2" />
                       ) : (
