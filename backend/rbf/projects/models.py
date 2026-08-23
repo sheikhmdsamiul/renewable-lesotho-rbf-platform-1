@@ -13,6 +13,9 @@ class ProspectSyncStatus(models.TextChoices):
 
 class ProjectStatus(models.TextChoices):
     SETUP_PENDING = 'setup_pending', 'Setup Pending'
+    SETUP_UNDER_REVIEW = 'setup_under_review', 'Setup Under Review'
+    SETUP_CHANGES_REQUESTED = 'setup_changes_requested', 'Setup Changes Requested'
+    SETUP_REJECTED = 'setup_rejected', 'Setup Rejected'
     ACTIVE = 'active', 'Active'
     PRE_QUALIFICATION = 'Pre-Qualification', 'Pre-Qualification'
     SITE_SPECIFIC = 'Site-Specific Proposal', 'Site-Specific Proposal'
@@ -142,6 +145,15 @@ class ProjectSetupSiteStatus(models.TextChoices):
     NOT_STARTED = 'not_started', 'Not Started'
 
 
+class ProjectSetupReviewStatus(models.TextChoices):
+    DRAFT = 'draft', 'Draft'
+    SUBMITTED = 'submitted', 'Submitted (Awaiting RMT Review)'
+    UNDER_REVIEW = 'under_review', 'Under RMT Review'
+    APPROVED = 'approved', 'Approved'
+    CHANGES_REQUESTED = 'changes_requested', 'Changes Requested'
+    REJECTED = 'rejected', 'Rejected'
+
+
 class ProjectSetup(models.Model):
     project = models.OneToOneField(Project, related_name='project_setup', on_delete=models.CASCADE)
     vendor = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='project_setups', on_delete=models.CASCADE)
@@ -167,6 +179,22 @@ class ProjectSetup(models.Model):
     checklist_site_ready = models.BooleanField(default=False)
     checklist_safety_ready = models.BooleanField(default=False)
     checklist_logistics_ready = models.BooleanField(default=False)
+    review_status = models.CharField(
+        max_length=32,
+        choices=ProjectSetupReviewStatus.choices,
+        default=ProjectSetupReviewStatus.DRAFT,
+    )
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        related_name='reviewed_project_setups',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    review_notes = models.TextField(blank=True)
+    previous_review_notes = models.TextField(blank=True)
     setup_completed_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

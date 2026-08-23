@@ -897,6 +897,7 @@ function mapProjectFromApi(api: any): Project {
     verificationMethodConfirmed: Boolean(api.verification_method_confirmed),
     setupCompletedAt: api.setup_completed_at ?? undefined,
     projectSetup: mapProjectSetupFromApi(api.project_setup),
+    setupStatusBanner: api.setup_status_banner ?? undefined,
     claimCount: api.claim_count != null ? Number(api.claim_count) : undefined,
     unresolvedFlagCount: api.unresolved_flag_count != null ? Number(api.unresolved_flag_count) : undefined,
     latestAuditEntry: api.latest_audit_entry ? mapAuditLogFromApi(api.latest_audit_entry) : undefined,
@@ -935,6 +936,13 @@ function mapProjectSetupFromApi(api: any): ProjectSetup | undefined {
     checklistSiteReady: Boolean(api.checklist_site_ready),
     checklistSafetyReady: Boolean(api.checklist_safety_ready),
     checklistLogisticsReady: Boolean(api.checklist_logistics_ready),
+    reviewStatus: api.review_status ?? undefined,
+    submittedAt: api.submitted_at ?? undefined,
+    reviewedBy: api.reviewed_by != null ? String(api.reviewed_by) : undefined,
+    reviewedByUsername: api.reviewed_by_username ?? undefined,
+    reviewedAt: api.reviewed_at ?? undefined,
+    reviewNotes: api.review_notes ?? undefined,
+    previousReviewNotes: api.previous_review_notes ?? undefined,
     setupCompletedAt: api.setup_completed_at ?? undefined,
     createdAt: api.created_at ?? undefined,
     updatedAt: api.updated_at ?? undefined,
@@ -3271,11 +3279,52 @@ export async function refreshProspectSyncPanel(payload?: {
   });
 }
 
-export async function requestProjectSetupChange(projectId: string, message: string): Promise<{ status: string; message: string }> {
-  return await http<{ status: string; message: string }>(`/api/projects/${projectId}/setup/request-change/`, {
+export async function startProjectSetupReview(projectId: string): Promise<{ status: string; message: string; project: Project }> {
+  const data = await http<any>(`/api/projects/${projectId}/setup/start-review/`, {
     method: "POST",
-    body: JSON.stringify({ message }),
+    body: JSON.stringify({}),
   });
+  return {
+    status: data.status || "ok",
+    message: data.message || "Review claimed.",
+    project: mapProjectFromApi(data.project ?? data),
+  };
+}
+
+export async function approveProjectSetup(projectId: string, notes?: string): Promise<{ status: string; message: string; project: Project }> {
+  const data = await http<any>(`/api/projects/${projectId}/setup/approve/`, {
+    method: "POST",
+    body: JSON.stringify({ notes: notes || "" }),
+  });
+  return {
+    status: data.status || "ok",
+    message: data.message || "Setup approved.",
+    project: mapProjectFromApi(data.project ?? data),
+  };
+}
+
+export async function requestSetupChangesByRmt(projectId: string, notes: string): Promise<{ status: string; message: string; project: Project }> {
+  const data = await http<any>(`/api/projects/${projectId}/setup/request-changes/`, {
+    method: "POST",
+    body: JSON.stringify({ notes }),
+  });
+  return {
+    status: data.status || "ok",
+    message: data.message || "Change request sent.",
+    project: mapProjectFromApi(data.project ?? data),
+  };
+}
+
+export async function rejectProjectSetup(projectId: string, notes: string): Promise<{ status: string; message: string; project: Project }> {
+  const data = await http<any>(`/api/projects/${projectId}/setup/reject/`, {
+    method: "POST",
+    body: JSON.stringify({ notes }),
+  });
+  return {
+    status: data.status || "ok",
+    message: data.message || "Setup rejected.",
+    project: mapProjectFromApi(data.project ?? data),
+  };
 }
 
 export async function uploadProjectMeterCsv(projectId: string, file: File): Promise<{ status: string; rows_ingested: number; uploaded_at: string }> {

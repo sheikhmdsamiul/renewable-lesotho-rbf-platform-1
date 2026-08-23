@@ -225,7 +225,10 @@ import {
   resolveAnomalyFlag,
   fetchProspectSyncLogs,
   refreshProspectSyncPanel,
-  requestProjectSetupChange,
+  startProjectSetupReview,
+  approveProjectSetup,
+  requestSetupChangesByRmt,
+  rejectProjectSetup,
   uploadProjectMeterCsv,
   API_BASE,
   USER_KEY,
@@ -14483,7 +14486,7 @@ const ProjectsHub = ({
   const isAuditorPortal = mode === "auditor";
   const isOfficialPortal = !isVendorPortal;
   const projectTabs = isRbfPortal
-    ? ["overview", "kpi", "map", "milestones", "payments", "documents", "updates"] as const
+    ? ["overview", "planning", "kpi", "map", "milestones", "payments", "documents", "updates"] as const
     : ["overview", "planning", "kpi", "map", "milestones", "fieldwork", "device_readings", "payments", "documents", "updates"] as const;
   const createEmptyMilestoneDraft = () => ({
     name: "",
@@ -14580,8 +14583,6 @@ const ProjectsHub = ({
   const [reportMessage, setReportMessage] = useState<string | null>(null);
   const [reportMessageTone, setReportMessageTone] = useState<"success" | "error" | "info">("info");
   const [reportErrors, setReportErrors] = useState<Record<string, string>>({});
-  const [requestChangeMessage, setRequestChangeMessage] = useState("");
-  const [requestChangeSubmitting, setRequestChangeSubmitting] = useState(false);
   const [meterCsvFile, setMeterCsvFile] = useState<File | null>(null);
   const [meterCsvUploading, setMeterCsvUploading] = useState(false);
   const [meterCsvMessage, setMeterCsvMessage] = useState<string | null>(null);
@@ -14669,7 +14670,6 @@ const ProjectsHub = ({
     setReportPhotos([]);
     setReportReceipt(null);
     setReportMessage(null);
-    setRequestChangeMessage("");
     setMeterCsvFile(null);
     setMeterCsvMessage(null);
     setFieldworkPage(1);
@@ -14822,6 +14822,15 @@ const ProjectsHub = ({
     if ([ProjectStatus.COMPLETED, "Completed"].includes(project.status as ProjectStatus | "Completed")) {
       return { label: "Completed", badgeClass: "bg-emerald-100 text-emerald-700", rowClass: "bg-emerald-50/60" };
     }
+    if (project.status === ProjectStatus.SETUP_UNDER_REVIEW) {
+      return { label: "Setup Under Review", badgeClass: "bg-blue-100 text-blue-700", rowClass: "bg-blue-50/60" };
+    }
+    if (project.status === ProjectStatus.SETUP_CHANGES_REQUESTED) {
+      return { label: "Setup Changes Requested", badgeClass: "bg-amber-100 text-amber-700", rowClass: "bg-amber-50/60" };
+    }
+    if (project.status === ProjectStatus.SETUP_REJECTED) {
+      return { label: "Setup Rejected", badgeClass: "bg-rose-100 text-rose-700", rowClass: "bg-rose-50/60" };
+    }
     if (!isProjectSetupComplete(project) || project.status === ProjectStatus.SETUP_PENDING) {
       return { label: "Setup", badgeClass: "bg-slate-200 text-slate-700", rowClass: "bg-slate-50" };
     }
@@ -14870,7 +14879,10 @@ const ProjectsHub = ({
         statusMeta.label === statusFilter ||
         (statusFilter === "Active" && activeProjects.some(p => p.id === project.id)) ||
         (statusFilter === "Completed" && completedProjects.some(p => p.id === project.id)) ||
-        (statusFilter === "Pending" && pendingProjects.some(p => p.id === project.id));
+        (statusFilter === "Pending" && pendingProjects.some(p => p.id === project.id)) ||
+        (statusFilter === "Setup Under Review" && project.status === ProjectStatus.SETUP_UNDER_REVIEW) ||
+        (statusFilter === "Setup Changes Requested" && project.status === ProjectStatus.SETUP_CHANGES_REQUESTED) ||
+        (statusFilter === "Setup Rejected" && project.status === ProjectStatus.SETUP_REJECTED);
       return matchesSearch && matchesTech && matchesDistrict && matchesWindow && matchesStatus && matchesDateRange(project);
     });
   }, [projects, search, techFilter, districtFilter, windowFilter, dateRangeFilter, statusFilter, activeProjects, completedProjects, pendingProjects, tenderById, isUndpPortal, selectedProjectKpi, projectAnomalyFlags]);
@@ -15130,11 +15142,18 @@ const ProjectsHub = ({
     if (label === "UNDER REVIEW" || label === "PENDING") return "text-amber-700";
     return "text-slate-500";
   };
-  const getSetupStatusLabel = (project: Project) => (isProjectSetupComplete(project) ? "COMPLETE" : "INCOMPLETE");
-  const getSetupBannerClass = (project: Project) =>
-    isProjectSetupComplete(project)
-      ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-      : "border-rose-200 bg-rose-50 text-rose-700";
+  const getSetupStatusLabel = (project: Project) => {
+    if (project.setupStatusBanner?.status) return project.setupStatusBanner.status;
+    return isProjectSetupComplete(project) ? "COMPLETE" : "INCOMPLETE";
+  };
+  const getSetupBannerClass = (project: Project) => {
+    const tone = project.setupStatusBanner?.tone;
+    if (tone === "green") return "border-emerald-200 bg-emerald-50 text-emerald-700";
+    if (tone === "blue") return "border-blue-200 bg-blue-50 text-blue-700";
+    if (tone === "indigo") return "border-indigo-200 bg-indigo-50 text-indigo-700";
+    if (tone === "amber") return "border-amber-200 bg-amber-50 text-amber-700";
+    return "border-rose-200 bg-rose-50 text-rose-700";
+  };
   const getProjectStatusTone = (project: Project) => {
     const unresolvedFlags = anomalyFlagsForProject(project.id).filter(flag => !flag.isResolved).length;
     if (project.status === ProjectStatus.COMPLETED) return { label: "Completed", className: "bg-slate-200 text-slate-700" };
@@ -15230,6 +15249,10 @@ const ProjectsHub = ({
       "uptime_pct",
       "milestone_status",
       "status",
+      "setup_review_status",
+      "setup_submitted_at",
+      "setup_reviewed_at",
+      "setup_review_notes",
     ];
     const rows = filteredProjects.map(project => {
       const kpiSnapshot = getProjectKpiSnapshot(project);
@@ -15251,6 +15274,10 @@ const ProjectsHub = ({
         kpiSnapshot.uptimePct.toFixed(1),
         milestoneLabel,
         project.status,
+        project.projectSetup?.reviewStatus || (isProjectSetupComplete(project) ? "approved" : "draft"),
+        project.projectSetup?.submittedAt || "",
+        project.projectSetup?.reviewedAt || "",
+        (project.projectSetup?.reviewNotes || "").replace(/[\n,]/g, " "),
       ].join(",");
     });
     triggerDownload("rbf_projects_rmt.csv", [header.join(","), ...rows].join("\n"), "text/csv;charset=utf-8");
@@ -15642,20 +15669,68 @@ const ProjectsHub = ({
     }
   };
 
-  const handleRequestSetupChange = async () => {
-    if (!selectedProject) return;
-    setRequestChangeSubmitting(true);
-    setPlanMessage(null);
+  const [rmtActionModal, setRmtActionModal] = useState<null | "approve" | "changes" | "reject">(null);
+  const [rmtActionNotes, setRmtActionNotes] = useState("");
+  const [rmtReviewMessage, setRmtReviewMessage] = useState<string | null>(null);
+  const [rmtReviewSubmitting, setRmtReviewSubmitting] = useState(false);
+
+  const openRmtAction = (kind: "approve" | "changes" | "reject") => {
+    setRmtActionModal(kind);
+    setRmtActionNotes("");
+    setRmtReviewMessage(null);
+  };
+
+  const closeRmtAction = () => {
+    setRmtActionModal(null);
+    setRmtActionNotes("");
+  };
+
+  const submitRmtAction = async () => {
+    if (!selectedProject || !rmtActionModal) return;
+    const notes = rmtActionNotes.trim();
+    if (rmtActionModal !== "approve" && !notes) {
+      setRmtReviewMessage("Notes are required for this action.");
+      return;
+    }
+    setRmtReviewSubmitting(true);
+    setRmtReviewMessage(null);
     try {
-      const response = await requestProjectSetupChange(selectedProject.id, requestChangeMessage.trim());
-      setPlanMessage(response.message);
-      setRequestChangeMessage("");
+      let result;
+      if (rmtActionModal === "approve") {
+        result = await approveProjectSetup(selectedProject.id, notes || undefined);
+      } else if (rmtActionModal === "changes") {
+        result = await requestSetupChangesByRmt(selectedProject.id, notes);
+      } else {
+        result = await rejectProjectSetup(selectedProject.id, notes);
+      }
+      setProjects(prev => prev.map(p => p.id === result.project.id ? { ...p, ...result.project } : p));
+      if (selectedProject.id === result.project.id) setSelectedProject({ ...selectedProject, ...result.project });
+      setRmtReviewMessage(result.message);
+      closeRmtAction();
       await refreshProjectUpdates(selectedProject.id);
     } catch (err: any) {
       const raw = String(err?.message || "");
-      setPlanMessage(toFriendlyApiMessage(raw) || "Unable to request a setup change.");
+      setRmtReviewMessage(toFriendlyApiMessage(raw) || "Unable to record the review action.");
     } finally {
-      setRequestChangeSubmitting(false);
+      setRmtReviewSubmitting(false);
+    }
+  };
+
+  const handleStartSetupReview = async () => {
+    if (!selectedProject) return;
+    setRmtReviewSubmitting(true);
+    setRmtReviewMessage(null);
+    try {
+      const result = await startProjectSetupReview(selectedProject.id);
+      setProjects(prev => prev.map(p => p.id === result.project.id ? { ...p, ...result.project } : p));
+      if (selectedProject.id === result.project.id) setSelectedProject({ ...selectedProject, ...result.project });
+      setRmtReviewMessage(result.message);
+      await refreshProjectUpdates(selectedProject.id);
+    } catch (err: any) {
+      const raw = String(err?.message || "");
+      setRmtReviewMessage(toFriendlyApiMessage(raw) || "Unable to start review.");
+    } finally {
+      setRmtReviewSubmitting(false);
     }
   };
 
@@ -16057,18 +16132,32 @@ const ProjectsHub = ({
       ? ["summary", "milestone_payments", "kpi", "compliance", "device_readings"] as const
       : isUndpPortal
         ? ["summary", "kpi", "compliance"] as const
-        : [
-            "overview",
-            "milestones",
-            ...(canAccessInstallations ? ["installations"] as const : []),
-            ...(canAccessDeviceReadings ? ["device_readings"] as const : []),
-            "kpi",
-            ...(canAccessPayments ? ["payments"] as const : []),
-            ...(canAccessAnomalyFlags ? ["anomaly_flags"] as const : []),
-            ...(canAccessDocuments ? ["documents"] as const : []),
-            ...(canAccessProspectSync ? ["prospect_sync"] as const : []),
-            ...(canAccessAuditTrail ? ["audit_trail"] as const : []),
-          ];
+        : isRbfPortal
+          ? [
+              "overview",
+              "planning",
+              "milestones",
+              ...(canAccessInstallations ? ["installations"] as const : []),
+              ...(canAccessDeviceReadings ? ["device_readings"] as const : []),
+              "kpi",
+              ...(canAccessPayments ? ["payments"] as const : []),
+              ...(canAccessAnomalyFlags ? ["anomaly_flags"] as const : []),
+              ...(canAccessDocuments ? ["documents"] as const : []),
+              ...(canAccessProspectSync ? ["prospect_sync"] as const : []),
+              ...(canAccessAuditTrail ? ["audit_trail"] as const : []),
+            ]
+          : [
+              "overview",
+              "milestones",
+              ...(canAccessInstallations ? ["installations"] as const : []),
+              ...(canAccessDeviceReadings ? ["device_readings"] as const : []),
+              "kpi",
+              ...(canAccessPayments ? ["payments"] as const : []),
+              ...(canAccessAnomalyFlags ? ["anomaly_flags"] as const : []),
+              ...(canAccessDocuments ? ["documents"] as const : []),
+              ...(canAccessProspectSync ? ["prospect_sync"] as const : []),
+              ...(canAccessAuditTrail ? ["audit_trail"] as const : []),
+            ];
     const activeTab = detailTabs.includes(projectTab as any) ? projectTab : detailTabs[0];
     const installationSummary = {
       total: projectReports.length,
@@ -16285,6 +16374,194 @@ const ProjectsHub = ({
                   )}
                 </div>
               </div>
+            </div>
+          )}
+
+          {activeTab === "planning" && isRbfPortal && (
+            <div className="space-y-4">
+              <div className="rounded-2xl border border-slate-200 bg-white p-5">
+                <div className="flex items-start justify-between gap-3 flex-wrap">
+                  <div>
+                    <p className="text-xs font-bold uppercase tracking-widest text-slate-400">Setup Review</p>
+                    <p className="mt-1 text-lg font-bold text-slate-900">
+                      {project.projectSetup?.reviewStatus
+                        ? project.projectSetup.reviewStatus.replace(/_/g, " ").toUpperCase()
+                        : isProjectSetupComplete(project) ? "APPROVED" : "DRAFT"}
+                    </p>
+                    <p className="mt-1 text-xs text-slate-500">
+                      {project.projectSetup?.submittedAt ? `Submitted ${new Date(project.projectSetup.submittedAt).toLocaleString()}` : "Not yet submitted"}
+                      {project.projectSetup?.reviewedAt ? ` \u2022 Reviewed ${new Date(project.projectSetup.reviewedAt).toLocaleString()}` : ""}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {project.projectSetup?.reviewStatus === "submitted" && (
+                      <button onClick={handleStartSetupReview} className="btn-secondary text-xs" disabled={rmtReviewSubmitting}>
+                        {rmtReviewSubmitting ? "Claiming..." : "Start Review"}
+                      </button>
+                    )}
+                    {["submitted", "under_review", "changes_requested"].includes(project.projectSetup?.reviewStatus || "") && (
+                      <>
+                        <button onClick={() => openRmtAction("approve")} className="btn-primary text-xs bg-emerald-600 hover:bg-emerald-700">
+                          Approve Setup
+                        </button>
+                        <button onClick={() => openRmtAction("changes")} className="btn-secondary text-xs border-amber-200 text-amber-700 hover:bg-amber-50">
+                          Request Changes
+                        </button>
+                        <button onClick={() => openRmtAction("reject")} className="btn-secondary text-xs border-rose-200 text-rose-700 hover:bg-rose-50">
+                          Reject Setup
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </div>
+                {rmtReviewMessage && (
+                  <div className="mt-3 rounded-xl border border-blue-200 bg-blue-50 p-3 text-xs text-blue-800">
+                    {rmtReviewMessage}
+                  </div>
+                )}
+                {project.projectSetup?.reviewNotes && (
+                  <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Latest Notes</p>
+                    <p className="mt-1 text-sm text-slate-700">{project.projectSetup.reviewNotes}</p>
+                  </div>
+                )}
+              </div>
+
+              <div className="rounded-2xl border border-slate-200 bg-white p-5">
+                <p className="text-sm font-semibold text-slate-800">Section A \u2014 Team & Resources</p>
+                <div className="mt-3 grid gap-4 md:grid-cols-2">
+                  <div className="rounded-xl border border-slate-100 bg-slate-50 p-3 text-sm">
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Team roster file</p>
+                    {project.projectSetup?.teamRosterFileUrl ? <a className="text-emerald-700 underline" href={project.projectSetup.teamRosterFileUrl} target="_blank" rel="noreferrer">Open uploaded file</a> : <span className="text-slate-500">Not uploaded</span>}
+                  </div>
+                  <div className="rounded-xl border border-slate-100 bg-slate-50 p-3 text-sm">
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Equipment plan file</p>
+                    {project.projectSetup?.equipmentPlanFileUrl ? <a className="text-emerald-700 underline" href={project.projectSetup.equipmentPlanFileUrl} target="_blank" rel="noreferrer">Open uploaded file</a> : <span className="text-slate-500">Not uploaded</span>}
+                  </div>
+                </div>
+                <div className="mt-3 grid gap-2 md:grid-cols-2 text-sm text-slate-700">
+                  {[
+                    ["Team roster finalized", project.projectSetup?.checklistTeamReady],
+                    ["Equipment sourcing confirmed", project.projectSetup?.checklistEquipmentReady],
+                    ["Deployment sites confirmed", project.projectSetup?.checklistSiteReady],
+                    ["Safety briefing completed", project.projectSetup?.checklistSafetyReady],
+                    ["Logistics mobilization confirmed", project.projectSetup?.checklistLogisticsReady],
+                  ].map(([label, done]) => (
+                    <div key={String(label)} className="flex items-center gap-2 rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
+                      {done ? <CheckCircle2 size={14} className="text-emerald-600" /> : <XCircle size={14} className="text-rose-500" />}
+                      <span className="text-sm text-slate-700">{String(label)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-slate-200 bg-white p-5">
+                <p className="text-sm font-semibold text-slate-800">Section B \u2014 Site Preparation</p>
+                <div className="mt-3 grid gap-3 md:grid-cols-2 text-sm">
+                  <div className="rounded-xl border border-slate-100 bg-slate-50 p-3">
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Site status</p>
+                    <p className="mt-1 text-slate-900">{project.projectSetup?.siteStatus || "not_started"}</p>
+                  </div>
+                  <div className="rounded-xl border border-slate-100 bg-slate-50 p-3">
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Work schedule</p>
+                    <p className="mt-1 text-slate-900">{project.projectSetup?.workScheduleStart || "?"} \u2192 {project.projectSetup?.workScheduleEnd || "?"}</p>
+                  </div>
+                  <div className="rounded-xl border border-slate-100 bg-slate-50 p-3">
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Compliance docs</p>
+                    {project.projectSetup?.complianceDocsFileUrl ? <a className="text-emerald-700 underline" href={project.projectSetup.complianceDocsFileUrl} target="_blank" rel="noreferrer">Open uploaded file</a> : <span className="text-slate-500">Not uploaded</span>}
+                  </div>
+                  <div className="rounded-xl border border-slate-100 bg-slate-50 p-3">
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Insurance certificate</p>
+                    {project.projectSetup?.insuranceCertificateFileUrl ? <a className="text-emerald-700 underline" href={project.projectSetup.insuranceCertificateFileUrl} target="_blank" rel="noreferrer">Open uploaded file</a> : <span className="text-slate-500">Not uploaded</span>}
+                  </div>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-slate-200 bg-white p-5">
+                <p className="text-sm font-semibold text-slate-800">Section C \u2014 Technology Details</p>
+                <div className="mt-3 grid gap-3 md:grid-cols-3 text-sm">
+                  <div className="rounded-xl border border-slate-100 bg-slate-50 p-3">
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Device brand</p>
+                    <p className="mt-1 text-slate-900">{project.projectSetup?.deviceBrand || "N/A"}</p>
+                  </div>
+                  <div className="rounded-xl border border-slate-100 bg-slate-50 p-3">
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Device model</p>
+                    <p className="mt-1 text-slate-900">{project.projectSetup?.deviceModel || "N/A"}</p>
+                  </div>
+                  <div className="rounded-xl border border-slate-100 bg-slate-50 p-3">
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Tech tier</p>
+                    <p className="mt-1 text-slate-900">{project.projectSetup?.techTier ?? "N/A"}</p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-slate-200 bg-white p-5">
+                <p className="text-sm font-semibold text-slate-800">Section D \u2014 Verification Method</p>
+                <div className="mt-3 space-y-2 text-sm">
+                  <p className="text-slate-700">Project method: <span className="font-semibold">{project.verificationMethod || "manual"}</span></p>
+                  {project.verificationMethod?.toLowerCase() === "iot" ? (
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <div className="rounded-xl border border-slate-100 bg-slate-50 p-3">
+                        <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Meter API endpoint</p>
+                        <p className="mt-1 break-all text-slate-900">{project.projectSetup?.meterApiEndpoint || "Not provided"}</p>
+                      </div>
+                      <div className="rounded-xl border border-slate-100 bg-slate-50 p-3">
+                        <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Meter API token</p>
+                        <p className="mt-1 text-slate-900">{project.projectSetup?.hasMeterApiToken ? "Saved (encrypted)" : "Not provided"}</p>
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="text-slate-700">Manual confirmation: <span className="font-semibold">{project.projectSetup?.manualVerificationConfirmed ? "Confirmed" : "Not confirmed"}</span></p>
+                  )}
+                </div>
+              </div>
+
+              {rmtActionModal && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/70 backdrop-blur-sm p-4" onClick={closeRmtAction}>
+                  <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="text-xs font-bold uppercase tracking-widest text-slate-400">Setup Review</p>
+                        <h3 className="text-lg font-bold text-slate-900">
+                          {rmtActionModal === "approve" && "Approve Setup"}
+                          {rmtActionModal === "changes" && "Request Changes"}
+                          {rmtActionModal === "reject" && "Reject Setup"}
+                        </h3>
+                      </div>
+                      <button onClick={closeRmtAction} className="rounded-full p-1 hover:bg-slate-100">
+                        <X size={16} className="text-slate-500" />
+                      </button>
+                    </div>
+                    <div className="mt-4 space-y-3">
+                      <label className="block text-xs font-bold uppercase tracking-wider text-slate-500">
+                        Notes {rmtActionModal !== "approve" && <span className="text-rose-600">*</span>}
+                      </label>
+                      <textarea
+                        className="input-field min-h-[120px]"
+                        value={rmtActionNotes}
+                        onChange={(e) => setRmtActionNotes(e.target.value)}
+                        placeholder={rmtActionModal === "approve" ? "Optional notes for the vendor" : "Explain what needs to be addressed"}
+                      />
+                      <div className="flex items-center justify-end gap-2">
+                        <button onClick={closeRmtAction} className="btn-secondary text-xs">Cancel</button>
+                        <button
+                          onClick={submitRmtAction}
+                          disabled={rmtReviewSubmitting}
+                          className={
+                            rmtActionModal === "approve"
+                              ? "btn-primary text-xs bg-emerald-600 hover:bg-emerald-700"
+                              : rmtActionModal === "changes"
+                                ? "btn-secondary text-xs border-amber-200 text-amber-700 hover:bg-amber-50"
+                                : "btn-secondary text-xs border-rose-200 text-rose-700 hover:bg-rose-50"
+                          }
+                        >
+                          {rmtReviewSubmitting ? "Submitting..." : rmtActionModal === "approve" ? "Approve" : rmtActionModal === "changes" ? "Send Change Request" : "Reject"}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -17271,7 +17548,10 @@ const ProjectsHub = ({
     const targetInstallations = Number(project.targetInstallations || 0);
     const overallProgress = typeof project.progress === "number" ? project.progress : 0;
     const setupComplete = isProjectSetupComplete(project);
-    const setupReadOnly = Boolean(project.projectSetup?.setupCompletedAt);
+    const reviewStatus = project.projectSetup?.reviewStatus;
+    const editableReviewStates = new Set(["draft", "changes_requested", "rejected"]);
+    const isVendorPortal = !isRbfPortal && !isTacPortal && !isPscPortal && !isDoePortal && !isUndpPortal && !isAuditorPortal;
+    const setupReadOnly = !editableReviewStates.has(reviewStatus ?? "draft") || !isVendorPortal;
     const planningReadOnly = setupReadOnly;
     const statusTone = getProjectStatusTone(project);
     const contractValue = Number(project.contractValue ?? budgetForProject(project) ?? 0);
@@ -17568,30 +17848,81 @@ const ProjectsHub = ({
               <div>
                 <h4 className="text-sm font-semibold text-slate-800">Planning</h4>
                 <div className="mt-2 inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 shadow-sm">
-                  {setupReadOnly ? <CheckCircle2 size={14} className="text-emerald-600" /> : <Clock size={14} className="text-amber-600" />}
-                  <span>Setup {setupReadOnly ? "Complete" : "In Progress"}</span>
+                  {setupComplete ? <CheckCircle2 size={14} className="text-emerald-600" /> : reviewStatus === "submitted" || reviewStatus === "under_review" ? <Clock size={14} className="text-blue-600" /> : reviewStatus === "changes_requested" ? <AlertCircle size={14} className="text-amber-600" /> : reviewStatus === "rejected" ? <XCircle size={14} className="text-rose-600" /> : <Clock size={14} className="text-amber-600" />}
+                  <span>
+                    {setupComplete
+                      ? "Setup Complete"
+                      : reviewStatus === "submitted"
+                      ? "Awaiting RMT Review"
+                      : reviewStatus === "under_review"
+                      ? "Under RMT Review"
+                      : reviewStatus === "changes_requested"
+                      ? "Changes Requested"
+                      : reviewStatus === "rejected"
+                      ? "Rejected"
+                      : "Setup In Progress"}
+                  </span>
                 </div>
               </div>
 
               <div className={`rounded-2xl border p-4 ${getSetupBannerClass(project)}`}>
-                <p className="text-sm font-semibold">Setup status: {getSetupStatusLabel(project)}</p>
+                <p className="text-sm font-semibold">
+                  Setup status: {getSetupStatusLabel(project)}
+                  {reviewStatus && reviewStatus !== "draft" && (
+                    <span className="ml-2 rounded-full bg-white/70 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider">
+                      {reviewStatus.replace(/_/g, " ")}
+                    </span>
+                  )}
+                </p>
                 <p className="mt-1 text-xs">
-                  {setupReadOnly
-                    ? "Project setup is complete. Submitted information is shown below in read-only mode."
+                  {reviewStatus === "submitted" && project.projectSetup?.submittedAt
+                    ? `Submitted on ${new Date(project.projectSetup.submittedAt).toLocaleString()}. RMT will review and notify you.`
+                    : reviewStatus === "under_review" && project.projectSetup?.reviewedByUsername
+                    ? `RMT reviewer ${project.projectSetup.reviewedByUsername} is reviewing your submission.`
+                    : reviewStatus === "changes_requested"
+                    ? "RMT requested changes. Update the form below and resubmit when ready."
+                    : reviewStatus === "rejected"
+                    ? "RMT rejected this setup. Address the rejection reason below, update the form, and resubmit when ready."
+                    : setupComplete
+                    ? "Project setup is approved. Installation submission is unlocked."
                     : "Complete all sections, save as draft when needed, and submit when ready."}
                 </p>
+                {reviewStatus === "changes_requested" && project.projectSetup?.reviewNotes && (
+                  <div className="mt-3 rounded-xl border border-amber-300 bg-white/70 p-3">
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-amber-600">RMT Notes</p>
+                    <p className="mt-1 text-xs text-amber-800">{project.projectSetup.reviewNotes}</p>
+                  </div>
+                )}
+                {reviewStatus === "rejected" && project.projectSetup?.reviewNotes && (
+                  <div className="mt-3 rounded-xl border border-rose-300 bg-white/70 p-3">
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-rose-600">Rejection Reason</p>
+                    <p className="mt-1 text-xs text-rose-800">{project.projectSetup.reviewNotes}</p>
+                  </div>
+                )}
               </div>
 
-              {setupReadOnly && (
-                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 space-y-3">
-                  <p className="text-sm font-semibold text-slate-800">Request Change</p>
-                  <textarea className="input-field min-h-[96px]" value={requestChangeMessage} onChange={(e) => setRequestChangeMessage(e.target.value)} placeholder="Explain what needs to be changed in the submitted setup." />
-                  <div className="flex items-center gap-3">
-                    <button onClick={handleRequestSetupChange} className="btn-secondary text-xs" disabled={requestChangeSubmitting}>
-                      {requestChangeSubmitting ? "Sending..." : "Request Change"}
-                    </button>
-                    {planMessage && <span className="text-xs text-slate-500">{planMessage}</span>}
-                  </div>
+              {setupReadOnly && reviewStatus === "approved" && (
+                <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
+                  <p className="text-sm font-semibold text-emerald-800">Project setup is locked</p>
+                  <p className="mt-1 text-xs text-emerald-700">
+                    RMT has approved this project setup. No further changes or change requests are allowed.
+                    Contact RMT directly if something needs correction.
+                  </p>
+                </div>
+              )}
+
+              {!setupReadOnly && (
+                <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 space-y-2">
+                  <p className="text-sm font-semibold text-emerald-800">
+                    {reviewStatus === "changes_requested" || reviewStatus === "rejected" ? "Update & Resubmit" : "Active Draft"}
+                  </p>
+                  <p className="text-xs text-emerald-700">
+                    {reviewStatus === "changes_requested"
+                      ? "Address RMT notes below and resubmit when ready."
+                      : reviewStatus === "rejected"
+                      ? "Address the rejection reason below and resubmit when ready."
+                      : "Complete all sections, save as draft when needed, and submit when ready."}
+                  </p>
                 </div>
               )}
 
@@ -17740,7 +18071,11 @@ const ProjectsHub = ({
                     {planSaving ? "Saving..." : "Save Draft"}
                   </button>
                   <button onClick={() => handleSaveDeploymentPlan("submit")} className="btn-primary px-6" disabled={planSaving}>
-                    {planSaving ? "Submitting..." : "Submit Project Setup"}
+                    {planSaving
+                      ? "Submitting..."
+                      : reviewStatus === "changes_requested" || reviewStatus === "rejected"
+                      ? "Resubmit Project Setup"
+                      : "Submit Project Setup"}
                   </button>
                   {planMessage && <span className="text-sm text-slate-500">{planMessage}</span>}
                 </div>
@@ -19160,6 +19495,13 @@ const ProjectsHub = ({
               <option value="Flagged">Flagged</option>
               <option value="Completed">Completed</option>
               <option value="Pending">Pending</option>
+              {isRbfPortal && (
+                <>
+                  <option value="Setup Under Review">Setup Under Review</option>
+                  <option value="Setup Changes Requested">Setup Changes Requested</option>
+                  <option value="Setup Rejected">Setup Rejected</option>
+                </>
+              )}
             </select>
             {isOfficialPortal && (
               <>

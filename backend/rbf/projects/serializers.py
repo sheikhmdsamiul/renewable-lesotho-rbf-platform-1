@@ -3,6 +3,7 @@ from django.db.models import Q, Sum
 from .models import (
     Project,
     ProjectSetup,
+    ProjectSetupReviewStatus,
     Milestone,
     ProjectUpdate,
     ProjectDocument,
@@ -140,15 +141,31 @@ class ProjectSerializer(serializers.ModelSerializer):
         return 'COMPLETE' if self._setup_complete(obj) else 'INCOMPLETE'
 
     def get_setup_status_banner(self, obj: Project):
+        setup = getattr(obj, 'project_setup', None)
         is_complete = self._setup_complete(obj)
+        review_status = getattr(setup, 'review_status', None) or (
+            ProjectSetupReviewStatus.APPROVED if is_complete else ProjectSetupReviewStatus.DRAFT
+        )
+        reviewed_by = getattr(setup, 'reviewed_by', None)
+        tone_map = {
+            ProjectSetupReviewStatus.DRAFT: ('INCOMPLETE', 'red', 'Project setup is incomplete. Complete setup before submitting installations.'),
+            ProjectSetupReviewStatus.SUBMITTED: ('PENDING', 'blue', 'Project setup has been submitted and is awaiting RMT review.'),
+            ProjectSetupReviewStatus.UNDER_REVIEW: ('PENDING', 'indigo', 'RMT is currently reviewing the project setup.'),
+            ProjectSetupReviewStatus.APPROVED: ('COMPLETE', 'green', 'Project setup is approved. Installation submission is unlocked.'),
+            ProjectSetupReviewStatus.CHANGES_REQUESTED: ('CHANGES_REQUESTED', 'amber', 'RMT requested changes. Update the setup and resubmit.'),
+            ProjectSetupReviewStatus.REJECTED: ('REJECTED', 'red', 'Project setup was rejected. Contact RMT for next steps.'),
+        }
+        status, tone, message = tone_map.get(review_status, ('INCOMPLETE', 'red', 'Project setup is incomplete.'))
         return {
-            'status': 'COMPLETE' if is_complete else 'INCOMPLETE',
-            'tone': 'green' if is_complete else 'red',
-            'message': (
-                'Project setup is complete. Installation submission is unlocked.'
-                if is_complete
-                else 'Project setup is incomplete. Complete setup before submitting installations.'
-            ),
+            'status': status,
+            'tone': tone,
+            'message': message,
+            'review_status': review_status,
+            'review_notes': getattr(setup, 'review_notes', '') or '',
+            'previous_review_notes': getattr(setup, 'previous_review_notes', '') or '',
+            'reviewed_at': setup.reviewed_at if setup else None,
+            'reviewed_by_username': getattr(reviewed_by, 'username', None) if reviewed_by else None,
+            'submitted_at': getattr(setup, 'submitted_at', None),
         }
 
     def get_installation_submission_enabled(self, obj: Project):
@@ -260,6 +277,7 @@ class ProjectSetupSerializer(serializers.ModelSerializer):
     insurance_certificate_file_url = serializers.SerializerMethodField()
     meter_api_token = serializers.CharField(write_only=True, required=False, allow_blank=True)
     has_meter_api_token = serializers.SerializerMethodField()
+    reviewed_by_username = serializers.CharField(source='reviewed_by.username', read_only=True, default=None)
 
     def _file_url(self, file_field):
         if file_field:
@@ -443,11 +461,32 @@ class ProjectSetupSerializer(serializers.ModelSerializer):
             'checklist_site_ready',
             'checklist_safety_ready',
             'checklist_logistics_ready',
+            'review_status',
+            'submitted_at',
+            'reviewed_by',
+            'reviewed_by_username',
+            'reviewed_at',
+            'review_notes',
+            'previous_review_notes',
             'setup_completed_at',
             'created_at',
             'updated_at',
         ]
-        read_only_fields = ['id', 'project', 'vendor', 'setup_completed_at', 'created_at', 'updated_at']
+        read_only_fields = [
+            'id',
+            'project',
+            'vendor',
+            'review_status',
+            'submitted_at',
+            'reviewed_by',
+            'reviewed_by_username',
+            'reviewed_at',
+            'review_notes',
+            'previous_review_notes',
+            'setup_completed_at',
+            'created_at',
+            'updated_at',
+        ]
 
 
 class ProjectUpdateSerializer(serializers.ModelSerializer):

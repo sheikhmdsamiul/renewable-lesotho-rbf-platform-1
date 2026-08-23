@@ -76,6 +76,9 @@ export enum BidStage2Status {
 
 export enum ProjectStatus {
   SETUP_PENDING = "setup_pending",
+  SETUP_UNDER_REVIEW = "setup_under_review",
+  SETUP_CHANGES_REQUESTED = "setup_changes_requested",
+  SETUP_REJECTED = "setup_rejected",
   ACTIVE = "active",
   PRE_QUALIFICATION = "Pre-Qualification",
   SITE_SPECIFIC = "Site-Specific Proposal",
@@ -413,6 +416,7 @@ export interface Project {
   verificationMethodConfirmed?: boolean;
   setupCompletedAt?: string;
   projectSetup?: ProjectSetup;
+  setupStatusBanner?: ProjectSetupStatusBanner;
   claimCount?: number;
   unresolvedFlagCount?: number;
   latestAuditEntry?: AuditLog;
@@ -427,6 +431,14 @@ contractValue?: number;
 }
 
 export type ProjectSetupSiteStatus = "ready" | "in_progress" | "not_started";
+
+export type ProjectSetupReviewStatus =
+  | "draft"
+  | "submitted"
+  | "under_review"
+  | "approved"
+  | "changes_requested"
+  | "rejected";
 
 export interface ProjectSetup {
   id?: string;
@@ -454,9 +466,28 @@ export interface ProjectSetup {
   checklistSiteReady?: boolean;
   checklistSafetyReady?: boolean;
   checklistLogisticsReady?: boolean;
+  reviewStatus?: ProjectSetupReviewStatus;
+  submittedAt?: string;
+  reviewedBy?: string;
+  reviewedByUsername?: string;
+  reviewedAt?: string;
+  reviewNotes?: string;
+  previousReviewNotes?: string;
   setupCompletedAt?: string;
   createdAt?: string;
   updatedAt?: string;
+}
+
+export interface ProjectSetupStatusBanner {
+  status: "COMPLETE" | "INCOMPLETE" | "PENDING" | "CHANGES_REQUESTED" | "REJECTED";
+  tone: "green" | "red" | "blue" | "indigo" | "amber";
+  message: string;
+  reviewStatus?: ProjectSetupReviewStatus;
+  reviewNotes?: string;
+  previousReviewNotes?: string;
+  reviewedAt?: string;
+  reviewedByUsername?: string;
+  submittedAt?: string;
 }
 
 export interface KpiMetricStatus {

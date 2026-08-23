@@ -26,6 +26,7 @@ from django_filters.rest_framework import DjangoFilterBackend
 from .models import (
     Project,
     ProjectSetup,
+    ProjectSetupReviewStatus,
     ProjectStatus,
     ProspectSyncStatus,
     Milestone,
@@ -406,6 +407,11 @@ class ProjectViewSet(viewsets.ModelViewSet):
         if not Project.objects.filter(id=project.id).filter(vendor_query_filter(user)).exists():
             raise PermissionDenied('You can only manage setup for your own projects.')
 
+    def _assert_rmt_setup_access(self):
+        user = self.request.user
+        if user.role not in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}:
+            raise PermissionDenied('Only the RBF Management Team can review project setup.')
+
     def _setup_instance_for_project(self, project: Project) -> ProjectSetup:
         user = self.request.user
         defaults = {'vendor': user}
@@ -429,6 +435,43 @@ class ProjectViewSet(viewsets.ModelViewSet):
         if notifications:
             Notification.objects.bulk_create(notifications, ignore_conflicts=True)
 
+    def _notify_setup_submitted_for_review(self, project: Project):
+        recipients = User.objects.filter(role__in={UserRole.RBF_OFFICIAL, UserRole.ADMIN}).only('id', 'full_name', 'username')
+        notifications = [
+            Notification(
+                recipient_id=str(user.id),
+                recipient_name=user.full_name or user.username,
+                type=NotificationChannel.IN_APP,
+                event='project_setup_submitted',
+                title='Project Setup Awaiting Review',
+                body=f'Vendor {project.vendor_name} submitted project setup for review on Project #{project.id}.',
+                status=NotificationStatus.SENT,
+                linked_entity_id=str(project.id),
+            )
+            for user in recipients
+        ]
+        if notifications:
+            Notification.objects.bulk_create(notifications, ignore_conflicts=True)
+
+    def _notify_vendor_of_setup_decision(self, project: Project, *, event: str, title: str, body: str):
+        vendor_id = str(getattr(project, 'vendor_id', '') or '')
+        if not vendor_id:
+            return
+        try:
+            vendor = User.objects.only('id', 'full_name', 'username').get(id=vendor_id)
+        except User.DoesNotExist:
+            return
+        Notification.objects.create(
+            recipient_id=str(vendor.id),
+            recipient_name=vendor.full_name or vendor.username,
+            type=NotificationChannel.IN_APP,
+            event=event,
+            title=title,
+            body=body,
+            status=NotificationStatus.SENT,
+            linked_entity_id=str(project.id),
+        )
+
     def _save_project_setup(self, request, project: Project, *, submit: bool):
         self._assert_vendor_setup_access(project)
         instance = getattr(project, 'project_setup', None) or self._setup_instance_for_project(project)
@@ -448,12 +491,29 @@ class ProjectViewSet(viewsets.ModelViewSet):
             ).exists()
             if not contract_is_approved:
                 raise PermissionDenied('Project setup can only be submitted after the contract is approved.')
-            completion_time = timezone.now()
-            setup.setup_completed_at = completion_time
-            setup.save(update_fields=['setup_completed_at', 'updated_at'])
+            submission_time = timezone.now()
+            setup.previous_review_notes = setup.review_notes
+            setup.review_notes = ''
+            setup.review_status = ProjectSetupReviewStatus.SUBMITTED
+            setup.submitted_at = submission_time
+            setup.reviewed_by = None
+            setup.reviewed_at = None
+            setup.setup_completed_at = None
+            setup.save(
+                update_fields=[
+                    'review_status',
+                    'submitted_at',
+                    'reviewed_by',
+                    'reviewed_at',
+                    'review_notes',
+                    'previous_review_notes',
+                    'setup_completed_at',
+                    'updated_at',
+                ]
+            )
 
-            project.status = ProjectStatus.ACTIVE
-            project.setup_completed_at = completion_time
+            project.status = ProjectStatus.SETUP_UNDER_REVIEW
+            project.setup_completed_at = None
             project.device_brand = setup.device_brand or project.device_brand
             project.device_model = setup.device_model or project.device_model
             project.device_tech_tier = str(setup.tech_tier or project.device_tech_tier or '')
@@ -473,17 +533,19 @@ class ProjectViewSet(viewsets.ModelViewSet):
             create_project_activity_update(
                 project,
                 request.user,
-                'Project Setup Completed',
-                'Completed project setup and unlocked installation submission for the vendor.',
+                'Project Setup Submitted for Review',
+                'Submitted project setup. Awaiting RMT review and approval.',
             )
             log_audit(
                 request.user,
-                'project_setup_completed',
+                'project_setup_submitted',
                 setup,
-                {'project_id': str(project.id), 'actor_id': str(request.user.id), 'timestamp': completion_time.isoformat()},
+                {'project_id': str(project.id), 'actor_id': str(request.user.id), 'timestamp': submission_time.isoformat()},
             )
-            self._notify_rmt_setup_completed(project)
+            self._notify_setup_submitted_for_review(project)
         else:
+            setup.review_status = ProjectSetupReviewStatus.DRAFT
+            setup.save(update_fields=['review_status', 'updated_at'])
             create_project_activity_update(
                 project,
                 request.user,
@@ -693,38 +755,9 @@ class ProjectViewSet(viewsets.ModelViewSet):
             for field_name in target_fields
         )
 
-        was_complete = bool(instance.setup_completed_at)
         project = serializer.save()
         if target_fields_changed:
             queue_project_targets_sync(str(project.id))
-        setup_fields = [
-            project.deployment_team_roster.strip(),
-            project.deployment_equipment_plan.strip(),
-            project.deployment_site_status.strip(),
-            project.deployment_work_schedule.strip(),
-            project.deployment_permits_status.strip(),
-            project.device_brand.strip(),
-            project.device_model.strip(),
-            project.device_tech_tier.strip(),
-        ]
-        contract_is_approved = TenderContract.objects.filter(
-            project_id=str(project.id),
-            status=ContractStatus.APPROVED,
-        ).exists()
-        if contract_is_approved and all(setup_fields) and project.verification_method_confirmed and not was_complete:
-            project.setup_completed_at = timezone.now()
-            if project.status == ProjectStatus.SETUP_PENDING:
-                project.status = ProjectStatus.ACTIVE
-                project.save(update_fields=['setup_completed_at', 'status'])
-            else:
-                project.save(update_fields=['setup_completed_at'])
-            refresh_project_kpis(str(project.id))
-            create_project_activity_update(
-                project,
-                self.request.user,
-                'Project Setup Completed',
-                'Completed project setup and unlocked Milestone 1 eligibility checks.',
-            )
         if changed_labels:
             create_project_activity_update(
                 project,
@@ -805,18 +838,53 @@ class ProjectViewSet(viewsets.ModelViewSet):
         project = self.get_object()
         self._assert_vendor_setup_access(project)
         setup = getattr(project, 'project_setup', None)
-        if not ((setup and setup.setup_completed_at) or project.setup_completed_at):
-            return Response({'detail': 'Project setup is not yet complete.'}, status=status.HTTP_400_BAD_REQUEST)
+        review_status = getattr(setup, 'review_status', None)
+        if review_status == ProjectSetupReviewStatus.APPROVED:
+            return Response(
+                {'detail': 'This project setup has been approved by RMT and is locked. Change requests are no longer allowed.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if review_status not in {ProjectSetupReviewStatus.CHANGES_REQUESTED, ProjectSetupReviewStatus.REJECTED}:
+            return Response(
+                {'detail': 'Project setup must be rejected or already in a changes-requested state before you can request further changes.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         message = str(request.data.get('message') or 'Please reopen the setup form for updates.').strip()
+        if not message:
+            return Response({'detail': 'A message is required when requesting a setup change.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        previous_notes = setup.review_notes if setup else ''
+        if setup:
+            setup.previous_review_notes = previous_notes
+            setup.review_notes = message
+            setup.review_status = ProjectSetupReviewStatus.CHANGES_REQUESTED
+            setup.reviewed_by = None
+            setup.reviewed_at = None
+            setup.setup_completed_at = None
+            setup.save(
+                update_fields=[
+                    'review_status',
+                    'review_notes',
+                    'previous_review_notes',
+                    'reviewed_by',
+                    'reviewed_at',
+                    'setup_completed_at',
+                    'updated_at',
+                ]
+            )
+        project.status = ProjectStatus.SETUP_CHANGES_REQUESTED
+        project.setup_completed_at = None
+        project.save(update_fields=['status', 'setup_completed_at'])
+
         recipients = User.objects.filter(role__in={UserRole.RBF_OFFICIAL, UserRole.ADMIN}).only('id', 'full_name', 'username')
         notifications = [
             Notification(
                 recipient_id=str(user.id),
                 recipient_name=user.full_name or user.username,
                 type=NotificationChannel.IN_APP,
-                event='project_setup_change_requested',
-                title='Project Setup Change Requested',
-                body=f'Vendor {project.vendor_name} requested a setup change for Project #{project.id}. {message}',
+                event='project_setup_changes_requested',
+                title='Project Setup Changes Requested',
+                body=f'Vendor {project.vendor_name} requested setup changes for Project #{project.id}. {message}',
                 status=NotificationStatus.SENT,
                 linked_entity_id=str(project.id),
             )
@@ -832,11 +900,217 @@ class ProjectViewSet(viewsets.ModelViewSet):
         )
         log_audit(
             request.user,
-            'project_setup_change_requested',
+            'project_setup_changes_requested',
             project,
-            {'project_id': str(project.id), 'message': message},
+            {'project_id': str(project.id), 'message': message, 'previous_notes': previous_notes},
         )
-        return Response({'status': 'ok', 'message': 'RMT has been notified of your requested setup change.'}, status=status.HTTP_200_OK)
+        project.refresh_from_db()
+        return Response(ProjectSerializer(project, context={'request': request}).data, status=status.HTTP_200_OK)
+
+    def _setup_review_action(
+        self,
+        request,
+        project: Project,
+        *,
+        next_status: str,
+        audit_action: str,
+        event: str,
+        vendor_title: str,
+        require_notes: bool = False,
+        body_template: str,
+        success_message: str,
+        approval: bool = False,
+        rejection: bool = False,
+    ):
+        self._assert_rmt_setup_access()
+        setup = getattr(project, 'project_setup', None)
+        if not setup:
+            return Response({'detail': 'Project setup has not been submitted yet.'}, status=status.HTTP_400_BAD_REQUEST)
+        if setup.review_status not in {
+            ProjectSetupReviewStatus.SUBMITTED,
+            ProjectSetupReviewStatus.UNDER_REVIEW,
+            ProjectSetupReviewStatus.CHANGES_REQUESTED,
+        }:
+            return Response(
+                {'detail': f'Project setup is in the "{setup.review_status}" state and cannot be actioned.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        notes = str(request.data.get('notes') or '').strip()
+        if require_notes and not notes:
+            return Response({'detail': 'Notes are required for this action.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        decision_time = timezone.now()
+        setup.previous_review_notes = setup.review_notes
+        setup.review_notes = notes or setup.review_notes
+        setup.review_status = next_status
+        setup.reviewed_by = request.user
+        setup.reviewed_at = decision_time
+        if approval:
+            setup.setup_completed_at = decision_time
+            project.setup_completed_at = decision_time
+            project.status = ProjectStatus.ACTIVE
+        elif rejection:
+            setup.setup_completed_at = None
+            project.setup_completed_at = None
+            project.status = ProjectStatus.SETUP_REJECTED
+        else:
+            setup.setup_completed_at = None
+            project.setup_completed_at = None
+            project.status = ProjectStatus.SETUP_CHANGES_REQUESTED if next_status == ProjectSetupReviewStatus.CHANGES_REQUESTED else ProjectStatus.SETUP_UNDER_REVIEW
+
+        setup.save(
+            update_fields=[
+                'review_status',
+                'review_notes',
+                'previous_review_notes',
+                'reviewed_by',
+                'reviewed_at',
+                'setup_completed_at',
+                'updated_at',
+            ]
+        )
+        project.save(update_fields=['status', 'setup_completed_at'])
+
+        if approval:
+            queue_project_agent_sync(str(project.id))
+        refresh_project_kpis(str(project.id))
+        log_audit(
+            request.user,
+            audit_action,
+            setup,
+            {
+                'project_id': str(project.id),
+                'actor_id': str(request.user.id),
+                'review_status': next_status,
+                'notes': notes,
+                'timestamp': decision_time.isoformat(),
+            },
+        )
+        self._notify_vendor_of_setup_decision(
+            project,
+            event=event,
+            title=vendor_title,
+            body=body_template.format(
+                project_id=project.id,
+                vendor=project.vendor_name,
+                reviewer=request.user.full_name or request.user.username,
+                notes=notes or '(no notes provided)',
+            ),
+        )
+        if approval:
+            create_project_activity_update(
+                project,
+                request.user,
+                'Project Setup Approved',
+                f'Approved by RMT. Installation submission is unlocked for the vendor. Notes: {notes or "(none)"}',
+            )
+        elif rejection:
+            create_project_activity_update(
+                project,
+                request.user,
+                'Project Setup Rejected',
+                f'Rejected by RMT. Vendor must contact RMT. Notes: {notes}',
+            )
+        else:
+            create_project_activity_update(
+                project,
+                request.user,
+                'Project Setup Changes Requested by RMT',
+                f'RMT requested changes. Notes: {notes}',
+            )
+
+        project.refresh_from_db()
+        return Response(
+            {
+                'status': 'ok',
+                'message': success_message,
+                'project': ProjectSerializer(project, context={'request': request}).data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=True, methods=['post'], url_path='setup/start-review')
+    def start_setup_review(self, request, pk=None):
+        project = self.get_object()
+        setup = getattr(project, 'project_setup', None)
+        if not setup or setup.review_status != ProjectSetupReviewStatus.SUBMITTED:
+            return Response(
+                {'detail': 'Only submitted setups can be claimed for review.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        self._assert_rmt_setup_access()
+        setup.review_status = ProjectSetupReviewStatus.UNDER_REVIEW
+        setup.reviewed_by = request.user
+        setup.reviewed_at = timezone.now()
+        setup.save(update_fields=['review_status', 'reviewed_by', 'reviewed_at', 'updated_at'])
+        log_audit(
+            request.user,
+            'project_setup_review_started',
+            setup,
+            {'project_id': str(project.id), 'actor_id': str(request.user.id)},
+        )
+        self._notify_vendor_of_setup_decision(
+            project,
+            event='project_setup_review_started',
+            title='Project Setup Review Started',
+            body=f'RMT has begun reviewing the project setup for Project #{project.id}.',
+        )
+        project.refresh_from_db()
+        return Response(
+            {
+                'status': 'ok',
+                'message': 'Review claimed.',
+                'project': ProjectSerializer(project, context={'request': request}).data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=True, methods=['post'], url_path='setup/approve')
+    def approve_setup(self, request, pk=None):
+        project = self.get_object()
+        return self._setup_review_action(
+            request,
+            project,
+            next_status=ProjectSetupReviewStatus.APPROVED,
+            audit_action='project_setup_approved',
+            event='project_setup_approved',
+            vendor_title='Project Setup Approved',
+            require_notes=False,
+            approval=True,
+            body_template='Project #{project_id} setup was approved by {reviewer}. Installation submission is now unlocked. Notes: {notes}',
+            success_message='Setup approved. Installation submission has been unlocked.',
+        )
+
+    @action(detail=True, methods=['post'], url_path='setup/request-changes')
+    def request_setup_changes(self, request, pk=None):
+        project = self.get_object()
+        return self._setup_review_action(
+            request,
+            project,
+            next_status=ProjectSetupReviewStatus.CHANGES_REQUESTED,
+            audit_action='project_setup_changes_requested_by_rmt',
+            event='project_setup_changes_requested',
+            vendor_title='Project Setup Changes Requested',
+            require_notes=True,
+            body_template='RMT requested changes on Project #{project_id}. Reason: {notes}',
+            success_message='Change request sent to the vendor.',
+        )
+
+    @action(detail=True, methods=['post'], url_path='setup/reject')
+    def reject_setup(self, request, pk=None):
+        project = self.get_object()
+        return self._setup_review_action(
+            request,
+            project,
+            next_status=ProjectSetupReviewStatus.REJECTED,
+            audit_action='project_setup_rejected',
+            event='project_setup_rejected',
+            vendor_title='Project Setup Rejected',
+            require_notes=True,
+            rejection=True,
+            body_template='Project #{project_id} setup was rejected by RMT. Reason: {notes}',
+            success_message='Setup rejected. The vendor has been notified.',
+        )
 
     @action(detail=True, methods=['post'], url_path='meter-csv-upload')
     def upload_meter_csv(self, request, pk=None):

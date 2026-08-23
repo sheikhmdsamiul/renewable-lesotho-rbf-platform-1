@@ -24,6 +24,7 @@ from .models import (
     PaymentClaimStatus,
     Project,
     ProjectSetup,
+    ProjectSetupReviewStatus,
     ProjectStatus,
     ProjectUpdate,
     SmartMeterReading,
@@ -423,23 +424,310 @@ class ProjectApiTests(APITestCase):
         project.refresh_from_db()
         setup = ProjectSetup.objects.get(project=project)
         setup.refresh_from_db()
-        self.assertIsNotNone(project.setup_completed_at)
-        self.assertEqual(project.status, ProjectStatus.ACTIVE)
-        self.assertIsNotNone(setup.setup_completed_at)
+        self.assertIsNone(project.setup_completed_at)
+        self.assertEqual(project.status, ProjectStatus.SETUP_UNDER_REVIEW)
+        self.assertIsNone(setup.setup_completed_at)
+        self.assertEqual(setup.review_status, ProjectSetupReviewStatus.SUBMITTED)
+        self.assertIsNotNone(setup.submitted_at)
         self.assertTrue(
             Notification.objects.filter(
-                event="project_setup_completed",
-                body=f"Vendor {project.vendor_name} completed setup for Project #{project.id}.",
+                event="project_setup_submitted",
+                body=f"Vendor {project.vendor_name} submitted project setup for review on Project #{project.id}.",
                 linked_entity_id=str(project.id),
             ).exists()
         )
         self.assertTrue(
             AuditLog.objects.filter(
-                action="project_setup_completed",
+                action="project_setup_submitted",
                 details__project_id=str(project.id),
                 details__actor_id=str(vendor.id),
             ).exists()
         )
+
+        rmt_user = User.objects.create_user(
+            username="rmt_approver",
+            password="securePass123",
+            role="RBF Management Team",
+            status="Active",
+        )
+        self.client.force_authenticate(rmt_user)
+        approve_call = self.client.post(
+            f"/api/projects/{project.id}/setup/approve/",
+            {"notes": "Looks good."},
+            format="json",
+        )
+        self.assertEqual(approve_call.status_code, status.HTTP_200_OK)
+        project.refresh_from_db()
+        setup.refresh_from_db()
+        self.assertEqual(project.status, ProjectStatus.ACTIVE)
+        self.assertIsNotNone(project.setup_completed_at)
+        self.assertEqual(setup.review_status, ProjectSetupReviewStatus.APPROVED)
+        self.assertTrue(
+            Notification.objects.filter(
+                event="project_setup_approved",
+                linked_entity_id=str(project.id),
+            ).exists()
+        )
+
+    def _build_setup_pending_project(self, username_suffix=""):
+        User = get_user_model()
+        tender = Tender.objects.create(
+            reference_number=f"TND-{username_suffix}",
+            name="Setup Tender",
+            department="Dept",
+            category="SHS",
+            status="Awarded",
+            deadline=timezone.now(),
+        )
+        vendor = User.objects.create_user(
+            username=f"vendor_setup_{username_suffix}",
+            password="securePass123",
+            role="Vendor",
+            status="Active",
+            gender="Female",
+            region="Maseru",
+        )
+        project = Project.objects.create(
+            tender=tender,
+            vendor_id=str(vendor.id),
+            vendor_name=vendor.username,
+            tech_type="SHS",
+            region="Maseru",
+            district="Maseru",
+            status=ProjectStatus.SETUP_PENDING,
+            verification_method="manual",
+            energy_output=100,
+            uptime=99,
+            gender_impact=0,
+        )
+        TenderContract.objects.create(
+            tender=tender,
+            vendor_id=str(vendor.id),
+            vendor_name=vendor.username,
+            reference_number=f"CTR-{username_suffix}",
+            status=ContractStatus.APPROVED,
+            project_id=str(project.id),
+        )
+        return tender, vendor, project
+
+    def _submit_setup(self, vendor, project):
+        self.client.force_authenticate(vendor)
+        return self.client.post(
+            f"/api/projects/{project.id}/setup/submit/",
+            {
+                "team_roster_file": SimpleUploadedFile("team.pdf", b"team", content_type="application/pdf"),
+                "equipment_plan_file": SimpleUploadedFile("equipment.pdf", b"equipment", content_type="application/pdf"),
+                "compliance_docs_file": SimpleUploadedFile("permits.pdf", b"permits", content_type="application/pdf"),
+                "insurance_certificate_file": SimpleUploadedFile("insurance.pdf", b"insurance", content_type="application/pdf"),
+                "site_status": "ready",
+                "work_schedule_start": "2026-04-01",
+                "work_schedule_end": "2026-04-30",
+                "device_brand": "SolarCo",
+                "device_model": "SHS-100",
+                "tech_tier": 2,
+                "manual_verification_confirmed": True,
+                "checklist_team_ready": True,
+                "checklist_equipment_ready": True,
+                "checklist_site_ready": True,
+                "checklist_safety_ready": True,
+                "checklist_logistics_ready": True,
+            },
+            format="multipart",
+        )
+
+    def test_project_setup_full_lifecycle_submit_approve(self):
+        _, vendor, project = self._build_setup_pending_project("lifecycle1")
+        response = self._submit_setup(vendor, project)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        rmt_user = get_user_model().objects.create_user(
+            username="rmt_lifecycle",
+            password="securePass123",
+            role="RBF Management Team",
+            status="Active",
+        )
+        self.client.force_authenticate(rmt_user)
+        approve = self.client.post(
+            f"/api/projects/{project.id}/setup/approve/",
+            {"notes": "All set."},
+            format="json",
+        )
+        self.assertEqual(approve.status_code, status.HTTP_200_OK)
+        project.refresh_from_db()
+        setup = ProjectSetup.objects.get(project=project)
+        self.assertEqual(setup.review_status, ProjectSetupReviewStatus.APPROVED)
+        self.assertEqual(project.status, ProjectStatus.ACTIVE)
+        self.assertIsNotNone(project.setup_completed_at)
+        self.assertIsNotNone(setup.setup_completed_at)
+
+    def test_project_setup_request_changes_then_resubmit(self):
+        _, vendor, project = self._build_setup_pending_project("lifecycle2")
+        self._submit_setup(vendor, project)
+
+        rmt_user = get_user_model().objects.create_user(
+            username="rmt_changes",
+            password="securePass123",
+            role="RBF Management Team",
+            status="Active",
+        )
+        self.client.force_authenticate(rmt_user)
+        resp = self.client.post(
+            f"/api/projects/{project.id}/setup/request-changes/",
+            {"notes": "Please add team lead."},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        project.refresh_from_db()
+        setup = ProjectSetup.objects.get(project=project)
+        self.assertEqual(setup.review_status, ProjectSetupReviewStatus.CHANGES_REQUESTED)
+        self.assertEqual(project.status, ProjectStatus.SETUP_CHANGES_REQUESTED)
+        self.assertEqual(setup.review_notes, "Please add team lead.")
+        self.assertIsNone(project.setup_completed_at)
+
+        # Vendor resubmits - previous notes preserved, status goes back to SUBMITTED
+        resubmit = self._submit_setup(vendor, project)
+        self.assertEqual(resubmit.status_code, status.HTTP_200_OK)
+        setup.refresh_from_db()
+        project.refresh_from_db()
+        self.assertEqual(setup.review_status, ProjectSetupReviewStatus.SUBMITTED)
+        self.assertEqual(setup.previous_review_notes, "Please add team lead.")
+        self.assertEqual(setup.review_notes, "")
+        self.assertEqual(project.status, ProjectStatus.SETUP_UNDER_REVIEW)
+
+    def test_project_setup_reject_blocks_installation(self):
+        _, vendor, project = self._build_setup_pending_project("lifecycle3")
+        self._submit_setup(vendor, project)
+
+        rmt_user = get_user_model().objects.create_user(
+            username="rmt_reject",
+            password="securePass123",
+            role="RBF Management Team",
+            status="Active",
+        )
+        self.client.force_authenticate(rmt_user)
+        resp = self.client.post(
+            f"/api/projects/{project.id}/setup/reject/",
+            {"notes": "Critical: device brand mismatched"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        project.refresh_from_db()
+        setup = ProjectSetup.objects.get(project=project)
+        self.assertEqual(setup.review_status, ProjectSetupReviewStatus.REJECTED)
+        self.assertEqual(project.status, ProjectStatus.SETUP_REJECTED)
+        self.assertIsNone(setup.setup_completed_at)
+
+    def test_project_setup_rejected_then_resubmit_allowed(self):
+        _, vendor, project = self._build_setup_pending_project("lifecycle3b")
+        self._submit_setup(vendor, project)
+
+        rmt_user = get_user_model().objects.create_user(
+            username="rmt_reject_resubmit",
+            password="securePass123",
+            role="RBF Management Team",
+            status="Active",
+        )
+        self.client.force_authenticate(rmt_user)
+        reject = self.client.post(
+            f"/api/projects/{project.id}/setup/reject/",
+            {"notes": "Insurance certificate missing."},
+            format="json",
+        )
+        self.assertEqual(reject.status_code, status.HTTP_200_OK)
+        project.refresh_from_db()
+        setup = ProjectSetup.objects.get(project=project)
+        self.assertEqual(setup.review_status, ProjectSetupReviewStatus.REJECTED)
+        self.assertEqual(project.status, ProjectStatus.SETUP_REJECTED)
+
+        # Vendor updates the form and resubmits after rejection
+        resubmit = self._submit_setup(vendor, project)
+        self.assertEqual(resubmit.status_code, status.HTTP_200_OK)
+        setup.refresh_from_db()
+        project.refresh_from_db()
+        self.assertEqual(setup.review_status, ProjectSetupReviewStatus.SUBMITTED)
+        self.assertEqual(project.status, ProjectStatus.SETUP_UNDER_REVIEW)
+        self.assertEqual(setup.previous_review_notes, "Insurance certificate missing.")
+        self.assertEqual(setup.review_notes, "")
+        self.assertIsNone(setup.setup_completed_at)
+
+    def test_project_setup_reject_requires_notes(self):
+        _, vendor, project = self._build_setup_pending_project("lifecycle4")
+        self._submit_setup(vendor, project)
+        rmt_user = get_user_model().objects.create_user(
+            username="rmt_nonotes",
+            password="securePass123",
+            role="RBF Management Team",
+            status="Active",
+        )
+        self.client.force_authenticate(rmt_user)
+        resp = self.client.post(f"/api/projects/{project.id}/setup/reject/", {}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        req_changes = self.client.post(f"/api/projects/{project.id}/setup/request-changes/", {}, format="json")
+        self.assertEqual(req_changes.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_vendor_request_change_after_approval_is_blocked(self):
+        _, vendor, project = self._build_setup_pending_project("lifecycle5")
+        self._submit_setup(vendor, project)
+        rmt_user = get_user_model().objects.create_user(
+            username="rmt_initial",
+            password="securePass123",
+            role="RBF Management Team",
+            status="Active",
+        )
+        self.client.force_authenticate(rmt_user)
+        self.client.post(f"/api/projects/{project.id}/setup/approve/", {}, format="json")
+
+        # Vendor can no longer request changes once RMT approved the setup
+        self.client.force_authenticate(vendor)
+        resp = self.client.post(
+            f"/api/projects/{project.id}/setup/request-change/",
+            {"message": "Need to update insurance cert"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        project.refresh_from_db()
+        setup = ProjectSetup.objects.get(project=project)
+        self.assertEqual(setup.review_status, ProjectSetupReviewStatus.APPROVED)
+        self.assertEqual(project.status, ProjectStatus.ACTIVE)
+        self.assertIsNotNone(setup.setup_completed_at)
+
+    def test_vendor_request_change_when_not_yet_approved_returns_400(self):
+        _, vendor, project = self._build_setup_pending_project("lifecycle6")
+        # Setup not yet submitted
+        self.client.force_authenticate(vendor)
+        resp = self.client.post(
+            f"/api/projects/{project.id}/setup/request-change/",
+            {"message": "Trying early"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_legacy_perform_update_no_longer_completes_setup(self):
+        _, vendor, project = self._build_setup_pending_project("lifecycle7")
+        self.client.force_authenticate(vendor)
+        # PATCH the project directly with all deployment fields - this should NOT complete setup
+        response = self.client.patch(
+            f"/api/projects/{project.id}/",
+            {
+                "deployment_team_roster": "Team A",
+                "deployment_equipment_plan": "Plan A",
+                "deployment_site_status": "ready",
+                "deployment_work_schedule": "Mon-Fri",
+                "deployment_permits_status": "approved",
+                "device_brand": "SolarCo",
+                "device_model": "SHS-100",
+                "device_tech_tier": "2",
+                "verification_method_confirmed": True,
+            },
+            format="json",
+        )
+        # The PATCH may succeed but should NOT auto-complete setup
+        project.refresh_from_db()
+        self.assertEqual(project.status, ProjectStatus.SETUP_PENDING)
+        self.assertIsNone(project.setup_completed_at)
+        if hasattr(project, 'project_setup') and project.project_setup:
+            setup = ProjectSetup.objects.get(project=project)
+            self.assertNotEqual(setup.review_status, ProjectSetupReviewStatus.APPROVED)
 
     def test_payment_claim_workflow_verify_approve_pay_with_audit(self):
         User = get_user_model()
