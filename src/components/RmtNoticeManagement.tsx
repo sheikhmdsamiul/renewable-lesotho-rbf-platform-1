@@ -35,7 +35,7 @@ import {
   unpublishNotice,
   fetchTenders,
 } from "../api";
-import { Notice, NoticeCategory, NoticeStatus, Tender } from "../types";
+import { Notice, NoticeAttachment, NoticeCategory, NoticeStatus, Tender } from "../types";
 
 const categoryConfig: Record<NoticeCategory, { label: string; color: string; bgColor: string; borderColor: string; textColor: string }> = {
   [NoticeCategory.TENDER]: { label: "Tender", color: "bg-blue-100 text-blue-700", bgColor: "bg-blue-50", borderColor: "border-blue-200", textColor: "text-blue-700" },
@@ -89,7 +89,7 @@ export default function RmtNoticeManagement({ currentUser }: { currentUser?: any
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<File[]>([]);
-  const [existingAttachments, setExistingAttachments] = useState<any[]>([]);
+  const [existingAttachments, setExistingAttachments] = useState<NoticeAttachment[]>([]);
 
   const [formData, setFormData] = useState({
     title: "",
@@ -425,7 +425,7 @@ export default function RmtNoticeManagement({ currentUser }: { currentUser?: any
   };
 
   const handleAttachmentChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files || []);
+    const files: File[] = Array.from(e.currentTarget.files ?? []);
     const validFiles = files.filter((f) => {
       const ext = f.name.split(".").pop()?.toLowerCase();
       if (!["pdf", "docx", "xlsx"].includes(ext || "")) {

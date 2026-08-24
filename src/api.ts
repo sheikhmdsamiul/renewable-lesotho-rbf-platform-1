@@ -23,6 +23,8 @@ import {
   Disbursement,
   AuditLog,
   AnomalyFlag,
+  AnomalyReviewEvent,
+  AnomalyEvidenceFile,
   MapInstallationsResponse,
   MapInstallationRecord,
   TenderBid,
@@ -52,6 +54,7 @@ import {
   FindingCategory,
   RiskLevel,
   Notice,
+  NoticeAttachment,
   NoticeCategory,
   NoticeStatus,
 } from "./types";
@@ -1454,6 +1457,35 @@ function mapSmartMeterReadingFromApi(api: any): SmartMeterReading {
   };
 }
 
+function mapAnomalyReviewEventFromApi(api: any): AnomalyReviewEvent {
+  return {
+    id: String(api.id ?? ""),
+    flag: String(api.flag ?? ""),
+    actor: api.actor != null ? String(api.actor) : undefined,
+    actorUsername: api.actor_username ?? undefined,
+    actorRole: api.actor_role ?? undefined,
+    fromStatus: api.from_status ?? undefined,
+    toStatus: String(api.to_status ?? ""),
+    investigationNotes: api.investigation_notes ?? undefined,
+    correctiveAction: api.corrective_action ?? undefined,
+    resolutionReason: api.resolution_reason ?? undefined,
+    evidenceReference: api.evidence_reference ?? undefined,
+    createdAt: api.created_at ?? "",
+  };
+}
+
+function mapAnomalyEvidenceFileFromApi(api: any): AnomalyEvidenceFile {
+  return {
+    id: String(api.id ?? ""),
+    flag: String(api.flag ?? ""),
+    file: String(api.file ?? ""),
+    originalName: api.original_name ?? undefined,
+    uploadedBy: api.uploaded_by != null ? String(api.uploaded_by) : undefined,
+    uploadedByUsername: api.uploaded_by_username ?? undefined,
+    uploadedAt: api.uploaded_at ?? "",
+  };
+}
+
 function mapAnomalyFlagFromApi(api: any): AnomalyFlag {
   return {
     id: String(api.id ?? ""),
@@ -1462,8 +1494,19 @@ function mapAnomalyFlagFromApi(api: any): AnomalyFlag {
     flagType: api.flag_type ?? "",
     description: api.description ?? undefined,
     isResolved: Boolean(api.is_resolved),
+    status: api.status ?? (api.is_resolved ? "resolved" : "open"),
+    severity: api.severity ?? "medium",
+    assignedTo: api.assigned_to != null ? String(api.assigned_to) : undefined,
+    assignedToUsername: api.assigned_to_username ?? undefined,
+    investigationNotes: api.investigation_notes ?? undefined,
+    correctiveAction: api.corrective_action ?? undefined,
+    resolutionReason: api.resolution_reason ?? undefined,
+    evidenceReference: api.evidence_reference ?? undefined,
+    dueDate: api.due_date ?? undefined,
     createdAt: api.created_at ?? "",
     resolvedAt: api.resolved_at ?? undefined,
+    reviewEvents: Array.isArray(api.review_events) ? api.review_events.map(mapAnomalyReviewEventFromApi) : [],
+    evidenceFiles: Array.isArray(api.evidence_files) ? api.evidence_files.map(mapAnomalyEvidenceFileFromApi) : [],
   };
 }
 
@@ -1719,8 +1762,9 @@ async function refreshAccessToken(): Promise<string | null> {
 
 // ============ API functions ============
 
-export async function fetchTenders(): Promise<Tender[]> {
-  const data = await http<any>(`/api/tenders/`);
+export async function fetchTenders(pageSize?: number): Promise<Tender[]> {
+  const query = pageSize ? `?page_size=${pageSize}` : "";
+  const data = await http<any>(`/api/tenders/${query}`);
   return unwrapListResponse<any>(data).map(mapTenderFromApi);
 }
 
@@ -2083,10 +2127,11 @@ export async function submitTenderBidFinal(bidId: string): Promise<TenderBid> {
   return mapTenderBidFromApi(data);
 }
 
-export async function fetchTenderBids(tenderId?: string): Promise<TenderBid[]> {
-  const url = tenderId
-    ? `/api/tender-bids/?tender=${tenderId}`
-    : `/api/tender-bids/`;
+export async function fetchTenderBids(tenderId?: string, pageSize?: number): Promise<TenderBid[]> {
+  const query = new URLSearchParams();
+  if (tenderId) query.set("tender", tenderId);
+  if (pageSize) query.set("page_size", String(pageSize));
+  const url = `/api/tender-bids/${query.toString() ? `?${query.toString()}` : ""}`;
   const data = await http<any>(url);
   return unwrapListResponse<any>(data).map(mapTenderBidFromApi);
 }
@@ -2176,11 +2221,12 @@ export async function updateBidEvaluation(id: string, payload: Partial<TenderBid
   return mapBidEvaluationFromApi(data);
 }
 
-export async function fetchTenderContracts(params?: { tenderId?: string; vendorId?: string; status?: string }): Promise<TenderContract[]> {
+export async function fetchTenderContracts(params?: { tenderId?: string; vendorId?: string; status?: string; pageSize?: number }): Promise<TenderContract[]> {
   const query = new URLSearchParams();
   if (params?.tenderId) query.set("tender", params.tenderId);
   if (params?.vendorId) query.set("vendor_id", params.vendorId);
   if (params?.status) query.set("status", params.status);
+  if (params?.pageSize) query.set("page_size", String(params.pageSize));
   const url = query.toString() ? `/api/tender-contracts/?${query.toString()}` : `/api/tender-contracts/`;
   const data = await http<any>(url);
   return unwrapListResponse<any>(data).map(mapTenderContractFromApi);
@@ -2264,8 +2310,9 @@ export async function rejectTenderContract(contractId: string, reason: string): 
   return mapTenderContractFromApi(data);
 }
 
-export async function fetchProjects(): Promise<Project[]> {
-  const data = await http<any>(`/api/projects/`);
+export async function fetchProjects(pageSize?: number): Promise<Project[]> {
+  const query = pageSize ? `?page_size=${pageSize}` : "";
+  const data = await http<any>(`/api/projects/${query}`);
   return unwrapListResponse<any>(data).map(mapProjectFromApi);
 }
 
@@ -2700,8 +2747,9 @@ export async function markAllNotificationsRead(): Promise<number> {
   return Number(data?.updated ?? 0);
 }
 
-export async function fetchVendorPrequalifications(): Promise<VendorPrequalification[]> {
-  const data = await http<any>(`/api/users/prequalifications/`);
+export async function fetchVendorPrequalifications(pageSize?: number): Promise<VendorPrequalification[]> {
+  const query = pageSize ? `?page_size=${pageSize}` : "";
+  const data = await http<any>(`/api/users/prequalifications/${query}`);
   return unwrapListResponse<any>(data).map(mapVendorPrequalificationFromApi);
 }
 
@@ -3186,6 +3234,32 @@ export async function resolveAnomalyFlag(id: string): Promise<AnomalyFlag> {
   const data = await http<any>(`/api/projects/anomaly-flags/${id}/resolve/`, {
     method: "POST",
     body: JSON.stringify({}),
+  });
+  return mapAnomalyFlagFromApi(data);
+}
+
+export async function reviewAnomalyFlag(id: string, payload: {
+  status: AnomalyFlag["status"];
+  investigationNotes?: string;
+  correctiveAction?: string;
+  resolutionReason?: string;
+  evidenceReference?: string;
+  dueDate?: string;
+  evidenceFiles?: File[];
+}): Promise<AnomalyFlag> {
+  const body = new FormData();
+  body.append("status", payload.status);
+  body.append("investigation_notes", payload.investigationNotes ?? "");
+  body.append("corrective_action", payload.correctiveAction ?? "");
+  body.append("resolution_reason", payload.resolutionReason ?? "");
+  body.append("evidence_reference", payload.evidenceReference ?? "");
+  if (payload.dueDate) body.append("due_date", payload.dueDate);
+  for (const file of payload.evidenceFiles ?? []) {
+    body.append("evidence_files", file);
+  }
+  const data = await http<any>(`/api/projects/anomaly-flags/${id}/review/`, {
+    method: "POST",
+    body,
   });
   return mapAnomalyFlagFromApi(data);
 }

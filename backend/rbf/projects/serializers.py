@@ -17,6 +17,8 @@ from .models import (
     AuditLog,
     ProspectSyncLog,
     AnomalyFlag,
+    AnomalyReviewEvent,
+    AnomalyEvidenceFile,
     Concern,
     ConcernResponse,
     AuditFinding,
@@ -714,11 +716,45 @@ class ProspectSyncLogSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at', 'updated_at']
 
 
+class AnomalyReviewEventSerializer(serializers.ModelSerializer):
+    actor_username = serializers.CharField(source='actor.username', read_only=True)
+
+    class Meta:
+        model = AnomalyReviewEvent
+        fields = [
+            'id', 'flag', 'actor', 'actor_username', 'actor_role',
+            'from_status', 'to_status', 'investigation_notes', 'corrective_action',
+            'resolution_reason', 'evidence_reference', 'created_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'actor_username']
+
+
+class AnomalyEvidenceFileSerializer(serializers.ModelSerializer):
+    uploaded_by_username = serializers.CharField(source='uploaded_by.username', read_only=True)
+
+    class Meta:
+        model = AnomalyEvidenceFile
+        fields = [
+            'id', 'flag', 'file', 'original_name', 'uploaded_by', 'uploaded_by_username', 'uploaded_at',
+        ]
+        read_only_fields = ['id', 'uploaded_at', 'uploaded_by_username']
+
+
 class AnomalyFlagSerializer(serializers.ModelSerializer):
+    assigned_to_username = serializers.CharField(source='assigned_to.username', read_only=True)
+    review_events = AnomalyReviewEventSerializer(many=True, read_only=True)
+    evidence_files = AnomalyEvidenceFileSerializer(many=True, read_only=True)
+
     class Meta:
         model = AnomalyFlag
-        fields = '__all__'
-        read_only_fields = ['id', 'created_at', 'resolved_at']
+        fields = [
+            'id', 'installation', 'project', 'flag_type', 'description', 'is_resolved',
+            'status', 'severity', 'assigned_to', 'assigned_to_username',
+            'investigation_notes', 'corrective_action', 'resolution_reason',
+            'evidence_reference', 'due_date', 'created_at', 'resolved_at',
+            'review_events', 'evidence_files',
+        ]
+        read_only_fields = ['id', 'created_at', 'resolved_at', 'is_resolved', 'assigned_to_username']
 
 
 class ConcernResponseSerializer(serializers.ModelSerializer):

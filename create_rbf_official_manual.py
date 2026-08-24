@@ -151,7 +151,7 @@ def build():
     doc.add_paragraph()
     meta = doc.add_paragraph()
     meta.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    meta.add_run(f"Version 1.0  |  {date.today().isoformat()}\nUse with the deployed application and approved programme procedures").italic = True
+    meta.add_run(f"Version 1.1  |  {date.today().isoformat()}\nUse with the deployed application and approved programme procedures").italic = True
     page_break(doc)
 
     heading(doc, "How to Use This Manual", 1)
@@ -176,7 +176,7 @@ def build():
         ("Notice Board", "Prepare and publish tender, deadline, award, clarification, training, and general notices."),
         ("Financial Evaluation", "Score the financial part of eligible bids after the technical gate is passed."),
         ("Pre-Qualification", "Review vendor applications: approve, request clarification, or reject."),
-        ("Projects Hub", "Portfolio and project tabs for overview, KPIs, maps, milestones, payments, documents, and updates."),
+        ("Projects Hub", "Portfolio and project tabs for overview, KPIs, maps, milestones, payments, anomaly flags, documents, and updates."),
         ("Blacklisting", "Initiate and monitor cases, evidence, review, appeals, and reinstatement."),
         ("GIS Mapping", "Use the project Map tab for installation locations, verification state, and anomalies."),
         ("Disbursements", "Review RMT claim approvals, payment holds, delays, and final payment confirmation."),
@@ -310,6 +310,7 @@ def build():
         ("Map", "Verified, pending, flagged installations; GPS anomalies; district and technology filters."),
         ("Milestones", "Eligibility conditions, completion, claim history, status, and claimable amount."),
         ("Payments", "Claim status, approval chain, payment proof, holds, delays, and bank-detail access controls."),
+        ("Anomaly Flags", "System-raised issues per installation; workflow state, due dates, evidence, and review history."),
         ("Documents", "Contract, annexes, project evidence, and required downloads."),
         ("Updates", "Chronological activity, decisions, notes, and actor history."),
     ], [1.3, 5.8])
@@ -329,7 +330,7 @@ def build():
         ("Pending", "Awaiting field or authorized review."),
         ("Partial", "Some evidence reviewed; record remains incomplete and should not be treated as fully verified."),
         ("Verified", "Evidence supports the installation result and the task is complete."),
-        ("Flagged", "Anomaly, mismatch, or concern requires follow-up; payment risk may exist."),
+        ("Flagged", "Anomaly, mismatch, or concern requires follow-up; resolve it through the project’s Anomaly Flags tab (see Section 12)."),
         ("Paused/Terminated", "Workflow is stopped by an operational or compliance event."),
     ], [1.5, 5.6])
 
@@ -372,6 +373,43 @@ def build():
         ("Major", "Escalate, consider payment hold, and require management response."),
         ("Critical", "Immediate escalation, protect funds/evidence, and follow the approved investigation, suspension, blacklist, or legal process."),
     ], [1.5, 5.6])
+
+    heading(doc, "Anomaly Flags: Controlled Review and Resolution", 2)
+    doc.add_paragraph("Anomaly flags are system-raised issues on installations. They are created automatically when meter data shows zero uptime, missing data, or material output deviation; when a duplicate GPS location is detected; or when a field verification records a distance or location mismatch. Flags are reviewed from Projects Hub > project > Anomaly Flags.")
+    callout(doc, "No direct resolution", "A flag can never be resolved in one step. The platform requires an Under Investigation state first, and every decision must carry notes, corrective action, a decision reason, and evidence. This protects milestone payments: unresolved blocking flags keep Milestone 2 claimable-gated and block Milestone 3 completion conditions.", "FCE4D6")
+    heading(doc, "Reading the queue", 3)
+    for item in [
+        "Stat cards show total raised, open, under investigation, awaiting action (correction requested or awaiting evidence), and resolved/closed counts.",
+        "Each row shows the true workflow state, not just open/closed. A red Overdue chip appears when the due date has passed without resolution.",
+        "Filter by workflow state, overdue flags, resolution state, or flag type; search by ID, type, description, or installation.",
+    ]:
+        bullet(doc, item)
+    table(doc, ["State", "Meaning"], [
+        ("Open", "Raised by the system; no reviewer has started work."),
+        ("Under Investigation", "An RMT member has documented what was checked and found."),
+        ("Correction Requested", "Vendor must take a recorded corrective action by a set date; vendor is notified."),
+        ("Awaiting Evidence", "RMT is waiting for additional proof; vendor is notified."),
+        ("Resolved", "Issue confirmed addressed; full dossier (notes, action, reason, evidence) recorded."),
+        ("False Positive", "Flag dismissed as incorrect; full dossier still required."),
+        ("Escalated", "Referred upward per programme rules; can return to investigation or be reopened."),
+        ("Reopened", "A closed flag was challenged or new evidence arrived; investigation restarts."),
+    ], [1.7, 5.4])
+    heading(doc, "Review procedure", 3)
+    for item in [
+        "Open Review flag on a row. The modal shows the case context (finding, installation, raised date, severity, reviewer, due date), any prior review timeline, and evidence already on file.",
+        "Start with Under Investigation and write factual investigation notes: what you checked (meter readings, KPI data, GPS, photos, verification record) and what you found.",
+        "If the vendor must act, choose Correction Requested with a corrective action and due date, or Awaiting Evidence if you need more proof. The vendor receives an in-app notification automatically in both cases.",
+        "Close the case only with a complete dossier: investigation notes, corrective action taken, decision reason, and an evidence reference or uploaded evidence files. The requirements checklist in the modal ticks green as each item is satisfied; the save button names your action (for example Start investigation or Resolve flag).",
+        "Use Escalate for issues beyond RMT authority, and Reopen when a resolved or false-positive decision is challenged. Every status move follows the same controlled path.",
+    ]:
+        number(doc, item)
+    heading(doc, "Evidence and audit trail", 3)
+    for item in [
+        "Attach evidence files (jpg, png, webp, or pdf, up to 5 MB each) directly in the review modal; they are stored against the flag and listed under Evidence on file for download.",
+        "Every review action writes a permanent timeline entry recording who acted, when, the previous and new states, and the notes captured at that moment. Entries cannot be edited or removed after the fact.",
+        "All actions also flow to the project audit trail and refresh project KPIs immediately, so milestone eligibility reflects the current flag state.",
+    ]:
+        bullet(doc, item)
 
     heading(doc, "13. Blacklisting, Suspension, and Appeals", 1)
     doc.add_paragraph("Blacklisting is a four-eyes compliance process. Initiation, review, and confirmation should be performed by different authorized people where the workflow requires it.")

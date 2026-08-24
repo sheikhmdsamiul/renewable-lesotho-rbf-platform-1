@@ -9,7 +9,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rbf_user} -d ${POSTGRES_DB:-rbf}"]
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rbf_user} -d ${POSTGRES_DB:-rbf}" ]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -64,7 +64,7 @@ services:
     command: >
       sh -c "python manage.py migrate --noinput && python manage.py collectstatic --noinput && gunicorn core.wsgi:application --bind 0.0.0.0:8000 --workers 3 --timeout 60"
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8000/api/health/ || exit 1"]
+      test: [ "CMD-SHELL", "curl -f http://localhost:8000/api/health/ || exit 1" ]
       interval: 15s
       timeout: 5s
       retries: 10

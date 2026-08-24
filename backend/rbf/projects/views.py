@@ -1,8 +1,9 @@
-from datetime import timedelta, timezone as dt_timezone
+from datetime import date, timedelta, timezone as dt_timezone
 from pathlib import Path
 import tempfile
 import html
 import logging
+import os
 
 from rest_framework import viewsets, filters
 from rest_framework.permissions import IsAuthenticated
@@ -47,6 +48,9 @@ from .models import (
     AuditLog,
     ProspectSyncLog,
     AnomalyFlag,
+    AnomalyFlagStatus,
+    AnomalyReviewEvent,
+    AnomalyEvidenceFile,
     GisStatus,
     GeneratedReport,
     Concern,
@@ -1216,6 +1220,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
             previous_reading = SmartMeterReading.objects.filter(
                 project=project,
                 meter_id=meter_id,
+                recorded_at__lt=recorded_at,
             ).order_by('-recorded_at', '-id').first()
 
             reading = SmartMeterReading.objects.create(
@@ -1231,22 +1236,35 @@ class ProjectViewSet(viewsets.ModelViewSet):
                 csv_output_power_by_reading_id[reading.id] = output_power_w
             # Timeseries payload will be built after all readings are processed
             if installation and uptime_pct == 0:
+                current_recorded = timezone.localtime(reading.recorded_at).strftime('%Y-%m-%d %H:%M %Z')
+                current_uploaded = timezone.localtime(reading.created_at).strftime('%Y-%m-%d %H:%M %Z')
                 create_or_refresh_anomaly(
                     installation=installation,
                     project=project,
                     flag_type='zero_uptime',
-                    description=f'Meter upload at row {row_number} reported 0% uptime for meter {meter_id}.',
+                    description=(
+                        f'Meter {meter_id} reported 0.0% uptime (zero-uptime threshold: 0%). '
+                        f'Reading: {kwh_value:.2f} kWh, recorded {current_recorded}, uploaded {current_uploaded}. '
+                        f'The meter produced no usable uptime during this reporting interval.'
+                    ),
                 )
                 anomaly_counts['zero_uptime'] += 1
             if installation and previous_reading and previous_reading.kwh > 0:
                 deviation_pct = abs(kwh_value - float(previous_reading.kwh)) / float(previous_reading.kwh) * 100.0
                 if deviation_pct > 5:
+                    signed_change_pct = (kwh_value - float(previous_reading.kwh)) / float(previous_reading.kwh) * 100.0
+                    current_recorded = timezone.localtime(reading.recorded_at).strftime('%Y-%m-%d %H:%M %Z')
+                    current_uploaded = timezone.localtime(reading.created_at).strftime('%Y-%m-%d %H:%M %Z')
+                    previous_recorded = timezone.localtime(previous_reading.recorded_at).strftime('%Y-%m-%d %H:%M %Z')
+                    previous_uploaded = timezone.localtime(previous_reading.created_at).strftime('%Y-%m-%d %H:%M %Z')
                     create_or_refresh_anomaly(
                         installation=installation,
                         project=project,
                         flag_type='output_deviation',
                         description=(
-                            f'Meter {meter_id} deviated by {deviation_pct:.1f}% from the previous uploaded reading.'
+                            f'Meter {meter_id} changed by {signed_change_pct:+.1f}% (review threshold: >5%). '
+                            f'Current reading: {kwh_value:.2f} kWh, recorded {current_recorded}, uploaded {current_uploaded}. '
+                            f'Compared with: {float(previous_reading.kwh):.2f} kWh, recorded {previous_recorded}, uploaded {previous_uploaded}.'
                         ),
                     )
                     anomaly_counts['output_deviation'] += 1
@@ -1270,11 +1288,27 @@ class ProjectViewSet(viewsets.ModelViewSet):
             smart_meter_readings__recorded_at__gte=cutoff,
         ).distinct()
         for installation in stale_installations:
+            last_reading = installation.smart_meter_readings.order_by('-recorded_at', '-id').first()
+            checked_at = timezone.localtime(upload_time).strftime('%Y-%m-%d %H:%M %Z')
+            if last_reading:
+                last_recorded = timezone.localtime(last_reading.recorded_at).strftime('%Y-%m-%d %H:%M %Z')
+                last_uploaded = timezone.localtime(last_reading.created_at).strftime('%Y-%m-%d %H:%M %Z')
+                hours_missing = max(0, (upload_time - last_reading.recorded_at).total_seconds() / 3600)
+                finding = (
+                    f'No meter reading has been received for meter {installation.meter_id} within the 48-hour rule. '
+                    f'Last reading: {float(last_reading.kwh):.2f} kWh, recorded {last_recorded}, uploaded {last_uploaded}. '
+                    f'At the check time {checked_at}, the last reading was {hours_missing:.1f} hours old.'
+                )
+            else:
+                finding = (
+                    f'No meter reading has been received for meter {installation.meter_id}. '
+                    f'The installation has no uploaded reading at the {checked_at} check time; the expected reporting window is 48 hours.'
+                )
             create_or_refresh_anomaly(
                 installation=installation,
                 project=project,
                 flag_type='no_data',
-                description=f'No meter reading has been received for meter {installation.meter_id} in the last 48 hours.',
+                description=finding,
             )
             anomaly_counts['no_data'] += 1
 
@@ -2302,8 +2336,9 @@ class InstallationReportViewSet(viewsets.ModelViewSet):
                 project=report.project,
                 flag_type='duplicate_gps',
                 description=(
-                    f"GPS coordinates are within {duplicate_info['distanceMeters']}m of installation "
-                    f"{duplicate_info['nearestId']}"
+                    f"Installation {report.id} is {duplicate_info['distanceMeters']}m from installation "
+                    f"{duplicate_info['nearestId']} (duplicate-location review threshold: 10m). "
+                    f"Submitted GPS: ({report.gps_lat:.6f}, {report.gps_lng:.6f}); checked {timezone.localtime().strftime('%Y-%m-%d %H:%M %Z')}."
                 ),
             )
             report.gis_status = GisStatus.YELLOW
@@ -2486,6 +2521,7 @@ class VerificationTaskViewSet(viewsets.ModelViewSet):
             report.gis_status = GisStatus.GREEN
             report.anomaly_flags.filter(flag_type__in=['verification_distance', 'location_mismatch'], is_resolved=False).update(
                 is_resolved=True,
+                status=AnomalyFlagStatus.RESOLVED,
                 resolved_at=timezone.now(),
             )
         elif next_status == VerificationStatus.FLAGGED:
@@ -2495,7 +2531,14 @@ class VerificationTaskViewSet(viewsets.ModelViewSet):
                 installation=report,
                 project=report.project,
                 flag_type='location_mismatch' if not location_match else 'verification_distance',
-                description=flag_reason or f'Field verification detected a {distance:.2f}m GPS mismatch.',
+                description=(
+                    f'{flag_reason or "Field verification detected a GPS mismatch."} '
+                    f'Verifier distance: {distance:.2f}m (allowed maximum: 50m). '
+                    f'Vendor GPS: ({float(task.vendor_lat):.6f}, {float(task.vendor_lng):.6f}); '
+                    f'Verifier GPS: ({verifier_lat:.6f}, {verifier_lng:.6f}); '
+                    f'checked {timezone.localtime().strftime("%Y-%m-%d %H:%M %Z")}. '
+                    f'Investigate whether the installation location and field visit are valid.'
+                ),
             )
         else:
             report.status = InstallationStatus.SUBMITTED
@@ -3043,6 +3086,70 @@ class ProspectSyncLogViewSet(viewsets.ReadOnlyModelViewSet):
         return Response({'status': 'queued', 'count': len(failed_logs)}, status=status.HTTP_202_ACCEPTED)
 
 
+ANOMALY_EVIDENCE_ALLOWED_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp', '.pdf'}
+ANOMALY_EVIDENCE_MAX_BYTES = 5 * 1024 * 1024
+
+
+def _record_anomaly_review_event(*, flag: AnomalyFlag, user, from_status: str, to_status: str) -> AnomalyReviewEvent:
+    return AnomalyReviewEvent.objects.create(
+        flag=flag,
+        actor=user if getattr(user, 'is_authenticated', False) else None,
+        actor_role=getattr(user, 'role', '') or '',
+        from_status=from_status or '',
+        to_status=to_status or '',
+        investigation_notes=flag.investigation_notes or '',
+        corrective_action=flag.corrective_action or '',
+        resolution_reason=flag.resolution_reason or '',
+        evidence_reference=flag.evidence_reference or '',
+    )
+
+
+def _save_anomaly_evidence_files(*, flag: AnomalyFlag, user, files) -> tuple[list[AnomalyEvidenceFile], list[str]]:
+    saved: list[AnomalyEvidenceFile] = []
+    errors: list[str] = []
+    for file in files or []:
+        extension = os.path.splitext(str(file.name or ''))[1].lower()
+        if extension not in ANOMALY_EVIDENCE_ALLOWED_EXTENSIONS:
+            errors.append(f'{file.name}: only jpg, png, webp, and pdf files are accepted.')
+            continue
+        if file.size and file.size > ANOMALY_EVIDENCE_MAX_BYTES:
+            errors.append(f'{file.name}: files must be 5 MB or smaller.')
+            continue
+        path = default_storage.save(f'anomaly_evidence/{uuid.uuid4().hex}{extension}', file)
+        saved.append(AnomalyEvidenceFile.objects.create(
+            flag=flag,
+            file=path,
+            original_name=str(file.name or '')[:256],
+            uploaded_by=user if getattr(user, 'is_authenticated', False) else None,
+        ))
+    return saved, errors
+
+
+def _notify_vendor_of_anomaly_review(flag: AnomalyFlag, *, event: str, title: str, body: str):
+    vendor_id = str(getattr(flag.project, 'vendor_id', '') or '')
+    if not vendor_id:
+        return
+    try:
+        vendor = User.objects.only('id', 'full_name', 'username').get(id=vendor_id)
+    except User.DoesNotExist:
+        return
+    Notification.objects.filter(
+        recipient_id=str(vendor.id),
+        event=event,
+        linked_entity_id=str(flag.id),
+    ).delete()
+    Notification.objects.create(
+        recipient_id=str(vendor.id),
+        recipient_name=vendor.full_name or vendor.username,
+        type=NotificationChannel.IN_APP,
+        event=event,
+        title=title,
+        body=body,
+        status=NotificationStatus.SENT,
+        linked_entity_id=str(flag.id),
+    )
+
+
 class AnomalyFlagViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = AnomalyFlag.objects.select_related('project', 'installation').all()
     serializer_class = AnomalyFlagSerializer
@@ -3067,14 +3174,131 @@ class AnomalyFlagViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=True, methods=['post'])
     def resolve(self, request, pk=None):
-        if request.user.role not in {UserRole.FIELD_VERIFIER, UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.DOE_OFFICER}:
-            raise PermissionDenied('You do not have permission to resolve anomaly flags.')
+        if request.user.role not in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}:
+            raise PermissionDenied('Only the RMT or Platform Administrator can resolve anomaly flags.')
+        resolution_notes = str(request.data.get('resolution_notes') or '').strip()
+        evidence_reference = str(request.data.get('evidence_reference') or '').strip()
+        if not resolution_notes or not evidence_reference:
+            return Response({'detail': 'Resolution notes and an evidence reference are required.'}, status=status.HTTP_400_BAD_REQUEST)
         flag = self.get_object()
+        current_status = flag.status or (AnomalyFlagStatus.RESOLVED if flag.is_resolved else AnomalyFlagStatus.OPEN)
+        if flag.is_resolved or current_status not in {AnomalyFlagStatus.UNDER_INVESTIGATION}:
+            return Response(
+                {'detail': 'Flags must be under investigation before they can be resolved. Start the investigation first.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        previous_status = current_status
         flag.is_resolved = True
+        flag.status = AnomalyFlagStatus.RESOLVED
+        flag.assigned_to = request.user
+        flag.investigation_notes = resolution_notes
+        flag.resolution_reason = resolution_notes
+        flag.evidence_reference = evidence_reference
         flag.resolved_at = timezone.now()
-        flag.save(update_fields=['is_resolved', 'resolved_at'])
+        flag.save(update_fields=['is_resolved', 'status', 'assigned_to', 'investigation_notes', 'resolution_reason', 'evidence_reference', 'resolved_at'])
+        _record_anomaly_review_event(flag=flag, user=request.user, from_status=previous_status, to_status=flag.status)
         refresh_project_kpis(str(flag.project_id))
-        log_audit(request.user, 'anomaly_flag_resolved', flag, {'project_id': str(flag.project_id)})
+        log_audit(request.user, 'anomaly_flag_resolved', flag, {'project_id': str(flag.project_id), 'previous_status': previous_status})
+        return Response(self.get_serializer(flag).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], url_path='review')
+    def review(self, request, pk=None):
+        if request.user.role not in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}:
+            raise PermissionDenied('Only the RMT or Platform Administrator can manage anomaly reviews.')
+
+        flag = self.get_object()
+        next_status = str(request.data.get('status') or '').strip()
+        allowed_statuses = {choice.value for choice in AnomalyFlagStatus}
+        if next_status not in allowed_statuses:
+            return Response({'status': f'Use one of: {", ".join(sorted(allowed_statuses))}.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        notes = str(request.data.get('investigation_notes') or '').strip()
+        resolution_reason = str(request.data.get('resolution_reason') or '').strip()
+        current_status = flag.status or (AnomalyFlagStatus.RESOLVED if flag.is_resolved else AnomalyFlagStatus.OPEN)
+        allowed_transitions = {
+            AnomalyFlagStatus.OPEN: {AnomalyFlagStatus.UNDER_INVESTIGATION, AnomalyFlagStatus.ESCALATED},
+            AnomalyFlagStatus.REOPENED: {AnomalyFlagStatus.UNDER_INVESTIGATION, AnomalyFlagStatus.ESCALATED},
+            AnomalyFlagStatus.UNDER_INVESTIGATION: {AnomalyFlagStatus.CORRECTION_REQUESTED, AnomalyFlagStatus.AWAITING_EVIDENCE, AnomalyFlagStatus.RESOLVED, AnomalyFlagStatus.FALSE_POSITIVE, AnomalyFlagStatus.ESCALATED},
+            AnomalyFlagStatus.CORRECTION_REQUESTED: {AnomalyFlagStatus.UNDER_INVESTIGATION, AnomalyFlagStatus.AWAITING_EVIDENCE, AnomalyFlagStatus.RESOLVED, AnomalyFlagStatus.ESCALATED},
+            AnomalyFlagStatus.AWAITING_EVIDENCE: {AnomalyFlagStatus.UNDER_INVESTIGATION, AnomalyFlagStatus.RESOLVED, AnomalyFlagStatus.ESCALATED},
+            AnomalyFlagStatus.RESOLVED: {AnomalyFlagStatus.REOPENED},
+            AnomalyFlagStatus.FALSE_POSITIVE: {AnomalyFlagStatus.REOPENED},
+            AnomalyFlagStatus.ESCALATED: {AnomalyFlagStatus.UNDER_INVESTIGATION, AnomalyFlagStatus.REOPENED},
+        }
+        if next_status != current_status and next_status not in allowed_transitions.get(current_status, set()):
+            return Response({'status': f'Cannot move an anomaly from {current_status} to {next_status}.'}, status=status.HTTP_400_BAD_REQUEST)
+        if next_status == AnomalyFlagStatus.UNDER_INVESTIGATION and not notes:
+            return Response({'detail': 'Investigation notes are required when starting or updating an investigation.'}, status=status.HTTP_400_BAD_REQUEST)
+        if next_status == AnomalyFlagStatus.CORRECTION_REQUESTED and (not notes or not str(request.data.get('corrective_action') or '').strip() or not request.data.get('due_date')):
+            return Response({'detail': 'Investigation notes, corrective action, and a due date are required when requesting correction.'}, status=status.HTTP_400_BAD_REQUEST)
+        if next_status == AnomalyFlagStatus.AWAITING_EVIDENCE and not (notes or str(request.data.get('evidence_reference') or '').strip()):
+            return Response({'detail': 'Investigation notes or an evidence request is required when awaiting evidence.'}, status=status.HTTP_400_BAD_REQUEST)
+        if next_status in {AnomalyFlagStatus.RESOLVED, AnomalyFlagStatus.FALSE_POSITIVE}:
+            required = {
+                'investigation notes': notes,
+                'corrective action': str(request.data.get('corrective_action') or '').strip(),
+                'decision reason': resolution_reason,
+                'evidence reference': str(request.data.get('evidence_reference') or '').strip(),
+            }
+            missing = [label for label, value in required.items() if not value]
+            if missing:
+                return Response({'detail': f'Required before final decision: {", ".join(missing)}.'}, status=status.HTTP_400_BAD_REQUEST)
+        if next_status == AnomalyFlagStatus.ESCALATED and (not notes or not resolution_reason):
+            return Response({'detail': 'Investigation notes and an escalation reason are required.'}, status=status.HTTP_400_BAD_REQUEST)
+        due_date = request.data.get('due_date')
+        if due_date:
+            try:
+                due_date = date.fromisoformat(str(due_date))
+            except ValueError:
+                return Response({'due_date': 'Use the YYYY-MM-DD format.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        previous_status = current_status
+        evidence_files = list(request.FILES.getlist('evidence_files'))
+        for file in evidence_files:
+            extension = os.path.splitext(str(file.name or ''))[1].lower()
+            if extension not in ANOMALY_EVIDENCE_ALLOWED_EXTENSIONS:
+                return Response({'detail': f'{file.name}: only jpg, png, webp, and pdf files are accepted.'}, status=status.HTTP_400_BAD_REQUEST)
+            if file.size and file.size > ANOMALY_EVIDENCE_MAX_BYTES:
+                return Response({'detail': f'{file.name}: files must be 5 MB or smaller.'}, status=status.HTTP_400_BAD_REQUEST)
+        update_fields = ['status', 'assigned_to', 'investigation_notes', 'corrective_action', 'resolution_reason', 'evidence_reference', 'due_date', 'is_resolved', 'resolved_at']
+        flag.status = next_status
+        flag.assigned_to = request.user
+        if notes:
+            flag.investigation_notes = notes
+        for field in ('corrective_action', 'resolution_reason', 'evidence_reference'):
+            if field in request.data:
+                setattr(flag, field, str(request.data.get(field) or '').strip())
+        if 'due_date' in request.data:
+            flag.due_date = due_date or None
+        flag.is_resolved = next_status in {AnomalyFlagStatus.RESOLVED, AnomalyFlagStatus.FALSE_POSITIVE}
+        flag.resolved_at = timezone.now() if flag.is_resolved else None
+        flag.save(update_fields=update_fields)
+        _record_anomaly_review_event(flag=flag, user=request.user, from_status=previous_status, to_status=next_status)
+        if evidence_files:
+            _save_anomaly_evidence_files(flag=flag, user=request.user, files=evidence_files)
+        project_ref = getattr(flag.project, 'project_reference', '') or str(flag.project_id)
+        finding_title = (flag.description or flag.flag_type or 'anomaly')[:180]
+        if next_status == AnomalyFlagStatus.CORRECTION_REQUESTED:
+            _notify_vendor_of_anomaly_review(
+                flag,
+                event='anomaly_correction_requested',
+                title='Corrective Action Requested',
+                body=f'Project {project_ref}: RMT requested corrective action for {finding_title}. Due {flag.due_date or "soon"}.',
+            )
+        elif next_status == AnomalyFlagStatus.AWAITING_EVIDENCE:
+            _notify_vendor_of_anomaly_review(
+                flag,
+                event='anomaly_evidence_requested',
+                title='Additional Evidence Requested',
+                body=f'Project {project_ref}: RMT is awaiting additional evidence for {finding_title}.',
+            )
+        refresh_project_kpis(str(flag.project_id))
+        log_audit(request.user, 'anomaly_flag_reviewed', flag, {
+            'project_id': str(flag.project_id),
+            'previous_status': previous_status,
+            'new_status': next_status,
+            'resolution_reason': flag.resolution_reason,
+        })
         return Response(self.get_serializer(flag).data, status=status.HTTP_200_OK)
 
 

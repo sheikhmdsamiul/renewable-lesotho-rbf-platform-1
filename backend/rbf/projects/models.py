@@ -565,12 +565,31 @@ class SmartMeterReading(models.Model):
         return f"{self.meter_id} - {self.kwh} kWh"
 
 
+class AnomalyFlagStatus(models.TextChoices):
+    OPEN = 'open', 'Open'
+    UNDER_INVESTIGATION = 'under_investigation', 'Under Investigation'
+    CORRECTION_REQUESTED = 'correction_requested', 'Correction Requested'
+    AWAITING_EVIDENCE = 'awaiting_evidence', 'Awaiting Evidence'
+    RESOLVED = 'resolved', 'Resolved'
+    FALSE_POSITIVE = 'false_positive', 'False Positive'
+    ESCALATED = 'escalated', 'Escalated'
+    REOPENED = 'reopened', 'Reopened'
+
+
 class AnomalyFlag(models.Model):
     installation = models.ForeignKey(InstallationReport, related_name='anomaly_flags', on_delete=models.CASCADE)
     project = models.ForeignKey(Project, related_name='anomaly_flags', on_delete=models.CASCADE)
     flag_type = models.CharField(max_length=64)
     description = models.TextField(blank=True)
     is_resolved = models.BooleanField(default=False)
+    status = models.CharField(max_length=32, choices=AnomalyFlagStatus.choices, default=AnomalyFlagStatus.OPEN)
+    severity = models.CharField(max_length=16, choices=[('low', 'Low'), ('medium', 'Medium'), ('high', 'High'), ('critical', 'Critical')], default='medium')
+    assigned_to = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='assigned_anomaly_flags', on_delete=models.SET_NULL, null=True, blank=True)
+    investigation_notes = models.TextField(blank=True)
+    corrective_action = models.TextField(blank=True)
+    resolution_reason = models.TextField(blank=True)
+    evidence_reference = models.TextField(blank=True)
+    due_date = models.DateField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     resolved_at = models.DateTimeField(null=True, blank=True)
 
@@ -587,6 +606,51 @@ class AnomalyFlag(models.Model):
     def save(self, *args, **kwargs):
         super().save(*args, **kwargs)
         self.installation.recompute_gis_status(save=True)
+
+
+class AnomalyReviewEvent(models.Model):
+    flag = models.ForeignKey(AnomalyFlag, related_name='review_events', on_delete=models.CASCADE)
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        related_name='anomaly_review_events',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    actor_role = models.CharField(max_length=64, blank=True)
+    from_status = models.CharField(max_length=32, blank=True)
+    to_status = models.CharField(max_length=32)
+    investigation_notes = models.TextField(blank=True)
+    corrective_action = models.TextField(blank=True)
+    resolution_reason = models.TextField(blank=True)
+    evidence_reference = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Review event for flag {self.flag_id}: {self.from_status or '—'} → {self.to_status}"
+
+
+class AnomalyEvidenceFile(models.Model):
+    flag = models.ForeignKey(AnomalyFlag, related_name='evidence_files', on_delete=models.CASCADE)
+    file = models.CharField(max_length=512)
+    original_name = models.CharField(max_length=256, blank=True)
+    uploaded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        related_name='anomaly_evidence_files',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['uploaded_at']
+
+    def __str__(self):
+        return f"Evidence {self.original_name} for flag {self.flag_id}"
 
 
 class AuditLog(models.Model):

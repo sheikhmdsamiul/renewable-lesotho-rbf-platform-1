@@ -1430,6 +1430,31 @@ export interface AuditLog {
   newStatus?: string;
 }
 
+export interface AnomalyReviewEvent {
+  id: string;
+  flag: string;
+  actor?: string;
+  actorUsername?: string;
+  actorRole?: string;
+  fromStatus?: string;
+  toStatus: string;
+  investigationNotes?: string;
+  correctiveAction?: string;
+  resolutionReason?: string;
+  evidenceReference?: string;
+  createdAt: string;
+}
+
+export interface AnomalyEvidenceFile {
+  id: string;
+  flag: string;
+  file: string;
+  originalName?: string;
+  uploadedBy?: string;
+  uploadedByUsername?: string;
+  uploadedAt: string;
+}
+
 export interface AnomalyFlag {
   id: string;
   installation: string;
@@ -1437,8 +1462,19 @@ export interface AnomalyFlag {
   flagType: string;
   description?: string;
   isResolved: boolean;
+  status: "open" | "under_investigation" | "correction_requested" | "awaiting_evidence" | "resolved" | "false_positive" | "escalated" | "reopened";
+  severity: "low" | "medium" | "high" | "critical";
+  assignedTo?: string;
+  assignedToUsername?: string;
+  investigationNotes?: string;
+  correctiveAction?: string;
+  resolutionReason?: string;
+  evidenceReference?: string;
+  dueDate?: string;
   createdAt: string;
   resolvedAt?: string;
+  reviewEvents?: AnomalyReviewEvent[];
+  evidenceFiles?: AnomalyEvidenceFile[];
 }
 
 export enum ConcernType {

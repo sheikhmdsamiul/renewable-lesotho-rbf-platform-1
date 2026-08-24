@@ -222,7 +222,7 @@ import {
   fetchAuditLogs,
   fetchSmartMeterReadings,
   fetchAnomalyFlags,
-  resolveAnomalyFlag,
+  reviewAnomalyFlag,
   fetchProspectSyncLogs,
   refreshProspectSyncPanel,
   startProjectSetupReview,
@@ -265,19 +265,33 @@ import {
 
 // --- Components ---
 
-const SidebarItem = ({ icon: Icon, label, active, onClick, badge }: any) => (
+const SidebarItem = ({ icon: Icon, label, active, onClick, badge, actionBadge }: any) => (
   <button
     onClick={onClick}
     className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${
       active 
         ? "bg-emerald-600 text-white shadow-lg shadow-emerald-600/20" 
-        : "text-blue-200 hover:bg-slate-700/40 hover:text-white"
+        : actionBadge
+          ? "text-amber-300 hover:bg-slate-700/40 hover:text-amber-200 ring-1 ring-amber-500/30"
+          : "text-blue-200 hover:bg-slate-700/40 hover:text-white"
     }`}
   >
-    <Icon size={20} />
+    <div className="relative shrink-0">
+      <Icon size={20} />
+      {actionBadge && !active && (
+        <span className="absolute -top-1 -right-1 flex h-2 w-2">
+          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75" />
+          <span className="relative inline-flex rounded-full h-2 w-2 bg-amber-500" />
+        </span>
+      )}
+    </div>
     <span className="font-medium flex-1 text-left">{label}</span>
-    {badge && <span className="px-1.5 py-0.5 rounded-md bg-rose-500 text-[10px] font-bold text-white">{badge}</span>}
-    {active && <motion.div layoutId="active-pill" className="ml-2 w-1.5 h-1.5 rounded-full bg-white" />}
+    {actionBadge && badge ? (
+      <span className="px-1.5 py-0.5 rounded-md bg-amber-500 text-[10px] font-bold text-white shrink-0">{badge}</span>
+    ) : badge ? (
+      <span className="px-1.5 py-0.5 rounded-md bg-rose-500 text-[10px] font-bold text-white shrink-0">{badge}</span>
+    ) : null}
+    {active && <motion.div layoutId="active-pill" className="ml-2 w-1.5 h-1.5 rounded-full bg-white shrink-0" />}
   </button>
 );
 
@@ -3800,8 +3814,9 @@ const Tenders = ({
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-200">
-            {paginatedTenders.map((tender) => (
-              <tr key={tender.id} className="hover:bg-slate-50 transition-colors">
+            {paginatedTenders.map((tender) => {
+              const isDraft = tender.status === TenderStatus.DRAFT;
+              return (<tr key={tender.id} className={`transition-colors ${isDraft ? "bg-amber-50/60 border-l-4 border-amber-400 hover:bg-amber-50" : "hover:bg-slate-50"}`}>
                 <td className="px-6 py-4 font-mono text-xs text-slate-500">{tender.id}</td>
                 <td className="px-6 py-4 font-mono text-sm text-slate-600">{tender.referenceNumber}</td>
                 <td className="px-6 py-4 font-medium text-slate-900">{tender.name}</td>
@@ -3860,8 +3875,8 @@ const Tenders = ({
                     )}
                   </div>
                 </td>
-              </tr>
-            ))}
+              </tr>);
+            })}
           </tbody>
         </table>
         {totalPages > 1 && <div className="flex items-center justify-between p-4 border-t border-slate-100">
@@ -4769,8 +4784,9 @@ const PreQualification = () => {
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {!loading && vendors.map(vendor => (
-              <tr key={vendor.id} className="hover:bg-slate-50 transition-colors">
+            {!loading && vendors.map(vendor => {
+              const needsReview = vendor.status === "Pending" || vendor.status === "Under Review";
+              return (<tr key={vendor.id} className={`transition-colors ${needsReview ? "bg-amber-50/60 border-l-4 border-amber-400 hover:bg-amber-50" : "hover:bg-slate-50"}`}>
                 <td className="px-6 py-4 font-mono text-xs text-slate-500">{vendor.id}</td>
                 <td className="px-6 py-4">
                   <div className="font-medium text-slate-900">{vendor.companyName}</div>
@@ -4801,8 +4817,8 @@ const PreQualification = () => {
                     Review Profile
                   </button>
                 </td>
-              </tr>
-            ))}
+              </tr>);
+            })}
             {!loading && vendors.length === 0 && (
               <tr>
                 <td colSpan={7} className="px-6 py-12 text-center text-sm text-slate-500">
@@ -6224,8 +6240,9 @@ const Disbursements = ({
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {!loading && claims.map(claim => (
-              <tr key={claim.id} className="hover:bg-slate-50 transition-colors">
+            {!loading && claims.map(claim => {
+              const isActionable = canActOnClaim(claim);
+              return (<tr key={claim.id} className={`transition-colors ${isActionable ? "bg-amber-50/60 border-l-4 border-amber-400 hover:bg-amber-50" : "hover:bg-slate-50"}`}>
                 <td className="px-6 py-4 font-mono text-xs text-slate-500">{claim.id}</td>
                 <td className="px-6 py-4 font-mono text-sm text-slate-600">CLM-{String(claim.id).padStart(3, "0")}</td>
                 <td className="px-6 py-4">
@@ -6309,8 +6326,8 @@ const Disbursements = ({
                     )}
                   </div>
                 </td>
-              </tr>
-            ))}
+              </tr>);
+            })}
             {!loading && claims.length === 0 && (
               <tr>
                 <td colSpan={7} className="px-6 py-12 text-center text-sm text-slate-500">
@@ -8176,6 +8193,37 @@ const PreQualificationSubmission = () => {
 
   return (
     <div className="max-w-4xl mx-auto space-y-8 pb-20">
+      {!latestPrequal && (
+        <div className="flex items-start gap-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3">
+          <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-amber-400">
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><circle cx="5" cy="5" r="4" fill="white"/><rect x="4.5" y="2.5" width="1" height="3" rx="0.5" fill="#d97706"/><rect x="4.5" y="6.5" width="1" height="1" rx="0.5" fill="#d97706"/></svg>
+          </span>
+          <div>
+            <p className="text-sm font-bold text-amber-800">Pre-Qualification Required</p>
+            <p className="mt-0.5 text-xs text-amber-700">
+              You must submit a pre-qualification application and be approved by the RMT before you can place any tender bids. Complete the 3-step wizard below.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {isResubmitMode && latestPrequal?.reviewerComments && (
+        <div className="flex items-start gap-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3">
+          <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-amber-400">
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><circle cx="5" cy="5" r="4" fill="white"/><rect x="4.5" y="2.5" width="1" height="3" rx="0.5" fill="#d97706"/><rect x="4.5" y="6.5" width="1" height="1" rx="0.5" fill="#d97706"/></svg>
+          </span>
+          <div>
+            <p className="text-sm font-bold text-amber-800">Resubmission Feedback</p>
+            <p className="mt-0.5 text-xs text-amber-700">
+              Please address the following comments from the RMT reviewer in your updated form:
+            </p>
+            <div className="mt-2 rounded-lg bg-white/70 p-2.5 text-xs text-slate-700 border border-amber-200">
+              {latestPrequal.reviewerComments}
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-slate-900">Vendor Pre-Qualification</h1>
@@ -9711,6 +9759,22 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
         <p className="text-slate-500">Track live bid status, Stage 2 readiness, and next actions across every tender you have entered</p>
       </div>
 
+      {summary.actionRequired > 0 && (
+        <div className="flex items-start gap-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3">
+          <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-amber-400">
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><circle cx="5" cy="5" r="4" fill="white"/><rect x="4.5" y="2.5" width="1" height="3" rx="0.5" fill="#d97706"/><rect x="4.5" y="6.5" width="1" height="1" rx="0.5" fill="#d97706"/></svg>
+          </span>
+          <div>
+            <p className="text-sm font-bold text-amber-800">
+              {summary.actionRequired} bid{summary.actionRequired !== 1 ? "s" : ""} require your attention
+            </p>
+            <p className="mt-0.5 text-xs text-amber-700">
+              These bids are highlighted below — they have revision requests or an unlocked Stage 2 submission waiting for you.
+            </p>
+          </div>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         <div className="card p-5">
           <p className="text-[11px] font-bold uppercase tracking-widest text-slate-400">Total Tenders</p>
@@ -9792,7 +9856,11 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
             const isStageTwo = display.stage_key === "site_specific";
             const showResubmit = display.status === BidStatus.SUBMITTED || display.status === BidStatus.REVISION_REQUIRED || Boolean(editableDraft?.stage_two_unlocked);
             return (
-              <div key={latest.id} className="border border-slate-100 rounded-2xl bg-white shadow-sm hover:shadow-md transition-shadow">
+              <div key={latest.id} className={`rounded-2xl shadow-sm hover:shadow-md transition-shadow border-l-4 ${
+                operationalState === "action_required"
+                  ? "border-l-amber-400 border border-amber-200 bg-amber-50/40"
+                  : "border-l-transparent border border-slate-100 bg-white"
+              }`}>
                 <div className="p-5">
                   <div className="flex items-start justify-between gap-4">
                     <div className="flex flex-wrap items-center gap-2">
@@ -14512,6 +14580,19 @@ const ProjectsHub = ({
   const [selectedProjectKpi, setSelectedProjectKpi] = useState<ProjectKpiSummary | null>(null);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState("");
+  const [anomalySearch, setAnomalySearch] = useState("");
+  const [anomalyStatusFilter, setAnomalyStatusFilter] = useState<string>("open");
+  const [anomalyTypeFilter, setAnomalyTypeFilter] = useState("all");
+  const [selectedAnomalyFlag, setSelectedAnomalyFlag] = useState<AnomalyFlag | null>(null);
+  const [anomalyEvidenceFiles, setAnomalyEvidenceFiles] = useState<File[]>([]);
+  const [selectedInstallationId, setSelectedInstallationId] = useState<string | null>(null);
+  const [anomalyReviewStatus, setAnomalyReviewStatus] = useState<AnomalyFlag["status"]>("under_investigation");
+  const [anomalyReviewNotes, setAnomalyReviewNotes] = useState("");
+  const [anomalyCorrectiveAction, setAnomalyCorrectiveAction] = useState("");
+  const [anomalyResolutionReason, setAnomalyResolutionReason] = useState("");
+  const [anomalyEvidenceReference, setAnomalyEvidenceReference] = useState("");
+  const [anomalyDueDate, setAnomalyDueDate] = useState("");
+  const [anomalyReviewSaving, setAnomalyReviewSaving] = useState(false);
   const [techFilter, setTechFilter] = useState("All");
   const [statusFilter, setStatusFilter] = useState("All");
   const [districtFilter, setDistrictFilter] = useState("All");
@@ -15916,9 +15997,70 @@ const ProjectsHub = ({
     }
   };
 
-  const handleResolveProjectFlag = async (projectId: string, flagId: string) => {
+  const openAnomalyReview = (flag: AnomalyFlag) => {
+    setSelectedAnomalyFlag(flag);
+    setAnomalyReviewStatus(flag.status === "resolved" ? "reopened" : flag.status || "under_investigation");
+    setAnomalyReviewNotes(flag.investigationNotes || "");
+    setAnomalyCorrectiveAction(flag.correctiveAction || "");
+    setAnomalyResolutionReason(flag.resolutionReason || "");
+    setAnomalyEvidenceReference(flag.evidenceReference || "");
+    setAnomalyDueDate(flag.dueDate || "");
+    setAnomalyEvidenceFiles([]);
+  };
+
+  const anomalyReviewOptions = (status: AnomalyFlag["status"]) => {
+    const transitions: Record<AnomalyFlag["status"], AnomalyFlag["status"][]> = {
+      open: ["under_investigation", "escalated"],
+      reopened: ["under_investigation", "escalated"],
+      under_investigation: ["correction_requested", "awaiting_evidence", "resolved", "false_positive", "escalated"],
+      correction_requested: ["under_investigation", "awaiting_evidence", "resolved", "escalated"],
+      awaiting_evidence: ["under_investigation", "resolved", "escalated"],
+      resolved: ["reopened"],
+      false_positive: ["reopened"],
+      escalated: ["under_investigation", "reopened"],
+    };
+    const options = transitions[status] || ["under_investigation"];
+    return Array.from(new Set<AnomalyFlag["status"]>([status, ...options]));
+  };
+
+  const handleReviewProjectFlag = async (projectId: string) => {
+    if (!selectedAnomalyFlag) return;
+    if (anomalyReviewStatus === "under_investigation" && !anomalyReviewNotes.trim()) {
+      alert("Add investigation notes before starting the investigation.");
+      return;
+    }
+    if (anomalyReviewStatus === "correction_requested" && (!anomalyReviewNotes.trim() || !anomalyCorrectiveAction.trim() || !anomalyDueDate)) {
+      alert("Investigation notes, corrective action, and a due date are required when requesting correction.");
+      return;
+    }
+    if (anomalyReviewStatus === "awaiting_evidence" && !anomalyReviewNotes.trim() && !anomalyEvidenceReference.trim()) {
+      alert("Add investigation notes or an evidence request before waiting for evidence.");
+      return;
+    }
+    if (["resolved", "false_positive"].includes(anomalyReviewStatus) && (!anomalyReviewNotes.trim() || !anomalyCorrectiveAction.trim() || !anomalyResolutionReason.trim() || (!anomalyEvidenceReference.trim() && anomalyEvidenceFiles.length === 0 && (selectedAnomalyFlag?.evidenceFiles?.length ?? 0) === 0))) {
+      alert("Final decisions require investigation notes, corrective action, a decision reason, and an evidence reference or uploaded evidence.");
+      return;
+    }
+    const oversized = anomalyEvidenceFiles.find(file => file.size > 5 * 1024 * 1024);
+    if (oversized) {
+      alert(`"${oversized.name}" is larger than 5 MB. Remove it or attach a smaller file.`);
+      return;
+    }
+    if (anomalyReviewStatus === "escalated" && (!anomalyReviewNotes.trim() || !anomalyResolutionReason.trim())) {
+      alert("Escalation requires investigation notes and an escalation reason.");
+      return;
+    }
+    setAnomalyReviewSaving(true);
     try {
-      await resolveAnomalyFlag(flagId);
+      await reviewAnomalyFlag(selectedAnomalyFlag.id, {
+        status: anomalyReviewStatus,
+        investigationNotes: anomalyReviewNotes,
+        correctiveAction: anomalyCorrectiveAction,
+        resolutionReason: anomalyResolutionReason,
+        evidenceReference: anomalyEvidenceReference,
+        dueDate: anomalyDueDate,
+        evidenceFiles: anomalyEvidenceFiles,
+      });
       const [flags, audits, kpi] = await Promise.all([
         fetchAnomalyFlags({ projectId }),
         fetchAuditLogs(projectId),
@@ -15927,10 +16069,12 @@ const ProjectsHub = ({
       setProjectAnomalyFlags(flags);
       setProjectAuditLogs(audits);
       setSelectedProjectKpi(kpi);
-      alert("Anomaly flag resolved.");
+      setSelectedAnomalyFlag(null);
     } catch (err: any) {
       const raw = String(err?.message || "");
       alert(toFriendlyApiMessage(raw) || "Unable to resolve anomaly flag.");
+    } finally {
+      setAnomalyReviewSaving(false);
     }
   };
 
@@ -15941,6 +16085,12 @@ const ProjectsHub = ({
     const projectClaims = claimsForProject(project.id);
     const contract = getProjectContract(project.id);
     const projectReports = reportsForPortfolioProject(project.id);
+    const selectedInstallation = projectReports.find(report => report.id === selectedInstallationId) || null;
+    const selectedInstallationReadings = selectedInstallation
+      ? smartReadingsForProject(project.id)
+          .filter(reading => String(reading.installationId || "") === selectedInstallation.id)
+          .sort((a, b) => String(b.recordedAt || "").localeCompare(String(a.recordedAt || "")))
+      : [];
     const verifiedCount = verifiedInstallationsForProject(project.id);
     const flaggedCount = flaggedInstallationsForProject(project.id);
     const targetInstallations = Number(project.targetInstallations || 0);
@@ -16103,6 +16253,81 @@ const ProjectsHub = ({
     const projectAuditTrail = auditLogsForProject(project.id);
     const projectDocumentsList = documentsForProject(project.id);
     const projectFlags = anomalyFlagsForProject(project.id);
+    const anomalyFindingTitle = (flagType: string) => ({
+      zero_uptime: "Meter reported zero uptime",
+      no_data: "Meter data is missing",
+      output_deviation: "Meter output changed materially",
+      duplicate_gps: "GPS location is close to another installation",
+      location_mismatch: "Verification location does not match the installation",
+      verification_distance: "Verifier was outside the allowed distance",
+    }[flagType] || "Anomaly requires investigation");
+    const anomalyFindingDescription = (flag: AnomalyFlag) => {
+      const detail = flag.description?.trim()
+        || `${anomalyFindingTitle(flag.flagType)} for installation ${flag.installation || "not identified"}.`;
+      const context = `Affected installation: ${flag.installation || "not identified"}. Raised: ${flag.createdAt ? new Date(flag.createdAt).toLocaleString() : "date unavailable"}.`;
+      return `${detail} ${context} Review the installation record, verification evidence, and uploaded meter data where available.`;
+    };
+    const anomalyStatusMeta = (status?: string): { label: string; badge: string } => ({
+      open: { label: "Open", badge: "bg-amber-100 text-amber-800" },
+      under_investigation: { label: "Under Investigation", badge: "bg-blue-100 text-blue-800" },
+      correction_requested: { label: "Correction Requested", badge: "bg-purple-100 text-purple-800" },
+      awaiting_evidence: { label: "Awaiting Evidence", badge: "bg-sky-100 text-sky-800" },
+      resolved: { label: "Resolved", badge: "bg-emerald-100 text-emerald-700" },
+      false_positive: { label: "False Positive", badge: "bg-slate-100 text-slate-600" },
+      escalated: { label: "Escalated", badge: "bg-rose-100 text-rose-700" },
+      reopened: { label: "Reopened", badge: "bg-orange-100 text-orange-800" },
+    }[status || "open"] || { label: (status || "Unknown").replace(/_/g, " "), badge: "bg-slate-100 text-slate-600" });
+    const isAnomalyOverdue = (flag: AnomalyFlag) =>
+      !flag.isResolved && Boolean(flag.dueDate) && new Date(flag.dueDate as string).getTime() < Date.now();
+    const anomalyDecisionRequirements = (target: string) => {
+      if (target === "under_investigation") return [{ key: "notes", label: "Investigation notes", met: Boolean(anomalyReviewNotes.trim()) }];
+      if (target === "correction_requested") return [
+        { key: "notes", label: "Investigation notes", met: Boolean(anomalyReviewNotes.trim()) },
+        { key: "action", label: "Corrective action", met: Boolean(anomalyCorrectiveAction.trim()) },
+        { key: "due", label: "Correction due date", met: Boolean(anomalyDueDate) },
+      ];
+      if (target === "awaiting_evidence") return [{ key: "either", label: "Investigation notes or evidence request", met: Boolean(anomalyReviewNotes.trim() || anomalyEvidenceReference.trim()) }];
+      if (["resolved", "false_positive"].includes(target)) return [
+        { key: "notes", label: "Investigation notes", met: Boolean(anomalyReviewNotes.trim()) },
+        { key: "action", label: "Corrective action taken", met: Boolean(anomalyCorrectiveAction.trim()) },
+        { key: "reason", label: "Decision reason", met: Boolean(anomalyResolutionReason.trim()) },
+        { key: "evidence", label: "Evidence reference or files", met: Boolean(anomalyEvidenceReference.trim() || anomalyEvidenceFiles.length > 0 || (selectedAnomalyFlag?.evidenceFiles?.length ?? 0) > 0) },
+      ];
+      if (target === "escalated") return [
+        { key: "notes", label: "Investigation notes", met: Boolean(anomalyReviewNotes.trim()) },
+        { key: "reason", label: "Escalation reason", met: Boolean(anomalyResolutionReason.trim()) },
+      ];
+      return [];
+    };
+    const anomalyActionLabel = (target: string) => ({
+      under_investigation: "Start investigation",
+      correction_requested: "Request correction",
+      awaiting_evidence: "Request evidence",
+      resolved: "Resolve flag",
+      false_positive: "Close as false positive",
+      escalated: "Escalate flag",
+      reopened: "Reopen flag",
+    }[target] || "Save review");
+    const selectedInstallation = projectReports.find(report => report.id === selectedInstallationId) || null;
+    const selectedInstallationReadings = selectedInstallation
+      ? smartReadingsForProject(project.id)
+          .filter(reading => String(reading.installationId || "") === selectedInstallation.id)
+          .sort((a, b) => String(b.recordedAt || "").localeCompare(String(a.recordedAt || "")))
+      : [];
+    const anomalyTypes = Array.from(new Set<string>(projectFlags.map(flag => flag.flagType).filter((value): value is string => Boolean(value)))).sort();
+    const visibleAnomalyFlags = projectFlags.filter(flag => {
+      const query = anomalySearch.trim().toLowerCase();
+      const matchesSearch = !query || [flag.id, flag.installation, flag.flagType, flag.description]
+        .filter(Boolean)
+        .some(value => String(value).toLowerCase().includes(query));
+      const matchesStatus = anomalyStatusFilter === "all"
+        || (anomalyStatusFilter === "open" && !flag.isResolved)
+        || (anomalyStatusFilter === "resolved" && flag.isResolved)
+        || (anomalyStatusFilter === "overdue" && isAnomalyOverdue(flag))
+        || (!["all", "open", "resolved", "overdue"].includes(anomalyStatusFilter) && (flag.status || "open") === anomalyStatusFilter);
+      const matchesType = anomalyTypeFilter === "all" || flag.flagType === anomalyTypeFilter;
+      return matchesSearch && matchesStatus && matchesType;
+    });
     const projectProspectSyncLogs = prospectLogsForProject(project.id);
     const statusTone = getProjectStatusTone(project);
     const kpiSnapshot = getProjectKpiSnapshot(project);
@@ -16621,31 +16846,94 @@ const ProjectsHub = ({
                 <table className="min-w-full divide-y divide-slate-200 text-sm">
                   <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
                     <tr>
-                      <th className="px-4 py-3">INS ID</th>
+                      <th className="px-4 py-3">Installation ID</th>
                       <th className="px-4 py-3">Beneficiary</th>
                       <th className="px-4 py-3">Household</th>
+                      <th className="px-4 py-3">Serial Number</th>
+                      <th className="px-4 py-3">Meter ID</th>
                       <th className="px-4 py-3">GPS</th>
                       <th className="px-4 py-3">Submitted</th>
-                      <th className="px-4 py-3">FO Verified</th>
-                      <th className="px-4 py-3">Status</th>
+                      <th className="px-4 py-3">Verified By</th>
+                      <th className="px-4 py-3">GIS / Anomalies</th>
+                      <th className="px-4 py-3">Verification Status</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 bg-white">
-                    {projectReports.map(report => (
+                    {projectReports.map(report => {
+                      const unresolvedAnomalies = projectAnomalyFlags.filter(flag => flag.installation === report.id && !flag.isResolved).length;
+                      const verificationStatus = report.verificationStatus || report.status || "Pending";
+                      const statusClass = String(verificationStatus).toLowerCase().includes("verified")
+                        ? "bg-emerald-100 text-emerald-700"
+                        : String(verificationStatus).toLowerCase().includes("flagged")
+                          ? "bg-rose-100 text-rose-700"
+                          : "bg-amber-100 text-amber-700";
+                      const gisClass = report.gisStatus === "green"
+                        ? "bg-emerald-100 text-emerald-700"
+                        : report.gisStatus === "red"
+                          ? "bg-rose-100 text-rose-700"
+                          : "bg-amber-100 text-amber-700";
+                      return (
                       <tr key={report.id}>
-                        <td className="px-4 py-3 text-slate-700">{report.id}</td>
+                        <td className="px-4 py-3"><button onClick={() => setSelectedInstallationId(report.id)} className="font-semibold text-emerald-700 hover:text-emerald-900 hover:underline">{report.id}</button></td>
                         <td className="px-4 py-3 text-slate-700">{report.beneficiaryName || report.beneficiaryId || "Restricted"}</td>
                         <td className="px-4 py-3 text-slate-700">{report.householdType || "—"}</td>
+                        <td className="px-4 py-3 text-slate-700">{report.serialNumber || "—"}</td>
+                        <td className="px-4 py-3 text-slate-700">{report.meterId || "—"}</td>
                         <td className="px-4 py-3"><a href={`https://www.google.com/maps?q=${report.gpsLat},${report.gpsLng}`} target="_blank" rel="noreferrer" className="text-emerald-700 underline">Map</a></td>
                         <td className="px-4 py-3 text-slate-700">{report.submittedAt ? new Date(report.submittedAt).toLocaleDateString() : "N/A"}</td>
                         <td className="px-4 py-3 text-slate-700">{report.verifiedBy || "Pending"}</td>
-                        <td className="px-4 py-3 text-slate-700">{report.verificationStatus || report.status || "Pending"}</td>
+                        <td className="px-4 py-3">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${gisClass}`}>GIS {report.gisStatus || "yellow"}</span>
+                            {unresolvedAnomalies > 0 && <span className="rounded-full bg-rose-100 px-2.5 py-1 text-xs font-semibold text-rose-700">{unresolvedAnomalies} open</span>}
+                            {unresolvedAnomalies === 0 && <span className="text-xs text-slate-500">No open flags</span>}
+                          </div>
+                        </td>
+                        <td className="px-4 py-3"><span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${statusClass}`}>{verificationStatus}</span></td>
                       </tr>
-                    ))}
-                    {projectReports.length === 0 && <tr><td colSpan={7} className="px-4 py-6 text-center text-sm text-slate-500">No installation records yet.</td></tr>}
+                      );
+                    })}
+                    {projectReports.length === 0 && <tr><td colSpan={10} className="px-4 py-6 text-center text-sm text-slate-500">No installation records yet.</td></tr>}
                   </tbody>
                 </table>
               </div>
+              {selectedInstallation && (
+                <div className="rounded-2xl border border-blue-200 bg-blue-50/40 p-5">
+                  <div className="flex flex-col gap-3 border-b border-blue-100 pb-4 sm:flex-row sm:items-start sm:justify-between">
+                    <div>
+                      <p className="text-xs font-bold uppercase tracking-widest text-blue-700">Installation evidence</p>
+                      <h4 className="mt-1 text-lg font-bold text-slate-900">{selectedInstallation.id}</h4>
+                      <p className="mt-1 text-sm text-slate-600">{selectedInstallation.beneficiaryName || selectedInstallation.beneficiaryId || "Beneficiary unavailable"} · Meter {selectedInstallation.meterId || "Not provided"}</p>
+                    </div>
+                    <button onClick={() => setSelectedInstallationId(null)} className="self-start rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50">Close details</button>
+                  </div>
+                  <div className="mt-4 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
+                    <div><p className="text-xs text-slate-500">Serial number</p><p className="font-semibold text-slate-900">{selectedInstallation.serialNumber || "N/A"}</p></div>
+                    <div><p className="text-xs text-slate-500">Verification</p><p className="font-semibold text-slate-900">{selectedInstallation.verificationStatus || selectedInstallation.status || "Pending"}</p></div>
+                    <div><p className="text-xs text-slate-500">Submitted</p><p className="font-semibold text-slate-900">{selectedInstallation.submittedAt ? new Date(selectedInstallation.submittedAt).toLocaleString() : "N/A"}</p></div>
+                    <div><p className="text-xs text-slate-500">Uploaded readings</p><p className="font-semibold text-slate-900">{selectedInstallationReadings.length}</p></div>
+                  </div>
+                  <div className="mt-5 overflow-x-auto rounded-xl border border-blue-100 bg-white">
+                    <table className="min-w-full divide-y divide-slate-200 text-sm">
+                      <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
+                        <tr><th className="px-3 py-2">Recorded at</th><th className="px-3 py-2">Meter ID</th><th className="px-3 py-2">kWh generated</th><th className="px-3 py-2">Uptime</th><th className="px-3 py-2">Uploaded</th></tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {selectedInstallationReadings.map(reading => (
+                          <tr key={reading.id}>
+                            <td className="whitespace-nowrap px-3 py-2 text-slate-700">{reading.recordedAt ? new Date(reading.recordedAt).toLocaleString() : "N/A"}</td>
+                            <td className="px-3 py-2 font-mono text-xs text-slate-700">{reading.meterId || selectedInstallation.meterId || "N/A"}</td>
+                            <td className="px-3 py-2 text-slate-700">{Number(reading.kwh || 0).toFixed(2)} kWh</td>
+                            <td className={`px-3 py-2 font-semibold ${Number(reading.uptimePct) < 80 ? "text-rose-700" : Number(reading.uptimePct) < 99 ? "text-amber-700" : "text-emerald-700"}`}>{reading.uptimePct == null ? "N/A" : `${Number(reading.uptimePct).toFixed(1)}%`}</td>
+                            <td className="whitespace-nowrap px-3 py-2 text-slate-500">{reading.createdAt ? new Date(reading.createdAt).toLocaleString() : "N/A"}</td>
+                          </tr>
+                        ))}
+                        {selectedInstallationReadings.length === 0 && <tr><td colSpan={5} className="px-3 py-8 text-center text-sm text-slate-500">No meter readings have been uploaded for this installation.</td></tr>}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -17351,44 +17639,245 @@ const ProjectsHub = ({
 
           {activeTab === "anomaly_flags" && (
             <div className="space-y-6">
-              <div className="grid gap-3 md:grid-cols-3">
-                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-xs text-slate-500">Total raised</p><p className="mt-1 text-lg font-semibold text-slate-900">{projectFlags.length}</p></div>
-                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-xs text-slate-500">Resolved</p><p className="mt-1 text-lg font-semibold text-slate-900">{projectFlags.filter(flag => flag.isResolved).length}</p></div>
-                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-xs text-slate-500">Unresolved</p><p className="mt-1 text-lg font-semibold text-slate-900">{projectFlags.filter(flag => !flag.isResolved).length}</p></div>
+              <div className="flex flex-col gap-4 rounded-2xl border border-slate-200 bg-white p-5 lg:flex-row lg:items-end lg:justify-between">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle size={18} className="text-amber-600" />
+                    <h4 className="text-base font-semibold text-slate-900">Anomaly review queue</h4>
+                  </div>
+                  <p className="mt-1 text-sm text-slate-500">Review evidence and resolve flags only after the underlying issue has been addressed.</p>
+                </div>
+                <div className="flex flex-col gap-2 sm:flex-row">
+                  <input
+                    value={anomalySearch}
+                    onChange={(event) => setAnomalySearch(event.target.value)}
+                    className="input-field min-w-0 sm:w-64"
+                    placeholder="Search ID, type, or description"
+                    aria-label="Search anomaly flags"
+                  />
+                  <select className="input-field sm:w-44" value={anomalyStatusFilter} onChange={(event) => setAnomalyStatusFilter(event.target.value)} aria-label="Filter anomaly status">
+                    <option value="open">Open (unresolved)</option>
+                    <option value="under_investigation">Under Investigation</option>
+                    <option value="correction_requested">Correction Requested</option>
+                    <option value="awaiting_evidence">Awaiting Evidence</option>
+                    <option value="escalated">Escalated</option>
+                    <option value="overdue">Overdue</option>
+                    <option value="resolved">Resolved only</option>
+                    <option value="false_positive">False positive</option>
+                    <option value="all">All statuses</option>
+                  </select>
+                  <select className="input-field sm:w-44" value={anomalyTypeFilter} onChange={(event) => setAnomalyTypeFilter(event.target.value)} aria-label="Filter anomaly type">
+                    <option value="all">All flag types</option>
+                    {anomalyTypes.map(type => <option key={type} value={type}>{type.replace(/_/g, " ")}</option>)}
+                  </select>
+                </div>
               </div>
-              <div className="overflow-x-auto rounded-2xl border border-slate-200">
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4"><p className="text-xs text-slate-500">Total raised</p><p className="mt-1 text-lg font-semibold text-slate-900">{projectFlags.length}</p></div>
+                <div className="rounded-2xl border border-rose-100 bg-rose-50 p-4"><p className="text-xs text-rose-700">Open (unresolved)</p><p className="mt-1 text-lg font-semibold text-rose-800">{projectFlags.filter(flag => !flag.isResolved).length}</p></div>
+                <div className="rounded-2xl border border-blue-100 bg-blue-50 p-4"><p className="text-xs text-blue-700">Under investigation</p><p className="mt-1 text-lg font-semibold text-blue-800">{projectFlags.filter(flag => flag.status === "under_investigation").length}</p></div>
+                <div className="rounded-2xl border border-purple-100 bg-purple-50 p-4"><p className="text-xs text-purple-700">Awaiting action</p><p className="mt-1 text-lg font-semibold text-purple-800">{projectFlags.filter(flag => ["correction_requested", "awaiting_evidence"].includes(flag.status || "")).length}</p></div>
+                <div className="rounded-2xl border border-emerald-100 bg-emerald-50 p-4"><p className="text-xs text-emerald-700">Resolved / closed</p><p className="mt-1 text-lg font-semibold text-emerald-800">{projectFlags.filter(flag => flag.isResolved).length}</p></div>
+              </div>
+              <div className="overflow-x-auto rounded-2xl border border-slate-200 bg-white">
                 <table className="min-w-full divide-y divide-slate-200 text-sm">
                   <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
                     <tr>
                       <th className="px-4 py-3">Flag ID</th>
                       <th className="px-4 py-3">Installation ID</th>
-                      <th className="px-4 py-3">Type</th>
-                      <th className="px-4 py-3">Description</th>
+                      <th className="px-4 py-3">Flag type</th>
+                      <th className="px-4 py-3 min-w-[280px]">Finding</th>
                       <th className="px-4 py-3">Raised</th>
-                      <th className="px-4 py-3">Action</th>
+                      <th className="px-4 py-3">State</th>
+                      <th className="px-4 py-3">Due / Resolved</th>
+                      <th className="px-4 py-3 text-right">Action</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 bg-white">
-                    {projectFlags.map(flag => (
+                    {visibleAnomalyFlags.map(flag => (
                       <tr key={flag.id}>
-                        <td className="px-4 py-3 text-slate-700">{flag.id}</td>
-                        <td className="px-4 py-3 text-slate-700">{flag.installationReportId || "N/A"}</td>
-                        <td className="px-4 py-3 text-slate-700">{flag.flagType || "Flag"}</td>
-                        <td className="px-4 py-3 text-slate-700">{flag.description || flag.notes || "No description"}</td>
-                        <td className="px-4 py-3 text-slate-700">{flag.createdAt ? new Date(flag.createdAt).toLocaleDateString() : "N/A"}</td>
-                        <td className="px-4 py-3 text-slate-700">
+                        <td className="px-4 py-3 font-mono text-xs text-slate-600">#{flag.id}</td>
+                        <td className="px-4 py-3 font-mono text-xs text-slate-700">{flag.installation || "N/A"}</td>
+                        <td className="px-4 py-3"><span className="rounded-full bg-amber-100 px-2.5 py-1 text-xs font-semibold capitalize text-amber-800">{(flag.flagType || "unknown").replace(/_/g, " ")}</span></td>
+                        <td className="max-w-md px-4 py-3 text-slate-700">
+                          <p className="font-semibold text-slate-900">{anomalyFindingTitle(flag.flagType)}</p>
+                          <p className="mt-1 leading-5">{anomalyFindingDescription(flag)}</p>
+                        </td>
+                        <td className="whitespace-nowrap px-4 py-3 text-slate-700">{flag.createdAt ? new Date(flag.createdAt).toLocaleDateString() : "N/A"}</td>
+                        <td className="px-4 py-3">
+                          <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${anomalyStatusMeta(flag.status).badge}`}>{anomalyStatusMeta(flag.status).label}</span>
+                          {isAnomalyOverdue(flag) && <span className="ml-1.5 rounded-full bg-red-100 px-2 py-0.5 text-[10px] font-bold uppercase text-red-700">Overdue</span>}
+                        </td>
+                        <td className="whitespace-nowrap px-4 py-3 text-slate-700">
+                          {flag.isResolved
+                            ? (flag.resolvedAt ? new Date(flag.resolvedAt).toLocaleDateString() : "—")
+                            : flag.dueDate
+                              ? <span>Due {new Date(flag.dueDate).toLocaleDateString()}</span>
+                              : "—"}
+                        </td>
+                        <td className="px-4 py-3 text-right text-slate-700">
                           {canResolveFlags && !flag.isResolved ? (
-                            <button onClick={() => void handleResolveProjectFlag(project.id, flag.id)} className="font-medium text-emerald-600 hover:text-emerald-700">Resolve</button>
+                            <button onClick={() => openAnomalyReview(flag)} className="rounded-lg border border-emerald-200 px-3 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-50">Review flag</button>
                           ) : (
-                            <span>{flag.isResolved ? "Resolved" : "Read only"}</span>
+                            canResolveFlags && flag.isResolved ? <button onClick={() => openAnomalyReview(flag)} className="text-xs font-semibold text-slate-600 hover:text-slate-900">View history</button> : <span className="text-xs text-slate-500">Read only</span>
                           )}
                         </td>
                       </tr>
                     ))}
-                    {projectFlags.length === 0 && <tr><td colSpan={6} className="px-4 py-6 text-center text-sm text-slate-500">No anomaly flags for this project.</td></tr>}
+                    {visibleAnomalyFlags.length === 0 && <tr><td colSpan={8} className="px-4 py-10 text-center"><AlertTriangle size={22} className="mx-auto text-slate-300" /><p className="mt-2 text-sm font-medium text-slate-600">{projectFlags.length === 0 ? "No anomaly flags for this project." : "No flags match the current filters."}</p><p className="mt-1 text-xs text-slate-400">Try changing the status, type, or search term.</p></td></tr>}
                   </tbody>
                 </table>
               </div>
+              {selectedAnomalyFlag && (() => {
+                const reviewMeta = anomalyStatusMeta(selectedAnomalyFlag.status);
+                const requirements = anomalyDecisionRequirements(anomalyReviewStatus);
+                const requirementsMet = requirements.every(item => item.met);
+                return (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4" onClick={() => !anomalyReviewSaving && setSelectedAnomalyFlag(null)}>
+                  <div className="max-h-[92vh] w-full max-w-3xl overflow-y-auto rounded-2xl bg-white p-6 shadow-2xl" onClick={(event) => event.stopPropagation()}>
+                    <div className="flex items-start justify-between gap-4 border-b border-slate-100 pb-4">
+                      <div>
+                        <p className="text-xs font-bold uppercase tracking-widest text-slate-400">Anomaly review</p>
+                        <h3 className="mt-1 text-xl font-bold text-slate-900">Flag #{selectedAnomalyFlag.id}</h3>
+                        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                          <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${reviewMeta.badge}`}>{reviewMeta.label}</span>
+                          <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold capitalize text-slate-700">{selectedAnomalyFlag.severity || "medium"} severity</span>
+                          {isAnomalyOverdue(selectedAnomalyFlag) && <span className="rounded-full bg-red-100 px-2.5 py-1 text-xs font-bold uppercase text-red-700">Overdue</span>}
+                        </div>
+                      </div>
+                      <button className="rounded-lg p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-700" onClick={() => setSelectedAnomalyFlag(null)} disabled={anomalyReviewSaving} aria-label="Close anomaly investigation">×</button>
+                    </div>
+
+                    <div className="mt-5 rounded-xl border border-amber-100 bg-amber-50 p-4 text-sm text-amber-900">
+                      <p className="font-semibold">Finding · {anomalyFindingTitle(selectedAnomalyFlag.flagType)}</p>
+                      <p className="mt-1">{selectedAnomalyFlag.description || "No description provided."}</p>
+                      <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-amber-800 md:grid-cols-4">
+                        <div><span className="font-semibold">Installation:</span> {selectedAnomalyFlag.installation || "N/A"}</div>
+                        <div><span className="font-semibold">Raised:</span> {selectedAnomalyFlag.createdAt ? new Date(selectedAnomalyFlag.createdAt).toLocaleDateString() : "N/A"}</div>
+                        <div><span className="font-semibold">Reviewer:</span> {selectedAnomalyFlag.assignedToUsername || "Unassigned"}</div>
+                        <div><span className="font-semibold">Due:</span> {selectedAnomalyFlag.dueDate ? new Date(selectedAnomalyFlag.dueDate).toLocaleDateString() : "—"}</div>
+                      </div>
+                    </div>
+
+                    {(selectedAnomalyFlag.reviewEvents?.length ?? 0) > 0 && (
+                      <div className="mt-5 rounded-xl border border-slate-200 bg-white p-4">
+                        <p className="text-sm font-bold text-slate-900">Review timeline</p>
+                        <ol className="mt-3 space-y-3">
+                          {selectedAnomalyFlag.reviewEvents!.map(event => {
+                            const eventFrom = event.fromStatus ? anomalyStatusMeta(event.fromStatus) : null;
+                            const eventTo = anomalyStatusMeta(event.toStatus);
+                            return (
+                              <li key={event.id} className="flex items-start gap-3 text-sm">
+                                <span className="mt-1 h-2 w-2 flex-shrink-0 rounded-full bg-emerald-500" />
+                                <div className="min-w-0 flex-1">
+                                  <p className="text-xs text-slate-500">
+                                    <span className="font-semibold text-slate-700">{event.actorUsername || "System"}</span>
+                                    {event.createdAt ? ` · ${new Date(event.createdAt).toLocaleString()}` : ""}
+                                  </p>
+                                  <p className="mt-0.5 flex flex-wrap items-center gap-1.5">
+                                    {eventFrom && <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${eventFrom.badge}`}>{eventFrom.label}</span>}
+                                    {eventFrom && <span className="text-slate-400">→</span>}
+                                    <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${eventTo.badge}`}>{eventTo.label}</span>
+                                  </p>
+                                  {event.investigationNotes && <p className="mt-1 line-clamp-2 text-xs text-slate-600"><span className="font-semibold">Notes:</span> {event.investigationNotes}</p>}
+                                  {event.correctiveAction && <p className="mt-0.5 text-xs text-slate-600"><span className="font-semibold">Corrective action:</span> {event.correctiveAction}</p>}
+                                  {event.resolutionReason && <p className="mt-0.5 text-xs text-slate-600"><span className="font-semibold">Reason:</span> {event.resolutionReason}</p>}
+                                </div>
+                              </li>
+                            );
+                          })}
+                        </ol>
+                      </div>
+                    )}
+
+                    {(selectedAnomalyFlag.evidenceFiles?.length ?? 0) > 0 && (
+                      <div className="mt-4 rounded-xl border border-slate-200 bg-white p-4">
+                        <p className="text-sm font-bold text-slate-900">Evidence on file</p>
+                        <ul className="mt-2 space-y-1.5">
+                          {selectedAnomalyFlag.evidenceFiles!.map(evidence => (
+                            <li key={evidence.id} className="flex items-center justify-between gap-2 rounded-lg bg-slate-50 px-3 py-2 text-sm">
+                              <span className="truncate text-slate-700">{evidence.originalName || evidence.file.split("/").pop()}</span>
+                              <a href={toFileUrl(evidence.file) || "#"} target="_blank" rel="noreferrer" className="flex-shrink-0 text-xs font-semibold text-emerald-700 underline">Download</a>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    <div className="mt-5 border-t border-slate-100 pt-5">
+                      <p className="text-sm font-bold text-slate-900">Review decision</p>
+                      <p className="mt-0.5 text-xs text-slate-500">Flags must be investigated before they can be resolved. Every decision is recorded in the timeline above.</p>
+                      <div className="mt-4 grid gap-4 md:grid-cols-2">
+                        <label className="text-sm font-semibold text-slate-700">Move status to
+                          <select className="input-field mt-1" value={anomalyReviewStatus} onChange={(event) => setAnomalyReviewStatus(event.target.value as AnomalyFlag["status"])}>
+                            {anomalyReviewOptions(selectedAnomalyFlag.status).map(status => (
+                              <option key={status} value={status}>{anomalyStatusMeta(status).label}{status === selectedAnomalyFlag.status ? " (current)" : ""}</option>
+                            ))}
+                          </select>
+                        </label>
+                        <label className="text-sm font-semibold text-slate-700">Due date{anomalyReviewStatus === "correction_requested" ? <span className="text-rose-500"> *</span> : null}
+                          <input type="date" className="input-field mt-1" value={anomalyDueDate} onChange={(event) => setAnomalyDueDate(event.target.value)} />
+                        </label>
+                      </div>
+                      {requirements.length > 0 && (
+                        <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5">
+                          {requirements.map(item => (
+                            <span key={item.key} className={`flex items-center gap-1.5 text-xs font-medium ${item.met ? "text-emerald-700" : "text-slate-500"}`}>
+                              {item.met ? <CheckCircle2 size={13} className="text-emerald-600" /> : <span className="h-3 w-3 rounded-full border border-slate-300 bg-white" />}
+                              {item.label}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      <div className="mt-4 grid gap-4 md:grid-cols-2">
+                        <label className="text-sm font-semibold text-slate-700">Investigation notes
+                          <textarea className="input-field mt-1 min-h-28" value={anomalyReviewNotes} onChange={(event) => setAnomalyReviewNotes(event.target.value)} placeholder="What was checked and what did you find?" />
+                        </label>
+                        <label className="text-sm font-semibold text-slate-700">Corrective action
+                          <textarea className="input-field mt-1 min-h-28" value={anomalyCorrectiveAction} onChange={(event) => setAnomalyCorrectiveAction(event.target.value)} placeholder="What action was taken or requested?" />
+                        </label>
+                        <label className="text-sm font-semibold text-slate-700">Decision / resolution reason
+                          <textarea className="input-field mt-1 min-h-24" value={anomalyResolutionReason} onChange={(event) => setAnomalyResolutionReason(event.target.value)} placeholder="Explain the decision." />
+                        </label>
+                        <label className="text-sm font-semibold text-slate-700">Evidence reference
+                          <textarea className="input-field mt-1 min-h-24" value={anomalyEvidenceReference} onChange={(event) => setAnomalyEvidenceReference(event.target.value)} placeholder="Document, photo, ticket, or report reference." />
+                        </label>
+                      </div>
+                      <div className="mt-4 rounded-xl border border-dashed border-slate-300 bg-slate-50 p-3">
+                        <label className="text-sm font-semibold text-slate-700">
+                          Attach evidence files
+                          <span className="ml-1 font-normal text-slate-400">(jpg, png, webp, or pdf · up to 5 MB each)</span>
+                          <input
+                            type="file"
+                            multiple
+                            accept=".jpg,.jpeg,.png,.webp,.pdf"
+                            className="input-field mt-1 text-sm"
+                            onChange={(event) => setAnomalyEvidenceFiles(Array.from(event.target.files ?? []))}
+                            disabled={anomalyReviewSaving}
+                          />
+                        </label>
+                        {anomalyEvidenceFiles.length > 0 && (
+                          <ul className="mt-2 space-y-1">
+                            {anomalyEvidenceFiles.map((file, index) => (
+                              <li key={`${file.name}-${index}`} className="flex items-center justify-between gap-2 rounded-md bg-white px-2.5 py-1.5 text-xs text-slate-700">
+                                <span className="truncate">{file.name} ({(file.size / (1024 * 1024)).toFixed(2)} MB)</span>
+                                <button type="button" className="flex-shrink-0 font-semibold text-rose-600 hover:underline" onClick={() => setAnomalyEvidenceFiles(prev => prev.filter((_, i) => i !== index))}>Remove</button>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="sticky bottom-0 mt-6 flex items-center justify-end gap-2 border-t border-slate-100 bg-white pt-4">
+                      {!requirementsMet && <span className="mr-auto text-xs font-medium text-amber-700">Complete the highlighted requirements before saving.</span>}
+                      <button className="btn-secondary text-sm" onClick={() => setSelectedAnomalyFlag(null)} disabled={anomalyReviewSaving}>Cancel</button>
+                      <button className="btn-primary text-sm" onClick={() => void handleReviewProjectFlag(project.id)} disabled={anomalyReviewSaving}>{anomalyReviewSaving ? "Saving..." : anomalyActionLabel(anomalyReviewStatus)}</button>
+                    </div>
+                  </div>
+                </div>
+                );
+              })()}
             </div>
           )}
 
@@ -19619,93 +20108,105 @@ const ProjectsHub = ({
               </table>
             </div>
           )}
-          {!loading && isVendorPortal && filteredProjects.map(project => (
-            <div key={project.id} className="rounded-3xl border border-slate-100 bg-white p-5 shadow-[0_24px_60px_-46px_rgba(15,23,42,0.55)] space-y-4 relative overflow-hidden">
-              <div className="absolute left-0 top-0 h-full w-1.5 bg-[linear-gradient(180deg,#22c55e_0%,#0ea5e9_60%,#1e293b_100%)]" />
-              <div className={`rounded-2xl border px-4 py-3 text-sm font-semibold ${getSetupBannerClass(project)}`}>
-                Setup status: {getSetupStatusLabel(project)}
-                {!isProjectSetupComplete(project) && <span className="ml-2 font-normal">Complete project setup to unlock installation reporting.</span>}
-              </div>
-              <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-                <div className="pl-2">
-                  <p className="text-base font-semibold text-slate-900">{project.projectReference || `PRJ-${project.id}`}</p>
-                  <p className="text-xs text-slate-500 mt-1">{project.techType || "N/A"} • {project.assignedDistrict || project.district || project.region || "Unassigned district"}</p>
-                  <div className="flex flex-wrap gap-2 mt-3 text-[11px]">
-                    <span className="badge bg-slate-100 text-slate-700">Target {formatMetricValue(project.targetInstallations)}</span>
-                    <span className="badge bg-slate-100 text-slate-700">Duration {project.projectDurationMonths ? `${project.projectDurationMonths} months` : "N/A"}</span>
-                    {project.status && <span className="badge bg-emerald-50 text-emerald-700">{project.status}</span>}
-                    {project.contractStatus && <span className="badge bg-blue-50 text-blue-700">{project.contractStatus}</span>}
+          {!loading && isVendorPortal && filteredProjects.map(project => {
+            const hasChangesRequested = project.status === ProjectStatus.SETUP_CHANGES_REQUESTED || project.setupStatusBanner?.status === "CHANGES_REQUESTED";
+            return (
+              <div key={project.id} className={`rounded-3xl border p-5 shadow-[0_24px_60px_-46px_rgba(15,23,42,0.55)] space-y-4 relative overflow-hidden transition-colors ${
+                hasChangesRequested
+                  ? "border-amber-300 bg-amber-50/40 border-l-4 border-l-amber-400"
+                  : "border-slate-100 bg-white"
+              }`}>
+                {!hasChangesRequested && <div className="absolute left-0 top-0 h-full w-1.5 bg-[linear-gradient(180deg,#22c55e_0%,#0ea5e9_60%,#1e293b_100%)]" />}
+                <div className={`rounded-2xl border px-4 py-3 text-sm font-semibold ${getSetupBannerClass(project)}`}>
+                  Setup status: {getSetupStatusLabel(project)}
+                  {!isProjectSetupComplete(project) && <span className="ml-2 font-normal">Complete project setup to unlock installation reporting.</span>}
+                  {hasChangesRequested && (project.setupStatusBanner?.reviewNotes || project.projectSetup?.reviewNotes) && (
+                    <div className="mt-2 rounded-lg bg-white/70 p-2 text-xs font-normal text-amber-800 border border-amber-200">
+                      Remarks: {project.setupStatusBanner?.reviewNotes || project.projectSetup?.reviewNotes}
+                    </div>
+                  )}
+                </div>
+                <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                  <div className="pl-2">
+                    <p className="text-base font-semibold text-slate-900">{project.projectReference || `PRJ-${project.id}`}</p>
+                    <p className="text-xs text-slate-500 mt-1">{project.techType || "N/A"} • {project.assignedDistrict || project.district || project.region || "Unassigned district"}</p>
+                    <div className="flex flex-wrap gap-2 mt-3 text-[11px]">
+                      <span className="badge bg-slate-100 text-slate-700">Target {formatMetricValue(project.targetInstallations)}</span>
+                      <span className="badge bg-slate-100 text-slate-700">Duration {project.projectDurationMonths ? `${project.projectDurationMonths} months` : "N/A"}</span>
+                      {project.status && <span className="badge bg-emerald-50 text-emerald-700">{project.status}</span>}
+                      {project.contractStatus && <span className="badge bg-blue-50 text-blue-700">{project.contractStatus}</span>}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={() => {
+                        setSelectedProject(prev => (prev?.id === project.id ? null : project));
+                        setProjectTab(project.status === ProjectStatus.SETUP_PENDING ? "planning" : "overview");
+                      }}
+                      className="btn-primary text-xs"
+                    >
+                      {selectedProject?.id === project.id ? "Close Project" : "Open Project"}
+                    </button>
+                    <button
+                      onClick={() => {
+                        setSelectedProject(project);
+                        setProjectTab("fieldwork");
+                      }}
+                      disabled={!isProjectSetupComplete(project)}
+                      className={`text-xs px-4 py-2 rounded-xl font-semibold ${
+                        isProjectSetupComplete(project)
+                          ? "bg-blue-600 text-white"
+                          : "bg-slate-100 text-slate-400 cursor-not-allowed"
+                      }`}
+                    >
+                      Submit Installation
+                    </button>
                   </div>
                 </div>
-                <div className="flex items-center gap-3">
-                  <button
-                    onClick={() => {
-                      setSelectedProject(prev => (prev?.id === project.id ? null : project));
-                      setProjectTab(project.status === ProjectStatus.SETUP_PENDING ? "planning" : "overview");
-                    }}
-                    className="btn-primary text-xs"
-                  >
-                    {selectedProject?.id === project.id ? "Close Project" : "Open Project"}
-                  </button>
-                  <button
-                    onClick={() => {
-                      setSelectedProject(project);
-                      setProjectTab("fieldwork");
-                    }}
-                    disabled={!isProjectSetupComplete(project)}
-                    className={`text-xs px-4 py-2 rounded-xl font-semibold ${
-                      isProjectSetupComplete(project)
-                        ? "bg-blue-600 text-white"
-                        : "bg-slate-100 text-slate-400 cursor-not-allowed"
-                    }`}
-                  >
-                    Submit Installation
-                  </button>
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-3 text-[11px] text-slate-500 sm:grid-cols-5">
-                <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
-                  <p className="uppercase tracking-wider text-slate-400">Project ID</p>
-                  <p className="font-semibold text-slate-700">{project.projectReference || `PRJ-${project.id}`}</p>
-                </div>
-                <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
-                  <p className="uppercase tracking-wider text-slate-400">Technology</p>
-                  <p className="font-semibold text-slate-700">{project.techType || "N/A"}</p>
-                </div>
-                <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
-                  <p className="uppercase tracking-wider text-slate-400">District</p>
-                  <p className="font-semibold text-slate-700">{project.assignedDistrict || project.district || project.region || "N/A"}</p>
-                </div>
-                <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
-                  <p className="uppercase tracking-wider text-slate-400">Installation Target</p>
-                  <p className="font-semibold text-slate-700">{formatMetricValue(project.targetInstallations)}</p>
-                </div>
-                <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
-                  <p className="uppercase tracking-wider text-slate-400">Project Duration</p>
-                  <p className="font-semibold text-slate-700">{project.projectDurationMonths ? `${project.projectDurationMonths} months` : "N/A"}</p>
-                </div>
-              </div>
-              <div className="grid gap-3 md:grid-cols-3">
-                {milestonesForProject(project.id).slice().sort((a, b) => (a.milestoneNumber || 0) - (b.milestoneNumber || 0)).map((milestone, index) => (
-                  <div key={milestone.id} className="rounded-2xl border border-slate-100 bg-slate-50 px-4 py-3">
-                    <p className="text-[11px] uppercase tracking-wider text-slate-400">Milestone {milestone.milestoneNumber || index + 1}</p>
-                    <p className="mt-1 text-sm font-semibold text-slate-900">{milestone.disbursementPct || milestone.percentage}%</p>
-                    <p className={`mt-1 text-xs font-semibold ${getMilestoneStateTone(getMilestoneStateLabel(milestone, project.id))}`}>
-                      {getMilestoneStateLabel(milestone, project.id)}
-                    </p>
+                <div className="grid grid-cols-2 gap-3 text-[11px] text-slate-500 sm:grid-cols-5">
+                  <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
+                    <p className="uppercase tracking-wider text-slate-400">Project ID</p>
+                    <p className="font-semibold text-slate-700">{project.projectReference || `PRJ-${project.id}`}</p>
                   </div>
-                ))}
-              </div>
-              <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
-                <div className="bg-gradient-to-r from-emerald-500 via-teal-400 to-sky-500 h-full" style={{ width: `${project.progress}%` }} />
-              </div>
-              {selectedProject?.id === project.id && (
-                <div className="pt-2">
-                  {renderProjectDetail(project)}
+                  <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
+                    <p className="uppercase tracking-wider text-slate-400">Technology</p>
+                    <p className="font-semibold text-slate-700">{project.techType || "N/A"}</p>
+                  </div>
+                  <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
+                    <p className="uppercase tracking-wider text-slate-400">District</p>
+                    <p className="font-semibold text-slate-700">{project.assignedDistrict || project.district || project.region || "N/A"}</p>
+                  </div>
+                  <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
+                    <p className="uppercase tracking-wider text-slate-400">Installation Target</p>
+                    <p className="font-semibold text-slate-700">{formatMetricValue(project.targetInstallations)}</p>
+                  </div>
+                  <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
+                    <p className="uppercase tracking-wider text-slate-400">Project Duration</p>
+                    <p className="font-semibold text-slate-700">{project.projectDurationMonths ? `${project.projectDurationMonths} months` : "N/A"}</p>
+                  </div>
                 </div>
-              )}
-            </div>
-          ))}
+                <div className="grid gap-3 md:grid-cols-3">
+                  {milestonesForProject(project.id).slice().sort((a, b) => (a.milestoneNumber || 0) - (b.milestoneNumber || 0)).map((milestone, index) => (
+                    <div key={milestone.id} className="rounded-2xl border border-slate-100 bg-slate-50 px-4 py-3">
+                      <p className="text-[11px] uppercase tracking-wider text-slate-400">Milestone {milestone.milestoneNumber || index + 1}</p>
+                      <p className="mt-1 text-sm font-semibold text-slate-900">{milestone.disbursementPct || milestone.percentage}%</p>
+                      <p className={`mt-1 text-xs font-semibold ${getMilestoneStateTone(getMilestoneStateLabel(milestone, project.id))}`}>
+                        {getMilestoneStateLabel(milestone, project.id)}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+                <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
+                  <div className="bg-gradient-to-r from-emerald-500 via-teal-400 to-sky-500 h-full" style={{ width: `${project.progress}%` }} />
+                </div>
+                {selectedProject?.id === project.id && (
+                  <div className="pt-2">
+                    {renderProjectDetail(project)}
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       </div>
 
@@ -20914,8 +21415,10 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
                           <span className="text-xs text-slate-500">{group.bids.length} bid{group.bids.length !== 1 ? "s" : ""}</span>
                         </div>
                         <div className="divide-y divide-slate-100">
-                          {activeStage === "stage1" ? group.bids.map((item) => (
-                            <div key={item.id} className="p-6 flex items-center justify-between hover:bg-slate-50 transition-colors">
+                          {activeStage === "stage1" ? group.bids.map((item) => {
+                            const needsStage1Review = item.status === BidStatus.SUBMITTED || item.status === BidStatus.UNDER_REVIEW;
+                            return (
+                            <div key={item.id} className={`p-6 flex items-center justify-between transition-colors ${needsStage1Review ? "bg-amber-50/50 border-l-4 border-amber-400" : "hover:bg-slate-50"}`}>
                               <div>
                                 <p className="font-bold text-slate-900">{item.vendor_name}</p>
                                 <p className="text-xs text-slate-500">Submitted {item.submitted_at ? new Date(item.submitted_at).toLocaleDateString() : "N/A"}</p>
@@ -20929,9 +21432,10 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
                                   className="btn-primary py-1.5 px-4 text-sm disabled:opacity-40 disabled:cursor-not-allowed"
                                 >{!canEvaluateBid(item) ? "Tender must be Published" : item.status === BidStatus.ACCEPTED ? "View" : "Review"}</button>
                               </div>
-                            </div>
-                          )) : group.bids.map((item) => {
+                            </div>);
+                          }) : group.bids.map((item) => {
                             const existing = roleScopedEvaluationsByBid.get(item.id);
+                            const needsEval = !existing;
                             const technicalExisting = technicalEvaluationsByBid.get(item.id);
                             const financialExisting = financialEvaluationsByBid.get(item.id);
                             const technicalScore = item.technical_score_total ?? getTechnicalComposite(technicalExisting);
@@ -20943,7 +21447,7 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
                               item.evaluation_status === "technical_scored" ? (isFinancialEvaluationMode ? "Pending Financial" : "Evaluated") :
                               "Pending";
                             return (
-                              <div key={item.id} className="p-6 flex items-center justify-between hover:bg-slate-50 transition-colors">
+                              <div key={item.id} className={`p-6 flex items-center justify-between transition-colors ${needsEval ? "bg-amber-50/50 border-l-4 border-amber-400" : "hover:bg-slate-50"}`}>
                                 <div className="flex gap-4 items-center">
                                   <div className="w-12 h-12 rounded-xl bg-slate-100 flex items-center justify-center text-slate-400">
                                     <FileText size={24} />
@@ -21025,7 +21529,7 @@ interface OfflineInspection {
     verificationStatus: "verified" | "flagged" | "partial";
     notes: string;
     flagReason: string;
-    sitePhotos: File[];
+    sitePhotos: string[];
   };
   createdAt: string;
   updatedAt: string;
@@ -22618,7 +23122,9 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
                                     item.task.status === "Flagged" || item.task.status === "Partial" ? "Resume" :
                                     isLocked ? "View" : "Verify";
                                   return (
-                                    <div key={item.task.id} className="p-6 flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+                                    <div key={item.task.id} className={`p-6 flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between ${
+                                      item.task.status === "Pending" ? "bg-amber-50/50 border-l-4 border-amber-400" : ""
+                                    }`}>
                                       <div className="flex gap-4 items-start">
                                         <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${
                                           item.task.status === "Verified" ? "bg-emerald-100 text-emerald-600" :
@@ -25579,6 +26085,7 @@ interface SidebarItemType {
   icon: React.ElementType;
   label: string;
   badge?: string;
+  actionBadge?: boolean;
 }
 
 // --- Main App ---
@@ -25611,6 +26118,7 @@ export default function App() {
   const [authMessage, setAuthMessage] = useState<string | null>(null);
   const [sessionExpiredMessage, setSessionExpiredMessage] = useState<string | null>(null);
   const [fieldVerifierInspectionBadge, setFieldVerifierInspectionBadge] = useState<string | undefined>(undefined);
+  const [sidebarBadges, setSidebarBadges] = useState<Record<string, string | undefined>>({});
   const [viewingVendorProfile, setViewingVendorProfile] = useState<string | null>(null);
   const [showDoeConcernModal, setShowDoeConcernModal] = useState(false);
   const [selectedProjectForConcern, setSelectedProjectForConcern] = useState<Project | null>(null);
@@ -25908,6 +26416,107 @@ export default function App() {
       window.clearInterval(id);
     };
   }, [currentUser]);
+
+  // ── Sidebar action badges ─────────────────────────────────────────────
+  const loadSidebarBadges = React.useCallback(async () => {
+    if (!currentUser) { setSidebarBadges({}); return; }
+    const r = currentUser.role;
+    const fmt = (n: number) => n > 99 ? "99+" : n > 0 ? String(n) : undefined;
+    try {
+      if (r === UserRole.VENDOR) {
+        const [prequalList, bidList, contractList, claimList, projectList] = await Promise.all([
+          fetchVendorPrequalifications(100),
+          fetchTenderBids(undefined, 100),
+          fetchTenderContracts({ pageSize: 100 }),
+          fetchPaymentClaims({ pageSize: 100 }),
+          fetchProjects(100),
+        ]);
+        // Vendor prequal: action needed if no approved prequal exists
+        const hasApprovedPrequal = prequalList.some(p => p.status === "Approved");
+        const hasOpenPrequalReview = prequalList.some(p => p.status === "Pending" || p.status === "Under Review");
+        const prequalNeedsAction = !hasApprovedPrequal && !hasOpenPrequalReview;
+
+        // Bids needing revision
+        const revisionBids = bidList.filter(b => b.status === BidStatus.REVISION_REQUIRED).length;
+
+        // Contracts awaiting vendor signature (Generated = waiting for vendor to sign)
+        const awaitingSignature = contractList.filter(c => c.status === "Generated").length;
+
+        // Claims: submitted/pending awaiting outcome
+        const pendingClaims = claimList.filter(c => c.status === "Submitted" || c.status === "Pending").length;
+
+        // Applications (projects) with setup changes requested
+        const changesRequested = projectList.filter(p =>
+          p.status === ProjectStatus.SETUP_CHANGES_REQUESTED ||
+          p.setupStatusBanner?.status === "CHANGES_REQUESTED"
+        ).length;
+
+        setSidebarBadges({
+          prequal: prequalNeedsAction ? "1" : undefined,
+          my_bids: fmt(revisionBids),
+          contracting: fmt(awaitingSignature),
+          claims: fmt(pendingClaims),
+          applications: fmt(changesRequested),
+        });
+
+      } else if (r === UserRole.RBF_OFFICIAL) {
+        const [tenderList, bidList, prequalList, claimList, projectList] = await Promise.all([
+          fetchTenders(100),
+          fetchTenderBids(undefined, 100),
+          fetchVendorPrequalifications(100),
+          fetchPaymentClaims({ pageSize: 100 }),
+          fetchProjects(100),
+        ]);
+        const draftTenders   = tenderList.filter(t => t.status === TenderStatus.DRAFT).length;
+        const pendingBids    = bidList.filter(b => b.status === BidStatus.SUBMITTED || b.status === BidStatus.UNDER_REVIEW).length;
+        const pendingPrequal = prequalList.filter(p => p.status === "Under Review" || p.status === "Pending").length;
+        const pendingClaims  = claimList.filter(c => c.status === "Submitted" || c.status === "Pending").length;
+        const setupReview    = projectList.filter(p =>
+          p.status === ProjectStatus.SETUP_UNDER_REVIEW || p.status === ProjectStatus.SETUP_PENDING
+        ).length;
+
+        setSidebarBadges({
+          tenders: fmt(draftTenders),
+          evaluations: fmt(pendingBids),
+          prequal: fmt(pendingPrequal),
+          payments: fmt(pendingClaims),
+          rbf_projects: fmt(setupReview),
+        });
+
+      } else if (r === UserRole.TAC) {
+        const [bids, claims] = await Promise.all([
+          fetchTenderBids(undefined, 100),
+          fetchPaymentClaims({ pageSize: 100 }),
+        ]);
+        const bidList   = bids;
+        const claimList = claims;
+
+        const pendingBids   = bidList.filter(b => b.status === BidStatus.SUBMITTED || b.status === BidStatus.UNDER_REVIEW).length;
+        const pendingClaims = claimList.filter(c => c.status === "Submitted" || c.status === "RMT Approved").length;
+
+        setSidebarBadges({
+          evaluations: fmt(pendingBids),
+          payments: fmt(pendingClaims),
+        });
+
+      } else if (r === UserRole.ADMIN) {
+        const usersResult = await fetchAdminManagedUsers();
+        const pendingUsers = usersResult.filter(u => u.status === "Pending").length;
+        setSidebarBadges({ users: fmt(pendingUsers) });
+
+      } else {
+        setSidebarBadges({});
+      }
+    } catch {
+      // Non-fatal: leave existing badges intact
+    }
+  }, [currentUser]);
+
+  React.useEffect(() => {
+    void loadSidebarBadges();
+    const id = window.setInterval(() => void loadSidebarBadges(), 30000);
+    return () => window.clearInterval(id);
+  }, [loadSidebarBadges]);
 
   // ── URL sync ──────────────────────────────────────────────────────────
   // Listen for browser back/forward.
@@ -26472,17 +27081,22 @@ if (activeTab === "reports") {
       { id: "dashboard", icon: LayoutDashboard, label: "Dashboard" },
     ];
 
+    const ab = (id: string) => ({
+      badge: sidebarBadges[id],
+      actionBadge: !!sidebarBadges[id],
+    });
+
     if (role === UserRole.VENDOR) {
       return [
         ...common,
         { id: "my_profile", icon: UserCircle, label: "My Profile" },
-        { id: "prequal", icon: ClipboardCheck, label: "Pre-Qualification", badge: "Required" },
+        { id: "prequal", icon: ClipboardCheck, label: "Pre-Qualification", ...ab("prequal") },
         { id: "tenders", icon: FileText, label: "Published Tenders" },
-        { id: "my_bids", icon: FileSearch, label: "My Bids" },
-        { id: "contracting", icon: FileText, label: "Contracting" },
-        { id: "applications", icon: ClipboardCheck, label: "My Applications" },
+        { id: "my_bids", icon: FileSearch, label: "My Bids", ...ab("my_bids") },
+        { id: "contracting", icon: FileText, label: "Contracting", ...ab("contracting") },
+        { id: "applications", icon: ClipboardCheck, label: "My Applications", ...ab("applications") },
         { id: "projects_hub", icon: BarChart3, label: "Projects Hub" },
-        { id: "claims", icon: CreditCard, label: "Payment Claims" },
+        { id: "claims", icon: CreditCard, label: "Payment Claims", ...ab("claims") },
         { id: "blacklisting", icon: FileWarning, label: "Blacklisting" },
       ];
     }
@@ -26492,8 +27106,8 @@ if (activeTab === "reports") {
         ...common,
         { id: "all_vendors", icon: Users, label: "All Vendors" },
         { id: "projects", icon: FolderKanban, label: "Projects" },
-        { id: "payments", icon: CreditCard, label: "Claim Reviews" },
-        { id: "evaluations", icon: ClipboardCheck, label: "Evaluations", badge: "4" },
+        { id: "payments", icon: CreditCard, label: "Claim Reviews", ...ab("payments") },
+        { id: "evaluations", icon: ClipboardCheck, label: "Evaluations", ...ab("evaluations") },
         { id: "blacklisting", icon: FileWarning, label: "Blacklisting" },
       ];
     }
@@ -26501,7 +27115,13 @@ if (activeTab === "reports") {
     if (role === UserRole.FIELD_VERIFIER) {
       return [
         ...common,
-        { id: "inspections", icon: ClipboardCheck, label: "Verifications", badge: fieldVerifierInspectionBadge },
+        {
+          id: "inspections",
+          icon: ClipboardCheck,
+          label: "Verifications",
+          badge: fieldVerifierInspectionBadge,
+          actionBadge: !!fieldVerifierInspectionBadge,
+        },
         { id: "gis", icon: MapIcon, label: "Map View" },
         { id: "reports", icon: FileText, label: "My Reports" },
         { id: "notifications", icon: Bell, label: "Notifications" },
@@ -26512,7 +27132,7 @@ if (activeTab === "reports") {
       return [
         ...common,
         { id: "all_vendors", icon: Users, label: "All Vendors" },
-        { id: "users", icon: Users, label: "User Management" },
+        { id: "users", icon: Users, label: "User Management", ...ab("users") },
         { id: "system_configuration", icon: Settings, label: "System Configuration" },
         { id: "prospect_sync", icon: History, label: "Prospect Sync" },
         { id: "audit_logs", icon: FileText, label: "Audit Logs" },
@@ -26521,18 +27141,18 @@ if (activeTab === "reports") {
       ];
     }
 
-   if (role === UserRole.DOE_OFFICER) {
-       return [
-         ...common,
-         { id: "all_vendors", icon: Users, label: "All Vendors" },
-         { id: "projects", icon: FolderKanban, label: "Regional Projects" },
-          { id: "regional", icon: MapIcon, label: "Regional Monitoring" },
-          { id: "kpis", icon: BarChart3, label: "KPI Review" },
-          { id: "blacklisting", icon: FileWarning, label: "Blacklisting" },
-        ];
-     }
+    if (role === UserRole.DOE_OFFICER) {
+      return [
+        ...common,
+        { id: "all_vendors", icon: Users, label: "All Vendors" },
+        { id: "projects", icon: FolderKanban, label: "Regional Projects" },
+        { id: "regional", icon: MapIcon, label: "Regional Monitoring" },
+        { id: "kpis", icon: BarChart3, label: "KPI Review" },
+        { id: "blacklisting", icon: FileWarning, label: "Blacklisting" },
+      ];
+    }
 
-     if (role === UserRole.UNDP_DONOR) {
+    if (role === UserRole.UNDP_DONOR) {
       return [
         ...common,
         { id: "all_vendors", icon: Users, label: "All Vendors" },
@@ -26564,14 +27184,14 @@ if (activeTab === "reports") {
     return [
       ...common,
       { id: "all_vendors", icon: Users, label: "All Vendors" },
-      { id: "tenders", icon: FileText, label: "Tender Management" },
+      { id: "tenders", icon: FileText, label: "Tender Management", ...ab("tenders") },
       { id: "notice_board", icon: Bell, label: "Notice Board" },
-      { id: "evaluations", icon: ClipboardCheck, label: "Evaluations" },
-      { id: "prequal", icon: ClipboardCheck, label: "Pre-Qualification" },
-      { id: "rbf_projects", icon: FolderKanban, label: "Projects Hub" },
+      { id: "evaluations", icon: ClipboardCheck, label: "Evaluations", ...ab("evaluations") },
+      { id: "prequal", icon: ClipboardCheck, label: "Pre-Qualification", ...ab("prequal") },
+      { id: "rbf_projects", icon: FolderKanban, label: "Projects Hub", ...ab("rbf_projects") },
       { id: "blacklisting", icon: FileWarning, label: "Blacklisting" },
       { id: "gis", icon: MapIcon, label: "GIS Mapping" },
-      { id: "payments", icon: CreditCard, label: "Disbursements" },
+      { id: "payments", icon: CreditCard, label: "Disbursements", ...ab("payments") },
       { id: "reports", icon: BarChart3, label: "Reports" },
       { id: "issues_findings", icon: AlertTriangle, label: "Issues & Findings" },
       { id: "notifications", icon: Bell, label: "Notifications" },
@@ -26605,6 +27225,7 @@ if (activeTab === "reports") {
                 icon={item.icon} 
                 label={item.label} 
                 badge={item.badge}
+                actionBadge={item.actionBadge}
                 active={activeTab === item.id} 
                 onClick={() => {
                   navigateTo(item.id);

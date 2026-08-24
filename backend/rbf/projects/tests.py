@@ -2951,3 +2951,160 @@ class ProspectServiceConfigurationTests(SimpleTestCase):
 
         self.assertEqual(service._token_for_read("getInstallations"), "installations-read-token")
         self.assertEqual(service._token_for_read("getTargets"), "targets-read-token")
+
+
+class AnomalyFlagReviewWorkflowTests(APITestCase):
+    def setUp(self):
+        User = get_user_model()
+        self.rbf_user = User.objects.create_user(
+            username="review_rbf",
+            password="securePass123",
+            role="RBF Management Team",
+            status="Active",
+        )
+        self.vendor_user = User.objects.create_user(
+            username="review_vendor",
+            password="securePass123",
+            role="Vendor",
+            status="Active",
+            region="Maseru",
+        )
+        self.project = Project.objects.create(
+            vendor_id=str(self.vendor_user.id),
+            vendor_name=self.vendor_user.username,
+            tech_type="SHS",
+            region="Maseru",
+            district="Maseru",
+            status=ProjectStatus.INSTALLATION,
+            start_date=timezone.localdate() - timedelta(days=10),
+            end_date=timezone.localdate() + timedelta(days=60),
+            target_installations=5,
+            target_female_pct=50,
+            target_vulnerable_pct=30,
+            target_low_income_pct=20,
+            energy_output=100,
+            uptime=98,
+            progress=20,
+        )
+        self.installation = InstallationReport.objects.create(
+            project=self.project,
+            vendor=self.vendor_user,
+            gps_lat=-29.31,
+            gps_lng=27.48,
+            serial_number="SER-RVW-1",
+            beneficiary_id="BEN-RVW-1",
+            household_type="standard",
+            meter_id="MTR-RVW-1",
+            status=InstallationStatus.VERIFIED,
+        )
+        self.flag = AnomalyFlag.objects.create(
+            installation=self.installation,
+            project=self.project,
+            flag_type="zero_uptime",
+            description="Meter reported zero uptime for the reporting window.",
+        )
+        self.client.force_authenticate(self.rbf_user)
+
+    def _review(self, payload, files=None):
+        data = dict(payload)
+        if files:
+            data["evidence_files"] = files
+        return self.client.post(
+            f"/api/projects/anomaly-flags/{self.flag.id}/review/",
+            data,
+            format="multipart" if files else "json",
+        )
+
+    def test_review_rejects_direct_open_to_resolution(self):
+        response = self._review({
+            "status": "resolved",
+            "investigation_notes": "Skipped investigation.",
+            "corrective_action": "None needed.",
+            "resolution_reason": "Looks fine.",
+            "evidence_reference": "REF-1",
+        })
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.flag.refresh_from_db()
+        self.assertEqual(self.flag.status, "open")
+
+    def test_resolve_locked_until_investigation_started(self):
+        blocked = self.client.post(
+            f"/api/projects/anomaly-flags/{self.flag.id}/resolve/",
+            {"resolution_notes": "notes", "evidence_reference": "REF-2"},
+            format="json",
+        )
+        self.assertEqual(blocked.status_code, status.HTTP_409_CONFLICT)
+        started = self._review({"status": "under_investigation", "investigation_notes": "Checking meter logs."})
+        self.assertEqual(started.status_code, status.HTTP_200_OK)
+        resolved = self.client.post(
+            f"/api/projects/anomaly-flags/{self.flag.id}/resolve/",
+            {"resolution_notes": "Meter replaced and verified.", "evidence_reference": "REF-3"},
+            format="json",
+        )
+        self.assertEqual(resolved.status_code, status.HTTP_200_OK)
+        self.flag.refresh_from_db()
+        self.assertEqual(self.flag.status, "resolved")
+        self.assertEqual(self.flag.review_events.count(), 2)
+
+    def test_correction_request_creates_event_and_notifies_vendor(self):
+        self._review({"status": "under_investigation", "investigation_notes": "Confirmed zero uptime."})
+        response = self._review({
+            "status": "correction_requested",
+            "investigation_notes": "Vendor must replace the meter.",
+            "corrective_action": "Replace meter within 7 days.",
+            "due_date": str(timezone.localdate() + timedelta(days=7)),
+        })
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.flag.refresh_from_db()
+        self.assertEqual(self.flag.status, "correction_requested")
+        self.assertEqual(self.flag.review_events.count(), 2)
+        self.assertTrue(Notification.objects.filter(
+            recipient_id=str(self.vendor_user.id),
+            event="anomaly_correction_requested",
+            linked_entity_id=str(self.flag.id),
+        ).exists())
+
+    def test_resolution_requires_full_dossier(self):
+        self._review({"status": "under_investigation", "investigation_notes": "Investigating."})
+        incomplete = self._review({
+            "status": "resolved",
+            "investigation_notes": "Done.",
+            "resolution_reason": "Fixed.",
+            "evidence_reference": "REF-4",
+        })
+        self.assertEqual(incomplete.status_code, status.HTTP_400_BAD_REQUEST)
+        complete = self._review({
+            "status": "resolved",
+            "investigation_notes": "Meter replaced.",
+            "corrective_action": "Replaced faulty meter.",
+            "resolution_reason": "Zero uptime resolved after replacement.",
+            "evidence_reference": "REF-5",
+        })
+        self.assertEqual(complete.status_code, status.HTTP_200_OK)
+
+    def test_oversized_evidence_file_rejected(self):
+        oversized = SimpleUploadedFile("big.pdf", b"x" * (5 * 1024 * 1024 + 1), content_type="application/pdf")
+        response = self._review(
+            {"status": "under_investigation", "investigation_notes": "With big file."},
+            files=[oversized],
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.flag.refresh_from_db()
+        self.assertEqual(self.flag.status, "open")
+        self.assertEqual(self.flag.evidence_files.count(), 0)
+
+    def test_evidence_file_saved_on_valid_review(self):
+        evidence = SimpleUploadedFile("report.pdf", b"%PDF-1.4 test", content_type="application/pdf")
+        response = self._review(
+            {"status": "under_investigation", "investigation_notes": "Attaching report."},
+            files=[evidence],
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.flag.refresh_from_db()
+        self.assertEqual(self.flag.evidence_files.count(), 1)
+        self.assertEqual(self.flag.evidence_files.first().original_name, "report.pdf")
+
+    def test_vendor_cannot_review_flags(self):
+        self.client.force_authenticate(self.vendor_user)
+        response = self._review({"status": "under_investigation", "investigation_notes": "Vendor trying."})
+        self.assertIn(response.status_code, {status.HTTP_403_FORBIDDEN})
