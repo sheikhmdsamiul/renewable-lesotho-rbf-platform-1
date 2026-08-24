@@ -1174,6 +1174,7 @@ class BlacklistAppealViewSet(viewsets.ReadOnlyModelViewSet):
 
 class LoginView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer
+    throttle_classes = []
 
     def post(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
