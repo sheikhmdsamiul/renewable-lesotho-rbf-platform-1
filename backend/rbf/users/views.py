@@ -67,6 +67,7 @@ from .serializers import (
     VendorBlacklistCaseSerializer,
     VendorPrequalificationSerializer,
     VendorProfileSerializer,
+    VendorProfileUpdateSerializer,
     VendorDirectorySerializer,
     generate_temporary_password,
 )
@@ -634,13 +635,29 @@ class UserViewSet(viewsets.ModelViewSet):
         log_audit(request.user, 'vendor_account_approved', user, {'username': user.username})
         return Response(UserSerializer(user).data, status=status.HTTP_200_OK)
 
-    @action(detail=False, methods=['get'])
+    @action(detail=False, methods=['get', 'patch'], url_path='my_profile')
     def my_profile(self, request):
         """Get current vendor's own profile"""
         if not request.user.is_authenticated:
             raise AuthenticationFailed('Not authenticated')
         if request.user.role != UserRole.VENDOR:
             raise PermissionDenied('Only vendors can access this endpoint')
+        if request.method == 'PATCH':
+            serializer = VendorProfileUpdateSerializer(
+                request.user,
+                data=request.data,
+                partial=True,
+                context={'request': request},
+            )
+            serializer.is_valid(raise_exception=True)
+            serializer.save()
+            log_audit(
+                request.user,
+                'vendor_profile_updated',
+                request.user,
+                {'fields': sorted(serializer.validated_data.keys())},
+            )
+
         serializer = VendorProfileSerializer(request.user, context={'request': request})
         return Response(serializer.data)
 

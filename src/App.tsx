@@ -45,6 +45,7 @@ import {
   FileWarning,
   History,
   Eye,
+  Pencil,
   Globe,
   Zap,
   Leaf,
@@ -118,11 +119,13 @@ import {
   VendorBankDetails,
   VendorProfile,
   VendorDirectoryEntry,
+  TenderViewersResponse,
 } from "./types";
 import { MOCK_TENDERS } from "./constants";
 import {
   fetchTenders,
   fetchTender,
+  fetchTenderViewers,
   createTender,
   updateTender,
   verifyTender,
@@ -165,6 +168,7 @@ import {
   reviewBlacklistAppeal,
   fetchPaymentClaims,
   fetchMyProfile,
+  updateMyProfile,
   submitPaymentClaim,
   verifyPaymentClaim,
   approvePaymentClaim,
@@ -1564,6 +1568,8 @@ const Tenders = ({
   const [selectedTender, setSelectedTender] = useState<Tender | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [tenders, setTenders] = useState<Tender[]>([]);
+  const [tenderViewers, setTenderViewers] = useState<TenderViewersResponse | null>(null);
+  const [viewersLoading, setViewersLoading] = useState(false);
   const [notification, setNotification] = useState<string | null>(null);
   const [tenderError, setTenderError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
@@ -1940,8 +1946,19 @@ const Tenders = ({
   const openTenderView = async (tenderId: string, nextView: typeof view, syncUrl = true) => {
     try {
       setIsActioning(true);
+      setTenderViewers(null);
       const full = await fetchTender(tenderId);
       setSelectedTender(full);
+      if (nextView === "details") {
+        setViewersLoading(true);
+        try {
+          setTenderViewers(await fetchTenderViewers(tenderId));
+        } catch {
+          setTenderViewers(null);
+        } finally {
+          setViewersLoading(false);
+        }
+      }
       if (nextView === "edit") {
         setFormData(toFormDataFromTender(full));
         setScheduleFile(null);
@@ -3307,6 +3324,38 @@ const Tenders = ({
                     <div className="bg-emerald-500 h-full" style={{ width: `${stageTwoBids.length > 0 ? Math.round((evaluatedStageTwoCount / stageTwoBids.length) * 100) : 0}%` }} />
                   </div>
                 </div>
+              )}
+            </div>
+
+            <div className="card p-6 space-y-4">
+              <h3 className="font-bold text-slate-900 flex items-center gap-2">
+                <Eye size={16} /> Tender Viewers
+              </h3>
+              {viewersLoading ? (
+                <p className="text-sm text-slate-500">Loading...</p>
+              ) : tenderViewers ? (
+                <>
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-slate-500">Unique vendors</span>
+                    <span className="font-bold text-blue-600">{tenderViewers.totalViewers}</span>
+                  </div>
+                  {tenderViewers.viewers.length ? (
+                    <div className="space-y-2 max-h-64 overflow-y-auto">
+                      {tenderViewers.viewers.map((viewer) => (
+                        <div key={viewer.vendorId} className="rounded-lg border border-slate-100 bg-slate-50 p-2">
+                          <p className="text-sm font-medium text-slate-700">{viewer.vendorName}</p>
+                          <p className="text-xs text-slate-400">
+                            Viewed {viewer.viewedAt ? formatDateTime(viewer.viewedAt) : "date unavailable"}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-slate-400">No vendors have viewed this tender yet.</p>
+                  )}
+                </>
+              ) : (
+                <p className="text-sm text-slate-400">Viewer information unavailable.</p>
               )}
             </div>
 
@@ -8667,13 +8716,6 @@ const VendorTenders = ({ onSubmitTender, onNavigate }: { onSubmitTender?: (tende
             <p className="text-lg font-bold text-slate-900 mt-2">{selectedTender.stageType || "N/A"}</p>
             <p className="text-xs text-slate-500 mt-1">Procurement stage</p>
           </div>
-          <div className="card p-5">
-            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Budget</p>
-            <p className="text-lg font-bold text-slate-900 mt-2">
-              {selectedTender.budget != null ? `M ${selectedTender.budget.toLocaleString()}` : "N/A"}
-            </p>
-            <p className="text-xs text-slate-500 mt-1">Estimated value</p>
-          </div>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -8704,14 +8746,10 @@ const VendorTenders = ({ onSubmitTender, onNavigate }: { onSubmitTender?: (tende
                   </div>
                 </div>
 
-                <div className="space-y-4">
-                  <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Financials</h3>
-                  <div className="space-y-1">
-                    <p className="text-xs font-bold text-slate-500">Budget Estimate</p>
-                    <p className="text-lg font-bold text-slate-900">M {selectedTender.budget?.toLocaleString() ?? "N/A"}</p>
-                  </div>
-                  <div className="space-y-1">
-                    <p className="text-xs font-bold text-slate-500">Bidding Currency</p>
+                  <div className="space-y-4">
+                    <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Tender Details</h3>
+                    <div className="space-y-1">
+                      <p className="text-xs font-bold text-slate-500">Bidding Currency</p>
                     <p className="text-sm font-medium">{selectedTender.biddingCurrency || "N/A"}</p>
                   </div>
                   {selectedTender.fundingSource && (
@@ -9096,14 +9134,6 @@ const VendorTenders = ({ onSubmitTender, onNavigate }: { onSubmitTender?: (tende
                         <p className="text-[10px] text-slate-400 mt-0.5">{new Date(deadlineMs).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })}</p>
                       )}
                     </div>
-
-                    {/* Budget */}
-                    {tender.budget != null && (
-                      <div className="text-center lg:text-right">
-                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Est. Budget</p>
-                        <p className="text-sm font-black text-slate-900 mt-0.5">M {tender.budget.toLocaleString()}</p>
-                      </div>
-                    )}
 
                     {/* CTA Button */}
                     <button
@@ -13590,11 +13620,41 @@ interface VendorProfileViewProps {
 const formatVendorMoney = (value?: number | null) => `LSL ${Number(value ?? 0).toLocaleString()}`;
   const formatCurrency = (value?: number | null) => `LSL ${Number(value ?? 0).toLocaleString()}`;
 
+type VendorProfileForm = {
+  email: string;
+  full_name: string;
+  gender: string;
+  mobile_number: string;
+  address: string;
+  organization_name: string;
+  organization_type: string;
+  registration_certificate_name: string;
+  tax_id: string;
+  technology_types: string;
+  region: string;
+};
+
 const VendorProfileView = ({ vendorId, viewerRole, onClose, embedded = false, useOwnProfile = false }: VendorProfileViewProps) => {
   const [activeTab, setActiveTab] = useState<VendorProfileTab>("company");
   const [profile, setProfile] = useState<VendorProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [editingProfile, setEditingProfile] = useState(false);
+  const [savingProfile, setSavingProfile] = useState(false);
+  const [profileSaveError, setProfileSaveError] = useState<string | null>(null);
+  const [profileForm, setProfileForm] = useState<VendorProfileForm>({
+    email: "",
+    full_name: "",
+    gender: "",
+    mobile_number: "",
+    address: "",
+    organization_name: "",
+    organization_type: "",
+    registration_certificate_name: "",
+    tax_id: "",
+    technology_types: "",
+    region: "",
+  });
   const [activityLogPage, setActivityLogPage] = useState(1);
   const activityLogPerPage = 10;
 
@@ -13640,6 +13700,19 @@ const VendorProfileView = ({ vendorId, viewerRole, onClose, embedded = false, us
       try {
         const data = useOwnProfile ? await fetchMyProfile() : await fetchVendorProfile(String(vendorId ?? ""));
         setProfile(data);
+        setProfileForm({
+          email: data.email || "",
+          full_name: data.full_name || "",
+          gender: data.gender || "",
+          mobile_number: data.mobile_number || "",
+          address: data.address || "",
+          organization_name: data.organization_name || "",
+          organization_type: data.organization_type || "",
+          registration_certificate_name: data.registration_certificate_name || "",
+          tax_id: data.tax_id || "",
+          technology_types: (data.technology_types || []).join(", "),
+          region: data.region || "",
+        });
       } catch (err: any) {
         console.error("Failed to load vendor profile:", err);
         setError(String(err?.message || "Unable to load vendor profile."));
@@ -13650,6 +13723,33 @@ const VendorProfileView = ({ vendorId, viewerRole, onClose, embedded = false, us
     };
     loadProfile();
   }, [vendorId, useOwnProfile]);
+
+  const startEditingProfile = () => {
+    if (!profile) return;
+    setProfileSaveError(null);
+    setEditingProfile(true);
+    setActiveTab("company");
+  };
+
+  const saveProfile = async () => {
+    setSavingProfile(true);
+    setProfileSaveError(null);
+    try {
+      const updated = await updateMyProfile({
+        ...profileForm,
+        technology_types: profileForm.technology_types
+          .split(",")
+          .map((item) => item.trim())
+          .filter(Boolean),
+      });
+      setProfile(updated);
+      setEditingProfile(false);
+    } catch (err: any) {
+      setProfileSaveError(toFriendlyApiMessage(String(err?.message || "")) || "Unable to update your company profile.");
+    } finally {
+      setSavingProfile(false);
+    }
+  };
 
   React.useEffect(() => {
     if (!visibleTabs.some((tab) => tab.key === activeTab)) {
@@ -13722,6 +13822,58 @@ const VendorProfileView = ({ vendorId, viewerRole, onClose, embedded = false, us
     switch (activeTab) {
       case "company":
         if (!canViewCompany) return <div className="p-8 text-center text-slate-500">Access denied</div>;
+        if (editingProfile) {
+          const updateField = (field: keyof VendorProfileForm, value: string) =>
+            setProfileForm((current) => ({ ...current, [field]: value }));
+          const fieldClass = "w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-emerald-500";
+          return (
+            <div className="space-y-6">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-lg font-bold text-slate-900">Edit Company Profile</h3>
+                  <p className="text-sm text-slate-500">Update the company and contact details shown in your profile.</p>
+                </div>
+                <button onClick={() => { setEditingProfile(false); setProfileSaveError(null); }} className="btn-secondary">Cancel</button>
+              </div>
+              {profileSaveError && <div className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{profileSaveError}</div>}
+              <div className="card p-4 space-y-4">
+                <h4 className="font-bold text-slate-900 border-b pb-2">Company Information</h4>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {([
+                    ["organization_name", "Company Name"],
+                    ["organization_type", "Organization Type"],
+                    ["registration_certificate_name", "Registration Number"],
+                    ["tax_id", "Tax ID / VAT"],
+                    ["email", "Email Address"],
+                    ["mobile_number", "Contact Number"],
+                    ["region", "Primary District"],
+                  ] as const).map(([field, label]) => (
+                    <label key={field} className="text-sm font-medium text-slate-700">
+                      {label}
+                      <input className={fieldClass} value={profileForm[field]} onChange={(event) => updateField(field, event.target.value)} />
+                    </label>
+                  ))}
+                  <label className="text-sm font-medium text-slate-700 md:col-span-2">
+                    Physical Address
+                    <textarea className={fieldClass} rows={3} value={profileForm.address} onChange={(event) => updateField("address", event.target.value)} />
+                  </label>
+                </div>
+              </div>
+              <div className="card p-4 space-y-4">
+                <h4 className="font-bold text-slate-900 border-b pb-2">Focal Person and Technical Information</h4>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <label className="text-sm font-medium text-slate-700">Focal Person Name<input className={fieldClass} value={profileForm.full_name} onChange={(event) => updateField("full_name", event.target.value)} /></label>
+                  <label className="text-sm font-medium text-slate-700">Gender<input className={fieldClass} value={profileForm.gender} onChange={(event) => updateField("gender", event.target.value)} /></label>
+                  <label className="text-sm font-medium text-slate-700 md:col-span-2">Technology Types <span className="font-normal text-slate-400">(comma separated)</span><input className={fieldClass} value={profileForm.technology_types} onChange={(event) => updateField("technology_types", event.target.value)} /></label>
+                </div>
+              </div>
+              <div className="flex justify-end gap-3">
+                <button onClick={() => { setEditingProfile(false); setProfileSaveError(null); }} className="btn-secondary">Cancel</button>
+                <button onClick={() => void saveProfile()} disabled={savingProfile} className="btn-primary disabled:opacity-60">{savingProfile ? "Saving..." : "Save Changes"}</button>
+              </div>
+            </div>
+          );
+        }
         return (
           <div className="space-y-6">
             <div className="card p-4">
@@ -13809,7 +13961,7 @@ const VendorProfileView = ({ vendorId, viewerRole, onClose, embedded = false, us
                 <div className="space-y-2">
                   {(documents?.prequalification_documents ?? []).map((doc) => (
                     <div key={`${doc.label}-${doc.url}`} className="flex items-center justify-between rounded-lg bg-slate-50 p-3">
-                      <div>
+           <div>
                         <p className="font-medium text-slate-900">{doc.label}</p>
                         <p className="text-xs text-slate-500">{doc.uploaded_at ? new Date(doc.uploaded_at).toLocaleString() : "Uploaded"}</p>
                       </div>
@@ -14228,7 +14380,10 @@ const VendorProfileView = ({ vendorId, viewerRole, onClose, embedded = false, us
               {profile?.last_login ? ` | Last login: ${new Date(profile.last_login).toLocaleString()}` : ""}
             </p>
           </div>
-          {!embedded && onClose && <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-lg"><X size={20}/></button>}
+           <div className="flex items-center gap-2">
+             {canEditProfile && <button onClick={startEditingProfile} className="btn-secondary flex items-center gap-2"><Pencil size={16} /> Edit Profile</button>}
+             {!embedded && onClose && <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-lg"><X size={20}/></button>}
+           </div>
         </div>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
           <div className="card p-3">
@@ -14279,7 +14434,7 @@ const VendorProfileView = ({ vendorId, viewerRole, onClose, embedded = false, us
       </div>
       {!embedded && onClose && (
         <div className="p-4 border-t flex justify-end gap-3">
-          {canEditProfile && <button className="btn-primary">Edit Profile</button>}
+           {canEditProfile && <button onClick={startEditingProfile} className="btn-primary">Edit Profile</button>}
           <button onClick={onClose} className="btn-secondary">Close</button>
         </div>
       )}

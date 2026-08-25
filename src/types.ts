@@ -249,6 +249,17 @@ export interface TenderBidSite {
   notes?: string;
 }
 
+export interface TenderViewer {
+  vendorId: string;
+  vendorName: string;
+  viewedAt: string;
+}
+
+export interface TenderViewersResponse {
+  totalViewers: number;
+  viewers: TenderViewer[];
+}
+
 export interface TenderBid {
   id: string;
   tender: string;

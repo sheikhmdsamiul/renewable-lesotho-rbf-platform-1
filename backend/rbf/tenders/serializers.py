@@ -1091,6 +1091,13 @@ class TenderListSerializer(serializers.ModelSerializer):
     
     def get_bid_count(self, obj):
         return obj.bids.count()
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        request = self.context.get('request')
+        if request and getattr(request.user, 'role', None) == UserRole.VENDOR:
+            data.pop('budget', None)
+        return data
     
     class Meta:
         model = Tender
@@ -1287,6 +1294,8 @@ class TenderSerializer(serializers.ModelSerializer):
     def to_representation(self, instance):
         data = super().to_representation(instance)
         request = self.context.get('request')
+        if request and getattr(request.user, 'role', None) == UserRole.VENDOR:
+            data.pop('budget', None)
         if request:
             file_fields = [
                 'schedule_file',

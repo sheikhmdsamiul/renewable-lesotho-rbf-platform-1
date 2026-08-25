@@ -698,6 +698,19 @@ class BlacklistAppealSerializer(serializers.ModelSerializer):
         ]
 
 
+class VendorProfileUpdateSerializer(serializers.ModelSerializer):
+    """Fields a vendor may maintain from their own profile."""
+
+    class Meta:
+        model = User
+        fields = [
+            'email', 'full_name', 'gender', 'mobile_number', 'address',
+            'organization_name', 'organization_type',
+            'registration_certificate_name', 'tax_id', 'technology_types',
+            'region',
+        ]
+
+
 class VendorProfileSerializer(serializers.ModelSerializer):
     """Detailed vendor profile for profile page"""
     prequalification = serializers.SerializerMethodField()

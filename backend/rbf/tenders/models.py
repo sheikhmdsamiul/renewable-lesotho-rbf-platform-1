@@ -121,6 +121,38 @@ class Tender(models.Model):
         return f"{self.reference_number} - {self.name}"
 
 
+class TenderViewLog(models.Model):
+    """Record the first time an authenticated vendor opens a published tender."""
+
+    tender = models.ForeignKey(
+        Tender,
+        on_delete=models.CASCADE,
+        related_name='view_logs',
+    )
+    vendor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='tender_view_logs',
+    )
+    vendor_name = models.CharField(max_length=255)
+    viewed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-viewed_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['tender', 'vendor'],
+                name='unique_tender_vendor_view',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['tender', 'viewed_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.vendor_name} viewed {self.tender.reference_number}"
+
+
 class TenderBid(models.Model):
     """Track vendor bids/submissions for tenders"""
     tender = models.ForeignKey(Tender, on_delete=models.CASCADE, related_name='bids')

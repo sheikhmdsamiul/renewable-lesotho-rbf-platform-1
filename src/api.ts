@@ -1,5 +1,6 @@
 import {
   Tender,
+  TenderViewersResponse,
   Project,
   ProjectSetup,
   Notification,
@@ -1788,6 +1789,20 @@ export async function fetchTender(tenderId: string): Promise<Tender> {
   return mapTenderFromApi(data);
 }
 
+export async function fetchTenderViewers(tenderId: string): Promise<TenderViewersResponse> {
+  const data = await http<any>(`/api/tenders/${tenderId}/viewers/`);
+  return {
+    totalViewers: Number(data?.total_viewers ?? 0),
+    viewers: Array.isArray(data?.viewers)
+      ? data.viewers.map((viewer: any) => ({
+          vendorId: String(viewer.vendor_id ?? ""),
+          vendorName: viewer.vendor_name ?? "Unknown vendor",
+          viewedAt: viewer.viewed_at ?? "",
+        }))
+      : [],
+  };
+}
+
 export async function verifyTender(tenderId: string): Promise<Tender> {
   const data = await http<any>(`/api/tenders/${tenderId}/verify/`, {
     method: "POST",
@@ -2755,6 +2770,26 @@ export async function fetchVendorPrequalifications(pageSize?: number): Promise<V
 
 export async function fetchMyProfile(): Promise<VendorProfile> {
   const data = await http<any>(`/api/users/my_profile/`);
+  return mapVendorProfileFromApi(data);
+}
+
+export async function updateMyProfile(payload: Partial<VendorProfile>): Promise<VendorProfile> {
+  const data = await http<any>(`/api/users/my_profile/`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      email: payload.email,
+      full_name: payload.full_name,
+      gender: payload.gender,
+      mobile_number: payload.mobile_number,
+      address: payload.address,
+      organization_name: payload.organization_name,
+      organization_type: payload.organization_type,
+      registration_certificate_name: payload.registration_certificate_name,
+      tax_id: payload.tax_id,
+      technology_types: payload.technology_types,
+      region: payload.region,
+    }),
+  });
   return mapVendorProfileFromApi(data);
 }
 

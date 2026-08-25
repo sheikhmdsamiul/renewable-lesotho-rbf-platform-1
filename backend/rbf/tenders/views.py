@@ -16,6 +16,7 @@ from django_filters.rest_framework import DjangoFilterBackend
 from django_filters import FilterSet, DateFromToRangeFilter, RangeFilter, CharFilter, ChoiceFilter
 from .models import (
     Tender,
+    TenderViewLog,
     TenderStatus,
     TenderBid,
     TenderBidSite,
@@ -979,6 +980,47 @@ class TenderViewSet(viewsets.ModelViewSet):
         if self.action == 'list':
             return TenderListSerializer
         return TenderSerializer
+
+    def retrieve(self, request, *args, **kwargs):
+        instance = self.get_object()
+        user = request.user
+        if (
+            user.is_authenticated
+            and getattr(user, 'role', None) == UserRole.VENDOR
+            and instance.status == TenderStatus.PUBLISHED
+        ):
+            vendor_name = (
+                getattr(user, 'organization_name', '')
+                or getattr(user, 'full_name', '')
+                or user.get_username()
+            )
+            TenderViewLog.objects.get_or_create(
+                tender=instance,
+                vendor=user,
+                defaults={'vendor_name': vendor_name},
+            )
+        serializer = self.get_serializer(instance)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['get'], url_path='viewers')
+    def viewers(self, request, pk=None):
+        """List the vendors that have viewed this tender."""
+        if getattr(request.user, 'role', None) not in {
+            UserRole.RBF_OFFICIAL,
+            UserRole.ADMIN,
+        }:
+            raise PermissionDenied('Only RMT and Admin users can view tender viewers.')
+
+        tender = self.get_object()
+        viewers = tender.view_logs.values(
+            'vendor_id',
+            'vendor_name',
+            'viewed_at',
+        )
+        return Response({
+            'total_viewers': tender.view_logs.count(),
+            'viewers': list(viewers),
+        })
 
     def _assert_write_permission(self):
         user = self.request.user
