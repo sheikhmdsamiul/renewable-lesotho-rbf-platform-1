@@ -20,6 +20,7 @@ from .models import (
     BlacklistCaseStatus,
     BlacklistReason,
     User,
+    RolePermission,
     UserRole,
     UserStatus,
     VendorBlacklistCase,
@@ -54,6 +55,37 @@ class UserSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, required=False, min_length=8)
     vendor_tag = serializers.SerializerMethodField(read_only=True)
     blacklist_summary = serializers.SerializerMethodField(read_only=True)
+    permissions = serializers.SerializerMethodField(read_only=True)
+
+    def get_permissions(self, obj):
+        if obj.role == UserRole.ADMIN:
+            return {'*': ['view', 'create', 'edit', 'delete', 'approve', 'export']}
+        records = {
+            record.module: list(record.actions or [])
+            for record in RolePermission.objects.filter(role=obj.role)
+        }
+        if records:
+            return records
+
+        default_modules = {
+            UserRole.RBF_OFFICIAL: {'dashboard', 'vendors', 'tenders', 'prequalification', 'bids', 'evaluations', 'projects', 'payments', 'blacklisting', 'notifications', 'reports'},
+            UserRole.TAC: {'dashboard', 'vendors', 'projects', 'payments', 'evaluations', 'blacklisting', 'reports', 'notifications'},
+            UserRole.DOE_OFFICER: {'dashboard', 'vendors', 'projects', 'blacklisting', 'reports', 'notifications'},
+            UserRole.FIELD_VERIFIER: {'dashboard', 'projects', 'notifications', 'reports'},
+            UserRole.UNDP_DONOR: {'dashboard', 'vendors', 'projects', 'payments', 'reports', 'notifications'},
+            UserRole.AUDITOR: {'dashboard', 'vendors', 'projects', 'payments', 'reports', 'audit_logs', 'prospect_sync', 'notifications'},
+            UserRole.VENDOR: {'dashboard', 'vendors', 'tenders', 'prequalification', 'bids', 'projects', 'payments', 'notifications', 'my_profile', 'my_bids', 'contracting', 'applications', 'blacklisting'},
+        }.get(obj.role, {'dashboard'})
+        default_actions = {
+            UserRole.RBF_OFFICIAL: ['view', 'create', 'edit', 'submit', 'upload', 'download', 'review', 'verify', 'publish', 'approve', 'reject', 'confirm', 'endorse', 'pay', 'mark_paid', 'assign', 'resolve', 'reinstate', 'export', 'view_sensitive', 'view_bank_details', 'run_sync', 'retry_sync', 'generate_report', 'respond', 'flag_issue'],
+            UserRole.TAC: ['view', 'review', 'approve', 'reject', 'endorse', 'export', 'respond'],
+            UserRole.DOE_OFFICER: ['view', 'review', 'verify', 'approve', 'reject', 'confirm', 'export', 'respond'],
+            UserRole.FIELD_VERIFIER: ['view', 'create', 'edit', 'submit', 'upload'],
+            UserRole.UNDP_DONOR: ['view', 'review', 'approve', 'reject', 'export', 'respond', 'flag_issue'],
+            UserRole.AUDITOR: ['view', 'create', 'edit', 'review', 'download', 'export', 'generate_report', 'respond', 'flag_issue'],
+            UserRole.VENDOR: ['view', 'create', 'edit', 'submit', 'upload', 'download', 'sign', 'appeal'],
+        }.get(obj.role, ['view'])
+        return {module: default_actions for module in default_modules}
 
     class Meta:
         model = User
@@ -64,7 +96,7 @@ class UserSerializer(serializers.ModelSerializer):
             'registration_certificate_name', 'tax_id', 'device_id', 'associated_entities',
             'bank_name', 'bank_branch', 'bank_swift_code', 'bank_sort_code',
             'tier_assignment', 'verification_zone', 'districts',
-            'status', 'must_change_password', 'password', 'vendor_tag', 'blacklist_summary'
+            'status', 'must_change_password', 'password', 'vendor_tag', 'blacklist_summary', 'permissions'
         ]
         read_only_fields = ['id']
 

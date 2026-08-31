@@ -1,5 +1,6 @@
 from rest_framework import viewsets, filters, status
 from rest_framework.permissions import IsAuthenticated, SAFE_METHODS, BasePermission
+from rbf.common.permissions import has_module_permission
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -32,6 +33,9 @@ from .models import (
     ChallengeDocument,
     ChallengeEvent,
     Notice,
+    BidStage,
+    ProcurementWorkflow,
+    PublishApprovalStatus,
 )
 from .serializers import (
     TenderSerializer,
@@ -41,6 +45,8 @@ from .serializers import (
     TenderContractSerializer,
     ProjectAssignmentSerializer,
     normalize_tender_stage,
+    normalize_bid_stage,
+    bid_stage_label,
     is_site_specific_stage,
     tender_stage_label,
     NoticeSerializer,
@@ -55,10 +61,10 @@ from rbf.users.models import UserRole, VendorPrequalification, PrequalificationS
 from rbf.users.models import User
 from rbf.users.blacklisting import is_vendor_restricted
 from rbf.common.urls import build_frontend_url
-from rbf.projects.models import Project, Milestone, MilestoneStatus, ProjectStatus, VerificationMethod
+from rbf.projects.models import Project, Milestone, MilestoneStatus, ProjectStatus, VerificationMethod, AuditLog
 from rbf.projects.audit import log_audit, AuditLogger
 from rbf.projects.integrations import SyncToProspectJob, queue_project_targets_sync
-from rbf.projects.serializers import ProjectSerializer
+from rbf.projects.serializers import ProjectSerializer, AuditLogSerializer
 from rbf.notifications.models import Notification, NotificationChannel, NotificationStatus
 from rbf.notifications.services import NotificationService, email_configured
 
@@ -100,7 +106,7 @@ def _auto_close_tender_on_deadline(tender: Tender) -> bool:
         return False
     if not _uses_hard_deadline(tender):
         return False
-    deadline = tender.last_date_submission or tender.deadline
+    deadline = tender.master_deadline()
     if deadline and timezone.now() >= deadline:
         tender.status = TenderStatus.CLOSED
         tender.closed_at = tender.closed_at or timezone.now()
@@ -593,18 +599,56 @@ def _copy_bid_documents(source_bid: TenderBid, target_bid: TenderBid):
 
 
 def _ensure_stage_two_draft(bid: TenderBid):
-    if bid.stage_two_unlocked:
+    return _ensure_stage_draft(bid, BidStage.TECHNICAL)
+
+
+def _ensure_stage_draft(bid: TenderBid, stage: str):
+    """Create (or return) a draft bid for a later stage (technical or financial).
+
+    In combined mode the technical bid record doubles as the financial record, so
+    only sequential tenders create a distinct financial draft.
+    """
+    stage = normalize_bid_stage(stage)
+    workflow = getattr(bid.tender, 'procurement_workflow', ProcurementWorkflow.SEQUENTIAL)
+
+    # Combined workflow: the technical bid record carries technical + financial content.
+    if stage == BidStage.FINANCIAL and workflow == ProcurementWorkflow.COMBINED:
         return bid
+
+    if stage == BidStage.TECHNICAL:
+        unlocked_flag, unlocked_at, source_field = (
+            'technical_stage_unlocked', 'technical_stage_unlocked_at', 'technical_stage_source_bid'
+        )
+    elif stage == BidStage.FINANCIAL:
+        unlocked_flag, unlocked_at, source_field = (
+            'financial_stage_unlocked', 'financial_stage_unlocked_at', 'financial_stage_source_bid'
+        )
+    if stage in (BidStage.EOI, BidStage.COMBINED):
+        return bid
+    if getattr(bid, 'bid_stage', '') and normalize_bid_stage(bid.bid_stage) == stage and getattr(bid, 'status', None) == BidStatus.DRAFT:
+        return bid
+
     existing = (
         TenderBid.objects.filter(
             tender=bid.tender,
             vendor_id=bid.vendor_id,
-            stage_two_unlocked=True,
+            bid_stage=stage,
             status=BidStatus.DRAFT,
         )
         .order_by('-version_number', '-created_at')
         .first()
     )
+    if existing is None:
+        existing = (
+            TenderBid.objects.filter(
+                tender=bid.tender,
+                vendor_id=bid.vendor_id,
+                stage_two_unlocked=True,
+                status=BidStatus.DRAFT,
+            )
+            .order_by('-version_number', '-created_at')
+            .first()
+        )
     if existing:
         _copy_bid_documents(bid, existing)
         _copy_bid_sites_if_missing(bid, existing)
@@ -625,7 +669,8 @@ def _ensure_stage_two_draft(bid: TenderBid):
         bid_amount=bid.bid_amount,
         subsidy_requested=bid.subsidy_requested,
         proposal_file=bid.proposal_file,
-        stage=tender_stage_label('site_specific'),
+        stage=bid_stage_label(stage),
+        bid_stage=stage,
         concept_note=bid.concept_note,
         technical_proposal=bid.technical_proposal,
         financial_proposal=bid.financial_proposal,
@@ -648,13 +693,42 @@ def _ensure_stage_two_draft(bid: TenderBid):
         collection_method=bid.collection_method,
         version_number=next_version,
         status=BidStatus.DRAFT,
-        stage_two_unlocked=True,
-        stage_two_unlocked_at=timezone.now(),
-        stage_two_source_bid=bid,
+        **{unlocked_flag: True, unlocked_at: timezone.now(), source_field: bid},
+        **({
+            'stage_two_unlocked': True,
+            'stage_two_unlocked_at': timezone.now(),
+            'stage_two_source_bid': bid,
+        } if stage == BidStage.TECHNICAL else {}),
     )
     _copy_bid_documents(bid, draft)
     _clone_sites_to_bid(bid, draft)
     return draft
+
+
+def _unlock_stage_for_bid(bid: TenderBid, stage: str):
+    """Open the given stage for an accepted bid and return its draft."""
+    stage = normalize_bid_stage(stage)
+    workflow = getattr(bid.tender, 'procurement_workflow', ProcurementWorkflow.SEQUENTIAL)
+    if stage == BidStage.TECHNICAL:
+        unlocked_flag, unlocked_at = 'technical_stage_unlocked', 'technical_stage_unlocked_at'
+    elif stage == BidStage.FINANCIAL:
+        unlocked_flag, unlocked_at = 'financial_stage_unlocked', 'financial_stage_unlocked_at'
+    else:
+        return bid
+    if workflow == ProcurementWorkflow.COMBINED:
+        # Financial is unlocked/already carried on the technical/combined record.
+        if stage == BidStage.FINANCIAL:
+            bid.financial_stage_unlocked = True
+            if not bid.financial_unsealed_at:
+                bid.financial_unsealed_at = timezone.now()
+            bid.financial_sealed = False
+            bid.save(update_fields=['financial_stage_unlocked', 'financial_unsealed_at', 'financial_sealed', 'updated_at'])
+            return bid
+    if not getattr(bid, unlocked_flag, False):
+        setattr(bid, unlocked_flag, True)
+        setattr(bid, unlocked_at, timezone.now())
+        bid.save(update_fields=[unlocked_flag, unlocked_at, 'updated_at'])
+    return _ensure_stage_draft(bid, stage)
 
 
 def _has_stage_two_shortlist_access(bid: TenderBid | None) -> bool:
@@ -662,6 +736,41 @@ def _has_stage_two_shortlist_access(bid: TenderBid | None) -> bool:
         return False
     source_bid = bid.stage_two_source_bid
     return bool(source_bid and source_bid.status == BidStatus.ACCEPTED)
+
+
+def _has_technical_stage_access(bid: TenderBid | None) -> bool:
+    if bid is None:
+        return False
+    if getattr(bid, 'bid_stage', '') == BidStage.TECHNICAL:
+        if getattr(bid, 'technical_stage_unlocked', False):
+            return True
+        if getattr(bid, 'stage_two_unlocked', False):
+            return _has_stage_two_shortlist_access(bid)
+        return True
+    return False
+
+
+def _has_financial_stage_access(bid: TenderBid | None) -> bool:
+    if bid is None:
+        return False
+    return bool(getattr(bid, 'financial_stage_unlocked', False))
+
+
+def _bid_stage_spec(bid: TenderBid | None, tender: Tender):
+    """Resolve the stage + applicable deadline for a bid (or a new opening bid)."""
+    if bid is not None and getattr(bid, 'bid_stage', ''):
+        stage = normalize_bid_stage(bid.bid_stage)
+    else:
+        stage = BidStage.EOI
+    workflow = getattr(tender, 'procurement_workflow', ProcurementWorkflow.SEQUENTIAL)
+    if stage == BidStage.FINANCIAL:
+        deadline = getattr(tender, 'financial_deadline', None)
+    elif stage in (BidStage.TECHNICAL, BidStage.COMBINED):
+        deadline = getattr(tender, 'technical_deadline', None)
+    else:
+        deadline = getattr(tender, 'eoi_deadline', None)
+    deadline = deadline or tender.master_deadline()
+    return {'stage': stage, 'deadline': deadline, 'workflow': workflow}
 
 
 def _backfill_stage_two_drafts_for_vendor(vendor_id: str):
@@ -679,6 +788,33 @@ def _backfill_stage_two_drafts_for_vendor(vendor_id: str):
         _ensure_stage_two_draft(bid)
 
 
+def _technical_passing_bids(tender: Tender):
+    """Return technical/combined bids whose technical score clears the threshold."""
+    threshold = Decimal(str(tender.technical_threshold or 70))
+    passing = []
+    bids = (
+        TenderBid.objects.filter(
+            tender=tender,
+            bid_stage__in=[BidStage.TECHNICAL, BidStage.COMBINED],
+        )
+        .prefetch_related('evaluations')
+    )
+    for bid in bids:
+        score = _technical_score_for_bid(bid)
+        if score is not None and score >= threshold:
+            passing.append(bid)
+    return passing
+
+
+def _open_financial_stage_for_tender(tender: Tender):
+    """Batch-open the Financial stage for every technical-passing bidder at once."""
+    opened = []
+    for bid in _technical_passing_bids(tender):
+        _unlock_stage_for_bid(bid, BidStage.FINANCIAL)
+        opened.append(bid)
+    return opened
+
+
 def _send_vendor_stage_one_outcome_email(bid: TenderBid, subject: str, message: str):
     if not email_configured() or not bid.vendor_email:
         return False
@@ -686,19 +822,21 @@ def _send_vendor_stage_one_outcome_email(bid: TenderBid, subject: str, message: 
 
 
 def _notify_stage_one_outcome(bid: TenderBid, passed: bool, draft: TenderBid | None = None):
-    if normalize_tender_stage(bid.tender.stage_type) != 'pre_qualification':
+    is_eoi_bid = normalize_bid_stage(getattr(bid, 'bid_stage', '')) == BidStage.EOI
+    is_legacy = normalize_tender_stage(getattr(bid.tender, 'stage_type', '')) == 'pre_qualification'
+    if not (is_eoi_bid or is_legacy):
         return
 
-    event = 'stage_one_passed' if passed else 'stage_one_failed'
+    event = 'eoi_passed' if passed else 'eoi_failed'
     title = (
-        f'Stage 1 Passed: {bid.tender.reference_number}'
+        f'EOI Shortlisted: {bid.tender.reference_number}'
         if passed else
-        f'Stage 1 Unsuccessful: {bid.tender.reference_number}'
+        f'EOI Unsuccessful: {bid.tender.reference_number}'
     )
     body = (
-        f'Your Stage 1 submission passed technical review. Stage 2 is now unlocked as draft version {draft.version_number}.'
+        f'Congratulations! Your EOI passed the shortlisting review. The next stage is now open as draft version {draft.version_number}.'
         if passed and draft is not None else
-        'Your Stage 1 submission did not meet the technical threshold. Please review the outcome in My Bids.'
+        'Your EOI did not pass the shortlisting review. Please review the outcome in My Bids.'
     )
     if not Notification.objects.filter(
         recipient_id=bid.vendor_id,
@@ -913,11 +1051,10 @@ class IsRbfOfficialOrReadOnly(BasePermission):
             # For now, allow unauthenticated read access for all GET requests
             # This enables the public impact portal to work without authentication
             return True  # Allow both authenticated and unauthenticated read access
-        return (
-            request.user
-            and request.user.is_authenticated
-            and getattr(request.user, 'role', None) in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}
-        )
+        if not request.user or not request.user.is_authenticated:
+            return False
+        action = 'create' if request.method == 'POST' else 'edit'
+        return has_module_permission(request.user, 'tenders', action)
 
 
 class TenderFilterSet(FilterSet):
@@ -1038,15 +1175,48 @@ class TenderViewSet(viewsets.ModelViewSet):
         data = request.data
         if not data.get('stage_type'):
             data = {**data, 'stage_type': 'Pre-Qualification'}
-        return super().create(request, *args, **kwargs)
+        response = super().create(request, *args, **kwargs)
+        tender = self.get_queryset().get(pk=response.data['id'])
+        log_audit(
+            request.user,
+            'tender_created',
+            tender,
+            {'module': 'tenders', 'reference_number': tender.reference_number, 'notes': 'Tender created.'},
+        )
+        return response
+
+    def _update_with_audit(self, request, partial, *args, **kwargs):
+        self._assert_write_permission()
+        tender = self.get_object()
+        old_status = tender.status
+        changed_fields = sorted(str(field) for field in request.data.keys())
+        serializer = self.get_serializer(tender, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        if getattr(tender, '_prefetched_objects_cache', None):
+            tender._prefetched_objects_cache = {}
+        response = Response(serializer.data)
+        tender.refresh_from_db()
+        log_audit(
+            request.user,
+            'tender_updated',
+            tender,
+            {
+                'module': 'tenders',
+                'reference_number': tender.reference_number,
+                'changed_fields': changed_fields,
+                'old_status': old_status,
+                'new_status': tender.status,
+                'notes': f'Tender edited. Fields changed: {", ".join(changed_fields) or "none"}.',
+            },
+        )
+        return response
 
     def update(self, request, *args, **kwargs):
-        self._assert_write_permission()
-        return super().update(request, *args, **kwargs)
+        return self._update_with_audit(request, False, *args, **kwargs)
 
     def partial_update(self, request, *args, **kwargs):
-        self._assert_write_permission()
-        return super().partial_update(request, *args, **kwargs)
+        return self._update_with_audit(request, True, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
         self._assert_write_permission()
@@ -1056,11 +1226,155 @@ class TenderViewSet(viewsets.ModelViewSet):
     def verify(self, request, pk=None):
         self._assert_write_permission()
         tender = self.get_object()
+        old_status = tender.status
 
         tender.is_verified = True
         tender.verified_at = timezone.now()
         tender.save(update_fields=['is_verified', 'verified_at', 'updated_at'])
-        log_audit(request.user, 'tender_verified', tender, {'reference_number': tender.reference_number})
+        log_audit(
+            request.user,
+            'tender_verified',
+            tender,
+            {
+                'reference_number': tender.reference_number,
+                'old_status': old_status,
+                'new_status': tender.status,
+                'notes': f'Tender {tender.reference_number} marked as verified.',
+            },
+        )
+        return Response(TenderSerializer(tender).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['get'])
+    def activity(self, request, pk=None):
+        """Audit trail specific to this tender's own lifecycle events (newest first)."""
+        tender = self.get_object()
+        logs = AuditLog.objects.filter(
+            entity_type='Tender',
+            entity_id=str(tender.id),
+            record_type='Tender',
+            record_id=tender.id,
+        ).order_by('-created_at')
+        serializer = AuditLogSerializer(logs, many=True, context={'request': request})
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+    @action(detail=False, methods=['get'])
+    def pending_publish_approvals(self, request):
+        """Super Admin-only list of tenders awaiting publish approval."""
+        user = request.user
+        if not user.is_authenticated or getattr(user, 'role', None) != UserRole.ADMIN:
+            raise PermissionDenied('Only the Platform Administrator (Super Admin) can view pending publish approvals.')
+        qs = Tender.objects.filter(
+            status=TenderStatus.PENDING_PUBLISH_APPROVAL,
+            publish_approval_status=PublishApprovalStatus.PENDING,
+        ).order_by('-publish_approval_requested_at')
+        serializer = TenderSerializer(qs, many=True, context=self.get_serializer_context())
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def request_publish_approval(self, request, pk=None):
+        """RBF submits a tender for Super Admin approval before publication."""
+        self._assert_write_permission()
+        tender = self.get_object()
+
+        if not tender.is_verified:
+            return Response({'detail': 'Tender must be verified before requesting publish approval.'}, status=status.HTTP_400_BAD_REQUEST)
+        if tender.status == TenderStatus.PUBLISHED:
+            return Response({'detail': 'Tender is already published.'}, status=status.HTTP_400_BAD_REQUEST)
+        if tender.status == TenderStatus.CLOSED:
+            return Response({'detail': 'Closed tender cannot be published.'}, status=status.HTTP_400_BAD_REQUEST)
+        if tender.publish_approval_status == PublishApprovalStatus.PENDING:
+            return Response({'detail': 'Publish approval has already been requested and is pending review.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        old_status = tender.status
+        old_pub_status = tender.publish_approval_status
+        tender.status = TenderStatus.PENDING_PUBLISH_APPROVAL
+        tender.publish_approval_status = PublishApprovalStatus.PENDING
+        tender.publish_approval_requested_at = timezone.now()
+        tender.publish_approval_reviewed_at = None
+        tender.publish_approval_reviewed_by = ''
+        tender.publish_approval_notes = ''
+        tender.save(update_fields=[
+            'status', 'publish_approval_status', 'publish_approval_requested_at',
+            'publish_approval_reviewed_at', 'publish_approval_reviewed_by',
+            'publish_approval_notes', 'updated_at',
+        ])
+        log_audit(
+            request.user,
+            'tender_publish_approval_requested',
+            tender,
+            {
+                'reference_number': tender.reference_number,
+                'old_status': old_status,
+                'new_status': tender.status,
+                'notes': f'Tender {tender.reference_number} submitted for Super Admin publish approval (was {old_pub_status}).',
+            },
+        )
+        return Response(TenderSerializer(tender).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def approve_publish(self, request, pk=None):
+        """Super Admin approves the tender for publication."""
+        self._assert_admin_approval_permission()
+        tender = self.get_object()
+
+        if tender.status != TenderStatus.PENDING_PUBLISH_APPROVAL or tender.publish_approval_status != PublishApprovalStatus.PENDING:
+            return Response({'detail': 'Tender is not awaiting publish approval.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        old_status = tender.status
+        tender.publish_approval_status = PublishApprovalStatus.APPROVED
+        tender.publish_approval_reviewed_at = timezone.now()
+        tender.publish_approval_reviewed_by = self._admin_reference(request.user)
+        tender.publish_approval_notes = (request.data.get('notes') or '').strip()
+        tender.status = TenderStatus.DRAFT  # Return to draft so RBF can proceed to publish
+        tender.save(update_fields=[
+            'publish_approval_status', 'publish_approval_reviewed_at',
+            'publish_approval_reviewed_by', 'publish_approval_notes', 'status', 'updated_at',
+        ])
+        log_audit(
+            request.user,
+            'tender_publish_approved',
+            tender,
+            {
+                'reference_number': tender.reference_number,
+                'old_status': old_status,
+                'new_status': tender.status,
+                'notes': f'Tender {tender.reference_number} approved for publication by Super Admin.',
+            },
+        )
+        return Response(TenderSerializer(tender).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def reject_publish(self, request, pk=None):
+        """Super Admin rejects the tender publication request."""
+        self._assert_admin_approval_permission()
+        tender = self.get_object()
+
+        if tender.status != TenderStatus.PENDING_PUBLISH_APPROVAL or tender.publish_approval_status != PublishApprovalStatus.PENDING:
+            return Response({'detail': 'Tender is not awaiting publish approval.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        old_status = tender.status
+        tender.publish_approval_status = PublishApprovalStatus.REJECTED
+        tender.publish_approval_reviewed_at = timezone.now()
+        tender.publish_approval_reviewed_by = self._admin_reference(request.user)
+        tender.publish_approval_notes = (request.data.get('notes') or '').strip()
+        tender.status = TenderStatus.DRAFT
+        tender.save(update_fields=[
+            'publish_approval_status', 'publish_approval_reviewed_at',
+            'publish_approval_reviewed_by', 'publish_approval_notes', 'status', 'updated_at',
+        ])
+        log_audit(
+            request.user,
+            'tender_publish_rejected',
+            tender,
+            {
+                'reference_number': tender.reference_number,
+                'old_status': old_status,
+                'new_status': tender.status,
+                'notes': f'Tender {tender.reference_number} publish approval rejected by Super Admin.'
+                         + (f' Reason: {tender.publish_approval_notes}' if tender.publish_approval_notes else ''),
+            },
+        )
         return Response(TenderSerializer(tender).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'])
@@ -1072,11 +1386,33 @@ class TenderViewSet(viewsets.ModelViewSet):
             return Response({'detail': 'Tender must be verified before publishing.'}, status=status.HTTP_400_BAD_REQUEST)
         if tender.status == TenderStatus.CLOSED:
             return Response({'detail': 'Closed tender cannot be published.'}, status=status.HTTP_400_BAD_REQUEST)
+        if tender.publish_approval_status != PublishApprovalStatus.APPROVED:
+            return Response({'detail': 'This tender must be approved by the Super Admin before it can be published.'}, status=status.HTTP_400_BAD_REQUEST)
 
+        old_status = tender.status
         tender.status = TenderStatus.PUBLISHED
         tender.published_at = timezone.now()
-        tender.save(update_fields=['status', 'published_at', 'updated_at'])
-        log_audit(request.user, 'tender_published', tender, {'reference_number': tender.reference_number})
+        tender.publish_approval_status = PublishApprovalStatus.NOT_REQUESTED
+        tender.publish_approval_requested_at = None
+        tender.publish_approval_reviewed_at = None
+        tender.publish_approval_reviewed_by = ''
+        tender.publish_approval_notes = ''
+        tender.save(update_fields=[
+            'status', 'published_at', 'publish_approval_status', 'publish_approval_requested_at',
+            'publish_approval_reviewed_at', 'publish_approval_reviewed_by', 'publish_approval_notes', 'updated_at',
+        ])
+        log_audit(
+            request.user,
+            'tender_published',
+            tender,
+            {
+                'reference_number': tender.reference_number,
+                'old_status': old_status,
+                'new_status': tender.status,
+                'publishApprovalStatus': 'approved',
+                'notes': f'Tender {tender.reference_number} published.',
+            },
+        )
 
         # Always notify all approved (pre-qualified) vendors on publish
         send_email = True
@@ -1097,6 +1433,15 @@ class TenderViewSet(viewsets.ModelViewSet):
         data = TenderSerializer(tender).data
         data['notification_summary'] = notification_summary
         return Response(data, status=status.HTTP_200_OK)
+
+    def _assert_admin_approval_permission(self):
+        user = self.request.user
+        if getattr(user, 'role', None) != UserRole.ADMIN:
+            raise PermissionDenied('Only the Platform Administrator (Super Admin) can approve or reject tender publication.')
+
+    def _admin_reference(self, user):
+        name = (getattr(user, 'full_name', None) or '').strip()
+        return name or getattr(user, 'username', None) or str(user.id)
 
     def _notify_vendors_of_publish(self, tender: Tender, send_email=True, notify_all=True):
         from rbf.users.models import User, VendorPrequalification, PrequalificationStatus
@@ -1557,7 +1902,8 @@ class TenderViewSet(viewsets.ModelViewSet):
         )
 
         # Auto-pause award if not already paused
-        if tender.status != TenderStatus.DISPUTED:
+        was_already_disputed = tender.status == TenderStatus.DISPUTED
+        if not was_already_disputed:
             tender.status = TenderStatus.DISPUTED
             tender.dispute_started_at = timezone.now()
             tender.save(update_fields=['status', 'dispute_started_at', 'updated_at'])
@@ -1574,7 +1920,10 @@ class TenderViewSet(viewsets.ModelViewSet):
             },
         )
 
-        self._notify_award_paused(tender)
+        # Only notify bidders that the award is paused if this challenge newly
+        # paused the award (pause_award already notified on its own path).
+        if not was_already_disputed:
+            self._notify_award_paused(tender)
 
         from .serializers import TenderChallengeSerializer
         data = TenderChallengeSerializer(challenge, context={'request': request}).data
@@ -2032,6 +2381,48 @@ class TenderViewSet(viewsets.ModelViewSet):
         return Response(TenderSerializer(tender).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'])
+    def open_financial_stage(self, request, pk=None):
+        """Batch-open the Financial stage for all technical-passing bidders.
+
+        Only the RBF Management Team may perform this action. It unlocks the
+        Financial stage (and unseals combined pricing) for every bid that cleared
+        the technical threshold, once all technical bids have been evaluated.
+        """
+        self._assert_write_permission()
+        tender = self.get_object()
+        workflow = getattr(tender, 'procurement_workflow', ProcurementWorkflow.SEQUENTIAL)
+
+        passing_bids = _technical_passing_bids(tender)
+        submitted_technical = TenderBid.objects.filter(
+            tender=tender,
+            bid_stage__in=[BidStage.TECHNICAL, BidStage.COMBINED],
+            status=BidStatus.SUBMITTED,
+        )
+        if submitted_technical.exists():
+            return Response(
+                {'detail': 'Not all technical bids have been evaluated yet. Evaluate every technical submission before opening the Financial stage.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        opened = _open_financial_stage_for_tender(tender)
+        log_audit(
+            request.user,
+            'financial_stage_opened',
+            tender,
+            {
+                'reference_number': tender.reference_number,
+                'workflow': workflow,
+                'opened_bids': len(opened),
+                'notes': 'Financial stage opened for all technical-passing bidders.',
+            },
+        )
+        return Response({
+            'detail': f'Financial stage opened for {len(opened)} bidder(s).',
+            'opened_bids': [str(b.id) for b in opened],
+            'workflow': workflow,
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
     def verify_security(self, request, pk=None):
         """Verify tender security deposit"""
         self._assert_write_permission()
@@ -2120,9 +2511,28 @@ class TenderBidViewSet(viewsets.ModelViewSet):
         _auto_close_tender_on_deadline(tender)
         if tender.status != TenderStatus.PUBLISHED:
             raise ValidationError({'tender': 'Tender is not open for bidding.'})
-        deadline = tender.last_date_submission or tender.deadline
+
+        workflow = getattr(tender, 'procurement_workflow', ProcurementWorkflow.SEQUENTIAL)
+        spec = _bid_stage_spec(bid, tender)
+        stage = spec['stage']
+        deadline = spec['deadline']
         if _uses_hard_deadline(tender) and deadline and timezone.now() >= deadline:
             raise ValidationError({'tender': 'Bidding deadline has passed.'})
+
+        if stage == BidStage.EOI:
+            # Normal EOI access; no prior shortlisting requirement.
+            pass
+        elif stage == BidStage.TECHNICAL:
+            if bid is not None and not _has_technical_stage_access(bid):
+                raise ValidationError({'detail': 'Only shortlisted vendors can submit a Technical proposal.'})
+        elif stage == BidStage.FINANCIAL:
+            if not _has_financial_stage_access(bid):
+                raise ValidationError({'detail': 'The Financial stage is not yet open for this vendor.'})
+        elif stage == BidStage.COMBINED:
+            if bid is not None and not _has_technical_stage_access(bid):
+                raise ValidationError({'detail': 'Only shortlisted vendors can submit a combined Technical & Financial proposal.'})
+
+        # Prevent duplicate submissions within the SAME stage lineage.
         existing_submitted_bid = TenderBid.objects.filter(
             tender=tender,
             vendor_id=str(request.user.id),
@@ -2133,14 +2543,19 @@ class TenderBidViewSet(viewsets.ModelViewSet):
             existing_submitted_bid = existing_submitted_bid.exclude(id=bid.id)
             if bid.stage_two_source_bid_id:
                 existing_submitted_bid = existing_submitted_bid.exclude(id=bid.stage_two_source_bid_id)
+            if bid.technical_stage_source_bid_id:
+                existing_submitted_bid = existing_submitted_bid.exclude(id=bid.technical_stage_source_bid_id)
+            if bid.financial_stage_source_bid_id:
+                existing_submitted_bid = existing_submitted_bid.exclude(id=bid.financial_stage_source_bid_id)
         if existing_submitted_bid.exists():
             raise ValidationError({'tender': 'You have already submitted a bid for this tender.'})
 
     def _assert_stage_one_review_permission(self, request, bid: TenderBid):
         if request.user.role not in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}:
-            raise PermissionDenied('Only the RBF Management Team can decide Stage 1 submissions.')
-        if normalize_tender_stage(getattr(bid.tender, 'stage_type', '')) != 'pre_qualification':
-            raise ValidationError({'detail': 'Stage 1 review actions only apply to pre-qualification bids.'})
+            raise PermissionDenied('Only the RBF Management Team can decide EOI submissions.')
+        if normalize_tender_stage(getattr(bid.tender, 'stage_type', '')) not in {'pre_qualification'} \
+                and normalize_bid_stage(getattr(bid, 'bid_stage', '')) != BidStage.EOI:
+            raise ValidationError({'detail': 'EOI review actions only apply to EOI submissions.'})
 
     def create(self, request, *args, **kwargs):
         """Submit a bid for a tender"""
@@ -2172,7 +2587,10 @@ class TenderBidViewSet(viewsets.ModelViewSet):
         payload['vendor_email'] = request.user.email
         payload['version_number'] = next_version
         payload['status'] = bid_status
-        payload['stage'] = tender_stage_label(tender.stage_type)
+        new_stage = normalize_bid_stage(payload.get('bid_stage') or BidStage.EOI)
+        if not payload.get('bid_stage'):
+            payload['bid_stage'] = new_stage
+        payload['stage'] = bid_stage_label(new_stage)
 
         serializer = self.get_serializer(data=payload)
         serializer.is_valid(raise_exception=True)
@@ -2204,7 +2622,7 @@ class TenderBidViewSet(viewsets.ModelViewSet):
             value = request.data.getlist(key) if len(request.data.getlist(key)) > 1 else request.data.get(key)
             payload[key] = value
         
-        payload['stage'] = tender_stage_label('site_specific' if bid.stage_two_unlocked else bid.tender.stage_type)
+        payload['stage'] = bid_stage_label(getattr(bid, 'bid_stage', None) or bid.stage or 'eoi')
         
         if submitting:
             latest_version = (
@@ -2243,7 +2661,7 @@ class TenderBidViewSet(viewsets.ModelViewSet):
             value = request.data.getlist(key) if len(request.data.getlist(key)) > 1 else request.data.get(key)
             payload[key] = value
         
-        payload['stage'] = tender_stage_label('site_specific' if bid.stage_two_unlocked else bid.tender.stage_type)
+        payload['stage'] = bid_stage_label(getattr(bid, 'bid_stage', None) or bid.stage or 'eoi')
         
         if submitting:
             latest_version = (
@@ -2355,22 +2773,35 @@ class TenderBidViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        deadline = bid.tender.last_date_submission or bid.tender.deadline
-        if _uses_hard_deadline(bid.tender) and deadline and timezone.now() >= deadline:
+        spec = _bid_stage_spec(bid, bid.tender)
+        total_deadline = spec['deadline']
+        if _uses_hard_deadline(bid.tender) and total_deadline and timezone.now() >= total_deadline:
             return Response(
                 {'detail': 'Bidding deadline has passed.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        if is_site_specific_stage(bid.tender.stage_type or bid.stage):
+        stage = spec['stage']
+        if stage in (BidStage.TECHNICAL, BidStage.COMBINED):
             if not bid.technical_proposal_file or not bid.financial_proposal_file:
                 return Response(
-                    {'detail': 'Technical and financial proposal files are required for site-specific bids.'},
+                    {'detail': 'Technical and financial proposal files are required for technical submissions.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             if not bid.boq_file:
                 return Response(
-                    {'detail': 'BOQ file is required for site-specific bids.'},
+                    {'detail': 'BOQ file is required for technical submissions.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        elif stage == BidStage.FINANCIAL:
+            if not bid.financial_proposal_file:
+                return Response(
+                    {'detail': 'Financial Proposal file is required for the Financial stage.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if not bid.boq_file:
+                return Response(
+                    {'detail': 'BOQ file is required for the Financial stage.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
@@ -2407,8 +2838,13 @@ class TenderBidViewSet(viewsets.ModelViewSet):
         bid.save(update_fields=['status', 'reviewed_at', 'reviewed_by'])
         log_audit(request.user, 'bid_accepted', bid, {'tender_id': str(bid.tender_id)})
 
-        if normalize_tender_stage(getattr(bid.tender, 'stage_type', '')) == 'pre_qualification':
-            draft = _ensure_stage_two_draft(bid)
+        is_eoi_bid = normalize_bid_stage(getattr(bid, 'bid_stage', '')) == BidStage.EOI
+        is_legacy = normalize_tender_stage(getattr(bid.tender, 'stage_type', '')) == 'pre_qualification'
+        if is_eoi_bid or is_legacy:
+            workflow = getattr(bid.tender, 'procurement_workflow', ProcurementWorkflow.SEQUENTIAL)
+            draft = _unlock_stage_for_bid(bid, BidStage.TECHNICAL)
+            if workflow == ProcurementWorkflow.COMBINED:
+                _unlock_stage_for_bid(bid, BidStage.FINANCIAL)
             Notification.objects.create(
                 recipient_id=bid.vendor_id,
                 recipient_name=bid.vendor_name,
@@ -2535,13 +2971,19 @@ class TenderBidEvaluationViewSet(viewsets.ModelViewSet):
             raise PermissionDenied('Only the RBF Management Team or TAC members can score bids.')
 
     def _assert_tender_closed_for_evaluation(self, bid):
-        if is_site_specific_stage(bid.tender.stage_type) or getattr(bid, 'stage_two_unlocked', False):
+        stage = normalize_bid_stage(getattr(bid, 'bid_stage', '') or bid.stage)
+        is_detailed = stage in (BidStage.TECHNICAL, BidStage.COMBINED) or getattr(bid, 'stage_two_unlocked', False)
+        if is_detailed:
+            if getattr(bid, 'financial_stage_unlocked', False) is False \
+                    and getattr(bid, 'financial_sealed', True) \
+                    and getattr(self.request.user, 'role', None) == UserRole.TAC:
+                raise PermissionDenied('Financial pricing is sealed until the Technical stage clears.')
             _assert_evaluation_window_open(bid.tender)
             return
         _auto_close_tender_on_deadline(bid.tender)
         if bid.tender.status not in {TenderStatus.PUBLISHED, TenderStatus.CLOSED, TenderStatus.EVALUATION}:
             raise ValidationError(
-                {'detail': 'Stage 1 evaluation requires the tender to be Published, Closed, or in Evaluation.'}
+                {'detail': 'EOI evaluation requires the tender to be Published, Closed, or in Evaluation.'}
             )
 
     def create(self, request, *args, **kwargs):

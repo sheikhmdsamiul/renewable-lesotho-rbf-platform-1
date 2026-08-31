@@ -126,12 +126,18 @@ import {
   fetchTenders,
   fetchTender,
   fetchTenderViewers,
+  fetchTenderActivity,
   createTender,
   updateTender,
   verifyTender,
   publishTender,
+  requestPublishApproval,
+  approvePublish,
+  rejectPublish,
+  fetchPendingPublishApprovals,
   awardTender,
   closeTender,
+  openFinancialStage,
   fetchNotifications,
   fetchUnreadNotificationCount,
   loginUser,
@@ -266,6 +272,13 @@ import {
   AuditorClaimsAudit,
   AuditorProspectSyncLog
 } from "./components/AuditorPortal";
+
+const getTenderDeadlineDefault = () => {
+  const deadline = new Date();
+  deadline.setDate(deadline.getDate() + 14);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${deadline.getFullYear()}-${pad(deadline.getMonth() + 1)}-${pad(deadline.getDate())}`;
+};
 
 // --- Components ---
 
@@ -460,6 +473,159 @@ const triggerDownload = (filename: string, content: string, mimeType = "text/pla
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+};
+
+const escHtml = (value?: string | null) =>
+  (value || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+
+const pdfFmt = (value?: string | null) => {
+  if (!value) return "N/A";
+  const ts = Date.parse(value);
+  if (Number.isNaN(ts)) return value;
+  return new Date(ts).toLocaleString([], { year: "numeric", month: "long", day: "numeric", hour: "2-digit", minute: "2-digit" });
+};
+
+const buildTenderPdfHtml = (tender: Tender) => {
+  const row = (label: string, value?: string | null, accent = "") =>
+    `<div class="row"><span class="label">${escHtml(label)}</span><span class="value ${accent}">${escHtml(value || "N/A")}</span></div>`;
+
+  const list = (label: string, values?: string[]) =>
+    `<div class="row"><span class="label">${escHtml(label)}</span><span class="value">${values && values.length ? values.map(v => `<span class="chip">${escHtml(v)}</span>`).join("") : "N/A"}</span></div>`;
+
+  const chip = (label: string, value: string | number | undefined | null) =>
+    `<div class="stat"><div class="stat-label">${escHtml(label)}</div><div class="stat-value">${escHtml(value == null ? "N/A" : String(value))}</div></div>`;
+
+  const stages = [
+    { label: "EOI (Stage 1)", value: tender.eoiDeadline, show: true },
+    { label: "Technical (Stage 2)", value: tender.technicalDeadline, show: true },
+    { label: "Financial (Stage 3)", value: tender.financialDeadline, show: tender.procurementWorkflow === "sequential" },
+  ].filter(s => s.show).map(s => row(s.label, s.value)).join("");
+
+  const deadlineSection = tender.eoiDeadline || tender.technicalDeadline || tender.financialDeadline
+    ? `<div class="section-title">Deadlines & Schedule</div><div class="section">${row("Overall Closing Deadline", tender.deadline)}${stages}</div>`
+    : "";
+
+  const requirements = [
+    ["Tender Security", tender.tenderSecurityRequired === true ? "Required" : tender.tenderSecurityRequired === false ? "Not Required" : "N/A"],
+    ["Bidders Schedule Purchase", tender.biddersSchedulePurchase === true ? "Required" : "Not Required"],
+    ["Cooling-Off Period", tender.coolingOffDays ? `${tender.coolingOffDays} days` : "N/A"],
+  ].map(([l, v]) => row(l, v)).join("");
+
+  return `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>${escHtml(tender.name)}</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: 'Segoe UI', -apple-system, Helvetica, Arial, sans-serif; color: #1e293b; margin: 0; padding: 0; line-height: 1.5; }
+  .page { padding: 40px 44px 32px; }
+  .cover { background: linear-gradient(135deg, #065f46 0%, #047857 55%, #059669 100%); color: #fff; border-radius: 14px; padding: 34px 34px 28px; margin-bottom: 28px; }
+  .cover .eyebrow { font-size: 11px; text-transform: uppercase; letter-spacing: 0.18em; color: #a7f3d0; font-weight: 700; }
+  .cover h1 { margin: 10px 0 6px; font-size: 25px; line-height: 1.25; font-weight: 700; color: #fff; }
+  .cover .ref { color: #d1fae5; font-size: 13px; letter-spacing: 0.02em; }
+  .cover .meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+  .cover .pill { background: rgba(255,255,255,0.14); color: #ecfdf5; border-radius: 999px; padding: 4px 12px; font-size: 11px; font-weight: 600; }
+  .badge { display: inline-block; padding: 3px 12px; border-radius: 999px; background: #d1fae5; color: #065f46; font-size: 11px; font-weight: 700; }
+  .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 30px; }
+  .stat { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 14px 16px; }
+  .stat-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: #64748b; font-weight: 700; }
+  .stat-value { margin-top: 4px; font-size: 16px; font-weight: 700; color: #0f766e; word-break: break-word; }
+  .section-title { display: flex; align-items: center; gap: 10px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.12em; color: #0f766e; font-weight: 700; margin: 30px 0 12px; }
+  .section-title::after { content: ""; flex: 1; height: 1px; background: #e2e8f0; }
+  .section { border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; }
+  .row { display: flex; border-bottom: 1px solid #f1f5f9; }
+  .row:last-child { border-bottom: none; }
+  .label { width: 260px; flex-shrink: 0; background: #f8fafc; padding: 12px 16px; font-size: 12px; font-weight: 700; color: #475569; }
+  .value { flex: 1; padding: 12px 16px; font-size: 13px; white-space: pre-wrap; word-break: break-word; }
+  .value.strong { font-weight: 700; color: #0f172a; }
+  .chip { display: inline-block; background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0; border-radius: 6px; padding: 2px 8px; font-size: 12px; font-weight: 600; margin: 1px 4px 1px 0; }
+  .note { white-space: pre-wrap; }
+  .footer { border-top: 1px solid #e2e8f0; margin-top: 34px; padding-top: 14px; color: #94a3b8; font-size: 11px; display: flex; justify-content: space-between; }
+  @media print { body { padding: 0; } .cover { -webkit-print-color-adjust: exact; print-color-adjust: exact; } .badge, .chip, .stat { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }
+</style>
+</head>
+<body>
+  <div class="page">
+    <div class="cover">
+      <div class="eyebrow">Tender Invitation</div>
+      <h1>${escHtml(tender.name)}</h1>
+      <div class="ref">Reference Number: ${escHtml(tender.referenceNumber)}</div>
+      <div class="meta">
+        <span class="pill">${escHtml(tender.department || "Department N/A")}</span>
+        <span class="pill">${escHtml(tender.category || "Category N/A")}</span>
+        <span class="pill">${escHtml(tender.procurementMethod || "Method N/A")}</span>
+      </div>
+    </div>
+
+    <div class="summary">
+      ${chip("Status", tender.status)}
+      ${chip("Overall Deadline", tender.deadline ? pdfFmt(tender.deadline) : "N/A")}
+      ${chip("Funding Source", tender.fundingSource)}
+      ${chip("Budget (M)", tender.budget?.toLocaleString())}
+    </div>
+
+    <div class="section-title">Tender Information</div>
+    <div class="section">
+      ${row("Status", `<span class="badge">${escHtml(tender.status)}</span>`)}
+      ${row("Procurement Workflow", tender.procurementWorkflow === "sequential" ? "Sequential (EOI → Technical → Financial)" : "Combined (EOI + Technical/Financial)")}
+      ${row("Application Type", tender.applicationType)}
+      ${row("Department", tender.department)}
+      ${row("Category", tender.category)}
+      ${row("Procurement Method", tender.procurementMethod)}
+      ${row("Place for Opening (Venue)", tender.placeForOpening)}
+      ${row("Address for Documents", tender.addressForDocument)}
+      ${row("Address for Security", tender.addressForSecurity)}
+      ${row("Bidders Eligibility", tender.biddersEligibility)}
+      ${row("Time for Completion", tender.timeForCompletion)}
+      ${row("Invited By", tender.invitedBy)}
+      ${row("Bidding Currency", tender.biddingCurrency)}
+      ${row("Funding Source", tender.fundingSource)}
+      ${row("Stage Type", tender.stageType)}
+    </div>
+
+    ${deadlineSection}
+
+    <div class="section-title">Technical Requirements</div>
+    <div class="section">
+      ${list("Technology Types", tender.technologyTypes)}
+      ${list("Target Districts", tender.targetDistricts)}
+      ${row("Target Site Type", tender.targetSiteType)}
+      ${row("Approximate Installation Target", tender.approximateInstallationTarget !== undefined && tender.approximateInstallationTarget !== null ? String(tender.approximateInstallationTarget) : undefined)}
+      ${row("Minimum Service Tier", tender.minimumServiceTier)}
+      ${row("Technical Weight", tender.technicalWeight !== undefined ? `${tender.technicalWeight}%` : undefined)}
+      ${row("Financial Weight", tender.financialWeight !== undefined ? `${tender.financialWeight}%` : undefined)}
+      ${row("Technical Threshold", tender.technicalThreshold !== undefined ? `${tender.technicalThreshold}%` : undefined)}
+    </div>
+
+    <div class="section-title">Additional Requirements</div>
+    <div class="section">${requirements}</div>
+
+    ${tender.preTenderMeetingInfo ? `<div class="section-title">Pre-Tender Meeting</div><div class="section"><div class="row"><div class="value note">${escHtml(tender.preTenderMeetingInfo)}</div></div></div>` : ""}
+    ${tender.instruction ? `<div class="section-title">Instructions</div><div class="section"><div class="row"><div class="value note">${escHtml(tender.instruction)}</div></div></div>` : ""}
+    ${tender.contactDetails ? `<div class="section-title">Contact Information</div><div class="section"><div class="row"><div class="value note">${escHtml(tender.contactDetails)}</div></div></div>` : ""}
+
+    <div class="footer">
+      <span>${escHtml(tender.referenceNumber)}</span>
+      <span>Generated ${pdfFmt(new Date().toISOString())}</span>
+    </div>
+  </div>
+</body>
+</html>`;
+};
+
+const downloadTenderPdf = (tender: Tender) => {
+  const html = buildTenderPdfHtml(tender);
+  const win = window.open("", "_blank", "width=860,height=1100");
+  if (!win) {
+    triggerDownload(`tender_${tender.referenceNumber || tender.id}.html`, html, "text/html;charset=utf-8");
+    return;
+  }
+  win.document.open();
+  win.document.write(html);
+  win.document.close();
+  win.focus();
+  win.print();
 };
 
 const isConnectivityError = (raw: string) => {
@@ -1552,6 +1718,203 @@ const ForcePasswordReset = ({
 
 // --- Pages ---
 
+const PublishApprovals = ({ onOpenTender }: { onOpenTender?: (tenderId: string) => void }) => {
+  const [pending, setPending] = useState<Tender[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [actionTenderId, setActionTenderId] = useState<string | null>(null);
+  const [notesMap, setNotesMap] = useState<Record<string, string>>({});
+  const [reasonOpen, setReasonOpen] = useState(false);
+  const [activeTender, setActiveTender] = useState<Tender | null>(null);
+  const [deciding, setDeciding] = useState<"approve" | "reject">("approve");
+  const [error, setError] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+
+  const actionError = (err: any, fallback: string) => {
+    const raw = String(err?.message || "");
+    if (isConnectivityError(raw)) return `Cannot connect to the backend (${API_BASE}).`;
+    return toFriendlyApiMessage(raw) || fallback;
+  };
+
+  const load = async () => {
+    try {
+      setLoading(true);
+      const rows = await fetchPendingPublishApprovals();
+      setPending(rows);
+    } catch (err: any) {
+      setError(actionError(err, "Failed to load pending publish approvals."));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  const confirmDecision = async () => {
+    if (!activeTender) return;
+    setActionTenderId(activeTender.id);
+    setError(null);
+    try {
+      if (deciding === "approve") {
+        const updated = await approvePublish(activeTender.id, notesMap[activeTender.id]);
+        setPending((prev) => prev.filter((t) => t.id !== updated.id));
+        setToast("Publish approval granted. The RBF can now publish this tender.");
+      } else {
+        const updated = await rejectPublish(activeTender.id, notesMap[activeTender.id]);
+        setPending((prev) => prev.filter((t) => t.id !== updated.id));
+        setToast("Publish request rejected.");
+      }
+      setReasonOpen(false);
+      setActiveTender(null);
+    } catch (err: any) {
+      setError(actionError(err, "Failed to process approval."));
+    } finally {
+      setActionTenderId(null);
+    }
+  };
+
+  const openDecision = (tender: Tender, decision: "approve" | "reject") => {
+    setActiveTender(tender);
+    setDeciding(decision);
+    setNotesMap((m) => ({ ...m, [tender.id]: m[tender.id] ?? "" }));
+    setError(null);
+    setReasonOpen(true);
+  };
+
+  return (
+    <div className="space-y-6">
+      {toast && (
+        <div className="flex items-center justify-between gap-4 p-4 bg-emerald-50 rounded-xl border border-emerald-200">
+          <p className="text-sm text-emerald-800 font-medium">{toast}</p>
+          <button onClick={() => setToast(null)} className="text-emerald-600 hover:text-emerald-800">
+            <X size={18} />
+          </button>
+        </div>
+      )}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-900">Publish Approvals</h1>
+          <p className="text-sm text-slate-500 mt-1">Review tenders that the RBF has requested to publish.</p>
+        </div>
+        <button onClick={() => void load()} className="btn-secondary flex items-center gap-2" disabled={loading}>
+          <RefreshCw className={loading ? "animate-spin" : ""} size={16} /> Refresh
+        </button>
+      </div>
+
+      {error && <div className="p-4 bg-rose-50 rounded-xl border border-rose-200 text-sm text-rose-700">{error}</div>}
+
+      {loading ? (
+        <div className="card p-10 text-center text-sm text-slate-500">Loading pending approvals...</div>
+      ) : pending.length === 0 ? (
+        <div className="card p-12 text-center">
+          <ShieldCheck size={40} className="mx-auto text-emerald-300 mb-3" />
+          <p className="font-semibold text-slate-700">No pending publish approvals</p>
+          <p className="text-sm text-slate-500 mt-1">Tenders requested for publication by the RBF will appear here.</p>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {pending.map((tender) => (
+            <div key={tender.id} className="card p-5">
+              <div className="flex flex-wrap items-start justify-between gap-4">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-3">
+                    <h3 className="font-bold text-slate-900">{tender.name}</h3>
+                    <span className="badge bg-sky-100 text-sky-700">{tender.status}</span>
+                  </div>
+                  <p className="text-xs font-mono text-slate-500">{tender.referenceNumber}</p>
+                </div>
+                <div className="flex gap-2">
+                  {onOpenTender && (
+                    <button onClick={() => onOpenTender(tender.id)} className="btn-secondary text-sm py-1.5">
+                      View Tender
+                    </button>
+                  )}
+                  <button
+                    onClick={() => openDecision(tender, "approve")}
+                    disabled={actionTenderId === tender.id}
+                    className="btn-primary text-sm py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60"
+                  >
+                    Approve
+                  </button>
+                  <button
+                    onClick={() => openDecision(tender, "reject")}
+                    disabled={actionTenderId === tender.id}
+                    className="btn-secondary text-sm py-1.5 border-rose-200 text-rose-700 hover:bg-rose-50 disabled:opacity-60"
+                  >
+                    Reject
+                  </button>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4 text-sm">
+                <div>
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Department</p>
+                  <p className="font-medium text-slate-700 mt-0.5">{tender.department || "N/A"}</p>
+                </div>
+                <div>
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Category</p>
+                  <p className="font-medium text-slate-700 mt-0.5">{tender.category || "N/A"}</p>
+                </div>
+                <div>
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Budget</p>
+                  <p className="font-medium text-slate-700 mt-0.5">M {tender.budget?.toLocaleString() ?? "N/A"}</p>
+                </div>
+                <div>
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Requested</p>
+                  <p className="font-medium text-slate-700 mt-0.5">
+                    {tender.publishApprovalRequestedAt
+                      ? new Date(tender.publishApprovalRequestedAt).toLocaleString()
+                      : "N/A"}
+                  </p>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {reasonOpen && activeTender && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-2xl p-6 w-full max-w-md shadow-2xl">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-slate-900">
+                {deciding === "approve" ? "Approve Publish" : "Reject Publish"}
+              </h3>
+              <button onClick={() => { setReasonOpen(false); setActiveTender(null); }} className="p-1 hover:bg-slate-100 rounded-lg">
+                <X size={20} className="text-slate-500" />
+              </button>
+            </div>
+            <p className="text-sm text-slate-600 mb-4 font-medium">{activeTender.name}</p>
+            <div>
+              <label className="text-sm font-bold text-slate-700 mb-2 block">
+                {deciding === "approve" ? "Approval Notes (optional)" : "Reason for Rejection (optional)"}
+              </label>
+              <textarea
+                className="input-field min-h-[90px]"
+                value={notesMap[activeTender.id] ?? ""}
+                onChange={(e) => setNotesMap((m) => ({ ...m, [activeTender.id]: e.target.value }))}
+                placeholder={deciding === "approve" ? "Add any notes for the RBF..." : "Explain why the tender should not be published..."}
+              />
+            </div>
+            <div className="flex gap-3 pt-4">
+              <button onClick={() => setReasonOpen(false)} className="btn-secondary flex-1">Cancel</button>
+              <button
+                onClick={() => void confirmDecision()}
+                disabled={actionTenderId === activeTender.id}
+                className={`flex-1 btn-primary disabled:opacity-60 ${deciding === "approve" ? "bg-emerald-600 hover:bg-emerald-700" : "bg-rose-600 hover:bg-rose-700"}`}
+              >
+                {actionTenderId === activeTender.id
+                  ? deciding === "approve" ? "Approving..." : "Rejecting..."
+                  : deciding === "approve" ? "Approve" : "Reject"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 const Tenders = ({
   initialView = "list",
   initialTenderId,
@@ -1566,10 +1929,17 @@ const Tenders = ({
   const [view, setView] = useState<"list" | "create" | "details" | "verify" | "publish" | "award" | "edit">(initialView);
   const navigateView = (newView: typeof view, id?: string | null) => { setView(newView); onNavigate?.(newView, id ?? undefined); };
   const [selectedTender, setSelectedTender] = useState<Tender | null>(null);
+  const [detailTab, setDetailTab] = useState<"overview" | "documents" | "logistics" | "activity">("overview");
   const [detailLoading, setDetailLoading] = useState(false);
   const [tenders, setTenders] = useState<Tender[]>([]);
   const [tenderViewers, setTenderViewers] = useState<TenderViewersResponse | null>(null);
   const [viewersLoading, setViewersLoading] = useState(false);
+  const [tenderAuditLogs, setTenderAuditLogs] = useState<AuditLog[]>([]);
+  const [tenderAuditLoading, setTenderAuditLoading] = useState(false);
+  const effectiveStatusLabel = (t: Tender) =>
+    t.publishApprovalStatus === "approved" && t.status === TenderStatus.DRAFT
+      ? "Approved to Publish"
+      : t.status;
   const [notification, setNotification] = useState<string | null>(null);
   const [tenderError, setTenderError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
@@ -1605,8 +1975,6 @@ const Tenders = ({
   const [bidsLoading, setBidsLoading] = useState(false);
   const [extendDeadlineOpen, setExtendDeadlineOpen] = useState(false);
   const [newDeadline, setNewDeadline] = useState("");
-  const [newSecurityDeadline, setNewSecurityDeadline] = useState("");
-  const [newOpeningDate, setNewOpeningDate] = useState("");
   const [isExtending, setIsExtending] = useState(false);
   const [formStep, setFormStep] = useState(1);
 
@@ -1618,6 +1986,24 @@ const Tenders = ({
         .catch(() => setTenderBids([]))
         .finally(() => setBidsLoading(false));
     }
+  }, [view, selectedTender?.id]);
+
+  useEffect(() => {
+    if (view !== "details" || !selectedTender?.id) return;
+    const tenderId = selectedTender.id;
+    const refresh = async () => {
+      try {
+        const fresh = await fetchTender(tenderId);
+        setSelectedTender(prev => (prev && prev.id === tenderId ? fresh : prev));
+        const logs = await fetchTenderActivity(tenderId);
+        setTenderAuditLogs(logs);
+      } catch {
+        // keep existing data if the refresh fails
+      }
+    };
+    void refresh();
+    const interval = setInterval(refresh, 20000);
+    return () => clearInterval(interval);
   }, [view, selectedTender?.id]);
   const [notifyEmail, setNotifyEmail] = useState(true);
   const [isActioning, setIsActioning] = useState(false);
@@ -1715,10 +2101,12 @@ const Tenders = ({
     biddingCurrency: "LSL (Maloti)",
     category: "SHS",
     budget: 0,
-    deadline: "",
-    lastDateSubmission: "",
-    lastDateSecurity: "",
-    dateOpening: "",
+    deadline: getTenderDeadlineDefault(),
+    openingDateOptional: false,
+    procurementWorkflow: "sequential",
+    eoiDeadline: getTenderDeadlineDefault(),
+    technicalDeadline: "",
+    financialDeadline: "",
     technologyTypes: [],
     targetDistricts: [],
     targetSiteType: "Household",
@@ -1742,43 +2130,12 @@ const Tenders = ({
   const scheduleFileRef = useRef<File | null>(null);
   const rfpDocumentsFileRef = useRef<File | null>(null);
   const milestonePaymentScheduleFileRef = useRef<File | null>(null);
+  const [requiredDocs, setRequiredDocs] = useState<{ id?: string; name: string; expected_type?: string; bid_stage?: string; position?: number }[]>([]);
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
     const { name, value } = e.target;
     setFormData(prev => ({ ...prev, [name]: value }));
   };
-
-  useEffect(() => {
-    const isAccessWindow = String(formData.applicationType || "").toLowerCase() === "access window";
-    const dateOpening = formData.dateOpening;
-    
-    if (isAccessWindow) {
-      setFormData(prev => {
-        const updates: any = {};
-        const datePart = dateOpening ? dateOpening.split('T')[0] : "";
-        const openingTime = dateOpening ? (dateOpening.split('T')[1] || '10:00') : "";
-
-        if (dateOpening) {
-          // Auto-set lastDateSubmission if not provided, matching opening date
-          if (!prev.lastDateSubmission) {
-            updates.lastDateSubmission = `${datePart}T${openingTime}`;
-          }
-        } else {
-          // If no opening date, but it's an access window, we want a long gap for submission if it's empty
-          if (!prev.lastDateSubmission) {
-            const farFuture = new Date();
-            farFuture.setFullYear(farFuture.getFullYear() + 5);
-            updates.lastDateSubmission = farFuture.toISOString().split('.')[0].slice(0, 16); // YYYY-MM-DDTHH:mm
-          }
-        }
-        
-        if (Object.keys(updates).length > 0) {
-          return { ...prev, ...updates };
-        }
-        return prev;
-      });
-    }
-  }, [formData.applicationType, formData.tenderSecurityRequired, formData.dateOpening]);
 
   const handleTechToggle = (tech: string) => {
     setFormData(prev => {
@@ -1813,9 +2170,10 @@ const Tenders = ({
     category: tender.category ?? defaultFormData.category,
     budget: tender.budget ?? 0,
     deadline: tender.deadline ?? "",
-    lastDateSubmission: tender.lastDateSubmission ?? tender.deadline ?? "",
-    lastDateSecurity: tender.lastDateSecurity ?? "",
-    dateOpening: tender.dateOpening ?? "",
+    procurementWorkflow: tender.procurementWorkflow ?? "sequential",
+    eoiDeadline: tender.eoiDeadline ?? tender.deadline ?? getTenderDeadlineDefault(),
+    technicalDeadline: tender.technicalDeadline ?? "",
+    financialDeadline: tender.financialDeadline ?? "",
     technologyTypes: tender.technologyTypes ?? [],
     targetDistricts: tender.targetDistricts ?? [],
     targetSiteType: tender.targetSiteType ?? defaultFormData.targetSiteType,
@@ -1939,6 +2297,7 @@ const Tenders = ({
     rfpDocumentsFileRef.current = null;
     setMilestonePaymentScheduleFile(null);
     milestonePaymentScheduleFileRef.current = null;
+    setRequiredDocs([]);
     setTenderError(null);
     navigateView("create");
   };
@@ -1949,6 +2308,16 @@ const Tenders = ({
       setTenderViewers(null);
       const full = await fetchTender(tenderId);
       setSelectedTender(full);
+      if (nextView === "details") {
+        setTenderAuditLoading(true);
+        try {
+          setTenderAuditLogs(await fetchTenderActivity(tenderId));
+        } catch {
+          setTenderAuditLogs([]);
+        } finally {
+          setTenderAuditLoading(false);
+        }
+      }
       if (nextView === "details") {
         setViewersLoading(true);
         try {
@@ -1967,6 +2336,15 @@ const Tenders = ({
         rfpDocumentsFileRef.current = null;
         setMilestonePaymentScheduleFile(null);
         milestonePaymentScheduleFileRef.current = null;
+        setRequiredDocs(
+          (full.requiredDocuments || []).map((d) => ({
+            id: d.id,
+            name: d.name,
+            expected_type: d.expected_type || "",
+            bid_stage: d.bid_stage || "eoi",
+            position: d.position,
+          }))
+        );
       }
       if (nextView === "award") {
         const contracts = await fetchTenderContracts({ tenderId });
@@ -2132,36 +2510,32 @@ const Tenders = ({
     }
   };
 
+  const handleRequestPublishApproval = async (tenderId: string) => {
+    try {
+      setIsActioning(true);
+      const updated = await requestPublishApproval(tenderId);
+      upsertTender(updated);
+      setSelectedTender(updated);
+      await loadTenders();
+      showNotification("Publish approval request submitted. The Super Admin will review before you can publish.");
+    } catch (err: any) {
+      showNotification(toActionError(err, "Failed to request publish approval."));
+    } finally {
+      setIsActioning(false);
+    }
+  };
+
   const handleSaveTender = async (tenderData: any) => {
     const payload = { ...tenderData };
-    const isAccessWindow = String(payload.applicationType || "").toLowerCase() === "access window";
     const isEditing = view === "edit" && Boolean(selectedTender);
     const hasExistingSchedule = Boolean(selectedTender?.scheduleFile);
 
-
-      // Application Window: strictly requires and maps deadline to lastDateSubmission.
-      // Access Window: auto-sets fallback deadline if submission deadline is missing.
-      if (isAccessWindow) {
-        if (payload.lastDateSubmission) {
-          payload.deadline = payload.lastDateSubmission;
-        } else {
-          // Rolling deadline: 5 years in future to keep the tender active
-          const rollingDate = new Date();
-          rollingDate.setFullYear(rollingDate.getFullYear() + 5);
-          payload.deadline = rollingDate.toISOString();
-        }
-      } else {
-        // Strict mapping for Application Window - Must be intentionally provided via lastDateSubmission
-        payload.deadline = payload.lastDateSubmission;
-      }
-      const requiredFields = [
-        'name','department','applicationType','procurementMethod',
-        'addressForDocument','addressForSecurity','placeForOpening',
-        'biddersEligibility','invitedBy','biddingCurrency','timeForCompletion',
-        'instruction','contactDetails','category','targetSiteType',
-        ...(payload.tenderSecurityRequired ? ['lastDateSecurity'] : []),
-        ...(!isAccessWindow ? ['dateOpening', 'lastDateSubmission'] : [])
-      ];
+    const requiredFields = [
+      'name','department','applicationType','procurementMethod',
+      'addressForDocument','addressForSecurity','placeForOpening',
+      'biddersEligibility','invitedBy','biddingCurrency','timeForCompletion',
+      'instruction','contactDetails','category','targetSiteType'
+    ];
      const missing = requiredFields.filter(f => !payload[f] || payload[f]?.length === 0);
      if (missing.length) {
        setTenderError(`Fill required fields: ${missing.join(', ')}`);
@@ -2185,6 +2559,22 @@ const Tenders = ({
     if (!((currentRfpFile || selectedTender?.rfpDocumentsFile) && (currentMilestoneFile || selectedTender?.milestonePaymentScheduleFile))) {
       setTenderError("Upload the RFP/Subsidy Framework and the Milestone Payment Schedule.");
       return;
+    }
+    const workflow = payload.procurementWorkflow ?? "sequential";
+    if (!payload.eoiDeadline) {
+      setTenderError("Provide the EOI (Stage 1) submission deadline.");
+      return;
+    }
+    if (!payload.technicalDeadline) {
+      setTenderError("Provide the Technical (Stage 2) submission deadline.");
+      return;
+    }
+    if (workflow === "sequential" && !payload.financialDeadline) {
+      setTenderError("Provide the Financial (Stage 3) submission deadline for the sequential workflow.");
+      return;
+    }
+    if (workflow === "combined") {
+      payload.financialDeadline = "";
     }
     try {
       setTenderError(null);
@@ -2253,6 +2643,24 @@ const Tenders = ({
     }
   };
 
+  const handleOpenFinancialStage = async (tenderId: string) => {
+    const tenderLabel = selectedTender?.name || "this tender";
+    if (!window.confirm(`Open the Financial stage for "${tenderLabel}" now?\n\nThis unlocks the sealed Financial submissions for all bidders who passed the technical threshold.`)) {
+      return;
+    }
+    try {
+      setIsActioning(true);
+      const result = await openFinancialStage(tenderId);
+      await loadTenders();
+      showNotification(result.detail || `Financial stage opened for ${result.opened_bids.length} bidder(s).`);
+      navigateView("list");
+    } catch (err: any) {
+      showNotification(toActionError(err, "Failed to open the Financial stage."));
+    } finally {
+      setIsActioning(false);
+    }
+  };
+
   const handleExtendDeadline = async () => {
     if (!selectedTender || !newDeadline) {
       showNotification("Please select a new deadline.");
@@ -2262,17 +2670,16 @@ const Tenders = ({
       setIsExtending(true);
       const payload = {
         ...selectedTender,
-        lastDateSubmission: newDeadline,
-        lastDateSecurity: newSecurityDeadline || newDeadline,
-        dateOpening: newOpeningDate || selectedTender.dateOpening,
+        deadline: newDeadline,
+        financialDeadline: newDeadline,
+        technicalDeadline: newDeadline,
+        eoiDeadline: newDeadline,
       };
       const updated = await updateTender(selectedTender.id, payload as Partial<Tender> & { scheduleFile?: File | null });
       upsertTender(updated);
       setSelectedTender(updated);
       setExtendDeadlineOpen(false);
       setNewDeadline("");
-      setNewSecurityDeadline("");
-      setNewOpeningDate("");
       showNotification("Deadline updated successfully.");
     } catch (err: any) {
       showNotification(toActionError(err, "Failed to extend deadline."));
@@ -2595,6 +3002,18 @@ const Tenders = ({
                 </select>
               </div>
               <div className="space-y-2">
+                <label className="text-sm font-bold text-slate-700">Procurement Workflow *</label>
+                <select name="procurementWorkflow" value={formData.procurementWorkflow ?? "sequential"} onChange={handleInputChange} className="input-field">
+                  <option value="sequential">Sequential (EOI → Technical → Financial)</option>
+                  <option value="combined">Combined (Technical + Financial together)</option>
+                </select>
+                <p className="text-[10px] text-slate-400">
+                  {formData.procurementWorkflow === "combined"
+                    ? "Bidders submit Technical and Financial together; Financial pricing is sealed until technical evaluation passes."
+                    : "Bidders progress through EOI, then Technical, then a separate Financial stage."}
+                </p>
+              </div>
+              <div className="space-y-2">
                 <label className="text-sm font-bold text-slate-700">Bidding Currency *</label>
                 <select name="biddingCurrency" value={formData.biddingCurrency} onChange={handleInputChange} className="input-field">
                   <option>LSL (Maloti)</option>
@@ -2647,89 +3066,36 @@ const Tenders = ({
                 </div>
               </div>
 
-              {/* Security Submission Deadline */}
-              <div>
-                <label className="text-sm font-bold text-slate-700 mb-2">Security Submission Deadline {formData.tenderSecurityRequired && '*'}</label>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {/* Procurement Workflow Deadlines */}
+              <div className="border-t border-slate-200 pt-4">
+                <label className="text-sm font-bold text-slate-700 mb-2 block">Procurement Workflow Deadlines</label>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                   <div className="relative">
-                    <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-                    <input type="date" placeholder="Date" required={formData.tenderSecurityRequired}
-                      value={formData.lastDateSecurity ? formData.lastDateSecurity.split('T')[0] : ""}
-                      onChange={(e) => { const currentTime = formData.lastDateSecurity?.split('T')[1] || '09:00'; setFormData(prev => ({ ...prev, lastDateSecurity: `${e.target.value}T${currentTime}` })); }}
-                      className="input-field pl-10 pr-10" />
-                    {formData.lastDateSecurity && (
-                      <button type="button" onClick={() => setFormData(prev => ({ ...prev, lastDateSecurity: "" }))}
-                        className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"><X size={16} /></button>
-                    )}
+                    <label className="text-xs font-bold text-slate-600 block mb-1">EOI / Stage 1 Deadline *</label>
+                    <Calendar className="absolute left-3 top-9 -translate-y-1/2 text-slate-400" size={16} />
+                    <input type="date" placeholder="Date" required
+                      value={formData.eoiDeadline ? formData.eoiDeadline.split('T')[0] : ""}
+                      onChange={(e) => setFormData(prev => ({ ...prev, eoiDeadline: e.target.value }))}
+                      className="input-field pl-10" />
                   </div>
                   <div className="relative">
-                    <Clock className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-                    <input type="time" placeholder="Time" required={formData.tenderSecurityRequired}
-                      value={formData.lastDateSecurity ? formData.lastDateSecurity.split('T')[1] : ''} disabled={!formData.lastDateSecurity}
-                      onChange={(e) => { const currentDate = formData.lastDateSecurity?.split('T')[0] || new Date().toISOString().split('T')[0]; setFormData(prev => ({ ...prev, lastDateSecurity: `${currentDate}T${e.target.value}` })); }}
-                      className="input-field pl-10 pr-10" />
-                    {formData.lastDateSecurity && (
-                      <button type="button" onClick={() => setFormData(prev => ({ ...prev, lastDateSecurity: "" }))}
-                        className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"><X size={16} /></button>
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              {/* Document Submission Deadline */}
-              <div>
-                <label className="text-sm font-bold text-slate-700 mb-2">Document Submission Deadline {formData.applicationType !== "Access Window" && "*"}</label>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  <div className="relative">
-                    <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-                    <input type="date" placeholder="Date" required={formData.applicationType !== "Access Window"}
-                      value={formData.lastDateSubmission ? formData.lastDateSubmission.split('T')[0] : ""}
-                      onChange={(e) => { const currentTime = formData.lastDateSubmission?.split('T')[1] || '14:00'; setFormData(prev => ({ ...prev, lastDateSubmission: `${e.target.value}T${currentTime}` })); }}
-                      className="input-field pl-10 pr-10" />
-                    {formData.lastDateSubmission && (
-                      <button type="button" onClick={() => setFormData(prev => ({ ...prev, lastDateSubmission: "" }))}
-                        className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"><X size={16} /></button>
-                    )}
+                    <label className="text-xs font-bold text-slate-600 block mb-1">Technical / Stage 2 Deadline *</label>
+                    <Calendar className="absolute left-3 top-9 -translate-y-1/2 text-slate-400" size={16} />
+                    <input type="date" placeholder="Date" required
+                      value={formData.technicalDeadline ? formData.technicalDeadline.split('T')[0] : ""}
+                      onChange={(e) => setFormData(prev => ({ ...prev, technicalDeadline: e.target.value }))}
+                      className="input-field pl-10" />
                   </div>
                   <div className="relative">
-                    <Clock className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-                    <input type="time" placeholder="Time" required={formData.applicationType !== "Access Window"}
-                      value={formData.lastDateSubmission ? formData.lastDateSubmission.split('T')[1] : ''} disabled={!formData.lastDateSubmission}
-                      onChange={(e) => { const currentDate = formData.lastDateSubmission?.split('T')[0] || new Date().toISOString().split('T')[0]; setFormData(prev => ({ ...prev, lastDateSubmission: `${currentDate}T${e.target.value}` })); }}
-                      className="input-field pl-10 pr-10" />
-                    {formData.lastDateSubmission && (
-                      <button type="button" onClick={() => setFormData(prev => ({ ...prev, lastDateSubmission: "" }))}
-                        className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"><X size={16} /></button>
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              {/* Tender Opening Date & Time */}
-              <div>
-                <label className="text-sm font-bold text-slate-700 mb-2">Tender Opening Date & Time *</label>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  <div className="relative">
-                    <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-                    <input type="date" placeholder="Date"
-                      value={formData.dateOpening ? formData.dateOpening.split('T')[0] : ""}
-                      onChange={(e) => { const currentTime = formData.dateOpening?.split('T')[1] || '10:00'; setFormData(prev => ({ ...prev, dateOpening: `${e.target.value}T${currentTime}` })); }}
-                      className="input-field pl-10 pr-10" />
-                    {formData.dateOpening && (
-                      <button type="button" onClick={() => setFormData(prev => ({ ...prev, dateOpening: "" }))}
-                        className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"><X size={16} /></button>
-                    )}
-                  </div>
-                  <div className="relative">
-                    <Clock className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-                    <input type="time" placeholder="Time"
-                      value={formData.dateOpening ? formData.dateOpening.split('T')[1] : ''} disabled={!formData.dateOpening}
-                      onChange={(e) => { const currentDate = formData.dateOpening?.split('T')[0] || new Date().toISOString().split('T')[0]; setFormData(prev => ({ ...prev, dateOpening: `${currentDate}T${e.target.value}` })); }}
-                      className="input-field pl-10 pr-10" />
-                    {formData.dateOpening && (
-                      <button type="button" onClick={() => setFormData(prev => ({ ...prev, dateOpening: "" }))}
-                        className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"><X size={16} /></button>
-                    )}
+                    <label className="text-xs font-bold text-slate-600 block mb-1">
+                      Financial / Stage 3 Deadline {formData.procurementWorkflow === "sequential" ? "*" : "(Combined)"}
+                    </label>
+                    <Calendar className="absolute left-3 top-9 -translate-y-1/2 text-slate-400" size={16} />
+                    <input type="date" placeholder="Date" required={formData.procurementWorkflow === "sequential"}
+                      disabled={formData.procurementWorkflow === "combined"}
+                      value={formData.financialDeadline ? formData.financialDeadline.split('T')[0] : ""}
+                      onChange={(e) => setFormData(prev => ({ ...prev, financialDeadline: e.target.value }))}
+                      className="input-field pl-10 disabled:opacity-50" />
                   </div>
                 </div>
               </div>
@@ -2864,7 +3230,10 @@ const Tenders = ({
                     type="checkbox" 
                     className="w-5 h-5 rounded border-slate-300 text-emerald-600" 
                     checked={formData.tenderSecurityRequired}
-                    onChange={(e) => setFormData(prev => ({ ...prev, tenderSecurityRequired: e.target.checked }))}
+                    onChange={(e) => setFormData(prev => ({
+                      ...prev,
+                      tenderSecurityRequired: e.target.checked,
+                    }))}
                   />
                   <span className="text-sm font-medium text-slate-700">Tender Security Required</span>
                 </label>
@@ -2948,11 +3317,71 @@ const Tenders = ({
                   </div>
                 ))}
               </div>
+              <div className="border-t border-slate-100 pt-4 mt-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <label className="text-sm font-bold text-slate-700">Required Bid Documents</label>
+                    <p className="text-xs text-slate-500">Define the documents bidders must upload per bid stage. Leave a stage empty to require no documents for it.</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setRequiredDocs(prev => [...prev, { name: "", expected_type: "PDF", bid_stage: "eoi" }])}
+                    className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-emerald-200 text-emerald-700 text-xs font-semibold hover:bg-emerald-50"
+                  >
+                    <Plus size={14} /> Add Document
+                  </button>
+                </div>
+                {requiredDocs.length === 0 && (
+                  <p className="text-xs text-slate-400 mt-3 italic">No required bid documents defined yet.</p>
+                )}
+                <div className="space-y-2 mt-3">
+                  {requiredDocs.map((doc, idx) => (
+                    <div key={idx} className="flex flex-col sm:flex-row gap-2 items-stretch sm:items-center p-3 rounded-xl border border-slate-200 bg-slate-50">
+                      <input
+                        type="text"
+                        value={doc.name}
+                        onChange={(e) => setRequiredDocs(prev => prev.map((d, i) => i === idx ? { ...d, name: e.target.value } : d))}
+                        placeholder="Document name (e.g. Valid Trading License)"
+                        className="input-field flex-1"
+                      />
+                      <select
+                        value={doc.expected_type || "PDF"}
+                        onChange={(e) => setRequiredDocs(prev => prev.map((d, i) => i === idx ? { ...d, expected_type: e.target.value } : d))}
+                        className="input-field sm:w-36"
+                      >
+                        <option value="PDF">PDF</option>
+                        <option value="PDF/DOCX">PDF/DOCX</option>
+                        <option value="DOCX">DOCX</option>
+                        <option value="XLSX">XLSX</option>
+                        <option value="Image">Image</option>
+                        <option value="Other">Other</option>
+                      </select>
+                      <select
+                        value={doc.bid_stage || "eoi"}
+                        onChange={(e) => setRequiredDocs(prev => prev.map((d, i) => i === idx ? { ...d, bid_stage: e.target.value } : d))}
+                        className="input-field sm:w-40"
+                      >
+                        <option value="eoi">EOI</option>
+                        <option value="technical">Technical</option>
+                        <option value="financial">Financial</option>
+                        <option value="combined">Combined</option>
+                      </select>
+                      <button
+                        type="button"
+                        onClick={() => setRequiredDocs(prev => prev.filter((_, i) => i !== idx))}
+                        className="shrink-0 p-2 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50"
+                        aria-label="Remove document"
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
             </div>
-
-            {/* Save buttons (step 4) */}
             {formStep === 4 && (
               <div className="flex justify-end gap-3 pt-6 border-t border-slate-100">
+                <button onClick={() => setFormStep(prev => prev - 1)} className="btn-secondary">Previous</button>
                 <button onClick={() => navigateView("list")} className="btn-secondary">Cancel</button>
                 {isEditing ? (
                   <button
@@ -2962,6 +3391,7 @@ const Tenders = ({
                         scheduleFile,
                         rfpDocumentsFile,
                         milestonePaymentScheduleFile,
+                        requiredDocuments: requiredDocs,
                       })
                     }
                     className="btn-primary disabled:opacity-60"
@@ -2973,17 +3403,18 @@ const Tenders = ({
                   <>
                     <button
                       onClick={() =>
-                        handleSaveTender({
-                          ...formData,
-                          scheduleFile,
-                          rfpDocumentsFile,
-                          milestonePaymentScheduleFile,
-                        })
-                      }
-                      className="btn-secondary border-emerald-200 text-emerald-700 hover:bg-emerald-50 disabled:opacity-60"
-                      disabled={isSaving}
-                    >
-                      {isSaving ? "Saving..." : "Save as Draft"}
+                      handleSaveTender({
+                        ...formData,
+                        scheduleFile,
+                        rfpDocumentsFile,
+                        milestonePaymentScheduleFile,
+                        requiredDocuments: requiredDocs,
+                      })
+                    }
+                    className="btn-secondary border-emerald-200 text-emerald-700 hover:bg-emerald-50 disabled:opacity-60"
+                    disabled={isSaving}
+                  >
+                    {isSaving ? "Saving..." : "Save as Draft"}
                     </button>
                     <button
                       onClick={() =>
@@ -2992,6 +3423,7 @@ const Tenders = ({
                           scheduleFile,
                           rfpDocumentsFile,
                           milestonePaymentScheduleFile,
+                          requiredDocuments: requiredDocs,
                         })
                       }
                       className="btn-primary disabled:opacity-60"
@@ -3074,6 +3506,20 @@ const Tenders = ({
       const time = new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
       return `${date} • ${time}`;
     };
+    const tenderActivityLabel = (action: string) => {
+      const labels: Record<string, string> = {
+        tender_created: "Tender Created",
+        tender_updated: "Tender Updated",
+        tender_verified: "Tender Verified",
+        tender_published: "Tender Published",
+        tender_publish_approval_requested: "Publish Approval Requested",
+        tender_publish_approved: "Publish Approval Granted",
+        tender_publish_rejected: "Publish Approval Rejected",
+        tender_closed: "Bidding Closed",
+        tender_financial_opened: "Financial Stage Opened",
+      };
+      return labels[action] || action.replace(/_/g, " ");
+    };
     const stageTwoBids = tenderBids.filter(bid => bid.stage_key === "site_specific" && bid.status !== BidStatus.DRAFT);
     const evaluatedStageTwoCount = stageTwoBids.filter(bid => bid.evaluation_status === "evaluated").length;
 
@@ -3091,6 +3537,9 @@ const Tenders = ({
             </div>
           </div>
           <div className="flex gap-3">
+            <button onClick={() => downloadTenderPdf(selectedTender)} className="btn-secondary flex items-center gap-2">
+              <Download size={18} /> Download PDF
+            </button>
             {selectedTender.status === TenderStatus.DRAFT && (
               <button onClick={() => openTenderView(selectedTender.id, "edit")} className="btn-secondary flex items-center gap-2">
                 <FileText size={18} /> Edit Tender
@@ -3104,7 +3553,16 @@ const Tenders = ({
                 <ShieldCheck size={18} /> Verify
               </button>
             )}
-            {selectedTender.isVerified && selectedTender.status === TenderStatus.DRAFT && (
+            {selectedTender.isVerified && selectedTender.status === TenderStatus.DRAFT && selectedTender.publishApprovalStatus !== "approved" && (
+              <button 
+                onClick={() => void handleRequestPublishApproval(selectedTender.id)}
+                disabled={isActioning}
+                className="btn-primary flex items-center gap-2 disabled:opacity-60"
+              >
+                <ShieldCheck size={18} /> {isActioning ? "Submitting..." : "Request Publish Approval"}
+              </button>
+            )}
+            {selectedTender.isVerified && selectedTender.status === TenderStatus.DRAFT && selectedTender.publishApprovalStatus === "approved" && (
               <button 
                 onClick={() => navigateView("publish")}
                 className="btn-primary flex items-center gap-2"
@@ -3120,14 +3578,22 @@ const Tenders = ({
             <div className="card p-6">
               <div className="flex flex-wrap items-center gap-3">
                 <span className={`badge ${
+                  selectedTender.publishApprovalStatus === "approved" && selectedTender.status === TenderStatus.DRAFT ? 'bg-emerald-100 text-emerald-700' :
                   selectedTender.status === TenderStatus.PUBLISHED ? 'bg-emerald-100 text-emerald-700' :
                   selectedTender.status === TenderStatus.EVALUATION ? 'bg-blue-100 text-blue-700' :
                   selectedTender.status === TenderStatus.STANDSTILL ? 'bg-amber-100 text-amber-700' :
                   selectedTender.status === TenderStatus.AWARDED ? 'bg-purple-100 text-purple-700' :
+                  selectedTender.status === TenderStatus.PENDING_PUBLISH_APPROVAL ? 'bg-sky-100 text-sky-700' :
                   'bg-amber-100 text-amber-700'
                 }`}>
-                  {selectedTender.status}
+                  {effectiveStatusLabel(selectedTender)}
                 </span>
+                {selectedTender.publishApprovalStatus === "approved" && selectedTender.status !== TenderStatus.PUBLISHED && (
+                  <span className="text-xs font-bold text-emerald-600">Publish Approval Granted</span>
+                )}
+                {selectedTender.publishApprovalStatus === "rejected" && (
+                  <span className="text-xs font-bold text-rose-600">Publish Rejected</span>
+                )}
                 <span className={`text-xs font-bold ${selectedTender.isVerified ? 'text-emerald-600' : 'text-amber-600'}`}>
                   {selectedTender.isVerified ? 'Verified' : 'Pending Verification'}
                 </span>
@@ -3144,166 +3610,325 @@ const Tenders = ({
               </div>
             </div>
 
-            <div className="card p-8 space-y-8">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                <div className="space-y-4">
-                  <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Overview</h3>
-                  <div className="grid grid-cols-2 gap-4 text-sm">
-                    <div className="space-y-1">
-                      <p className="text-xs font-bold text-slate-500">Application Type</p>
-                      <p className="font-medium">{selectedTender.applicationType || "N/A"}</p>
-                    </div>
-                    <div className="space-y-1">
-                      <p className="text-xs font-bold text-slate-500">Procurement Method</p>
-                      <p className="font-medium">{selectedTender.procurementMethod || "N/A"}</p>
-                    </div>
-                    <div className="space-y-1">
-                      <p className="text-xs font-bold text-slate-500">Invited By</p>
-                      <p className="font-medium">{selectedTender.invitedBy || "N/A"}</p>
-                    </div>
-                    <div className="space-y-1">
-                      <p className="text-xs font-bold text-slate-500">Time for Completion</p>
-                      <p className="font-medium">{selectedTender.timeForCompletion || "N/A"}</p>
-                    </div>
-                    <div className="space-y-1">
-                      <p className="text-xs font-bold text-slate-500">Funding Source</p>
-                      <p className="font-medium">{selectedTender.fundingSource || "N/A"}</p>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="space-y-4">
-                  <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Financials & Security</h3>
-                  <div className="grid grid-cols-2 gap-4 text-sm">
-                     <div className="space-y-1">
-                       <p className="text-xs font-bold text-slate-500">Budget Estimate</p>
-                       <p className="text-lg font-bold text-slate-900">M {selectedTender.budget?.toLocaleString() ?? "N/A"}</p>
-                     </div>
-                     <div className="space-y-1">
-                       <p className="text-xs font-bold text-slate-500">Bidding Currency</p>
-                       <p className="font-medium">{selectedTender.biddingCurrency || "LSL (Maloti)"}</p>
-                     </div>
-                     <div className="space-y-1">
-                       <p className="text-xs font-bold text-slate-500">Tender Security</p>
-                       <p className="font-medium">{selectedTender.tenderSecurityRequired ? "Required" : "Not Required"}</p>
-                     </div>
-                  </div>
-                </div>
+            <div className="card overflow-hidden">
+              <div className="flex border-b border-slate-200 bg-slate-50/50 px-2">
+                {([
+                  { key: "overview", label: "Overview" },
+                  { key: "documents", label: "Documents" },
+                  { key: "logistics", label: "Logistics" },
+                  { key: "activity", label: "Activity" },
+                ] as const).map((tab) => (
+                  <button
+                    key={tab.key}
+                    onClick={() => setDetailTab(tab.key)}
+                    className={`px-4 py-3 text-sm font-semibold border-b-2 -mb-px transition-colors ${
+                      detailTab === tab.key
+                        ? "border-blue-600 text-blue-700"
+                        : "border-transparent text-slate-500 hover:text-slate-800"
+                    }`}
+                  >
+                    {tab.label}
+                    {tab.key === "activity" && tenderAuditLogs.length > 0 && (
+                      <span className="ml-2 text-[10px] font-bold bg-slate-200 text-slate-600 rounded-full px-1.5 py-0.5">{tenderAuditLogs.length}</span>
+                    )}
+                  </button>
+                ))}
               </div>
 
-              <div className="space-y-4 pt-6 border-t border-slate-100">
-                <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Deadlines & Schedule</h3>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                  <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
-                    <Clock size={16} className="text-slate-400 mb-2" />
-                    <p className="text-xs font-bold text-slate-500">Submission Deadline</p>
-                    <p className="text-sm font-bold text-slate-900">{formatDateTime(selectedTender.lastDateSubmission || selectedTender.deadline)}</p>
-                  </div>
-                  <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
-                    <ShieldCheck size={16} className="text-slate-400 mb-2" />
-                    <p className="text-xs font-bold text-slate-500">Security Deadline</p>
-                    <p className="text-sm font-bold text-slate-900">{formatDateTime(selectedTender.lastDateSecurity)}</p>
-                  </div>
-                  <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
-                    <Eye size={16} className="text-slate-400 mb-2" />
-                    <p className="text-xs font-bold text-slate-500">Opening Date</p>
-                    <p className="text-sm font-bold text-slate-900">{formatDateTime(selectedTender.dateOpening)}</p>
-                  </div>
-                </div>
-              </div>
-
-              <div className="space-y-4 pt-6 border-t border-slate-100">
-                <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Technical Requirements</h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                  <div className="space-y-2">
-                    <p className="text-xs font-bold text-slate-500">Technology Types</p>
-                    <div className="flex flex-wrap gap-2">
-                      {(selectedTender.technologyTypes || []).length ? (selectedTender.technologyTypes || []).map(tech => (
-                        <span key={tech} className="px-2 py-1 bg-emerald-50 text-emerald-700 rounded text-[10px] font-bold uppercase tracking-wider">{tech}</span>
-                      )) : (
-                        <span className="text-xs text-slate-500">N/A</span>
-                      )}
-                    </div>
-                  </div>
-                  <div className="space-y-2">
-                    <p className="text-xs font-bold text-slate-500">Target Site Type</p>
-                    <p className="text-sm font-medium">{selectedTender.targetSiteType || "N/A"}</p>
-                  </div>
-                  <div className="space-y-2">
-                    <p className="text-xs font-bold text-slate-500">Minimum Service Tier</p>
-                    <p className="text-sm font-medium">{selectedTender.minimumServiceTier || "N/A"}</p>
-                  </div>
-                  <div className="space-y-2">
-                    <p className="text-xs font-bold text-slate-500">Approximate Installation Target</p>
-                    <p className="text-sm font-medium">{selectedTender.approximateInstallationTarget != null ? selectedTender.approximateInstallationTarget.toLocaleString() : "N/A"}</p>
-                  </div>
-                </div>
-              </div>
-
-              <div className="space-y-4 pt-6 border-t border-slate-100">
-                <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Eligibility & Instructions</h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
-                  <div className="p-3 bg-slate-50 rounded-lg border border-slate-100">
-                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Eligibility</p>
-                    <p className="text-slate-700">{selectedTender.biddersEligibility || "Not specified"}</p>
-                  </div>
-                   <div className="p-3 bg-slate-50 rounded-lg border border-slate-100">
-                     <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Instructions</p>
-                     <p className="text-slate-700">{selectedTender.instruction || "Not specified"}</p>
-                   </div>
-                </div>
-              </div>
-
-              <div className="space-y-4 pt-6 border-t border-slate-100">
-                <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Required Documents</h3>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  {[
-                    { label: "Tender Schedule", url: toFileUrl(selectedTender.scheduleFile) },
-                    { label: "RFP / Subsidy Framework", url: toFileUrl(selectedTender.rfpDocumentsFile) },
-                    { label: "Milestone Payment Schedule", url: toFileUrl(selectedTender.milestonePaymentScheduleFile) },
-                  ].map((doc, i) => (
-                    <div key={i} className="p-4 border-2 border-dashed border-slate-200 rounded-xl bg-slate-50">
-                      <div className="flex items-center gap-2">
-                        <FileText size={18} className="text-slate-400" />
-                        <span className="text-xs font-bold text-slate-700">{doc.label}</span>
-                      </div>
-                      <div className="mt-3">
-                        <button
-                          onClick={() => downloadTenderDocument(doc.label, doc.url)}
-                          className={`text-emerald-600 hover:text-emerald-700 text-xs font-bold ${doc.url ? "" : "opacity-40 cursor-not-allowed"}`}
-                          title={doc.url ? `Download ${doc.label}` : "No file uploaded"}
-                          disabled={!doc.url}
-                        >
-                          {doc.url ? "Download →" : "Not provided"}
-                        </button>
+              <div className="p-8">
+                {detailTab === "overview" && (
+                  <div className="space-y-8">
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                      {[
+                        { label: "Application Type", value: selectedTender.applicationType || "N/A" },
+                        { label: "Procurement Method", value: selectedTender.procurementMethod || "N/A" },
+                        { label: "Invited By", value: selectedTender.invitedBy || "N/A" },
+                        { label: "Time for Completion", value: selectedTender.timeForCompletion || "N/A" },
+                      ].map((f) => (
+                        <div key={f.label} className="p-4 rounded-xl bg-slate-50 border border-slate-100">
+                          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{f.label}</p>
+                          <p className="mt-1 text-sm font-semibold text-slate-800 leading-snug">{f.value}</p>
+                        </div>
+                      ))}
+                      <div className="p-4 rounded-xl bg-slate-50 border border-slate-100">
+                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Funding Source</p>
+                        <p className="mt-1 text-sm font-semibold text-slate-800 leading-snug">{selectedTender.fundingSource || "N/A"}</p>
                       </div>
                     </div>
-                  ))}
-                </div>
+
+                    <div className="space-y-4">
+                      <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Financials & Security</h3>
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                        <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-100">
+                          <p className="text-[10px] font-bold text-emerald-500 uppercase tracking-widest">Budget Estimate</p>
+                          <p className="mt-1 text-2xl font-bold text-emerald-700">M {selectedTender.budget?.toLocaleString() ?? "N/A"}</p>
+                        </div>
+                        <div className="p-4 rounded-xl bg-slate-50 border border-slate-100">
+                          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Bidding Currency</p>
+                          <p className="mt-1 text-sm font-semibold text-slate-800">{selectedTender.biddingCurrency || "LSL (Maloti)"}</p>
+                        </div>
+                        <div className="p-4 rounded-xl bg-slate-50 border border-slate-100">
+                          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Tender Security</p>
+                          <p className="mt-1 text-sm font-semibold text-slate-800">{selectedTender.tenderSecurityRequired ? "Required" : "Not Required"}</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="space-y-4">
+                      <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Deadlines & Schedule</h3>
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                        <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
+                          <Clock size={16} className="text-slate-400 mb-2" />
+                          <p className="text-xs font-bold text-slate-500">Submission Deadline</p>
+                          <p className="text-sm font-bold text-slate-900">{formatDateTime(selectedTender.deadline)}</p>
+                        </div>
+                        {selectedTender.eoiDeadline && (
+                          <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
+                            <Clock size={16} className="text-slate-400 mb-2" />
+                            <p className="text-xs font-bold text-slate-500">EOI Deadline</p>
+                            <p className="text-sm font-bold text-slate-900">{formatDateTime(selectedTender.eoiDeadline)}</p>
+                          </div>
+                        )}
+                        {selectedTender.technicalDeadline && (
+                          <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
+                            <Clock size={16} className="text-slate-400 mb-2" />
+                            <p className="text-xs font-bold text-slate-500">Technical Deadline</p>
+                            <p className="text-sm font-bold text-slate-900">{formatDateTime(selectedTender.technicalDeadline)}</p>
+                          </div>
+                        )}
+                        {selectedTender.financialDeadline && (
+                          <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
+                            <Clock size={16} className="text-slate-400 mb-2" />
+                            <p className="text-xs font-bold text-slate-500">Financial Deadline</p>
+                            <p className="text-sm font-bold text-slate-900">{formatDateTime(selectedTender.financialDeadline)}</p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="space-y-4">
+                      <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Technical Requirements</h3>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div className="space-y-2">
+                          <p className="text-xs font-bold text-slate-500">Technology Types</p>
+                          <div className="flex flex-wrap gap-2">
+                            {(selectedTender.technologyTypes || []).length ? (selectedTender.technologyTypes || []).map(tech => (
+                              <span key={tech} className="px-2 py-1 bg-emerald-50 text-emerald-700 rounded text-[10px] font-bold uppercase tracking-wider">{tech}</span>
+                            )) : (
+                              <span className="text-xs text-slate-500">N/A</span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                          <div className="space-y-1">
+                            <p className="text-xs font-bold text-slate-500">Target Site Type</p>
+                            <p className="text-sm font-medium">{selectedTender.targetSiteType || "N/A"}</p>
+                          </div>
+                          <div className="space-y-1">
+                            <p className="text-xs font-bold text-slate-500">Service Tier</p>
+                            <p className="text-sm font-medium">{selectedTender.minimumServiceTier || "N/A"}</p>
+                          </div>
+                          <div className="space-y-1">
+                            <p className="text-xs font-bold text-slate-500">Installation Target</p>
+                            <p className="text-sm font-medium">{selectedTender.approximateInstallationTarget != null ? selectedTender.approximateInstallationTarget.toLocaleString() : "N/A"}</p>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="space-y-4">
+                      <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Eligibility & Instructions</h3>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+                        <div className="p-3 bg-slate-50 rounded-lg border border-slate-100">
+                          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Eligibility</p>
+                          <p className="text-slate-700">{selectedTender.biddersEligibility || "Not specified"}</p>
+                        </div>
+                        <div className="p-3 bg-slate-50 rounded-lg border border-slate-100">
+                          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Instructions</p>
+                          <p className="text-slate-700">{selectedTender.instruction || "Not specified"}</p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {detailTab === "documents" && (
+                  <div className="space-y-6">
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                      {[
+                        { label: "Tender Schedule", url: toFileUrl(selectedTender.scheduleFile) },
+                        { label: "RFP / Subsidy Framework", url: toFileUrl(selectedTender.rfpDocumentsFile) },
+                        { label: "Milestone Payment Schedule", url: toFileUrl(selectedTender.milestonePaymentScheduleFile) },
+                      ].map((doc, i) => (
+                        <div key={i} className="p-5 border-2 border-dashed border-slate-200 rounded-xl bg-slate-50">
+                          <div className="flex items-center gap-2">
+                            <FileText size={18} className="text-slate-400" />
+                            <span className="text-xs font-bold text-slate-700">{doc.label}</span>
+                          </div>
+                          <div className="mt-3">
+                            <button
+                              onClick={() => downloadTenderDocument(doc.label, doc.url)}
+                              className={`text-emerald-600 hover:text-emerald-700 text-xs font-bold ${doc.url ? "" : "opacity-40 cursor-not-allowed"}`}
+                              title={doc.url ? `Download ${doc.label}` : "No file uploaded"}
+                              disabled={!doc.url}
+                            >
+                              {doc.url ? "Download →" : "Not provided"}
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {detailTab === "logistics" && (
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    {[
+                      { label: "Document Address", value: selectedTender.addressForDocument, icon: <FileText size={18} className="text-blue-500" /> },
+                      { label: "Security Address", value: selectedTender.addressForSecurity, icon: <ShieldCheck size={18} className="text-blue-500" /> },
+                      { label: "Opening Venue", value: selectedTender.placeForOpening, icon: <MapPin size={18} className="text-blue-500" /> },
+                    ].map((item) => (
+                      <div key={item.label} className="p-5 rounded-xl border border-slate-100 bg-slate-50">
+                        <div className="flex items-center gap-2">
+                          {item.icon}
+                          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{item.label}</p>
+                        </div>
+                        <p className="mt-2 text-sm text-slate-700">{item.value || "Not specified"}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {detailTab === "activity" && (
+                  <div>
+                    {tenderAuditLoading ? (
+                      <p className="text-sm text-slate-500">Loading tender history...</p>
+                    ) : tenderAuditLogs.length === 0 ? (
+                      <p className="text-sm text-slate-500">No activity recorded for this tender.</p>
+                    ) : (
+                      <div className="space-y-3">
+                        {tenderAuditLogs.map((log) => {
+                          const hasStatus = Boolean(log.oldStatus || log.newStatus);
+                          const changedFields = Array.isArray(log.details?.changed_fields)
+                            ? log.details.changed_fields
+                            : [];
+                          return (
+                            <div key={log.id} className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-3">
+                              <div className="flex items-start justify-between gap-2">
+                                <div className="flex flex-col gap-0.5">
+                                  <p className="font-semibold text-slate-900">{tenderActivityLabel(log.action)}</p>
+                                  <p className="text-xs text-slate-400">{formatDateTime(log.createdAt)}</p>
+                                </div>
+                                <span className="shrink-0 rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-semibold capitalize text-slate-600">
+                                  {log.actorRole || "System"}
+                                </span>
+                              </div>
+                              <p className="mt-1 text-xs text-slate-600">
+                                {log.actorFullName || log.actorUsername || log.actor || "System"}
+                              </p>
+                              {hasStatus && (
+                                <p className="mt-1.5 text-xs text-slate-500">
+                                  {log.oldStatus && <span className="text-slate-400">{log.oldStatus}</span>}
+                                  {log.oldStatus && log.newStatus && <span className="mx-1 text-slate-400">→</span>}
+                                  {log.newStatus && <span className="font-semibold text-emerald-700">{log.newStatus}</span>}
+                                </p>
+                              )}
+                              {log.notes && <p className="mt-1 text-xs text-slate-500">{log.notes}</p>}
+                              {changedFields.length > 0 && (
+                                <p className="mt-1 text-xs text-slate-400">
+                                  Changed fields ({changedFields.length}): {changedFields.join(", ")}
+                                </p>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           </div>
 
           <div className="space-y-6">
-            <div className="card p-6">
-              <h3 className="font-bold text-slate-900 mb-3">Contact</h3>
-              <p className="text-sm text-slate-600">{selectedTender.contactDetails || "Not provided"}</p>
-            </div>
-            <div className="card p-6">
-              <h3 className="font-bold text-slate-900 mb-3">Logistics & Locations</h3>
-              <div className="space-y-3 text-sm">
-                <div className="p-3 bg-slate-50 rounded-lg border border-slate-100">
-                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Document Address</p>
-                  <p className="text-slate-700">{selectedTender.addressForDocument || "Not specified"}</p>
-                </div>
-                <div className="p-3 bg-slate-50 rounded-lg border border-slate-100">
-                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Security Address</p>
-                  <p className="text-slate-700">{selectedTender.addressForSecurity || "Not specified"}</p>
-                </div>
-                <div className="p-3 bg-slate-50 rounded-lg border border-slate-100">
-                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Opening Venue</p>
-                  <p className="text-slate-700">{selectedTender.placeForOpening || "Not specified"}</p>
-                </div>
+           <div className="card p-6">
+             <h3 className="font-bold text-slate-900 mb-3">Contact</h3>
+             <p className="text-sm text-slate-600">{selectedTender.contactDetails || "Not provided"}</p>
+           </div>
+            <div className="card p-6 space-y-4">
+              <h3 className="font-bold text-slate-900">Quick Actions</h3>
+              <div className="space-y-2">
+                <button onClick={sendBidReminder} className="btn-secondary w-full flex items-center justify-center gap-2">
+                  <Bell size={16} /> Send Reminder
+                </button>
+                <button onClick={exportBidList} className="btn-secondary w-full flex items-center justify-center gap-2">
+                  <Download size={16} /> Export Bid List
+                </button>
+                {(selectedTender.status === TenderStatus.PUBLISHED) && (
+                  <button
+                    onClick={() => void handleCloseBidding(selectedTender.id)}
+                    disabled={isActioning}
+                    className="btn-secondary w-full border-rose-200 text-rose-700 hover:bg-rose-50 disabled:opacity-60"
+                  >
+                    {isActioning ? "Closing..." : "Close Bidding"}
+                  </button>
+                )}
+                {(selectedTender.status === TenderStatus.EVALUATION || selectedTender.status === TenderStatus.CLOSED) && (
+                  <button
+                    onClick={() => void handleOpenFinancialStage(selectedTender.id)}
+                    disabled={isActioning}
+                    className="btn-secondary w-full border-blue-200 text-blue-700 hover:bg-blue-50 disabled:opacity-60"
+                  >
+                    <Lock size={16} /> {isActioning ? "Opening..." : "Open Financial Stage"}
+                  </button>
+                )}
+                {(selectedTender.status === TenderStatus.PUBLISHED) && (
+                  <button
+                    onClick={() => {
+                      setNewDeadline(selectedTender.deadline || "");
+                      setExtendDeadlineOpen(true);
+                    }}
+                    className="btn-secondary w-full border-amber-200 text-amber-700 hover:bg-amber-50"
+                  >
+                    Update Deadlines & Schedule
+                  </button>
+                )}
+                {(selectedTender.status === TenderStatus.EVALUATION || selectedTender.status === TenderStatus.PUBLISHED || selectedTender.status === TenderStatus.STANDSTILL) && (
+                  <button onClick={() => navigateView("award")} className="btn-primary w-full bg-purple-600 hover:bg-purple-700">
+                    {selectedTender.intentToAwardAt ? "Manage Award" : "Issue Award"}
+                  </button>
+                )}
+                {selectedTender.status !== TenderStatus.AWARDED && (
+                  <button onClick={() => setCoolingOffAdjustOpen(true)} className="btn-secondary w-full border-blue-200 text-blue-700 hover:bg-blue-50 flex items-center justify-center gap-2">
+                    <Clock size={16} /> Adjust Cooling-Off
+                  </button>
+                )}
+                {selectedTender.status !== TenderStatus.AWARDED && selectedTender.intentToAwardAt && selectedTender.status !== TenderStatus.DISPUTED && (
+                  <button onClick={() => {
+                    setChallengeFormVendorId("");
+                    setChallengeFormVendorName("");
+                    setChallengeFormGrounds("");
+                    setChallengeFormBidId("");
+                    setCreateChallengeOpen(true);
+                  }} className="btn-secondary w-full border-rose-200 text-rose-700 hover:bg-rose-50 flex items-center justify-center gap-2">
+                    <AlertTriangle size={16} /> File Challenge
+                  </button>
+                )}
+                {selectedTender.status !== TenderStatus.AWARDED && selectedTender.status !== TenderStatus.DISPUTED && selectedTender.intentToAwardAt && (
+                  <button onClick={() => setPauseConfirmOpen(true)} className="btn-secondary w-full border-amber-200 text-amber-700 hover:bg-amber-50 flex items-center justify-center gap-2">
+                    <Pause size={16} /> Pause Award
+                  </button>
+                )}
+                {selectedTender.status !== TenderStatus.AWARDED && selectedTender.intentToAwardAt && (
+                  <button onClick={() => setRevokeConfirmOpen(true)} className="btn-secondary w-full border-rose-200 text-rose-700 hover:bg-rose-50 flex items-center justify-center gap-2">
+                    <XCircle size={16} /> Revoke Intent
+                  </button>
+                )}
+                {selectedTender.status === TenderStatus.DISPUTED && (
+                  <button onClick={() => openTenderView(selectedTender.id, "award")} className="btn-secondary w-full border-rose-300 text-rose-700 hover:bg-rose-50 flex items-center justify-center gap-2">
+                    <AlertTriangle size={16} /> Review Challenge
+                  </button>
+                )}
               </div>
             </div>
             <div className="card p-6 space-y-4">
@@ -3358,76 +3983,6 @@ const Tenders = ({
                 <p className="text-sm text-slate-400">Viewer information unavailable.</p>
               )}
             </div>
-
-            <div className="card p-6 space-y-4">
-              <h3 className="font-bold text-slate-900">Quick Actions</h3>
-              <div className="space-y-2">
-                <button onClick={sendBidReminder} className="btn-secondary w-full flex items-center justify-center gap-2">
-                  <Bell size={16} /> Send Reminder
-                </button>
-                <button onClick={exportBidList} className="btn-secondary w-full flex items-center justify-center gap-2">
-                  <Download size={16} /> Export Bid List
-                </button>
-                {(selectedTender.status === TenderStatus.PUBLISHED) && (
-                  <button
-                    onClick={() => void handleCloseBidding(selectedTender.id)}
-                    disabled={isActioning}
-                    className="btn-secondary w-full border-rose-200 text-rose-700 hover:bg-rose-50 disabled:opacity-60"
-                  >
-                    {isActioning ? "Closing..." : "Close Bidding"}
-                  </button>
-                )}
-                {(selectedTender.status === TenderStatus.PUBLISHED) && (
-                  <button
-                    onClick={() => {
-                      setNewDeadline(selectedTender.lastDateSubmission || selectedTender.deadline || "");
-                      setNewSecurityDeadline(selectedTender.lastDateSecurity || "");
-                      setNewOpeningDate(selectedTender.dateOpening || "");
-                      setExtendDeadlineOpen(true);
-                    }}
-                    className="btn-secondary w-full border-amber-200 text-amber-700 hover:bg-amber-50"
-                  >
-                    Update Deadlines & Schedule
-                  </button>
-                )}
-                {(selectedTender.status === TenderStatus.EVALUATION || selectedTender.status === TenderStatus.PUBLISHED || selectedTender.status === TenderStatus.STANDSTILL) && (
-                  <button onClick={() => navigateView("award")} className="btn-primary w-full bg-purple-600 hover:bg-purple-700">
-                    {selectedTender.intentToAwardAt ? "Manage Award" : "Issue Award"}
-                  </button>
-                )}
-                {selectedTender.status !== TenderStatus.AWARDED && (
-                  <button onClick={() => setCoolingOffAdjustOpen(true)} className="btn-secondary w-full border-blue-200 text-blue-700 hover:bg-blue-50 flex items-center justify-center gap-2">
-                    <Clock size={16} /> Adjust Cooling-Off
-                  </button>
-                )}
-                {selectedTender.status !== TenderStatus.AWARDED && selectedTender.intentToAwardAt && selectedTender.status !== TenderStatus.DISPUTED && (
-                  <button onClick={() => {
-                    setChallengeFormVendorId("");
-                    setChallengeFormVendorName("");
-                    setChallengeFormGrounds("");
-                    setChallengeFormBidId("");
-                    setCreateChallengeOpen(true);
-                  }} className="btn-secondary w-full border-rose-200 text-rose-700 hover:bg-rose-50 flex items-center justify-center gap-2">
-                    <AlertTriangle size={16} /> File Challenge
-                  </button>
-                )}
-                {selectedTender.status !== TenderStatus.AWARDED && selectedTender.status !== TenderStatus.DISPUTED && selectedTender.intentToAwardAt && (
-                  <button onClick={() => setPauseConfirmOpen(true)} className="btn-secondary w-full border-amber-200 text-amber-700 hover:bg-amber-50 flex items-center justify-center gap-2">
-                    <Pause size={16} /> Pause Award
-                  </button>
-                )}
-                {selectedTender.status !== TenderStatus.AWARDED && selectedTender.intentToAwardAt && (
-                  <button onClick={() => setRevokeConfirmOpen(true)} className="btn-secondary w-full border-rose-200 text-rose-700 hover:bg-rose-50 flex items-center justify-center gap-2">
-                    <XCircle size={16} /> Revoke Intent
-                  </button>
-                )}
-                {selectedTender.status === TenderStatus.DISPUTED && (
-                  <button onClick={() => openTenderView(selectedTender.id, "award")} className="btn-secondary w-full border-rose-300 text-rose-700 hover:bg-rose-50 flex items-center justify-center gap-2">
-                    <AlertTriangle size={16} /> Review Challenge
-                  </button>
-                )}
-              </div>
-            </div>
           </div>
         </div>
 
@@ -3447,24 +4002,6 @@ const Tenders = ({
                   type="datetime-local"
                   value={newDeadline}
                   onChange={(e) => setNewDeadline(e.target.value)}
-                  className="input-field"
-                />
-              </div>
-              <div>
-                <label className="text-sm font-bold text-slate-700 mb-2 block">Security Deadline</label>
-                <input
-                  type="datetime-local"
-                  value={newSecurityDeadline}
-                  onChange={(e) => setNewSecurityDeadline(e.target.value)}
-                  className="input-field"
-                />
-              </div>
-              <div>
-                <label className="text-sm font-bold text-slate-700 mb-2 block">Date Opening</label>
-                <input
-                  type="datetime-local"
-                  value={newOpeningDate}
-                  onChange={(e) => setNewOpeningDate(e.target.value)}
                   className="input-field"
                 />
               </div>
@@ -3613,6 +4150,30 @@ const Tenders = ({
             <p className="text-xs text-emerald-600 font-mono">{selectedTender.referenceNumber}</p>
           </div>
 
+          {selectedTender.publishApprovalStatus === "approved" && (
+            <div className="p-4 bg-emerald-50 rounded-xl border border-emerald-200 flex items-start gap-3">
+              <ShieldCheck size={18} className="text-emerald-600 mt-0.5" />
+              <div>
+                <p className="text-sm font-semibold text-emerald-800">Publish Approval Granted</p>
+                <p className="text-xs text-emerald-700 mt-0.5">
+                  The Super Admin has approved this tender for publication. You can now publish it.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {selectedTender.publishApprovalStatus !== "approved" && (
+            <div className="p-4 bg-amber-50 rounded-xl border border-amber-200 flex items-start gap-3">
+              <AlertCircle size={18} className="text-amber-600 mt-0.5" />
+              <div>
+                <p className="text-sm font-semibold text-amber-800">Awaiting Publish Approval</p>
+                <p className="text-xs text-amber-700 mt-0.5">
+                  This tender has not yet been approved by the Super Admin. Request publish approval from the tender details page before publishing.
+                </p>
+              </div>
+            </div>
+          )}
+
           <div className="space-y-6">
             <div className="p-4 bg-slate-50 rounded-xl border border-slate-200">
               <p className="text-sm text-slate-700 font-medium">
@@ -3638,7 +4199,11 @@ const Tenders = ({
 
           <div className="flex justify-end gap-3 pt-6 border-t border-slate-100">
             <button onClick={() => navigateView("list")} className="btn-secondary">Cancel</button>
-            <button onClick={() => handlePublish(selectedTender.id)} disabled={isActioning} className="btn-primary disabled:opacity-60">
+            <button
+              onClick={() => handlePublish(selectedTender.id)}
+              disabled={isActioning || selectedTender.publishApprovalStatus !== "approved"}
+              className="btn-primary disabled:opacity-60"
+            >
               {isActioning ? "Publishing..." : "Publish Now"}
             </button>
           </div>
@@ -3701,14 +4266,6 @@ const Tenders = ({
               <div className="space-y-1">
                 <p className="text-xs font-bold text-slate-500">Submission Deadline</p>
                 <p className="text-sm font-medium">{selectedTender.deadline}</p>
-              </div>
-              <div className="space-y-1">
-                <p className="text-xs font-bold text-slate-500">Security Deadline</p>
-                <p className="text-sm font-medium">{selectedTender.lastDateSecurity || "2025-06-10 12:00"}</p>
-              </div>
-              <div className="space-y-1">
-                <p className="text-xs font-bold text-slate-500">Opening Date</p>
-                <p className="text-sm font-medium">{selectedTender.dateOpening || "2025-06-16 10:00"}</p>
               </div>
             </div>
           </div>
@@ -3872,13 +4429,15 @@ const Tenders = ({
                 <td className="px-6 py-4 text-sm text-slate-600">{tender.category}</td>
                 <td className="px-6 py-4">
                   <span className={`badge ${
+                    tender.publishApprovalStatus === "approved" && tender.status === TenderStatus.DRAFT ? 'bg-emerald-100 text-emerald-700' :
                     tender.status === TenderStatus.PUBLISHED ? 'bg-emerald-100 text-emerald-700' :
                     tender.status === TenderStatus.EVALUATION ? 'bg-blue-100 text-blue-700' :
                     tender.status === TenderStatus.STANDSTILL ? 'bg-amber-100 text-amber-700' :
                     tender.status === TenderStatus.AWARDED ? 'bg-purple-100 text-purple-700' :
+                    tender.status === TenderStatus.PENDING_PUBLISH_APPROVAL ? 'bg-sky-100 text-sky-700' :
                     'bg-amber-100 text-amber-700'
                   }`}>
-                    {tender.status}
+                    {effectiveStatusLabel(tender)}
                   </span>
                 </td>
                 <td className="px-6 py-4">
@@ -3906,7 +4465,15 @@ const Tenders = ({
                         Verify
                       </button>
                     )}
-                    {tender.isVerified && tender.status === TenderStatus.DRAFT && (
+                    {tender.isVerified && tender.status === TenderStatus.DRAFT && tender.publishApprovalStatus !== "approved" && (
+                      <button 
+                        onClick={() => void handleRequestPublishApproval(tender.id)}
+                        className="text-blue-600 hover:text-blue-700 font-medium text-sm"
+                      >
+                        {tender.publishApprovalStatus === "rejected" ? "Request Approval" : "Request Approval"}
+                      </button>
+                    )}
+                    {tender.isVerified && tender.status === TenderStatus.DRAFT && tender.publishApprovalStatus === "approved" && (
                       <button 
                         onClick={() => void openTenderView(tender.id, "publish")}
                         className="text-emerald-600 hover:text-emerald-700 font-medium text-sm"
@@ -8621,7 +9188,7 @@ const VendorTenders = ({ onSubmitTender, onNavigate }: { onSubmitTender?: (tende
     const now = Date.now();
     return tenders.filter(t => {
       if (t.status !== TenderStatus.PUBLISHED) return false;
-      const deadline = Date.parse(t.lastDateSubmission || t.deadline || "");
+      const deadline = Date.parse(t.deadline || "");
       if (Number.isNaN(deadline)) return false;
       const days = Math.ceil((deadline - now) / (1000 * 60 * 60 * 24));
       return days >= 0 && days <= 7;
@@ -8677,7 +9244,7 @@ const VendorTenders = ({ onSubmitTender, onNavigate }: { onSubmitTender?: (tende
       { label: "RFP / Subsidy Framework", url: toFileUrl(selectedTender.rfpDocumentsFile) },
       { label: "Milestone Payment Schedule", url: toFileUrl(selectedTender.milestonePaymentScheduleFile) },
     ];
-    const deadlineValue = selectedTender.lastDateSubmission || selectedTender.deadline;
+    const deadlineValue = selectedTender.deadline;
     const deadlineMs = deadlineValue ? Date.parse(deadlineValue) : NaN;
     const daysLeft = Number.isNaN(deadlineMs) ? null : Math.ceil((deadlineMs - Date.now()) / (1000 * 60 * 60 * 24));
 
@@ -8691,23 +9258,30 @@ const VendorTenders = ({ onSubmitTender, onNavigate }: { onSubmitTender?: (tende
             <h1 className="text-2xl font-bold text-slate-900">{selectedTender.name}</h1>
             <p className="text-sm text-slate-500 font-mono">{selectedTender.referenceNumber}</p>
           </div>
-          {onSubmitTender && (
-            <div className="ml-auto">
+          <div className="ml-auto flex items-center gap-3">
+            <button
+              onClick={() => downloadTenderPdf(selectedTender)}
+              className="flex items-center gap-2 px-4 py-2.5 rounded-xl border border-slate-200 text-slate-700 text-sm font-semibold hover:border-emerald-300 hover:text-emerald-700 transition-all"
+            >
+              <Download size={15} />
+              Download PDF
+            </button>
+            {onSubmitTender && (
               <button
                 onClick={() => onSubmitTender(selectedTender.id)}
                 className="btn-primary"
               >
                 Submit Proposal
               </button>
-            </div>
-          )}
+            )}
+          </div>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <div className="card p-5">
             <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Deadline</p>
             <p className="text-lg font-bold text-slate-900 mt-2">
-              {selectedTender.lastDateSubmission || selectedTender.deadline || "N/A"}
+              {selectedTender.deadline || "N/A"}
             </p>
             <p className="text-xs text-slate-500 mt-1">Submission cutoff</p>
           </div>
@@ -8767,17 +9341,7 @@ const VendorTenders = ({ onSubmitTender, onNavigate }: { onSubmitTender?: (tende
                   <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
                     <Clock size={16} className="text-slate-400 mb-2" />
                     <p className="text-xs font-bold text-slate-500">Submission Deadline</p>
-                    <p className="text-sm font-bold text-slate-900">{selectedTender.lastDateSubmission || selectedTender.deadline || "N/A"}</p>
-                  </div>
-                  <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
-                    <ShieldCheck size={16} className="text-slate-400 mb-2" />
-                    <p className="text-xs font-bold text-slate-500">Security Deadline</p>
-                    <p className="text-sm font-bold text-slate-900">{selectedTender.lastDateSecurity || "N/A"}</p>
-                  </div>
-                  <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
-                    <Eye size={16} className="text-slate-400 mb-2" />
-                    <p className="text-xs font-bold text-slate-500">Opening Date</p>
-                    <p className="text-sm font-bold text-slate-900">{selectedTender.dateOpening || "N/A"}</p>
+                    <p className="text-sm font-bold text-slate-900">{selectedTender.deadline || "N/A"}</p>
                   </div>
                 </div>
               </div>
@@ -9073,7 +9637,7 @@ const VendorTenders = ({ onSubmitTender, onNavigate }: { onSubmitTender?: (tende
         )}
 
         {!loading && paginatedTenders.map((tender) => {
-          const deadline = tender.lastDateSubmission || tender.deadline;
+          const deadline = tender.deadline;
           const deadlineMs = deadline ? Date.parse(deadline) : NaN;
           const daysLeft = Number.isNaN(deadlineMs) ? null : Math.ceil((deadlineMs - Date.now()) / (1000 * 60 * 60 * 24));
           const isClosingSoon = daysLeft !== null && daysLeft >= 0 && daysLeft <= 7;
@@ -10563,6 +11127,10 @@ const VendorDashboard = ({
     paygoPlatform: "",
     dailyPaymentAmountLsl: "",
     collectionMethod: "Mobile Money",
+    eoiNarrative: "",
+    financialStandingSummary: "",
+    technicalExperienceSummary: "",
+    trackRecordSummary: "",
     sites: [
       {
         siteName: "",
@@ -10589,6 +11157,10 @@ const VendorDashboard = ({
     omPlan: File | null;
     distributionMap: File | null;
     tenderSecurity: File | null;
+    companyCredentials: File | null;
+    financialStanding: File | null;
+    technicalExperience: File | null;
+    trackRecord: File | null;
   }>({
     technicalProposal: null,
     financialProposal: null,
@@ -10598,6 +11170,10 @@ const VendorDashboard = ({
     omPlan: null,
     distributionMap: null,
     tenderSecurity: null,
+    companyCredentials: null,
+    financialStanding: null,
+    technicalExperience: null,
+    trackRecord: null,
   });
   const [bidConfirmOpen, setBidConfirmOpen] = useState(false);
   const [bidSubmissionConfirmed, setBidSubmissionConfirmed] = useState(false);
@@ -10912,6 +11488,10 @@ const VendorDashboard = ({
       paygoPlatform: "",
       dailyPaymentAmountLsl: "",
       collectionMethod: "Mobile Money",
+      eoiNarrative: "",
+      financialStandingSummary: "",
+      technicalExperienceSummary: "",
+      trackRecordSummary: "",
       sites: [
         {
           siteName: "",
@@ -10941,6 +11521,10 @@ const VendorDashboard = ({
       omPlan: null,
       distributionMap: null,
       tenderSecurity: null,
+      companyCredentials: null,
+      financialStanding: null,
+      technicalExperience: null,
+      trackRecord: null,
     });
     setBidConfirmOpen(false);
     setBidSubmissionConfirmed(false);
@@ -11056,6 +11640,10 @@ const VendorDashboard = ({
       paygoPlatform: version.paygo_platform ?? "",
       dailyPaymentAmountLsl: version.daily_payment_amount_lsl != null ? String(version.daily_payment_amount_lsl) : "",
       collectionMethod: version.collection_method ?? "Mobile Money",
+      eoiNarrative: version.eoi_narrative ?? "",
+      financialStandingSummary: version.financial_standing_summary ?? "",
+      technicalExperienceSummary: version.technical_experience_summary ?? "",
+      trackRecordSummary: version.track_record_summary ?? "",
       sites: (version.sites && version.sites.length > 0
         ? version.sites.map((site) => {
             const validDistricts = (bidTender?.targetDistricts && bidTender.targetDistricts.length > 0)
@@ -11102,6 +11690,10 @@ const VendorDashboard = ({
       omPlan: null,
       distributionMap: null,
       tenderSecurity: null,
+      companyCredentials: null,
+      financialStanding: null,
+      technicalExperience: null,
+      trackRecord: null,
     });
     setBidConfirmOpen(false);
     setBidSubmissionConfirmed(false);
@@ -11121,6 +11713,11 @@ const VendorDashboard = ({
   const bidStageLabel = bidStageKey === "site_specific" ? "Stage 2: Detailed" : "Stage 1: Concept";
   const isPreQualificationStage = bidStageKey === "pre_qualification";
   const isSiteSpecificStage = bidStageKey === "site_specific";
+  const currentBidStage: "eoi" | "technical" | "financial" | "combined" =
+    ((["eoi", "technical", "financial", "combined"] as const) as readonly string[]).includes(activeBidVersionForStage?.bid_stage ?? "")
+      ? (activeBidVersionForStage?.bid_stage as "eoi" | "technical" | "financial" | "combined")
+      : (bidStageKey === "site_specific" ? "technical" : "eoi");
+  const isEoiStage = currentBidStage === "eoi";
   const bidTechnologyTypeOptions = Array.isArray(bidTender?.technologyTypes)
     ? bidTender.technologyTypes.filter((value): value is string => Boolean(String(value || "").trim()))
     : [];
@@ -11129,7 +11726,7 @@ const VendorDashboard = ({
     const normalized = String(tech || "").toLowerCase();
     return normalized === "gmg" || normalized.includes("mini-grid") || normalized.includes("mini grid");
   }) || String(bidTender?.category || "").toLowerCase().includes("mini-grid") || String(bidTender?.category || "").toLowerCase().includes("mini grid");
-  const bidDeadlineLabel = bidTender?.lastDateSubmission || bidTender?.deadline || "";
+  const bidDeadlineLabel = bidTender?.deadline || "";
   const bidDeadlineCountdown = useMemo(() => {
     if (!bidDeadlineLabel) return "Deadline unavailable";
     const deadlineMs = Date.parse(bidDeadlineLabel);
@@ -11154,6 +11751,22 @@ const VendorDashboard = ({
      distributionMap: currentEditingBidVersion?.distribution_map_file,
      tenderSecurity: currentEditingBidVersion?.tender_security_file,
    };
+   const existingEoiDocuments = {
+     companyCredentials: currentEditingBidVersion?.company_credentials_file,
+     financialStanding: currentEditingBidVersion?.financial_standing_file,
+     technicalExperience: currentEditingBidVersion?.technical_experience_file,
+     trackRecord: currentEditingBidVersion?.track_record_file,
+   };
+   const eoiDocuments = [
+     { key: "companyCredentials", label: "Company Credentials", hint: "PDF/DOCX", long: "Registration certificate, CR number, directors' details." },
+     { key: "financialStanding", label: "Financial Standing", hint: "PDF/DOCX/XLSX", long: "Audited financial statements or bank reference." },
+     { key: "technicalExperience", label: "Technical Experience", hint: "PDF/DOCX", long: "Track record of similar installations." },
+     { key: "trackRecord", label: "Track Record", hint: "PDF/DOCX", long: "References from past successful projects." },
+   ] as const;
+   const uploadedEoiDocumentCount = eoiDocuments.filter(doc => Boolean((bidFiles as any)[doc.key] || (existingEoiDocuments as any)[doc.key])).length;
+   const eoiDocumentsComplete = uploadedEoiDocumentCount === eoiDocuments.length;
+   const eoiNarrativeCharCount = bidForm.eoiNarrative.trim().length;
+   const eoiNarrativeValid = eoiNarrativeCharCount >= 200;
    const stageTwoDocuments = [
      { key: "technicalProposal", label: "Technical Proposal", hint: "PDF/DOCX" },
      { key: "financialProposal", label: "Financial Proposal", hint: "PDF/DOCX/XLSX" },
@@ -11164,6 +11777,19 @@ const VendorDashboard = ({
      ...(bidTender?.tenderSecurityRequired ? [{ key: "tenderSecurity", label: "Tender Security", hint: "PDF/DOCX" }] : []),
    ] as const;
   const uploadedStageTwoDocumentCount = stageTwoDocuments.filter(doc => Boolean((bidFiles as any)[doc.key] || (existingStageTwoDocuments as any)[doc.key])).length;
+  const customRequiredDocsForStage = (bidTender?.requiredDocuments || []).filter(
+    (d) => d.bid_stage === currentBidStage || d.bid_stage === "combined"
+  );
+  const customDocsExistingMap: Record<string, { file_name?: string; file_url?: string; expected_type?: string }> = {};
+  (currentEditingBidVersion?.customDocuments || []).forEach((cd: any) => {
+    customDocsExistingMap[cd.name] = { file_name: cd.file_name, file_url: cd.file_url, expected_type: cd.expected_type };
+  });
+  const customDocsComplete = customRequiredDocsForStage.every(
+    (d) => Boolean(bidCustomFiles[d.name]) || Boolean(customDocsExistingMap[d.name]?.file_url || customDocsExistingMap[d.name]?.file_name)
+  );
+  const customDocsUploadedCount = customRequiredDocsForStage.filter(
+    (d) => Boolean(bidCustomFiles[d.name]) || Boolean(customDocsExistingMap[d.name]?.file_url || customDocsExistingMap[d.name]?.file_name)
+  ).length;
   const bidSiteCount = bidForm.sites.filter(site => site.siteName.trim()).length;
   const requiredFemaleTarget = 50;
   const requiredVulnerableTarget = 30;
@@ -11408,6 +12034,7 @@ const VendorDashboard = ({
   const [bidFileErrors, setBidFileErrors] = useState<Record<string, string>>({});
   const [bidFieldErrors, setBidFieldErrors] = useState<Record<string, string>>({});
   const [bidSiteErrors, setBidSiteErrors] = useState<Record<number, string>>({});
+  const [bidCustomFiles, setBidCustomFiles] = useState<Record<string, File | null>>({});
 
   const handleBidFileChange = (key: string, file: File | null) => {
     if (!file) {
@@ -11428,6 +12055,24 @@ const VendorDashboard = ({
     }
     setBidFiles(prev => ({ ...prev, [key]: file }));
     setBidFileErrors(prev => { const next = { ...prev }; delete next[key]; return next; });
+  };
+
+  const handleBidCustomFileChange = (name: string, file: File | null) => {
+    if (!file) {
+      setBidCustomFiles(prev => ({ ...prev, [name]: null }));
+      return;
+    }
+    const ext = "." + file.name.split(".").pop()?.toLowerCase();
+    if (!ALLOWED_BID_DOC_EXTENSIONS.includes(ext)) {
+      setBidFileErrors(prev => ({ ...prev, [`custom-${name}`]: `Invalid file type (${ext || "unknown"}). Accepted formats: PDF, DOCX, XLSX.` }));
+      return;
+    }
+    if (file.size > MAX_BID_FILE_SIZE_BYTES) {
+      setBidFileErrors(prev => ({ ...prev, [`custom-${name}`]: `File is too large (${(file.size / 1024 / 1024).toFixed(1)}MB). Maximum size is 10MB.` }));
+      return;
+    }
+    setBidCustomFiles(prev => ({ ...prev, [name]: file }));
+    setBidFileErrors(prev => { const next = { ...prev }; delete next[`custom-${name}`]; return next; });
   };
 
   const LESOTHO_BOUNDS = { minLon: 27.02907, maxLon: 29.46576, minLat: -30.66896, maxLat: -28.57206 };
@@ -11523,6 +12168,16 @@ const VendorDashboard = ({
         fields.conceptNote = "Concept note is required for Stage 1 submissions.";
       } else if (implementationStrategyCharCount < 200) {
         fields.conceptNote = `Concept note must contain at least 200 characters before submission (currently ${implementationStrategyCharCount}).`;
+      }
+      if (isEoiStage) {
+        if (eoiNarrativeCharCount < 200) {
+          fields.eoiNarrative = `EOI narrative must contain at least 200 characters before submission (currently ${eoiNarrativeCharCount}).`;
+        }
+        eoiDocuments.forEach((doc) => {
+          if (!(bidFiles as any)[doc.key] && !(existingEoiDocuments as any)[doc.key]) {
+            files[doc.key] = `${doc.label} document is required for the EOI (Stage 1) submission.`;
+          }
+        });
       }
     }
 
@@ -11835,6 +12490,15 @@ const VendorDashboard = ({
         bid_amount: bidForm.bidAmount ? Number(bidForm.bidAmount) : undefined,
         subsidy_requested: bidForm.subsidyRequested ? Number(bidForm.subsidyRequested) : undefined,
         concept_note: bidForm.conceptNote,
+        bid_stage: currentBidStage,
+        eoi_narrative: bidForm.eoiNarrative,
+        financial_standing_summary: bidForm.financialStandingSummary,
+        technical_experience_summary: bidForm.technicalExperienceSummary,
+        track_record_summary: bidForm.trackRecordSummary,
+        company_credentials_file: bidFiles.companyCredentials ?? undefined,
+        financial_standing_file: bidFiles.financialStanding ?? undefined,
+        technical_experience_file: bidFiles.technicalExperience ?? undefined,
+        track_record_file: bidFiles.trackRecord ?? undefined,
         technical_proposal: bidForm.technicalProposal,
         financial_proposal: bidForm.financialProposal,
         device_brand_model: [bidForm.deviceBrand.trim(), bidForm.deviceModel.trim()].filter(Boolean).join(" ").trim() || bidForm.deviceBrandModel,
@@ -11875,6 +12539,19 @@ const VendorDashboard = ({
         om_plan_document: bidFiles.omPlan ?? undefined,
         distribution_map_file: bidFiles.distributionMap ?? undefined,
         service_tier: bidForm.techTier as TenderBid["service_tier"],
+        custom_documents: customRequiredDocsForStage.length
+          ? customRequiredDocsForStage.map((d) => {
+              const file = bidCustomFiles[d.name] || null;
+              return {
+                name: d.name,
+                expected_type: d.expected_type || "",
+                file_name: file ? file.name : (customDocsExistingMap[d.name]?.file_name || ""),
+              };
+            })
+          : undefined,
+        custom_documents_files: customRequiredDocsForStage
+          .map((d) => bidCustomFiles[d.name])
+          .filter(Boolean) as File[],
         sites: payloadSites,
         status,
       };
@@ -12804,6 +13481,177 @@ const VendorDashboard = ({
                       );
                     })}
                   </div>
+                  {customRequiredDocsForStage.length > 0 && (
+                    <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50/50 p-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-sm font-medium text-slate-700">RBF-required documents for this stage</span>
+                        <span className="text-xs font-bold text-slate-500">{customDocsUploadedCount} of {customRequiredDocsForStage.length} uploaded</span>
+                      </div>
+                      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 mt-4">
+                        {customRequiredDocsForStage.map((doc, idx) => {
+                          const uploaded = Boolean(bidCustomFiles[doc.name]) || Boolean(customDocsExistingMap[doc.name]?.file_url || customDocsExistingMap[doc.name]?.file_name);
+                          const err = bidFileErrors[`custom-${doc.name}`];
+                          return (
+                            <div key={doc.name} className={`rounded-2xl border p-4 ${uploaded ? "border-emerald-300 bg-emerald-50" : "border-amber-300 bg-white"}`}>
+                              <label htmlFor={`bid-custom-doc-${doc.name}`} className="cursor-pointer block">
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className={`rounded-2xl p-3 ${uploaded ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
+                                    <FileText size={18} />
+                                  </div>
+                                  {uploaded ? <CheckCircle2 size={18} className="text-emerald-600" /> : <Upload size={18} className="text-slate-400" />}
+                                </div>
+                                <p className="mt-4 text-sm font-bold text-slate-900">{doc.name}</p>
+                                <p className="mt-1 text-xs text-slate-500">{doc.expected_type ? `Expected format: ${doc.expected_type}` : "Any supported format"}</p>
+                                <p className="mt-3 text-xs font-medium text-slate-500">
+                                  {bidCustomFiles[doc.name]
+                                    ? bidCustomFiles[doc.name]!.name
+                                    : customDocsExistingMap[doc.name]?.file_name
+                                      ? customDocsExistingMap[doc.name]!.file_name
+                                      : "Click to upload"}
+                                </p>
+                              </label>
+                              <input
+                                id={`bid-custom-doc-${doc.name}`}
+                                type="file"
+                                accept=".pdf,.docx,.xlsx"
+                                className="hidden"
+                                onChange={(e) => handleBidCustomFileChange(doc.name, e.target.files?.[0] || null)}
+                              />
+                              {err && <p className="mt-2 text-xs font-semibold text-rose-600">{err}</p>}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {isEoiStage && (
+              <div id="bid-section-eoi" className="card overflow-hidden border-slate-200">
+                <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="flex items-center gap-3">
+                      <div className={`rounded-2xl p-3 ${eoiDocumentsComplete && eoiNarrativeValid ? "bg-emerald-100 text-emerald-700" : "bg-slate-900 text-white"}`}>
+                        <FileText size={18} />
+                      </div>
+                      <div>
+                        <h3 className="text-lg font-bold text-slate-900">Stage 1: Expression of Interest (EOI)</h3>
+                        <p className="text-sm text-slate-500">Submit your company credentials, financial standing, technical experience, and track record to be considered for this tender.</p>
+                      </div>
+                    </div>
+                    {eoiDocumentsComplete && eoiNarrativeValid ? <CheckCircle2 size={18} className="text-emerald-600" /> : <AlertTriangle size={18} className="text-amber-500" />}
+                  </div>
+                </div>
+                <div className="space-y-4 p-6">
+                  {bidSectionErrors["eoi"] && (
+                    <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 font-medium">
+                      {bidSectionErrors["eoi"]}
+                    </div>
+                  )}
+                  <div className="flex items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                    <span className="text-sm font-medium text-slate-700">EOI document checklist</span>
+                    <span className="text-xs font-bold text-slate-500">{uploadedEoiDocumentCount} of {eoiDocuments.length} uploaded</span>
+                  </div>
+                  <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                    {eoiDocuments.map((doc, idx) => {
+                      const uploaded = Boolean((bidFiles as any)[doc.key]?.name || (existingEoiDocuments as any)[doc.key]);
+                      return (
+                        <div key={doc.key} className={`rounded-3xl border p-5 ${uploaded ? "border-emerald-200 bg-emerald-50" : "border-slate-200 bg-white"}`}>
+                          <label htmlFor={`bid-eoi-doc-${doc.key}-${idx}`} className="cursor-pointer block">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className={`rounded-2xl p-3 ${uploaded ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>
+                                <FileText size={18} />
+                              </div>
+                              {uploaded ? <CheckCircle2 size={18} className="text-emerald-600" /> : <Upload size={18} className="text-slate-400" />}
+                            </div>
+                            <p className="mt-4 text-sm font-bold text-slate-900">{doc.label}</p>
+                            <p className="mt-1 text-xs text-slate-500">{doc.hint}</p>
+                            <p className="mt-3 text-xs font-medium text-slate-500">{uploaded ? (doc.long || "Uploaded and ready") : "Click to upload"}</p>
+                          </label>
+                          <input
+                            id={`bid-eoi-doc-${doc.key}-${idx}`}
+                            type="file"
+                            accept=".pdf,.docx,.xlsx"
+                            className="hidden"
+                            onChange={(e) => handleBidFileChange(doc.key, e.target.files?.[0] || null)}
+                          />
+                          {bidFileErrors[doc.key] && <p className="mt-2 text-xs font-semibold text-rose-600">{bidFileErrors[doc.key]}</p>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                  {customRequiredDocsForStage.length > 0 && (
+                    <div className="mt-6 rounded-2xl border border-amber-200 bg-amber-50/50 p-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-sm font-medium text-slate-700">RBF-required documents for this stage</span>
+                        <span className="text-xs font-bold text-slate-500">{customDocsUploadedCount} of {customRequiredDocsForStage.length} uploaded</span>
+                      </div>
+                      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 mt-4">
+                        {customRequiredDocsForStage.map((doc, idx) => {
+                          const uploaded = Boolean(bidCustomFiles[doc.name]) || Boolean(customDocsExistingMap[doc.name]?.file_url || customDocsExistingMap[doc.name]?.file_name);
+                          const err = bidFileErrors[`custom-${doc.name}`];
+                          return (
+                            <div key={doc.name} className={`rounded-2xl border p-4 ${uploaded ? "border-emerald-300 bg-emerald-50" : "border-amber-300 bg-white"}`}>
+                              <label htmlFor={`bid-custom-doc-${idx}`} className="cursor-pointer block">
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className={`rounded-2xl p-3 ${uploaded ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
+                                    <FileText size={18} />
+                                  </div>
+                                  {uploaded ? <CheckCircle2 size={18} className="text-emerald-600" /> : <Upload size={18} className="text-slate-400" />}
+                                </div>
+                                <p className="mt-4 text-sm font-bold text-slate-900">{doc.name}</p>
+                                <p className="mt-1 text-xs text-slate-500">{doc.expected_type ? `Expected format: ${doc.expected_type}` : "Any supported format"}</p>
+                                <p className="mt-3 text-xs font-medium text-slate-500">
+                                  {bidCustomFiles[doc.name]
+                                    ? bidCustomFiles[doc.name]!.name
+                                    : customDocsExistingMap[doc.name]?.file_name
+                                      ? customDocsExistingMap[doc.name]!.file_name
+                                      : "Click to upload"}
+                                </p>
+                              </label>
+                              <input
+                                id={`bid-custom-doc-${idx}`}
+                                type="file"
+                                accept=".pdf,.docx,.xlsx"
+                                className="hidden"
+                                onChange={(e) => handleBidCustomFileChange(doc.name, e.target.files?.[0] || null)}
+                              />
+                              {err && <p className="mt-2 text-xs font-semibold text-rose-600">{err}</p>}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                  <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                    <div className="space-y-1">
+                      <label className="text-sm font-bold text-slate-700 ml-1">Financial Standing Summary (Optional)</label>
+                      <textarea className="input-field min-h-[120px]" value={bidForm.financialStandingSummary} onChange={(e) => setBidForm(prev => ({ ...prev, financialStandingSummary: e.target.value }))} />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-sm font-bold text-slate-700 ml-1">Technical Experience Summary (Optional)</label>
+                      <textarea className="input-field min-h-[120px]" value={bidForm.technicalExperienceSummary} onChange={(e) => setBidForm(prev => ({ ...prev, technicalExperienceSummary: e.target.value }))} />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-sm font-bold text-slate-700 ml-1">Track Record Summary (Optional)</label>
+                      <textarea className="input-field min-h-[120px]" value={bidForm.trackRecordSummary} onChange={(e) => setBidForm(prev => ({ ...prev, trackRecordSummary: e.target.value }))} />
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <label className="text-sm font-bold text-slate-700 ml-1">EOI Narrative *</label>
+                    <span className={`inline-flex rounded-full px-3 py-1 text-xs font-bold ${eoiNarrativeValid ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
+                      {eoiNarrativeCharCount}/200 chars
+                    </span>
+                  </div>
+                  <textarea
+                    className="input-field min-h-[160px]"
+                    value={bidForm.eoiNarrative}
+                    onChange={(e) => { setBidForm(prev => ({ ...prev, eoiNarrative: e.target.value })); clearBidFieldError("eoiNarrative"); }}
+                    placeholder="Briefly describe why your company is well-suited for this opportunity, including capacity, experience, and intended approach."
+                  />
+                  <BidFieldError message={bidFieldErrors["eoiNarrative"]} />
                 </div>
               </div>
             )}
@@ -12842,7 +13690,6 @@ const VendorDashboard = ({
                 </div>
               </div>
             </div>
-
             {isSiteSpecificStage && (
               <div className="card overflow-hidden border-slate-200">
                 <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
@@ -12983,7 +13830,7 @@ const VendorDashboard = ({
                 </div>
                 <div>
                   <p className="text-sm font-bold text-slate-900">{bidDeadlineCountdown}</p>
-                  <p className="text-xs text-slate-500">{bidTender.lastDateSubmission || bidTender.deadline}</p>
+                  <p className="text-xs text-slate-500">{bidTender.deadline}</p>
                 </div>
               </div>
             </div>
@@ -20508,7 +21355,11 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
 
   const filteredBidQueue = useMemo(() => {
     if (isFinancialEvaluationMode) {
-      return bidQueue.filter((bid) => bid.stage_key === "site_specific" && hasPassedTechnicalThreshold(bid));
+      return bidQueue.filter((bid) =>
+        bid.stage_key === "site_specific" &&
+        hasPassedTechnicalThreshold(bid) &&
+        bid.financial_sealed !== true
+      );
     }
     return bidQueue.filter((bid) => bid.stage_key === "site_specific");
   }, [bidQueue, isFinancialEvaluationMode, technicalEvaluationsByBid, tenderThresholds, bidsById]);
@@ -24975,12 +25826,6 @@ const PublicPortal = ({ onBack, onRegisterClick, publicSubView, publicTenderId, 
                       <p className="text-[10px] font-bold text-rose-500 uppercase tracking-wider mb-1">Deadline</p>
                       <p className="text-sm font-bold text-rose-600">{selected.deadline ? new Date(selected.deadline).toLocaleDateString() : "N/A"}</p>
                     </div>
-                    {selected.dateOpening && (
-                      <div className="rounded-2xl border border-blue-100 p-3 bg-gradient-to-br from-blue-50 to-white">
-                        <p className="text-[10px] font-bold text-blue-500 uppercase tracking-wider mb-1">Opening Date</p>
-                        <p className="text-sm font-bold text-blue-700">{new Date(selected.dateOpening).toLocaleDateString()}</p>
-                      </div>
-                    )}
                     {selected.timeForCompletion && (
                       <div className="rounded-2xl border border-violet-100 p-3 bg-gradient-to-br from-violet-50 to-white">
                         <p className="text-[10px] font-bold text-violet-500 uppercase tracking-wider mb-1">Completion</p>
@@ -25094,22 +25939,10 @@ const PublicPortal = ({ onBack, onRegisterClick, publicSubView, publicTenderId, 
                     <p className="text-sm text-slate-700 leading-relaxed">{selected.biddersEligibility || "Pre-qualification required. Vendors must be registered with valid trading license and tax clearance."}</p>
                   </div>
 
-                  {(selected.lastDateSubmission || selected.lastDateSecurity || selected.addressForDocument || selected.placeForOpening) && (
+                  {(selected.addressForDocument || selected.placeForOpening) && (
                     <div className="rounded-2xl border border-slate-200 p-5">
                       <h5 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-4">Submission Details</h5>
                       <div className="space-y-3">
-                        {selected.lastDateSubmission && (
-                          <div className="flex items-center gap-3 py-2 border-b border-slate-100">
-                            <span className="text-xs font-bold text-slate-500 w-36 flex-shrink-0">Last Submission Date</span>
-                            <span className="text-sm font-bold text-rose-600">{new Date(selected.lastDateSubmission).toLocaleDateString()}</span>
-                          </div>
-                        )}
-                        {selected.lastDateSecurity && (
-                          <div className="flex items-center gap-3 py-2 border-b border-slate-100">
-                            <span className="text-xs font-bold text-slate-500 w-36 flex-shrink-0">Security Deadline</span>
-                            <span className="text-sm font-bold text-slate-900">{new Date(selected.lastDateSecurity).toLocaleDateString()}</span>
-                          </div>
-                        )}
                         {selected.addressForDocument && (
                           <div className="flex items-start gap-3 py-2 border-b border-slate-100">
                             <span className="text-xs font-bold text-slate-500 w-36 flex-shrink-0 pt-1">Document Address</span>
@@ -26655,9 +27488,15 @@ export default function App() {
         });
 
       } else if (r === UserRole.ADMIN) {
-        const usersResult = await fetchAdminManagedUsers();
+        const [usersResult, pendingApprovals] = await Promise.all([
+          fetchAdminManagedUsers(),
+          fetchPendingPublishApprovals(),
+        ]);
         const pendingUsers = usersResult.filter(u => u.status === "Pending").length;
-        setSidebarBadges({ users: fmt(pendingUsers) });
+        setSidebarBadges({
+          users: fmt(pendingUsers),
+          publish_approvals: fmt(pendingApprovals.length),
+        });
 
       } else {
         setSidebarBadges({});
@@ -26848,9 +27687,44 @@ export default function App() {
     return { tab: "dashboard" };
   };
 
+  const sidebarPermissionModule: Record<string, string> = {
+    dashboard: "dashboard",
+    users: "users",
+    all_vendors: "vendors",
+    tenders: "tenders",
+    notice_board: "notifications",
+    evaluations: "evaluations",
+    prequal: "prequalification",
+    rbf_projects: "projects",
+    projects: "projects",
+    projects_hub: "projects",
+    payments: "payments",
+    claims: "payments",
+    blacklisting: "blacklisting",
+    issues_findings: "issues",
+    issues: "issues",
+    reports: "reports",
+    audit_logs: "audit_logs",
+    audit_findings: "audit_logs",
+    notifications: "notifications",
+    system_configuration: "system_configuration",
+    prospect_sync: "prospect_sync",
+    system_health: "system_health",
+    gis: "projects",
+    regional: "projects",
+    kpis: "reports",
+    kpi_dashboard: "reports",
+  };
+
+  const canViewSidebarItem = (tab: string) => {
+    if (role === UserRole.ADMIN || !currentUser.permissions) return true;
+    const module = sidebarPermissionModule[tab] || tab;
+    return currentUser.permissions[module]?.includes("view") ?? false;
+  };
+
   const handleNotificationSelect = (note: Notification) => {
     const target = resolveNotificationTarget(note);
-    const allowedTabs = new Set(getSidebarItems().map(item => item.id));
+    const allowedTabs = new Set(getSidebarItems().filter(item => canViewSidebarItem(item.id)).map(item => item.id));
     const nextTab = allowedTabs.has(target.tab) ? target.tab : (allowedTabs.has("notifications") ? "notifications" : "dashboard");
 
     setShowNotifications(false);
@@ -27042,9 +27916,19 @@ export default function App() {
     }
     if (role === UserRole.ADMIN) {
       switch (activeTab) {
+        case "tenders": return <Tenders initialView={routerAction && ["list", "create", "details", "verify", "publish", "award", "edit"].includes(routerAction) ? routerAction as any : "list"} initialTenderId={routerId || pendingTenderId} onTenderOpened={() => setPendingTenderId(null)} onNavigate={(action, id) => navigateTo("tenders", action, id)} />;
+        case "publish_approvals": return <PublishApprovals onOpenTender={(tenderId) => { setPendingTenderId(tenderId); navigateTo("tenders", "details", tenderId); }} />;
+        case "notice_board": return <RmtNoticeManagement currentUser={currentUser} />;
+        case "evaluations": return <TACView mode="financial" onNavigate={(action, id) => navigateTo("evaluations", action, id)} />;
+        case "prequal": return <PreQualification />;
+        case "rbf_projects": return <ProjectsHub mode="rbf" externalProjectId={selectedProjectId} externalProjectTab={selectedProjectTab} />;
+        case "blacklisting": return <Blacklisting currentUser={currentUser} />;
+        case "payments": return <Disbursements onOpenProjectKpi={openProjectKpiView} onOpenProject={openProjectHubView} />;
+        case "issues_findings": return <RmtIssuesFindings currentUser={currentUser} />;
         case "dashboard":
-        case "users":
-        case "system_configuration":
+         case "users":
+         case "permissions":
+         case "system_configuration":
         case "prospect_sync":
         case "audit_logs":
         case "notifications":
@@ -27286,9 +28170,19 @@ if (activeTab === "reports") {
     if (role === UserRole.ADMIN) {
       return [
         ...common,
-        { id: "all_vendors", icon: Users, label: "All Vendors" },
-        { id: "users", icon: Users, label: "User Management", ...ab("users") },
-        { id: "system_configuration", icon: Settings, label: "System Configuration" },
+         { id: "all_vendors", icon: Users, label: "All Vendors" },
+         { id: "tenders", icon: FileText, label: "Tender Management", ...ab("tenders") },
+         { id: "publish_approvals", icon: ClipboardCheck, label: "Publish Approvals" },
+         { id: "notice_board", icon: Bell, label: "Notice Board" },
+         { id: "evaluations", icon: ClipboardCheck, label: "Evaluations", ...ab("evaluations") },
+         { id: "prequal", icon: ClipboardCheck, label: "Pre-Qualification", ...ab("prequal") },
+         { id: "rbf_projects", icon: FolderKanban, label: "Projects" },
+         { id: "payments", icon: CreditCard, label: "Payments", ...ab("payments") },
+         { id: "blacklisting", icon: FileWarning, label: "Blacklisting" },
+         { id: "issues_findings", icon: AlertTriangle, label: "Issues & Findings" },
+         { id: "users", icon: Users, label: "User Management", ...ab("users") },
+         { id: "permissions", icon: ShieldCheck, label: "Role Permissions" },
+         { id: "system_configuration", icon: Settings, label: "System Configuration" },
         { id: "prospect_sync", icon: History, label: "Prospect Sync" },
         { id: "audit_logs", icon: FileText, label: "Audit Logs" },
         { id: "notifications", icon: Bell, label: "Notifications" },
@@ -27374,7 +28268,7 @@ if (activeTab === "reports") {
         <nav className="flex-1 px-4 space-y-1 overflow-y-auto">
           <div className="py-4">
             <p className="px-4 text-[10px] font-bold text-blue-200/80 uppercase tracking-widest mb-2">Menu</p>
-            {getSidebarItems().map(item => (
+            {getSidebarItems().filter(item => canViewSidebarItem(item.id)).map(item => (
               <SidebarItem 
                 key={item.id}
                 icon={item.icon} 

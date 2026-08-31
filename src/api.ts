@@ -43,6 +43,7 @@ import {
   PlatformConfiguration,
   SystemHealthPayload,
   SuperAdminDashboardSummary,
+  RolePermissionMatrix,
   ReportTemplate,
   ReportHistoryItem,
   ReportFormat,
@@ -354,6 +355,10 @@ function mapTenderFromApi(api: any): Tender {
     category: api.category ?? "",
     status: api.status ?? "Draft",
     deadline: api.deadline ?? "",
+    procurementWorkflow: api.procurement_workflow ?? "sequential",
+    eoiDeadline: api.eoi_deadline ?? undefined,
+    technicalDeadline: api.technical_deadline ?? undefined,
+    financialDeadline: api.financial_deadline ?? undefined,
     budget: api.budget != null ? Number(api.budget) : undefined,
     applicationType: api.application_type ?? undefined,
     stageType: api.stage_type ?? undefined,
@@ -366,9 +371,6 @@ function mapTenderFromApi(api: any): Tender {
     invitedBy: api.invited_by ?? undefined,
     biddingCurrency: api.bidding_currency ?? undefined,
     instruction: api.instruction ?? undefined,
-    lastDateSecurity: api.last_date_security ?? undefined,
-    lastDateSubmission: api.last_date_submission ?? undefined,
-    dateOpening: api.date_opening ?? undefined,
     preTenderMeetingInfo: api.pre_tender_meeting_info ?? undefined,
     biddersSchedulePurchase: api.bidders_schedule_purchase ?? undefined,
     tenderSecurityRequired: api.tender_security_required ?? undefined,
@@ -397,9 +399,24 @@ function mapTenderFromApi(api: any): Tender {
     verifiedAt: api.verified_at ?? undefined,
     awardedAt: api.awarded_at ?? undefined,
     closedAt: api.closed_at ?? undefined,
+    publishApprovalStatus: api.publish_approval_status ?? undefined,
+    publishApprovalRequestedAt: api.publish_approval_requested_at ?? undefined,
+    publishApprovalReviewedAt: api.publish_approval_reviewed_at ?? undefined,
+    publishApprovalReviewedBy: api.publish_approval_reviewed_by ?? undefined,
+    publishApprovalNotes: api.publish_approval_notes ?? undefined,
     awardedVendorName: api.awarded_vendor_name ?? undefined,
     awardedVendorId: api.awarded_vendor_id ?? undefined,
     bidCount: api.bid_count ?? undefined,
+    requiredDocuments: Array.isArray(api.required_documents)
+      ? api.required_documents.map((d: any) => ({
+          id: d.id != null ? String(d.id) : undefined,
+          name: d.name ?? "",
+          expected_type: d.expected_type ?? "",
+          bid_stage: d.bid_stage ?? "eoi",
+          bid_stage_label: d.bid_stage_label ?? undefined,
+          position: d.position != null ? d.position : undefined,
+        }))
+      : undefined,
   };
 }
 
@@ -446,6 +463,7 @@ function mapUserFromApi(api: any): User {
       : undefined,
     vendorTag: api.vendor_tag ?? undefined,
     blacklistSummary: api.blacklist_summary ?? undefined,
+    permissions: api.permissions && typeof api.permissions === "object" ? api.permissions : undefined,
   };
 }
 
@@ -790,6 +808,10 @@ function mapTenderToApi(ui: Partial<Tender>): any {
     category: ui.category ?? "",
     status: ui.status ?? "Draft",
     deadline: ui.deadline && ui.deadline !== "" ? ui.deadline : null,
+    procurement_workflow: ui.procurementWorkflow ?? "sequential",
+    eoi_deadline: ui.eoiDeadline && ui.eoiDeadline !== "" ? ui.eoiDeadline : null,
+    technical_deadline: ui.technicalDeadline && ui.technicalDeadline !== "" ? ui.technicalDeadline : null,
+    financial_deadline: ui.financialDeadline && ui.financialDeadline !== "" ? ui.financialDeadline : null,
     budget: ui.budget ?? null,
     application_type: ui.applicationType ?? null,
     stage_type: ui.stageType ?? null,
@@ -802,9 +824,6 @@ function mapTenderToApi(ui: Partial<Tender>): any {
     invited_by: ui.invitedBy ?? "",
     bidding_currency: ui.biddingCurrency ?? null,
     instruction: ui.instruction ?? "",
-    last_date_security: ui.lastDateSecurity && ui.lastDateSecurity !== "" ? ui.lastDateSecurity : null,
-    last_date_submission: ui.lastDateSubmission && ui.lastDateSubmission !== "" ? ui.lastDateSubmission : null,
-    date_opening: ui.dateOpening && ui.dateOpening !== "" ? ui.dateOpening : null,
     pre_tender_meeting_info: ui.preTenderMeetingInfo ?? "",
     bidders_schedule_purchase: ui.biddersSchedulePurchase ?? false,
     tender_security_required: ui.tenderSecurityRequired ?? false,
@@ -820,6 +839,7 @@ function mapTenderToApi(ui: Partial<Tender>): any {
     financial_weight: ui.financialWeight ?? 30,
     technical_threshold: ui.technicalThreshold ?? 70,
     cooling_off_days: ui.coolingOffDays ?? 7,
+    required_documents: Array.isArray(ui.requiredDocuments) ? ui.requiredDocuments : undefined,
   };
 }
 
@@ -828,6 +848,10 @@ function buildTenderForm(payload: Partial<Tender> & { scheduleFile?: File | null
   const form = new FormData();
   Object.entries(apiPayload).forEach(([k, v]) => {
     if (v == null) return;
+    if (k === 'required_documents' && Array.isArray(v)) {
+      form.append(k, JSON.stringify(v));
+      return;
+    }
     if ((k === 'technology_types' || k === 'target_districts') && Array.isArray(v)) {
       // JSONField expects JSON-encoded string
       form.append(k, JSON.stringify(v));
@@ -1304,8 +1328,33 @@ function mapTenderBidFromApi(api: any): TenderBid {
     stage_two_unlocked_at: api.stage_two_unlocked_at ?? undefined,
     stage_two_source_bid: api.stage_two_source_bid != null ? String(api.stage_two_source_bid) : undefined,
     stage_two_ready: api.stage_two_ready != null ? Boolean(api.stage_two_ready) : undefined,
+    bid_stage: api.bid_stage ?? undefined,
+    eoi_narrative: api.eoi_narrative ?? undefined,
+    company_credentials_file: normalizeFileUrl(api.company_credentials_file ?? undefined),
+    financial_standing_file: normalizeFileUrl(api.financial_standing_file ?? undefined),
+    technical_experience_file: normalizeFileUrl(api.technical_experience_file ?? undefined),
+    track_record_file: normalizeFileUrl(api.track_record_file ?? undefined),
+    financial_standing_summary: api.financial_standing_summary ?? undefined,
+    technical_experience_summary: api.technical_experience_summary ?? undefined,
+    track_record_summary: api.track_record_summary ?? undefined,
+    technical_stage_unlocked: api.technical_stage_unlocked != null ? Boolean(api.technical_stage_unlocked) : undefined,
+    technical_stage_unlocked_at: api.technical_stage_unlocked_at ?? undefined,
+    technical_stage_source_bid: api.technical_stage_source_bid != null ? String(api.technical_stage_source_bid) : undefined,
+    financial_stage_unlocked: api.financial_stage_unlocked != null ? Boolean(api.financial_stage_unlocked) : undefined,
+    financial_stage_unlocked_at: api.financial_stage_unlocked_at ?? undefined,
+    financial_stage_source_bid: api.financial_stage_source_bid != null ? String(api.financial_stage_source_bid) : undefined,
+    financial_sealed: api.financial_sealed != null ? Boolean(api.financial_sealed) : undefined,
+    financial_unsealed_at: api.financial_unsealed_at ?? undefined,
+    tender_procurement_workflow: api.tender_procurement_workflow ?? undefined,
+    financial_stage_open: api.financial_stage_open != null ? Boolean(api.financial_stage_open) : undefined,
     document_requirements: Array.isArray(api.document_requirements) ? api.document_requirements : [],
     document_counts: api.document_counts ?? undefined,
+    customDocuments: Array.isArray(api.custom_documents) ? api.custom_documents.map((cd: any) => ({
+      name: cd?.name ?? "",
+      expected_type: cd?.expected_type ?? "",
+      file_name: cd?.file_name ?? "",
+      file_url: cd?.file_url ? normalizeFileUrl(cd.file_url) : undefined,
+    })) : [],
     deadline: api.deadline ?? undefined,
     deadline_passed: api.deadline_passed != null ? Boolean(api.deadline_passed) : undefined,
     deadline_countdown_seconds: api.deadline_countdown_seconds != null ? Number(api.deadline_countdown_seconds) : undefined,
@@ -1434,6 +1483,7 @@ function mapAuditLogFromApi(api: any): AuditLog {
     details: api.details && typeof api.details === "object" ? api.details : {},
     actor: api.actor != null ? String(api.actor) : undefined,
     actorUsername: api.actor_username ?? undefined,
+    actorFullName: api.actor_full_name ?? undefined,
     createdAt: api.created_at ?? "",
     notes: api.notes ?? undefined,
     recordId: api.record_id != null ? String(api.record_id) : undefined,
@@ -1828,6 +1878,45 @@ export async function publishTender(
   };
 }
 
+export async function requestPublishApproval(
+  tenderId: string,
+): Promise<Tender> {
+  const data = await http<any>(`/api/tenders/${tenderId}/request_publish_approval/`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  return mapTenderFromApi(data);
+}
+
+export async function approvePublish(
+  tenderId: string,
+  notes?: string,
+): Promise<Tender> {
+  const data = await http<any>(`/api/tenders/${tenderId}/approve_publish/`, {
+    method: "POST",
+    body: JSON.stringify({ notes: notes ?? "" }),
+  });
+  return mapTenderFromApi(data);
+}
+
+export async function rejectPublish(
+  tenderId: string,
+  notes?: string,
+): Promise<Tender> {
+  const data = await http<any>(`/api/tenders/${tenderId}/reject_publish/`, {
+    method: "POST",
+    body: JSON.stringify({ notes: notes ?? "" }),
+  });
+  return mapTenderFromApi(data);
+}
+
+export async function fetchPendingPublishApprovals(): Promise<Tender[]> {
+  const data = await http<any>(`/api/tenders/pending_publish_approvals/`, {
+    method: "GET",
+  });
+  return (Array.isArray(data) ? data : (data?.results ?? [])).map(mapTenderFromApi);
+}
+
 export async function awardTender(
   tenderId: string,
   payload: {
@@ -2006,6 +2095,28 @@ export async function submitTenderBid(payload: Partial<TenderBid>): Promise<Tend
   if (payload.sites) form.append('sites', JSON.stringify(payload.sites.map(mapTenderBidSiteToApi)));
   form.append('status', payload.status ?? BidStatus.DRAFT);
   if (payload.preferred_district) form.append('preferred_district', payload.preferred_district);
+  if (payload.bid_stage != null) form.append('bid_stage', payload.bid_stage);
+  form.append('eoi_narrative', payload.eoi_narrative ?? "");
+  form.append('financial_standing_summary', payload.financial_standing_summary ?? "");
+  form.append('technical_experience_summary', payload.technical_experience_summary ?? "");
+  form.append('track_record_summary', payload.track_record_summary ?? "");
+
+  const companyCredentialsFile = (payload as any).company_credentials_file;
+  if (companyCredentialsFile instanceof File) {
+    form.append('company_credentials_file', companyCredentialsFile);
+  }
+  const financialStandingFile = (payload as any).financial_standing_file;
+  if (financialStandingFile instanceof File) {
+    form.append('financial_standing_file', financialStandingFile);
+  }
+  const technicalExperienceFile = (payload as any).technical_experience_file;
+  if (technicalExperienceFile instanceof File) {
+    form.append('technical_experience_file', technicalExperienceFile);
+  }
+  const trackRecordFile = (payload as any).track_record_file;
+  if (trackRecordFile instanceof File) {
+    form.append('track_record_file', trackRecordFile);
+  }
 
   const technicalProposalFile = (payload as any).technical_proposal_file;
   if (technicalProposalFile instanceof File) {
@@ -2046,6 +2157,15 @@ export async function submitTenderBid(payload: Partial<TenderBid>): Promise<Tend
   const tenderSecurityFile = (payload as any).tender_security_file;
   if (tenderSecurityFile instanceof File) {
     form.append('tender_security_file', tenderSecurityFile);
+  }
+
+  const customDocuments = (payload as any).custom_documents;
+  if (Array.isArray(customDocuments) && customDocuments.length) {
+    form.append('custom_documents', JSON.stringify(customDocuments));
+  }
+  const customDocumentsFiles = (payload as any).custom_documents_files;
+  if (Array.isArray(customDocumentsFiles) && customDocumentsFiles.length) {
+    customDocumentsFiles.forEach((f: File) => form.append('custom_documents_files', f));
   }
 
   const data = await http<any>(`/api/tender-bids/`, {
@@ -2085,6 +2205,28 @@ export async function updateTenderBid(bidId: string, payload: Partial<TenderBid>
   if (payload.sites != null) form.append('sites', JSON.stringify(payload.sites.map(mapTenderBidSiteToApi)));
   if (payload.status != null) form.append('status', payload.status);
   if (payload.preferred_district != null) form.append('preferred_district', payload.preferred_district);
+  if (payload.bid_stage != null) form.append('bid_stage', payload.bid_stage);
+  if (payload.eoi_narrative != null) form.append('eoi_narrative', payload.eoi_narrative);
+  if (payload.financial_standing_summary != null) form.append('financial_standing_summary', payload.financial_standing_summary);
+  if (payload.technical_experience_summary != null) form.append('technical_experience_summary', payload.technical_experience_summary);
+  if (payload.track_record_summary != null) form.append('track_record_summary', payload.track_record_summary);
+
+  const companyCredentialsFile = (payload as any).company_credentials_file;
+  if (companyCredentialsFile instanceof File) {
+    form.append('company_credentials_file', companyCredentialsFile);
+  }
+  const financialStandingFile = (payload as any).financial_standing_file;
+  if (financialStandingFile instanceof File) {
+    form.append('financial_standing_file', financialStandingFile);
+  }
+  const technicalExperienceFile = (payload as any).technical_experience_file;
+  if (technicalExperienceFile instanceof File) {
+    form.append('technical_experience_file', technicalExperienceFile);
+  }
+  const trackRecordFile = (payload as any).track_record_file;
+  if (trackRecordFile instanceof File) {
+    form.append('track_record_file', trackRecordFile);
+  }
 
   const technicalProposalFile = (payload as any).technical_proposal_file;
   if (technicalProposalFile instanceof File) {
@@ -2125,6 +2267,15 @@ export async function updateTenderBid(bidId: string, payload: Partial<TenderBid>
   const tenderSecurityFile = (payload as any).tender_security_file;
   if (tenderSecurityFile instanceof File) {
     form.append('tender_security_file', tenderSecurityFile);
+  }
+
+  const customDocuments = (payload as any).custom_documents;
+  if (Array.isArray(customDocuments) && customDocuments.length) {
+    form.append('custom_documents', JSON.stringify(customDocuments));
+  }
+  const customDocumentsFiles = (payload as any).custom_documents_files;
+  if (Array.isArray(customDocumentsFiles) && customDocumentsFiles.length) {
+    customDocumentsFiles.forEach((f: File) => form.append('custom_documents_files', f));
   }
 
   const data = await http<any>(`/api/tender-bids/${bidId}/`, {
@@ -2165,6 +2316,20 @@ export async function acceptTenderBid(bidId: string): Promise<TenderBid> {
     body: JSON.stringify({}),
   });
   return mapTenderBidFromApi(data);
+}
+
+export async function openFinancialStage(
+  tenderId: string
+): Promise<{ detail: string; opened_bids: string[]; workflow: string }> {
+  const data = await http<any>(`/api/tenders/${tenderId}/open_financial_stage/`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  return {
+    detail: data?.detail ?? "",
+    opened_bids: Array.isArray(data?.opened_bids) ? data.opened_bids.map(String) : [],
+    workflow: data?.workflow ?? "sequential",
+  };
 }
 
 export async function rejectTenderBid(
@@ -3222,6 +3387,11 @@ export async function fetchSystemAuditLogs(params?: {
   return unwrapListResponse<any>(data).map(mapAuditLogFromApi);
 }
 
+export async function fetchTenderActivity(tenderId: string): Promise<AuditLog[]> {
+  const data = await http<any>(`/api/tenders/${tenderId}/activity/`);
+  return unwrapListResponse<any>(data).map(mapAuditLogFromApi);
+}
+
 export async function exportSystemAuditLogs(
   format: "csv" | "pdf",
   params?: {
@@ -3699,6 +3869,17 @@ export async function confirmResetPassword(token: string, newPassword: string): 
 export async function fetchSuperAdminDashboardSummary(): Promise<SuperAdminDashboardSummary> {
   const data = await http<any>(`/api/users/admin/dashboard/`);
   return mapSuperAdminDashboardSummaryFromApi(data);
+}
+
+export async function fetchRolePermissions(): Promise<RolePermissionMatrix> {
+  return await http<RolePermissionMatrix>('/api/users/admin/permissions/');
+}
+
+export async function updateRolePermissions(matrix: RolePermissionMatrix): Promise<{ updated: number }> {
+  return await http<{ updated: number }>('/api/users/admin/permissions/', {
+    method: 'PUT',
+    body: JSON.stringify({ roles: matrix.roles }),
+  });
 }
 
 export async function fetchOrganizations(): Promise<Organization[]> {

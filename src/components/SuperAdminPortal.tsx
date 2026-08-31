@@ -42,6 +42,7 @@ import {
   fetchProspectSyncLogs,
   fetchProspectSyncSummary,
   fetchSuperAdminDashboardSummary,
+  fetchRolePermissions,
   fetchSystemAuditLogs,
   fetchSystemHealth,
   fetchUserManagementMeta,
@@ -53,6 +54,7 @@ import {
   updateAdminManagedUser,
   updateOrganization,
   updatePlatformConfiguration,
+  updateRolePermissions,
   USER_KEY,
 } from "../api";
 import {
@@ -62,6 +64,7 @@ import {
   PlatformConfiguration,
   ProspectSyncLog,
   SuperAdminDashboardSummary,
+  RolePermissionMatrix,
   SystemHealthPayload,
   User,
   UserRole,
@@ -174,6 +177,7 @@ const toneForNotification = (status: Notification["status"]) => {
 type AdminSection =
   | "dashboard"
   | "users"
+  | "permissions"
   | "organizations"
   | "system_configuration"
   | "prospect_sync"
@@ -209,6 +213,9 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
   const [userForm, setUserForm] = useState(emptyUserForm);
   const [usersLoading, setUsersLoading] = useState(false);
   const [userSubmitting, setUserSubmitting] = useState(false);
+  const [permissionMatrix, setPermissionMatrix] = useState<RolePermissionMatrix | null>(null);
+  const [permissionsLoading, setPermissionsLoading] = useState(false);
+  const [permissionsSubmitting, setPermissionsSubmitting] = useState(false);
 
   const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [organizationForm, setOrganizationForm] = useState(emptyOrganizationForm);
@@ -340,6 +347,49 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
     }
   };
 
+  const loadPermissions = async () => {
+    setPermissionsLoading(true);
+    try {
+      setPermissionMatrix(await fetchRolePermissions());
+    } catch (err: any) {
+      setError(String(err?.message || "Unable to load role permissions."));
+    } finally {
+      setPermissionsLoading(false);
+    }
+  };
+
+  const savePermissions = async () => {
+    if (!permissionMatrix) return;
+    setPermissionsSubmitting(true);
+    try {
+      await updateRolePermissions(permissionMatrix);
+      setBanner("Role permissions updated successfully.");
+      await loadPermissions();
+    } catch (err: any) {
+      setError(String(err?.message || "Unable to update role permissions."));
+    } finally {
+      setPermissionsSubmitting(false);
+    }
+  };
+
+  const togglePermission = (role: string, module: string, action: string) => {
+    setPermissionMatrix((current) => {
+      if (!current || role === UserRole.ADMIN) return current;
+      return {
+        ...current,
+        roles: current.roles.map((roleEntry) => roleEntry.role !== role ? roleEntry : {
+          ...roleEntry,
+          permissions: roleEntry.permissions.map((permission) => permission.module !== module ? permission : {
+            ...permission,
+            actions: permission.actions.includes(action)
+              ? permission.actions.filter((value) => value !== action)
+              : [...permission.actions, action],
+          }),
+        }),
+      };
+    });
+  };
+
   useEffect(() => {
     clearFlash();
     if (section === "dashboard") void loadDashboard();
@@ -358,6 +408,7 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
     if (section === "prospect_sync") void loadProspect();
     if (section === "audit_logs") void loadAudit();
     if (section === "system_health") void loadHealth();
+    if (section === "permissions") void loadPermissions();
   }, [section]);
 
   useEffect(() => {
@@ -634,6 +685,7 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
     users: ["User Management", "Create, edit, deactivate, and audit all non-vendor accounts."],
     organizations: ["Organizations", "Manage stakeholder organizations and their points of contact."],
     system_configuration: ["System Configuration", "Control thresholds, notification behavior, and boundary assets."],
+    permissions: ["Role Permissions", "Control which modules and actions each platform role can access."],
     prospect_sync: ["Prospect Sync", "Monitor connectivity, failed jobs, and recent sync activity."],
     audit_logs: ["Audit Logs", "Filter the full platform audit trail and export reports."],
     reports: ["Reports", "Generate and export KPI, financial, verification, and portfolio reports."],
@@ -657,6 +709,7 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
             if (section === "prospect_sync") void loadProspect();
             if (section === "audit_logs") void loadAudit();
             if (section === "system_health") void loadHealth();
+            if (section === "permissions") void loadPermissions();
           }}
           className="btn-secondary flex items-center gap-2"
         >
@@ -800,6 +853,54 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
                     </>
                   );
                 })()}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {section === "permissions" && (
+        <div className="card overflow-hidden">
+          {permissionsLoading || !permissionMatrix ? (
+            <div className="p-10 text-center text-slate-500">Loading role permissions...</div>
+          ) : (
+            <>
+              <div className="flex flex-col gap-3 border-b border-slate-100 p-5 md:flex-row md:items-center md:justify-between">
+                <p className="text-sm text-slate-600">Super Admin always has full access. Configure permissions for every other role.</p>
+                <button type="button" onClick={() => void savePermissions()} disabled={permissionsSubmitting} className="btn-primary disabled:opacity-60">
+                  {permissionsSubmitting ? "Saving..." : "Save Permissions"}
+                </button>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="min-w-[980px] w-full text-left text-sm">
+                  <thead className="bg-slate-50 text-xs uppercase tracking-wider text-slate-500">
+                    <tr>
+                      <th className="sticky left-0 z-10 bg-slate-50 px-5 py-3">Role / Module</th>
+                      {permissionMatrix.actions.map((action) => <th key={action} className="px-3 py-3 text-center">{action}</th>)}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {permissionMatrix.roles.map((roleEntry) => roleEntry.permissions.map((permission, index) => (
+                      <tr key={`${roleEntry.role}-${permission.module}`} className={index === 0 ? "border-t-2 border-slate-200" : ""}>
+                        <td className="sticky left-0 z-10 bg-white px-5 py-3">
+                          <div className="font-semibold text-slate-900">{index === 0 ? roleEntry.label : ""}</div>
+                          <div className="text-xs text-slate-500">{permission.label}</div>
+                        </td>
+                        {permissionMatrix.actions.map((action) => (
+                          <td key={action} className="px-3 py-3 text-center">
+                            <input
+                              type="checkbox"
+                              checked={permission.actions.includes(action)}
+                              disabled={roleEntry.role === UserRole.ADMIN}
+                              onChange={() => togglePermission(roleEntry.role, permission.module, action)}
+                              className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 disabled:opacity-60"
+                            />
+                          </td>
+                        ))}
+                      </tr>
+                    )))}
+                  </tbody>
+                </table>
               </div>
             </>
           )}

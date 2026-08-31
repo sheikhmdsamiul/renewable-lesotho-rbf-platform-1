@@ -5,12 +5,20 @@ from django.utils import timezone
 
 class TenderStatus(models.TextChoices):
     DRAFT = 'Draft'
+    PENDING_PUBLISH_APPROVAL = 'Pending Publish Approval'
     PUBLISHED = 'Published'
     EVALUATION = 'Evaluation'
     STANDSTILL = 'Standstill'
     DISPUTED = 'Disputed'
     AWARDED = 'Awarded'
     CLOSED = 'Closed'
+
+
+class PublishApprovalStatus(models.TextChoices):
+    NOT_REQUESTED = 'not_requested', 'Not Requested'
+    PENDING = 'pending', 'Pending'
+    APPROVED = 'approved', 'Approved'
+    REJECTED = 'rejected', 'Rejected'
 
 
 class BidStatus(models.TextChoices):
@@ -39,14 +47,38 @@ class BidStage2Status(models.TextChoices):
     NOT_AWARDED = 'Not Awarded'
 
 
+class ProcurementWorkflow(models.TextChoices):
+    """How the Technical and Financial stages are handled after EOI shortlisting."""
+    COMBINED = 'combined', 'Combined'          # Tech + Fin submitted together, evaluated tech-then-fin that financial is sealed until technical clearance
+    SEQUENTIAL = 'sequential', 'Sequential'    # Tech submission -> Tech eval -> if cleared -> Fin submission -> Fin eval
+
+
+class BidStage(models.TextChoices):
+    """Which stage a TenderBid record represents within a tender."""
+    EOI = 'eoi', 'EOI'
+    TECHNICAL = 'technical', 'Technical'
+    FINANCIAL = 'financial', 'Financial'
+    COMBINED = 'combined', 'Combined'
+
+
 class Tender(models.Model):
     reference_number = models.CharField(max_length=64, unique=True)
     name = models.CharField(max_length=255)
     department = models.CharField(max_length=255)
     category = models.CharField(max_length=64)
-    status = models.CharField(max_length=16, choices=TenderStatus.choices, default=TenderStatus.DRAFT)
+    status = models.CharField(max_length=32, choices=TenderStatus.choices, default=TenderStatus.DRAFT)
     deadline = models.DateTimeField()
     budget = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+
+    # Three-stage procurement configuration
+    procurement_workflow = models.CharField(
+        max_length=16,
+        choices=ProcurementWorkflow.choices,
+        default=ProcurementWorkflow.SEQUENTIAL,
+    )
+    eoi_deadline = models.DateTimeField(null=True, blank=True)
+    technical_deadline = models.DateTimeField(null=True, blank=True)
+    financial_deadline = models.DateTimeField(null=True, blank=True)
 
     application_type = models.CharField(max_length=64, blank=True)
     stage_type = models.CharField(max_length=64, blank=True)
@@ -59,9 +91,6 @@ class Tender(models.Model):
     invited_by = models.CharField(max_length=255, blank=True)
     bidding_currency = models.CharField(max_length=64, blank=True)
     instruction = models.TextField(blank=True)
-    last_date_security = models.DateTimeField(null=True, blank=True)
-    last_date_submission = models.DateTimeField(null=True, blank=True)
-    date_opening = models.DateTimeField(null=True, blank=True)
     pre_tender_meeting_info = models.TextField(blank=True)
     bidders_schedule_purchase = models.BooleanField(default=False)
     tender_security_required = models.BooleanField(default=False)
@@ -105,6 +134,17 @@ class Tender(models.Model):
     security_deposit_verified = models.BooleanField(default=False)
     security_deposit_verified_at = models.DateTimeField(null=True, blank=True)
 
+    # Publish approval workflow (RBF requests, Super Admin approves, then RBF publishes)
+    publish_approval_status = models.CharField(
+        max_length=32,
+        choices=PublishApprovalStatus.choices,
+        default=PublishApprovalStatus.NOT_REQUESTED,
+    )
+    publish_approval_requested_at = models.DateTimeField(null=True, blank=True)
+    publish_approval_reviewed_at = models.DateTimeField(null=True, blank=True)
+    publish_approval_reviewed_by = models.CharField(max_length=255, blank=True)
+    publish_approval_notes = models.TextField(blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -119,6 +159,13 @@ class Tender(models.Model):
 
     def __str__(self):
         return f"{self.reference_number} - {self.name}"
+
+    def master_deadline(self):
+        """The overall tender deadline, derived from the staged deadlines."""
+        candidates = [
+            v for v in (self.eoi_deadline, self.technical_deadline, self.financial_deadline) if v
+        ]
+        return max(candidates) if candidates else None
 
 
 class TenderViewLog(models.Model):
@@ -165,7 +212,24 @@ class TenderBid(models.Model):
     subsidy_requested = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
     proposal_file = models.FileField(upload_to='tender_bids/', null=True, blank=True)
     stage = models.CharField(max_length=64, blank=True)  # e.g., "Pre-Qualification", "Site-Specific"
+    bid_stage = models.CharField(
+        max_length=16,
+        choices=BidStage.choices,
+        default=BidStage.EOI,
+        help_text="Which procurement stage this bid record represents.",
+    )
     concept_note = models.TextField(blank=True)  # For Stage 1
+
+    # EOI stage content (company credentials, financial standing, technical experience, track record)
+    eoi_narrative = models.TextField(blank=True)
+    company_credentials_file = models.FileField(upload_to='tender_bids/', null=True, blank=True)
+    financial_standing_file = models.FileField(upload_to='tender_bids/', null=True, blank=True)
+    technical_experience_file = models.FileField(upload_to='tender_bids/', null=True, blank=True)
+    track_record_file = models.FileField(upload_to='tender_bids/', null=True, blank=True)
+    financial_standing_summary = models.TextField(blank=True)
+    technical_experience_summary = models.TextField(blank=True)
+    track_record_summary = models.TextField(blank=True)
+
     technical_proposal = models.TextField(blank=True)  # For Stage 2
     financial_proposal = models.TextField(blank=True)  # For Stage 2
     system_configuration = models.JSONField(default=dict, blank=True)
@@ -196,6 +260,7 @@ class TenderBid(models.Model):
     collection_method = models.CharField(max_length=64, blank=True)
     preferred_district = models.CharField(max_length=128, blank=True)
     technology_types = models.JSONField(default=list, blank=True)
+    custom_documents = models.JSONField(default=list, blank=True, help_text="Uploaded custom required bid documents: [{name, expected_type, file_name, file_url}]")
     
     # Metadata
     version_number = models.PositiveIntegerField(default=1)
@@ -213,7 +278,31 @@ class TenderBid(models.Model):
         on_delete=models.SET_NULL,
         related_name='stage_two_drafts',
     )
-    
+
+    # Stage gating between EOI -> Technical -> Financial
+    technical_stage_unlocked = models.BooleanField(default=False)
+    technical_stage_unlocked_at = models.DateTimeField(null=True, blank=True)
+    technical_stage_source_bid = models.ForeignKey(
+        'self',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='technical_stage_drafts',
+    )
+    financial_stage_unlocked = models.BooleanField(default=False)
+    financial_stage_unlocked_at = models.DateTimeField(null=True, blank=True)
+    financial_stage_source_bid = models.ForeignKey(
+        'self',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='financial_stage_drafts',
+    )
+    # Financial bids are sealed until the technical evaluation clears the threshold.
+    financial_sealed = models.BooleanField(default=True)
+    financial_unsealed_at = models.DateTimeField(null=True, blank=True)
+
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -533,3 +622,22 @@ class Notice(models.Model):
 
     def __str__(self):
         return f"{self.notice_id} - {self.title}"
+
+
+class TenderRequiredDocument(models.Model):
+    """A supporting document the RBF requires from bidders, configurable per tender and bid stage."""
+    tender = models.ForeignKey(Tender, on_delete=models.CASCADE, related_name="required_documents")
+    name = models.CharField(max_length=255)
+    expected_type = models.CharField(max_length=64, blank=True, default='')
+    bid_stage = models.CharField(max_length=32, choices=BidStage.choices, default=BidStage.EOI)
+    position = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['position', 'id']
+        verbose_name = 'Required Bid Document'
+        verbose_name_plural = 'Required Bid Documents'
+
+    def __str__(self):
+        return f"{self.name} ({self.get_bid_stage_display()})"

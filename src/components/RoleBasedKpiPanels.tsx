@@ -498,7 +498,7 @@ export function MacroKpiPortal({
   const tenderStats = useMemo(() => {
     const published = tenders.filter(t => t.status === "Published");
     const closingSoon = published.filter(t => {
-      const deadline = Date.parse(t.lastDateSubmission || t.deadline || "");
+      const deadline = Date.parse(t.deadline || "");
       if (Number.isNaN(deadline)) return false;
       const days = Math.ceil((deadline - Date.now()) / (1000 * 60 * 60 * 24));
       return days >= 0 && days <= 7;
@@ -842,7 +842,7 @@ export function MacroKpiPortal({
                     <>
                       <div className="space-y-3">
                         {paginatedActiveTenders.map((t) => {
-                          const deadline = t.lastDateSubmission || t.deadline;
+                          const deadline = t.deadline;
                           const deadlineMs = deadline ? Date.parse(deadline) : NaN;
                           const daysLeft = Number.isNaN(deadlineMs) ? null : Math.ceil((deadlineMs - Date.now()) / (1000 * 60 * 60 * 24));
                           const isClosingSoon = daysLeft !== null && daysLeft >= 0 && daysLeft <= 7;

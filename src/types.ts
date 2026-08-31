@@ -38,6 +38,7 @@ export interface ReportHistoryItem {
 
 export enum TenderStatus {
   DRAFT = "Draft",
+  PENDING_PUBLISH_APPROVAL = "Pending Publish Approval",
   PUBLISHED = "Published",
   EVALUATION = "Evaluation",
   STANDSTILL = "Standstill",
@@ -169,6 +170,10 @@ export interface Tender {
   category: string;
   status: TenderStatus;
   deadline: string;
+  procurementWorkflow?: "sequential" | "combined";
+  eoiDeadline?: string;
+  technicalDeadline?: string;
+  financialDeadline?: string;
   budget?: number;
   applicationType?: "Access Window" | "Application Window";
   stageType?: "Stage 1: Concept" | "Stage 2: Detailed" | "Pre-Qualification" | "Site-Specific";
@@ -181,9 +186,7 @@ export interface Tender {
   invitedBy?: string;
   biddingCurrency?: string;
   instruction?: string;
-  lastDateSecurity?: string;
-  lastDateSubmission?: string;
-  dateOpening?: string;
+  openingDateOptional?: boolean;
   preTenderMeetingInfo?: string;
   biddersSchedulePurchase?: boolean;
   tenderSecurityRequired?: boolean;
@@ -212,10 +215,25 @@ export interface Tender {
   verifiedAt?: string;
   awardedAt?: string;
   closedAt?: string;
+  publishApprovalStatus?: "not_requested" | "pending" | "approved" | "rejected";
+  publishApprovalRequestedAt?: string;
+  publishApprovalReviewedAt?: string;
+  publishApprovalReviewedBy?: string;
+  publishApprovalNotes?: string;
   awardedVendorName?: string;
   awardedVendorId?: string;
   bidCount?: number;
   challenges?: TenderChallenge[];
+  requiredDocuments?: TenderRequiredDocument[];
+}
+
+export interface TenderRequiredDocument {
+  id?: string;
+  name: string;
+  expected_type?: string;
+  bid_stage?: "eoi" | "technical" | "financial" | "combined";
+  bid_stage_label?: string;
+  position?: number;
 }
 
 export interface TenderChallenge {
@@ -354,6 +372,25 @@ export interface TenderBid {
   stage_two_unlocked_at?: string;
   stage_two_source_bid?: string;
   stage_two_ready?: boolean;
+  bid_stage?: "eoi" | "technical" | "financial" | "combined";
+  eoi_narrative?: string;
+  company_credentials_file?: string;
+  financial_standing_file?: string;
+  technical_experience_file?: string;
+  track_record_file?: string;
+  financial_standing_summary?: string;
+  technical_experience_summary?: string;
+  track_record_summary?: string;
+  technical_stage_unlocked?: boolean;
+  technical_stage_unlocked_at?: string;
+  technical_stage_source_bid?: string;
+  financial_stage_unlocked?: boolean;
+  financial_stage_unlocked_at?: string;
+  financial_stage_source_bid?: string;
+  financial_sealed?: boolean;
+  financial_unsealed_at?: string;
+  tender_procurement_workflow?: "sequential" | "combined";
+  financial_stage_open?: boolean;
   document_requirements?: Array<{ field: string; required: boolean; uploaded: boolean }>;
   document_counts?: { uploaded: number; required: number };
   deadline?: string;
@@ -379,6 +416,12 @@ export interface TenderBid {
   created_at?: string;
   updated_at?: string;
   sites?: TenderBidSite[];
+  customDocuments?: Array<{
+    name: string;
+    expected_type?: string;
+    file_name?: string;
+    file_url?: string;
+  }>;
 }
 
 export interface Project {
@@ -648,6 +691,7 @@ export interface User {
   prospectSyncStatus?: ProspectSyncLog[];
   vendorTag?: string | null;
   blacklistSummary?: BlacklistSummary | null;
+  permissions?: Record<string, string[]>;
 }
 
 export interface Organization {
@@ -755,6 +799,16 @@ export interface SuperAdminDashboardSummary {
     failedJobs: number;
     lastSyncAt?: string | null;
   };
+}
+
+export interface RolePermissionMatrix {
+  actions: string[];
+  modules: Array<{ value: string; label: string }>;
+  roles: Array<{
+    role: string;
+    label: string;
+    permissions: Array<{ module: string; label: string; actions: string[] }>;
+  }>;
 }
 
 export interface ProspectSyncLog {
@@ -1431,6 +1485,7 @@ export interface AuditLog {
   details: Record<string, any>;
   actor?: string;
   actorUsername?: string;
+  actorFullName?: string;
   createdAt: string;
   notes?: string;
   recordId?: string;

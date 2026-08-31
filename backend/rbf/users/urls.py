@@ -18,6 +18,7 @@ from .views import (
     PlatformConfigurationBoundaryUploadView,
     SystemHealthView,
     SuperAdminDashboardView,
+    RolePermissionsView,
 )
 
 router = DefaultRouter()
@@ -36,6 +37,7 @@ urlpatterns = [
     path('auth/verify-otp/', VerifyRegistrationOtpView.as_view(), name='verify_registration_otp'),
     path('auth/bootstrap-demo-users/', BootstrapDemoUsersView.as_view(), name='bootstrap_demo_users'),
     path('admin/dashboard/', SuperAdminDashboardView.as_view(), name='super_admin_dashboard'),
+    path('admin/permissions/', RolePermissionsView.as_view(), name='role_permissions'),
     path('platform-configuration/', PlatformConfigurationView.as_view(), name='platform_configuration'),
     path('platform-configuration/refresh-boundary/', PlatformConfigurationBoundaryRefreshView.as_view(), name='platform_configuration_refresh_boundary'),
     path('platform-configuration/upload-boundary/', PlatformConfigurationBoundaryUploadView.as_view(), name='platform_configuration_upload_boundary'),

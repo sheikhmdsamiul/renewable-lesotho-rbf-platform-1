@@ -101,6 +101,24 @@ class User(AbstractUser):
         return UserStatus.PENDING
 
 
+class RolePermission(models.Model):
+    """Module actions granted to a platform role."""
+
+    role = models.CharField(max_length=64, choices=UserRole.choices)
+    module = models.CharField(max_length=64)
+    actions = models.JSONField(default=list, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['role', 'module'], name='unique_role_permission_module'),
+        ]
+        ordering = ['role', 'module']
+
+    def __str__(self):
+        return f'{self.role}: {self.module}'
+
+
 class PrequalificationStatus(models.TextChoices):
     PENDING = 'Pending', 'Pending'
     UNDER_REVIEW = 'Under Review', 'Under Review'

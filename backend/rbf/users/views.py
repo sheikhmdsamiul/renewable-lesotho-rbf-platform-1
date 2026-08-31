@@ -45,6 +45,7 @@ from .models import (
     PasswordResetRequestStatus,
     PlatformConfiguration,
     User,
+    RolePermission,
     UserRole,
     UserStatus,
     VendorBlacklistCase,
@@ -74,6 +75,57 @@ from .serializers import (
 from rbf.projects.audit import log_audit, AuditLogger
 from rbf.projects.integrations import SyncToProspectJob, normalize_prospect_gender
 from rbf.projects.models import AuditLog, Project, ProjectStatus, ProspectSyncLog, ProspectSyncStatus
+
+
+PERMISSION_ACTIONS = (
+    'view', 'create', 'edit', 'delete', 'submit', 'upload', 'download',
+    'review', 'verify', 'publish', 'approve', 'reject', 'confirm', 'endorse',
+    'pay', 'mark_paid', 'sign', 'assign', 'resolve', 'reinstate', 'appeal',
+    'export', 'view_sensitive', 'view_bank_details', 'run_sync', 'retry_sync',
+    'generate_report', 'respond', 'flag_issue',
+)
+PERMISSION_MODULES = (
+    ('dashboard', 'Dashboard'),
+    ('users', 'Users'),
+    ('vendors', 'Vendors'),
+    ('tenders', 'Tenders'),
+    ('prequalification', 'Prequalification'),
+    ('bids', 'Bids'),
+    ('evaluations', 'Evaluations'),
+    ('projects', 'Projects'),
+    ('payments', 'Payments'),
+    ('blacklisting', 'Blacklisting'),
+    ('notifications', 'Notifications'),
+    ('reports', 'Reports'),
+    ('audit_logs', 'Audit Logs'),
+    ('system_configuration', 'System Configuration'),
+    ('system_health', 'System Health'),
+)
+
+ROLE_DEFAULT_MODULES = {
+    UserRole.ADMIN: {module for module, _ in PERMISSION_MODULES},
+    UserRole.RBF_OFFICIAL: {
+        'dashboard', 'vendors', 'tenders', 'prequalification', 'bids', 'evaluations',
+        'projects', 'payments', 'blacklisting', 'notifications', 'reports',
+    },
+    UserRole.TAC: {'dashboard', 'vendors', 'projects', 'payments', 'evaluations', 'blacklisting', 'reports', 'notifications'},
+    UserRole.DOE_OFFICER: {'dashboard', 'vendors', 'projects', 'blacklisting', 'reports', 'notifications'},
+    UserRole.FIELD_VERIFIER: {'dashboard', 'projects', 'notifications', 'reports'},
+    UserRole.UNDP_DONOR: {'dashboard', 'vendors', 'projects', 'payments', 'reports', 'notifications'},
+    UserRole.AUDITOR: {'dashboard', 'vendors', 'projects', 'payments', 'reports', 'audit_logs', 'prospect_sync', 'notifications'},
+    UserRole.VENDOR: {'dashboard', 'vendors', 'tenders', 'prequalification', 'bids', 'projects', 'payments', 'notifications'},
+}
+
+ROLE_DEFAULT_ACTIONS = {
+    UserRole.ADMIN: set(PERMISSION_ACTIONS),
+    UserRole.RBF_OFFICIAL: {'view', 'create', 'edit', 'submit', 'upload', 'download', 'review', 'verify', 'publish', 'approve', 'reject', 'confirm', 'endorse', 'pay', 'mark_paid', 'assign', 'resolve', 'reinstate', 'export', 'view_sensitive', 'view_bank_details', 'run_sync', 'retry_sync', 'generate_report', 'respond', 'flag_issue'},
+    UserRole.TAC: {'view', 'review', 'approve', 'reject', 'endorse', 'export', 'respond'},
+    UserRole.DOE_OFFICER: {'view', 'review', 'verify', 'approve', 'reject', 'confirm', 'export', 'respond'},
+    UserRole.FIELD_VERIFIER: {'view', 'create', 'edit', 'submit', 'upload'},
+    UserRole.UNDP_DONOR: {'view', 'review', 'approve', 'reject', 'export', 'respond', 'flag_issue'},
+    UserRole.AUDITOR: {'view', 'create', 'edit', 'review', 'download', 'export', 'generate_report', 'respond', 'flag_issue'},
+    UserRole.VENDOR: {'view', 'create', 'edit', 'submit', 'upload', 'download', 'sign', 'appeal'},
+}
 
 
 DEFAULT_ORGANIZATIONS = [
@@ -927,6 +979,66 @@ class SuperAdminDashboardView(APIView):
         )
         apply_blacklist_initiation(case, request.user)
         return Response(VendorBlacklistCaseSerializer(case).data, status=status.HTTP_201_CREATED)
+
+
+class RolePermissionsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def _assert_super_admin(self, request):
+        if request.user.role != UserRole.ADMIN:
+            raise PermissionDenied('Only Platform Administrator (Super Admin) can manage role permissions.')
+
+    @staticmethod
+    def _default_actions(role, module):
+        if module not in ROLE_DEFAULT_MODULES.get(role, set()):
+            return []
+        return sorted(ROLE_DEFAULT_ACTIONS.get(role, {'view'}))
+
+    def get(self, request):
+        self._assert_super_admin(request)
+        roles = []
+        for role, role_label in UserRole.choices:
+            permissions = []
+            for module, module_label in PERMISSION_MODULES:
+                record = RolePermission.objects.filter(role=role, module=module).first()
+                permissions.append({
+                    'module': module,
+                    'label': module_label,
+                    'actions': list(record.actions) if record else self._default_actions(role, module),
+                })
+            roles.append({'role': role, 'label': role_label, 'permissions': permissions})
+        return Response({
+            'actions': list(PERMISSION_ACTIONS),
+            'modules': [{'value': value, 'label': label} for value, label in PERMISSION_MODULES],
+            'roles': roles,
+        })
+
+    def put(self, request):
+        self._assert_super_admin(request)
+        submitted = request.data.get('roles', [])
+        if not isinstance(submitted, list):
+            return Response({'detail': 'roles must be a list.'}, status=status.HTTP_400_BAD_REQUEST)
+        allowed_roles = {value for value, _ in UserRole.choices if value != UserRole.ADMIN}
+        allowed_modules = {value for value, _ in PERMISSION_MODULES}
+        changed = 0
+        for role_data in submitted:
+            if not isinstance(role_data, dict) or role_data.get('role') not in allowed_roles:
+                continue
+            for permission in role_data.get('permissions', []):
+                if not isinstance(permission, dict) or permission.get('module') not in allowed_modules:
+                    continue
+                actions = permission.get('actions', [])
+                if not isinstance(actions, list):
+                    continue
+                cleaned = sorted({str(action) for action in actions if str(action) in PERMISSION_ACTIONS})
+                RolePermission.objects.update_or_create(
+                    role=role_data['role'],
+                    module=permission['module'],
+                    defaults={'actions': cleaned},
+                )
+                changed += 1
+        AuditLogger.log('Updated role permissions', 'users', notes=f'Updated {changed} role-module permission sets.')
+        return Response({'updated': changed})
 
 
 class VendorPrequalificationViewSet(viewsets.ModelViewSet):

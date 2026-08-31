@@ -702,11 +702,12 @@ class SmartMeterReadingSerializer(serializers.ModelSerializer):
 
 class AuditLogSerializer(serializers.ModelSerializer):
     actor_username = serializers.CharField(source='actor.username', read_only=True)
+    actor_full_name = serializers.CharField(source='actor.full_name', read_only=True)
 
     class Meta:
         model = AuditLog
         fields = '__all__'
-        read_only_fields = ['id', 'created_at', 'actor_username']
+        read_only_fields = ['id', 'created_at', 'actor_username', 'actor_full_name']
 
 
 class ProspectSyncLogSerializer(serializers.ModelSerializer):

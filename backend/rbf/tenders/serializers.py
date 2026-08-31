@@ -6,6 +6,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from django.conf import settings
+from django.core.files.storage import default_storage
 from django.utils import timezone
 from rest_framework import serializers
 from .models import (
@@ -23,8 +24,11 @@ from .models import (
     Notice,
     TenderStatus,
     BidStatus,
+    BidStage,
+    ProcurementWorkflow,
     ContractStatus,
     ContractSignatureStatus,
+    TenderRequiredDocument,
 )
 from rbf.users.models import UserRole, VendorPrequalification, PrequalificationStatus
 from rbf.projects.models import TechnologyType, VerificationMethod
@@ -49,6 +53,62 @@ SITE_SPECIFIC_STAGE_KEYS = {
     'stage2',
     'stage_2:_detailed',
 }
+EOI_STAGE_KEYS = {
+    'eoi',
+    'expression_of_interest',
+    'expression of interest',
+    'pre_qualification',
+    'prequalification',
+    'pre-qualification',
+    'concept',
+    'stage_1',
+    'stage1',
+    'stage_1:_concept',
+}
+TECHNICAL_STAGE_KEYS = {
+    'technical',
+    'technical_bid',
+    'rfp',
+    'site_specific',
+    'site-specific',
+    'detailed',
+    'stage_2',
+    'stage2',
+}
+FINANCIAL_STAGE_KEYS = {'financial', 'financial_bid', 'price', 'price_bid', 'sealed', 'stage_3', 'stage3'}
+COMBINED_STAGE_KEYS = {'combined', 'combined_bid', 'combined_bid_submission', 'stage_2_and_3'}
+
+STAGE_ORDER = ('eoi', 'technical', 'financial')
+
+
+def normalize_bid_stage(value) -> str:
+    """Normalize any stage value to: eoi | technical | financial | combined."""
+    raw = str(value or '').strip().lower().replace(' ', '_')
+    if raw in COMBINED_STAGE_KEYS:
+        return BidStage.COMBINED
+    if raw in EOI_STAGE_KEYS:
+        return BidStage.EOI
+    if raw in FINANCIAL_STAGE_KEYS:
+        return BidStage.FINANCIAL
+    if raw in TECHNICAL_STAGE_KEYS:
+        return BidStage.TECHNICAL
+    return BidStage.TECHNICAL
+
+
+def bid_stage_label(value) -> str:
+    key = normalize_bid_stage(value)
+    return {
+        BidStage.EOI: 'EOI',
+        BidStage.TECHNICAL: 'Technical',
+        BidStage.FINANCIAL: 'Financial',
+        BidStage.COMBINED: 'Technical & Financial',
+    }.get(key, 'EOI')
+
+
+def is_financial_stage(value) -> bool:
+    return normalize_bid_stage(value) == BidStage.FINANCIAL
+
+
 SITE_TARGET_BENEFICIARY_CHOICES = (
     ('female_headed', 'female_headed'),
     ('vulnerable', 'vulnerable'),
@@ -186,6 +246,55 @@ def has_stage_two_shortlist_access(bid) -> bool:
     return bool(source_bid and source_bid.status == BidStatus.ACCEPTED)
 
 
+def has_technical_stage_access(bid) -> bool:
+    """True when a vendor may work on the Technical stage bid for this tender."""
+    if bid is None:
+        return False
+    if getattr(bid, 'bid_stage', '') == BidStage.TECHNICAL:
+        if getattr(bid, 'technical_stage_unlocked', False):
+            return True
+        # Backward compat: legacy stage-two unlocked bids are treated as technical.
+        if getattr(bid, 'stage_two_unlocked', False):
+            source = getattr(bid, 'stage_two_source_bid', None)
+            return bool(source and source.status == BidStatus.ACCEPTED)
+        return True
+    return False
+
+
+def has_financial_stage_access(bid) -> bool:
+    """True when a vendor may see/work the Financial stage for this tender."""
+    if bid is None:
+        return False
+    if getattr(bid, 'financial_stage_unlocked', False):
+        return True
+    # Backward compat: a legacy unlocked stage-two bid carried both tech + fin.
+    if getattr(bid, 'stage_two_unlocked', False):
+        source = getattr(bid, 'stage_two_source_bid', None)
+        return bool(source and source.status == BidStatus.ACCEPTED)
+    return False
+
+
+def financial_bid_is_sealed(bid, request=None) -> bool:
+    """Financial pricing is hidden from evaluators until technical clearance.
+
+    A financial bid is considered open only when its financial stage is unlocked
+    AND the requesting user is not an evaluator who must wait for clearance.
+    Vendors always see their own bid; RMT sees it once the financial stage is open.
+    """
+    if bid is None:
+        return False
+    if request is not None:
+        user = getattr(request, 'user', None)
+        role = getattr(user, 'role', None) if user is not None else None
+        if role == UserRole.VENDOR:
+            return False  # owners see their own bid including pricing
+        if role == UserRole.TAC:
+            if not getattr(bid, 'financial_stage_unlocked', False):
+                return True
+        # RMT / Admin may review financials once the stage is open.
+    return not bool(getattr(bid, 'financial_stage_unlocked', False))
+
+
 class TenderBidSiteSerializer(serializers.ModelSerializer):
     target_beneficiary_type = serializers.ChoiceField(
         choices=SITE_TARGET_BENEFICIARY_CHOICES,
@@ -288,9 +397,11 @@ class TenderBidSerializer(serializers.ModelSerializer):
     stage_badge = serializers.SerializerMethodField()
     technology_type = serializers.SerializerMethodField()
     tender_technology_types = serializers.SerializerMethodField()
+    tender_procurement_workflow = serializers.SerializerMethodField()
     document_requirements = serializers.SerializerMethodField()
     document_counts = serializers.SerializerMethodField()
     stage_two_ready = serializers.SerializerMethodField()
+    financial_stage_open = serializers.SerializerMethodField()
     deadline = serializers.SerializerMethodField()
     deadline_passed = serializers.SerializerMethodField()
     deadline_countdown_seconds = serializers.SerializerMethodField()
@@ -308,7 +419,7 @@ class TenderBidSerializer(serializers.ModelSerializer):
             'tender_reference', 'tender_name', 'tender_status',
             'tender_intent_to_award_at', 'tender_intent_to_award_bid_id',
             'tender_awarded_at', 'tender_awarded_vendor_id', 'tender_awarded_vendor_name',
-            'bid_amount', 'subsidy_requested', 'proposal_file', 'stage', 'stage_key', 'stage_badge', 'technology_type', 'tender_technology_types', 'technology_types', 'concept_note',
+            'bid_amount', 'subsidy_requested', 'proposal_file', 'stage', 'stage_key', 'stage_badge', 'technology_type', 'tender_technology_types', 'technology_types', 'concept_note', 'custom_documents',
             'technical_proposal', 'financial_proposal',
             'system_configuration', 'boq_items', 'boq_details', 'device_brand_model', 'tech_tier', 'energy_target_kwh_month',
             'technical_proposal_file', 'financial_proposal_file', 'boq_file',
@@ -319,6 +430,13 @@ class TenderBidSerializer(serializers.ModelSerializer):
             'om_strategy_summary', 'local_technicians_to_be_trained', 'warranty_period_months',
             'offer_paygo', 'paygo_platform', 'daily_payment_amount_lsl', 'collection_method', 'preferred_district',
             'stage_two_unlocked', 'stage_two_unlocked_at', 'stage_two_source_bid', 'stage_two_ready',
+            'bid_stage', 'eoi_narrative',
+            'company_credentials_file', 'financial_standing_file', 'technical_experience_file', 'track_record_file',
+            'financial_standing_summary', 'technical_experience_summary', 'track_record_summary',
+            'technical_stage_unlocked', 'technical_stage_unlocked_at', 'technical_stage_source_bid',
+            'financial_stage_unlocked', 'financial_stage_unlocked_at', 'financial_stage_source_bid',
+            'financial_sealed', 'financial_unsealed_at',
+            'tender_procurement_workflow', 'financial_stage_open',
             'document_requirements', 'document_counts',
             'deadline', 'deadline_passed', 'deadline_countdown_seconds', 'is_locked', 'version_history',
             'evaluation_status', 'technical_score_total', 'financial_score_total', 'has_challenge',
@@ -326,7 +444,7 @@ class TenderBidSerializer(serializers.ModelSerializer):
             'submitted_at', 'reviewed_at', 'reviewed_by', 'rejection_reason',
             'created_at', 'updated_at', 'sites'
         ]
-        read_only_fields = ['id', 'submitted_at', 'created_at', 'updated_at', 'stage', 'stage_key', 'stage_badge', 'technology_type', 'stage_two_unlocked', 'stage_two_unlocked_at', 'stage_two_source_bid', 'stage_two_ready']
+        read_only_fields = ['id', 'submitted_at', 'created_at', 'updated_at', 'stage', 'stage_key', 'stage_badge', 'technology_type', 'stage_two_unlocked', 'stage_two_unlocked_at', 'stage_two_source_bid', 'stage_two_ready', 'bid_stage', 'technical_stage_unlocked', 'technical_stage_unlocked_at', 'technical_stage_source_bid', 'financial_stage_unlocked', 'financial_stage_unlocked_at', 'financial_stage_source_bid', 'financial_sealed', 'financial_unsealed_at', 'tender_procurement_workflow', 'financial_stage_open']
 
     def get_tender_intent_to_award_bid_id(self, obj):
         bid_id = getattr(obj.tender, 'intent_to_award_bid_id', None)
@@ -361,7 +479,7 @@ class TenderBidSerializer(serializers.ModelSerializer):
             'local_technicians_count',
         ):
             payload.pop(alias, None)
-        for field_name in ('sites', 'system_configuration', 'boq_items', 'boq_details'):
+        for field_name in ('sites', 'system_configuration', 'boq_items', 'boq_details', 'custom_documents'):
             value = payload.get(field_name)
             if isinstance(value, str):
                 try:
@@ -399,20 +517,35 @@ class TenderBidSerializer(serializers.ModelSerializer):
             'om_plan_file',
         ]
 
-    def _effective_stage_key(self, attrs):
+    def _resolved_stage(self, obj):
+        """Stage for an existing bid instance, prioritizing legacy stage-two bids."""
+        if obj is None:
+            return BidStage.EOI
+        if getattr(obj, 'stage_two_unlocked', False):
+            return BidStage.TECHNICAL
+        return normalize_bid_stage(getattr(obj, 'bid_stage', None) or getattr(obj, 'stage', '') or '')
+
+    def _effective_bid_stage(self, attrs):
+        """Return the canonical stage this bid record belongs to."""
         instance = getattr(self, 'instance', None)
-        if instance is not None and has_stage_two_shortlist_access(instance):
-            return 'site_specific'
-        tender = attrs.get('tender') or getattr(getattr(self, 'instance', None), 'tender', None)
+        if instance is not None:
+            return self._resolved_stage(instance)
+        # Creating a new record: use the provided bid_stage or the tender's opening stage.
+        bid_stage = attrs.get('bid_stage')
+        if bid_stage:
+            return normalize_bid_stage(bid_stage)
+        tender = attrs.get('tender')
         if tender is not None:
-            return normalize_tender_stage(tender.stage_type)
-        return 'pre_qualification'
+            workflow = getattr(tender, 'procurement_workflow', '') or ''
+            if workflow == ProcurementWorkflow.COMBINED:
+                return BidStage.COMBINED
+        return BidStage.EOI
+
+    def _effective_stage_key(self, attrs):
+        return self._effective_bid_stage(attrs)
 
     def _effective_stage_label(self, attrs):
-        tender = attrs.get('tender') or getattr(getattr(self, 'instance', None), 'tender', None)
-        if tender is not None:
-            return tender_stage_label(tender.stage_type)
-        return 'Stage 1: Concept'
+        return bid_stage_label(self._effective_bid_stage(attrs))
 
     def validate(self, attrs):
         errors = {}
@@ -420,6 +553,7 @@ class TenderBidSerializer(serializers.ModelSerializer):
         instance = getattr(self, 'instance', None)
         tender = attrs.get('tender') or getattr(instance, 'tender', None)
         stage_key = self._effective_stage_key(attrs)
+        stage_key = normalize_bid_stage(stage_key)
         attrs['stage'] = self._effective_stage_label(attrs)
 
         def validate_file(field_name, allowed_ext=None):
@@ -442,6 +576,10 @@ class TenderBidSerializer(serializers.ModelSerializer):
         validate_file('implementation_plan_file')
         validate_file('om_plan_file')
         validate_file('reporting_templates_file')
+        validate_file('company_credentials_file')
+        validate_file('financial_standing_file')
+        validate_file('technical_experience_file')
+        validate_file('track_record_file')
 
         bid_amount = attrs.get('bid_amount', instance.bid_amount if instance else None)
         subsidy_requested = attrs.get('subsidy_requested', instance.subsidy_requested if instance else None)
@@ -455,14 +593,45 @@ class TenderBidSerializer(serializers.ModelSerializer):
                 if value not in (None, '') and Decimal(str(value)) <= Decimal('0'):
                     errors.setdefault('system_configuration', {})[field_name] = 'Value must be greater than 0.'
 
-        stage_key = self._effective_stage_key(attrs)
-        if stage_key == 'site_specific':
+        bid_status = attrs.get('status', getattr(instance, 'status', None) if instance else None)
+
+        is_detailed = stage_key in (BidStage.TECHNICAL, BidStage.COMBINED)
+        is_eoi = stage_key == BidStage.EOI
+        is_financial = stage_key == BidStage.FINANCIAL
+
+        # ---- EOI stage (Stage 1) ----
+        if is_eoi:
+            eoi_narrative = str(attrs.get('eoi_narrative', getattr(instance, 'eoi_narrative', '') if instance else '') or '').strip()
+            if bid_status == BidStatus.SUBMITTED and len(eoi_narrative) < 200:
+                errors['eoi_narrative'] = 'EOI narrative must be at least 200 characters before submission.'
+            if bid_status == BidStatus.SUBMITTED:
+                for field_name, label in (
+                    ('company_credentials_file', 'Company credentials'),
+                    ('financial_standing_file', 'Financial standing'),
+                    ('technical_experience_file', 'Technical experience'),
+                    ('track_record_file', 'Track record'),
+                ):
+                    file_obj = attrs.get(field_name, getattr(instance, field_name, None) if instance else None)
+                    if not file_obj:
+                        errors[field_name] = f'{label} document is required for the EOI stage.'
+
+        # ---- Financial-only stage (Stage 3) ----
+        if is_financial:
+            financial_proposal_file = attrs.get('financial_proposal_file', getattr(instance, 'financial_proposal_file', None) if instance else None)
+            if bid_status == BidStatus.SUBMITTED:
+                if not financial_proposal_file:
+                    errors['financial_proposal_file'] = 'Financial Proposal document is required for the Financial stage.'
+                if bid_amount in (None, ''):
+                    errors['bid_amount'] = 'Bid amount is required for the Financial stage.'
+
+        # ---- Technical / Combined stage (Stage 2) ----
+        if is_detailed:
             boq_items = attrs.get('boq_items', instance.boq_items if instance else [])
             if not boq_items:
                 boq_items = attrs.get('boq_details', [])
             boq_total = Decimal('0')
             if not boq_items:
-                errors['boq_items'] = 'Bill of Quantities is required for site-specific submissions.'
+                errors['boq_items'] = 'Bill of Quantities is required for technical submissions.'
             elif isinstance(boq_items, list):
                 for item in boq_items:
                     qty = item.get('qty') if isinstance(item, dict) else None
@@ -472,10 +641,9 @@ class TenderBidSerializer(serializers.ModelSerializer):
                 if bid_amount not in (None, '') and boq_total != Decimal(str(bid_amount)):
                     errors['boq_items'] = f'BOQ grand total must equal the bid amount. Current total: {boq_total}.'
 
-            if stage_key == 'site_specific':
                 om_strategy_summary = attrs.get('om_strategy_summary', instance.om_strategy_summary if instance else '')
                 if not str(om_strategy_summary or '').strip():
-                    errors['om_strategy_summary'] = 'O&M strategy summary is required for site-specific submissions.'
+                    errors['om_strategy_summary'] = 'O&M strategy summary is required for technical submissions.'
 
                 offer_paygo = attrs.get('offer_paygo', instance.offer_paygo if instance else False)
                 technology_type = system_configuration.get('technology_type') if isinstance(system_configuration, dict) else None
@@ -494,10 +662,9 @@ class TenderBidSerializer(serializers.ModelSerializer):
                         if not str(collection_method or '').strip():
                             errors['collection_method'] = 'Collection method is required when PAYGO is offered.'
 
-            if not attrs.get('inclusion_commitment_confirmed', instance.inclusion_commitment_confirmed if instance else False):
-                errors['inclusion_commitment_confirmed'] = 'You must confirm the inclusion commitment before submitting.'
-            sites = attrs.get('sites', instance.sites.all() if instance and hasattr(instance, 'sites') else [])
-            if stage_key == 'site_specific':
+                if not attrs.get('inclusion_commitment_confirmed', instance.inclusion_commitment_confirmed if instance else False):
+                    errors['inclusion_commitment_confirmed'] = 'You must confirm the inclusion commitment before submitting.'
+                sites = attrs.get('sites', instance.sites.all() if instance and hasattr(instance, 'sites') else [])
                 if not sites:
                     errors['sites'] = 'At least 1 project site is required.'
                 else:
@@ -524,65 +691,45 @@ class TenderBidSerializer(serializers.ModelSerializer):
                             site_errors[idx] = 'Site coordinates must fall within Lesotho.'
                     if site_errors:
                         errors['sites'] = site_errors
-            elif sites:
-                site_errors = {}
-                for idx, site in enumerate(sites):
-                    latitude = getattr(site, 'latitude', None) if not isinstance(site, dict) else site.get('latitude')
-                    longitude = getattr(site, 'longitude', None) if not isinstance(site, dict) else site.get('longitude')
-                    if latitude in (None, '') or longitude in (None, ''):
-                        continue
-                    if not point_in_lesotho(Decimal(str(longitude)), Decimal(str(latitude))):
-                        site_errors[idx] = 'Site coordinates must fall within Lesotho.'
-                if site_errors:
-                    errors['sites'] = site_errors
-        if stage_key == 'pre_qualification':
+
+                if bid_status == BidStatus.SUBMITTED:
+                    request = self.context.get('request')
+                    if request and hasattr(request, 'user') and request.user.role == UserRole.VENDOR:
+                        latest_prequal = (
+                            VendorPrequalification.objects.filter(vendor_id=str(request.user.id))
+                            .order_by('-submitted_at', '-id')
+                            .first()
+                        )
+                        if (
+                            latest_prequal
+                            and latest_prequal.status == PrequalificationStatus.APPROVED
+                            and latest_prequal.tech_tier
+                        ):
+                            approved_match = re.search(r'\d+', str(latest_prequal.tech_tier))
+                            bid_tier_raw = attrs.get('tech_tier', getattr(instance, 'tech_tier', '') if instance else '')
+                            bid_match = re.search(r'\d+', str(bid_tier_raw))
+                            if approved_match and bid_match:
+                                approved_num = int(approved_match.group())
+                                bid_num = int(bid_match.group())
+                                if bid_num > approved_num:
+                                    errors['tech_tier'] = f'Technical tier cannot exceed your approved pre-qualification tier (Tier {approved_num}).'
+
+                    required_file_fields = [
+                        ('technical_proposal_file', 'Technical Proposal'),
+                        ('boq_file', 'Bill of Quantities'),
+                    ]
+                    if stage_key != BidStage.FINANCIAL:
+                        required_file_fields.append(('financial_proposal_file', 'Financial Proposal'))
+                    for field_name, label in required_file_fields:
+                        file_obj = attrs.get(field_name, getattr(instance, field_name, None) if instance else None)
+                        if not file_obj:
+                            errors[field_name] = f'{label} document is required for technical submissions.'
+
+        if is_eoi:
             attrs['technical_proposal'] = ''
             attrs['financial_proposal'] = ''
         if not attrs.get('boq_details') and attrs.get('boq_items'):
             attrs['boq_details'] = attrs['boq_items']
-
-        bid_status = attrs.get('status', getattr(instance, 'status', None) if instance else None)
-
-        # Stage 1: enforce concept note minimum length on final submission
-        if stage_key == 'pre_qualification' and bid_status == BidStatus.SUBMITTED:
-            concept_note = str(attrs.get('concept_note', getattr(instance, 'concept_note', '') if instance else '') or '').strip()
-            if len(concept_note) < 200:
-                errors['concept_note'] = 'Concept note must be at least 200 characters before submission.'
-
-        # Stage 2: enforce tech tier ceiling on final submission
-        if stage_key == 'site_specific' and bid_status == BidStatus.SUBMITTED:
-            request = self.context.get('request')
-            if request and hasattr(request, 'user') and request.user.role == UserRole.VENDOR:
-                latest_prequal = (
-                    VendorPrequalification.objects.filter(vendor_id=str(request.user.id))
-                    .order_by('-submitted_at', '-id')
-                    .first()
-                )
-                if (
-                    latest_prequal
-                    and latest_prequal.status == PrequalificationStatus.APPROVED
-                    and latest_prequal.tech_tier
-                ):
-                    approved_match = re.search(r'\d+', str(latest_prequal.tech_tier))
-                    bid_tier_raw = attrs.get('tech_tier', getattr(instance, 'tech_tier', '') if instance else '')
-                    bid_match = re.search(r'\d+', str(bid_tier_raw))
-                    if approved_match and bid_match:
-                        approved_num = int(approved_match.group())
-                        bid_num = int(bid_match.group())
-                        if bid_num > approved_num:
-                            errors['tech_tier'] = f'Technical tier cannot exceed your approved pre-qualification tier (Tier {approved_num}).'
-
-        # Stage 2: enforce required files on final submission
-        if stage_key == 'site_specific' and bid_status == BidStatus.SUBMITTED:
-            required_file_fields = [
-                ('technical_proposal_file', 'Technical Proposal'),
-                ('financial_proposal_file', 'Financial Proposal'),
-                ('boq_file', 'Bill of Quantities'),
-            ]
-            for field_name, label in required_file_fields:
-                file_obj = attrs.get(field_name, getattr(instance, field_name, None) if instance else None)
-                if not file_obj:
-                    errors[field_name] = f'{label} document is required for Stage 2 submissions.'
 
         if errors:
             raise serializers.ValidationError(errors)
@@ -590,15 +737,18 @@ class TenderBidSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         sites_data = validated_data.pop('sites', [])
+        docs = validated_data.pop('custom_documents', None)
         bid = super().create(validated_data)
         if sites_data:
             TenderBidSite.objects.bulk_create(
                 [TenderBidSite(bid=bid, **site) for site in sites_data]
             )
+        self._save_custom_documents(bid, docs)
         return bid
 
     def update(self, instance, validated_data):
         sites_data = validated_data.pop('sites', None)
+        docs = validated_data.pop('custom_documents', None)
         bid = super().update(instance, validated_data)
         if sites_data is not None:
             bid.sites.all().delete()
@@ -606,7 +756,46 @@ class TenderBidSerializer(serializers.ModelSerializer):
                 TenderBidSite.objects.bulk_create(
                     [TenderBidSite(bid=bid, **site) for site in sites_data]
                 )
+        self._save_custom_documents(bid, docs)
         return bid
+
+    def _save_custom_documents(self, instance, docs):
+        if docs is None:
+            return
+        request = self.context.get('request')
+        files_by_name = {}
+        if request is not None:
+            for uploaded in request.FILES.getlist('custom_documents_files'):
+                files_by_name[uploaded.name] = uploaded
+        existing = {
+            (d.get('file_name') or d.get('name')): d
+            for d in (instance.custom_documents or [])
+        }
+        saved = []
+        for doc in docs if isinstance(docs, list) else []:
+            if not isinstance(doc, dict):
+                continue
+            name = str(doc.get('name') or '').strip()
+            if not name:
+                continue
+            fname = str(doc.get('file_name') or '').strip()
+            uploaded = files_by_name.get(fname) if fname else None
+            file_url = None
+            if uploaded is not None:
+                path = default_storage.save(
+                    f'custom_documents/{os.path.basename(uploaded.name)}', uploaded
+                )
+                file_url = f'/media/{path}'
+            elif fname and existing.get(fname, {}).get('file_url'):
+                file_url = existing[fname]['file_url']
+            saved.append({
+                'name': name,
+                'expected_type': str(doc.get('expected_type') or '').strip(),
+                'file_name': uploaded.name if uploaded else fname,
+                'file_url': file_url,
+            })
+        instance.custom_documents = saved
+        instance.save(update_fields=['custom_documents', 'updated_at'])
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
@@ -626,7 +815,7 @@ class TenderBidSerializer(serializers.ModelSerializer):
         data['vulnerable_group_target'] = data.get('vulnerable_target_pct')
         data['low_income_target'] = data.get('low_income_target_pct')
         data['aftersales_description'] = system_configuration.get('aftersales_description', '')
-        data['stage'] = tender_stage_label('site_specific' if instance.stage_two_unlocked else (instance.tender.stage_type if instance.tender_id else instance.stage))
+        data['stage'] = bid_stage_label(self._resolved_stage(instance))
         data['device_brand'] = system_configuration.get('device_brand', '')
         data['device_model'] = system_configuration.get('device_model', '')
         data['rated_power_w'] = system_configuration.get('rated_power_w')
@@ -646,30 +835,43 @@ class TenderBidSerializer(serializers.ModelSerializer):
                 'om_plan_file',
                 'reporting_templates_file',
                 'distribution_map_file',
+                'company_credentials_file',
+                'financial_standing_file',
+                'technical_experience_file',
+                'track_record_file',
             ]
             for field in file_fields:
                 if data.get(field):
                     data[field] = request.build_absolute_uri(data[field])
             if data.get('om_plan_document'):
                 data['om_plan_document'] = request.build_absolute_uri(data['om_plan_document'])
+            if data.get('custom_documents'):
+                for _cd in data['custom_documents']:
+                    if _cd.get('file_url'):
+                        _cd['file_url'] = request.build_absolute_uri(_cd['file_url'])
+
+        # Seal financial pricing for evaluators until technical clearance passes.
+        if financial_bid_is_sealed(instance, request):
+            for field in ('bid_amount', 'subsidy_requested', 'financial_proposal_file', 'financial_proposal'):
+                data[field] = None
+            data['financial_sealed'] = True
         return data
 
     def get_stage_key(self, obj):
-        if has_stage_two_shortlist_access(obj):
-            return 'site_specific'
-        stage_source = obj.stage or (obj.tender.stage_type if obj.tender_id else '')
-        return normalize_tender_stage(stage_source)
+        return self._resolved_stage(obj)
 
     def get_stage_badge(self, obj):
-        if has_stage_two_shortlist_access(obj):
-            return tender_stage_label('site_specific')
-        stage_source = obj.stage or (obj.tender.stage_type if obj.tender_id else '')
-        return tender_stage_label(stage_source)
+        return bid_stage_label(self._resolved_stage(obj))
 
     def get_stage_two_ready(self, obj):
-        if has_stage_two_shortlist_access(obj):
-            return True
         return bool(
+            TenderBid.objects.filter(
+                tender=obj.tender,
+                vendor_id=obj.vendor_id,
+                bid_stage__in=(BidStage.TECHNICAL, BidStage.COMBINED),
+                status=BidStatus.DRAFT,
+            ).exclude(id=obj.id).exists()
+        ) or bool(
             TenderBid.objects.filter(
                 tender=obj.tender,
                 vendor_id=obj.vendor_id,
@@ -678,6 +880,12 @@ class TenderBidSerializer(serializers.ModelSerializer):
                 stage_two_source_bid__status=BidStatus.ACCEPTED,
             ).exclude(id=obj.id).exists()
         )
+
+    def get_tender_procurement_workflow(self, obj):
+        return getattr(obj.tender, 'procurement_workflow', ProcurementWorkflow.SEQUENTIAL) if obj.tender_id else ProcurementWorkflow.SEQUENTIAL
+
+    def get_financial_stage_open(self, obj):
+        return has_financial_stage_access(obj)
 
     def get_technology_type(self, obj):
         # Prefer the technology type selected in the bid system configuration
@@ -694,30 +902,62 @@ class TenderBidSerializer(serializers.ModelSerializer):
         return obj.tender.technology_types if obj.tender_id else []
 
     def get_document_requirements(self, obj):
-        required = self._required_document_fields()
+        stage = self._resolved_stage(obj)
+        if stage == BidStage.EOI:
+            required = [
+                'company_credentials_file',
+                'financial_standing_file',
+                'technical_experience_file',
+                'track_record_file',
+            ]
+        elif stage == BidStage.FINANCIAL:
+            required = ['financial_proposal_file', 'boq_file']
+        else:
+            required = self._required_document_fields()
         return [
             {
                 'field': field_name,
-                'required': is_site_specific_stage(obj.tender.stage_type if obj.tender_id else obj.stage),
+                'required': stage in (BidStage.TECHNICAL, BidStage.COMBINED, BidStage.FINANCIAL),
                 'uploaded': bool(getattr(obj, field_name)),
             }
             for field_name in required
         ]
 
     def get_document_counts(self, obj):
-        required = self._required_document_fields()
+        stage = self._resolved_stage(obj)
+        if stage == BidStage.EOI:
+            required = [
+                'company_credentials_file',
+                'financial_standing_file',
+                'technical_experience_file',
+                'track_record_file',
+            ]
+        elif stage == BidStage.FINANCIAL:
+            required = ['financial_proposal_file', 'boq_file']
+        else:
+            required = self._required_document_fields()
         uploaded = sum(1 for field_name in required if getattr(obj, field_name))
         return {'uploaded': uploaded, 'required': len(required)}
 
+    def _stage_deadline(self, obj):
+        stage = self._resolved_stage(obj)
+        if stage == BidStage.FINANCIAL:
+            deadline = getattr(obj.tender, 'financial_deadline', None) if obj.tender_id else None
+        elif stage in (BidStage.TECHNICAL, BidStage.COMBINED):
+            deadline = getattr(obj.tender, 'technical_deadline', None) if obj.tender_id else None
+        else:
+            deadline = getattr(obj.tender, 'eoi_deadline', None) if obj.tender_id else None
+        return deadline or (obj.tender.master_deadline() if obj.tender_id else None)
+
     def get_deadline(self, obj):
-        return obj.tender.last_date_submission or obj.tender.deadline
+        return self._stage_deadline(obj)
 
     def get_deadline_passed(self, obj):
-        deadline = obj.tender.last_date_submission or obj.tender.deadline
+        deadline = self._stage_deadline(obj)
         return bool(deadline and timezone.now() > deadline)
 
     def get_deadline_countdown_seconds(self, obj):
-        deadline = obj.tender.last_date_submission or obj.tender.deadline
+        deadline = self._stage_deadline(obj)
         if not deadline:
             return None
         remaining = int((deadline - timezone.now()).total_seconds())
@@ -744,7 +984,7 @@ class TenderBidSerializer(serializers.ModelSerializer):
         ]
 
     def _stage_two_scored_evaluations(self, obj):
-        if self.get_stage_key(obj) != 'site_specific':
+        if self.get_stage_key(obj) not in (BidStage.TECHNICAL, BidStage.COMBINED):
             return []
         evaluations = getattr(obj, '_prefetched_objects_cache', {}).get('evaluations')
         if evaluations is None:
@@ -1107,13 +1347,27 @@ class TenderListSerializer(serializers.ModelSerializer):
             'awarded_vendor_name', 'bid_count', 'created_at',
             'technology_types', 'target_districts', 'procurement_method',
             'application_type', 'tender_security_required',
+            'procurement_workflow', 'eoi_deadline', 'technical_deadline', 'financial_deadline',
+            'technical_weight', 'financial_weight', 'technical_threshold',
+            'publish_approval_status', 'publish_approval_requested_at',
+            'publish_approval_reviewed_at', 'publish_approval_reviewed_by', 'publish_approval_notes',
         ]
+
+
+class TenderRequiredDocumentSerializer(serializers.ModelSerializer):
+    bid_stage_label = serializers.CharField(source='get_bid_stage_display', read_only=True)
+
+    class Meta:
+        model = TenderRequiredDocument
+        fields = ['id', 'name', 'expected_type', 'bid_stage', 'bid_stage_label', 'position']
+        read_only_fields = ['id']
 
 
 class TenderSerializer(serializers.ModelSerializer):
     reference_number = serializers.CharField(required=False, allow_blank=True, default='')
     bid_count = serializers.SerializerMethodField()
-    
+    required_documents = serializers.JSONField(required=False, allow_null=True, write_only=True)
+
     def get_bid_count(self, obj):
         return obj.bids.count()
     
@@ -1138,14 +1392,14 @@ class TenderSerializer(serializers.ModelSerializer):
     )
     OPTIONAL_DATE_FIELDS = (
         'deadline',
-        'last_date_security',
-        'last_date_submission',
-        'date_opening',
         'verified_at',
         'published_at',
         'awarded_at',
         'closed_at',
         'security_deposit_verified_at',
+        'eoi_deadline',
+        'technical_deadline',
+        'financial_deadline',
     )
     OPTIONAL_BOOLEAN_FIELDS = (
         'bidders_schedule_purchase',
@@ -1175,19 +1429,14 @@ class TenderSerializer(serializers.ModelSerializer):
     def to_internal_value(self, data):
         payload = data.copy() if hasattr(data, 'copy') else dict(data)
 
-        application_type = payload.get('application_type', '') or ''
-        is_access_window = application_type.lower() == 'access window'
-
         for field in self.OPTIONAL_TEXT_FIELDS:
-            if payload.get(field) is None:
+            if (not self.partial or field in payload) and payload.get(field) is None:
                 payload[field] = ''
 
         optional_date_fields = list(self.OPTIONAL_DATE_FIELDS)
-        if is_access_window:
-            optional_date_fields = [f for f in optional_date_fields if f not in {'last_date_submission', 'last_date_security'}]
-        
+
         for field in optional_date_fields:
-            if payload.get(field) in ('', None):
+            if (not self.partial or field in payload) and payload.get(field) in ('', None):
                 payload[field] = None
 
         for field in self.OPTIONAL_BOOLEAN_FIELDS:
@@ -1207,9 +1456,6 @@ class TenderSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         errors = {}
         instance = getattr(self, 'instance', None)
-        application_type = attrs.get('application_type') or (instance.application_type if instance else '')
-        is_access_window = application_type.lower() == 'access window'
-        tender_security_required = attrs.get('tender_security_required', instance.tender_security_required if instance else False)
 
         # 1. Define required fields for both types
         required_fields = [
@@ -1219,20 +1465,7 @@ class TenderSerializer(serializers.ModelSerializer):
             'bidding_currency', 'instruction', 'contact_details', 'target_site_type',
         ]
 
-        # 2. Type-specific requirement logic
-        if not is_access_window:
-            # Application Window requirements: Submission and Opening dates are mandatory
-            if not attrs.get('last_date_submission') and not (instance and instance.last_date_submission):
-                errors['last_date_submission'] = 'Document Submission Deadline is required for Application Window tenders.'
-            if not attrs.get('date_opening') and not (instance and instance.date_opening):
-                errors['date_opening'] = 'Tender Opening Date is required for Application Window tenders.'
-        
-        # 3. Tender Security requirement logic
-        if tender_security_required:
-            if not attrs.get('last_date_security') and not (instance and instance.last_date_security):
-                errors['last_date_security'] = 'Security Submission Deadline is required when Tender Security is enabled.'
-
-        # 4. Standard required fields check
+        # 2. Standard required fields check
         for field in required_fields:
             value = attrs.get(field)
             if value is None and instance is not None:
@@ -1246,16 +1479,6 @@ class TenderSerializer(serializers.ModelSerializer):
         target_districts = attrs.get('target_districts', instance.target_districts if instance else [])
         if not target_districts:
             errors['target_districts'] = 'Select at least one target district.'
-
-        # 5. Handle Deadline mapping
-        # For Application Window: must map to submission deadline
-        # For Access Window: map to submission deadline if provided, else handled in create()
-        if attrs.get('last_date_submission'):
-            attrs['deadline'] = attrs['last_date_submission']
-        elif not is_access_window:
-            # Fallback for Application Window if missing (though validate should catch it)
-            if instance and instance.last_date_submission:
-                 attrs['deadline'] = instance.last_date_submission
 
         def validate_file(field_name, max_size_mb=10, allowed_ext=None):
             file_obj = attrs.get(field_name)
@@ -1286,6 +1509,31 @@ class TenderSerializer(serializers.ModelSerializer):
         if cooling_off_days < 0 or cooling_off_days > 14:
             errors['cooling_off_days'] = 'Cooling-off period must be between 0 and 14 days.'
 
+        # Procurement workflow + staged deadlines
+        workflow = attrs.get('procurement_workflow') or (instance.procurement_workflow if instance else ProcurementWorkflow.SEQUENTIAL)
+        eoi_deadline = attrs.get('eoi_deadline', instance.eoi_deadline if instance else None)
+        technical_deadline = attrs.get('technical_deadline', instance.technical_deadline if instance else None)
+        financial_deadline = attrs.get('financial_deadline', instance.financial_deadline if instance else None)
+        if workflow == ProcurementWorkflow.SEQUENTIAL:
+            if eoi_deadline is None:
+                errors['eoi_deadline'] = 'EOI deadline is required for a sequential workflow.'
+            if technical_deadline is None:
+                errors['technical_deadline'] = 'Technical deadline is required for a sequential workflow.'
+            if financial_deadline is None:
+                errors['financial_deadline'] = 'Financial deadline is required for a sequential workflow.'
+            if eoi_deadline and technical_deadline and technical_deadline <= eoi_deadline:
+                errors['technical_deadline'] = 'Technical deadline must be after the EOI deadline.'
+            if technical_deadline and financial_deadline and financial_deadline <= technical_deadline:
+                errors['financial_deadline'] = 'Financial deadline must be after the Technical deadline.'
+        elif workflow == ProcurementWorkflow.COMBINED:
+            if eoi_deadline is None:
+                errors['eoi_deadline'] = 'EOI deadline is required.'
+            if technical_deadline is None:
+                errors['technical_deadline'] = 'Combined submission deadline is required.'
+            if eoi_deadline and technical_deadline and technical_deadline <= eoi_deadline:
+                errors['technical_deadline'] = 'Combined submission deadline must be after the EOI deadline.'
+            # no separate financial deadline in combined mode
+
         if errors:
             raise serializers.ValidationError(errors)
 
@@ -1294,6 +1542,12 @@ class TenderSerializer(serializers.ModelSerializer):
     def to_representation(self, instance):
         data = super().to_representation(instance)
         request = self.context.get('request')
+        req_serializer = TenderRequiredDocumentSerializer(
+            instance.required_documents.all(),
+            many=True,
+            context=self.context,
+        )
+        data['required_documents'] = req_serializer.data
         if request and getattr(request.user, 'role', None) == UserRole.VENDOR:
             data.pop('budget', None)
         if request:
@@ -1311,6 +1565,24 @@ class TenderSerializer(serializers.ModelSerializer):
                     data[field] = request.build_absolute_uri(data[field])
         return data
 
+    def _save_required_documents(self, tender, docs):
+        if docs is None:
+            return
+        tender.required_documents.all().delete()
+        if not isinstance(docs, (list, tuple)):
+            return
+        for idx, doc in enumerate(docs):
+            name = str((doc or {}).get('name') or '').strip()
+            if not name:
+                continue
+            TenderRequiredDocument.objects.create(
+                tender=tender,
+                name=name,
+                expected_type=str((doc or {}).get('expected_type') or '').strip(),
+                bid_stage=(doc or {}).get('bid_stage') or BidStage.EOI,
+                position=int((doc or {}).get('position') if (doc or {}).get('position') not in (None, '') else idx),
+            )
+
     def create(self, validated_data):
         request = self.context.get('request')
         if request:
@@ -1318,28 +1590,43 @@ class TenderSerializer(serializers.ModelSerializer):
             if role not in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}:
                 raise serializers.ValidationError('Only the RBF Management Team or Platform Administrators can create tenders.')
         
-        application_type = validated_data.get('application_type', '') or ''
-        is_access_window = application_type.lower() == 'access window'
-        
-        # Final safety for deadline before saving (Database NOT NULL constraint)
+        docs = validated_data.pop('required_documents', None)
+        # Final safety for deadline before saving (Database NOT NULL constraint).
+        # The master deadline is derived from the staged deadlines (validate() ensures
+        # the required staged deadlines are present for the given workflow).
         if not validated_data.get('deadline'):
-            if is_access_window:
-                # 5-year rolling window for Access Window tenders
-                validated_data['deadline'] = timezone.now() + timedelta(days=365 * 5)
-            else:
-                # Should have been caught by validate() but as fallback use submission date
-                validated_data['deadline'] = validated_data.get('last_date_submission') or timezone.now()
-        
+            staged = [
+                v for v in (
+                    validated_data.get('eoi_deadline'),
+                    validated_data.get('technical_deadline'),
+                    validated_data.get('financial_deadline'),
+                ) if v
+            ]
+            validated_data['deadline'] = max(staged) if staged else timezone.now()
+
         if not validated_data.get('reference_number'):
             last_id = Tender.objects.order_by('-id').values_list('id', flat=True).first() or 0
             validated_data['reference_number'] = f"TND-{last_id + 1:06d}"
-        return super().create(validated_data)
+
+        workflow = validated_data.get('procurement_workflow', ProcurementWorkflow.SEQUENTIAL)
+        if workflow == ProcurementWorkflow.COMBINED:
+            validated_data['financial_deadline'] = None
+        tender = super().create(validated_data)
+        self._save_required_documents(tender, docs)
+        return tender
+
+    def update(self, instance, validated_data):
+        docs = validated_data.pop('required_documents', None)
+        tender = super().update(instance, validated_data)
+        self._save_required_documents(tender, docs)
+        return tender
 
     class Meta:
         model = Tender
         fields = '__all__'
-        read_only_fields = ['id', 'created_at', 'updated_at', 'verified_at', 'published_at', 'awarded_at', 'closed_at', 'dispute_started_at', 'security_deposit_verified_at', 'bid_count']
+        read_only_fields = ['id', 'created_at', 'updated_at', 'verified_at', 'published_at', 'awarded_at', 'closed_at', 'dispute_started_at', 'security_deposit_verified_at', 'bid_count', 'publish_approval_status', 'publish_approval_requested_at', 'publish_approval_reviewed_at', 'publish_approval_reviewed_by', 'publish_approval_notes']
         extra_kwargs = {
+            'deadline': {'required': False, 'allow_null': True},
             'reference_number': {'required': False, 'allow_blank': True},
             'schedule_file': {'required': False, 'allow_null': True},
             'rfp_documents_file': {'required': False, 'allow_null': True},
