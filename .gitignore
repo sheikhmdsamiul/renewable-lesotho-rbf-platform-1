@@ -1,8 +1,29 @@
 node_modules/
 build/
 dist/
+public/config.json
 coverage/
 .DS_Store
 *.log
 .env*
 !.env.example
+!.env.example
+# Claw Code local artifacts
+.claw/settings.local.json
+.claw/sessions/
+.clawhip/
+
+# Claude / AI Configuration files
+.claw.json
+AGENTS.md
+CLAUDE.md
+
+# Build outputs and specific examples
+.react-example@0.0.0*
+.react-example
+tsc
+
+# Python Virtual Environments
+.venv/
+venv/
+env/

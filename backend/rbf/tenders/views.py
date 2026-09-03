@@ -1,20 +1,23 @@
 from rest_framework import viewsets, filters, status
 from rest_framework.permissions import IsAuthenticated, SAFE_METHODS, BasePermission
+from rbf.common.permissions import has_module_permission
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework.pagination import PageNumberPagination
 from django.utils import timezone
 from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from django.conf import settings
-from django.core.mail import send_mail
 from django.db import transaction
+from django.db.models.functions import Coalesce
 from django.urls import reverse
 from rest_framework.parsers import MultiPartParser, FormParser
 from django_filters.rest_framework import DjangoFilterBackend
 from django_filters import FilterSet, DateFromToRangeFilter, RangeFilter, CharFilter, ChoiceFilter
 from .models import (
     Tender,
+    TenderViewLog,
     TenderStatus,
     TenderBid,
     TenderBidSite,
@@ -24,6 +27,15 @@ from .models import (
     TenderContract,
     ContractStatus,
     ContractSignatureStatus,
+    TenderChallenge,
+    ChallengeStatus,
+    ChallengeCategory,
+    ChallengeDocument,
+    ChallengeEvent,
+    Notice,
+    BidStage,
+    ProcurementWorkflow,
+    PublishApprovalStatus,
 )
 from .serializers import (
     TenderSerializer,
@@ -33,19 +45,28 @@ from .serializers import (
     TenderContractSerializer,
     ProjectAssignmentSerializer,
     normalize_tender_stage,
+    normalize_bid_stage,
+    bid_stage_label,
     is_site_specific_stage,
     tender_stage_label,
+    NoticeSerializer,
+    NoticeListSerializer,
+    TenderChallengeSerializer,
+    ChallengeDocumentSerializer,
+    ChallengeEventSerializer,
+    ChallengeCreateSerializer,
 )
 from .pba_pdf import generate_contract_pdf
 from rbf.users.models import UserRole, VendorPrequalification, PrequalificationStatus
 from rbf.users.models import User
 from rbf.users.blacklisting import is_vendor_restricted
-from rbf.projects.models import Project, Milestone, MilestoneStatus, ProjectStatus, VerificationMethod
+from rbf.common.urls import build_frontend_url
+from rbf.projects.models import Project, Milestone, MilestoneStatus, ProjectStatus, VerificationMethod, AuditLog
 from rbf.projects.audit import log_audit, AuditLogger
-from rbf.projects.integrations import SyncToProspectJob
-from rbf.projects.serializers import ProjectSerializer
+from rbf.projects.integrations import SyncToProspectJob, queue_project_targets_sync
+from rbf.projects.serializers import ProjectSerializer, AuditLogSerializer
 from rbf.notifications.models import Notification, NotificationChannel, NotificationStatus
-from rbf.notifications.services import NotificationService
+from rbf.notifications.services import NotificationService, email_configured
 
 
 LESOTHO_DISTRICTS = [
@@ -60,6 +81,55 @@ LESOTHO_DISTRICTS = [
     'Quthing',
     'Thaba-Tseka',
 ]
+
+APPLICATION_WINDOW = 'application window'
+ACCESS_WINDOW = 'access window'
+
+
+def _normalized_application_type(tender: Tender) -> str:
+    return str(getattr(tender, 'application_type', '') or '').strip().lower()
+
+
+def _uses_hard_deadline(tender: Tender) -> bool:
+    return _normalized_application_type(tender) == APPLICATION_WINDOW
+
+
+def _auto_close_tender_on_deadline(tender: Tender) -> bool:
+    """Automatically close a published tender once its submission deadline passes.
+
+    Only application-window tenders auto-close on their deadline; access-window
+    tenders remain published until the RMT closes them manually.
+
+    Returns True when the tender was transitioned to CLOSED.
+    """
+    if tender.status != TenderStatus.PUBLISHED:
+        return False
+    if not _uses_hard_deadline(tender):
+        return False
+    deadline = tender.master_deadline()
+    if deadline and timezone.now() >= deadline:
+        tender.status = TenderStatus.CLOSED
+        tender.closed_at = tender.closed_at or timezone.now()
+        tender.save(update_fields=['status', 'closed_at', 'updated_at'])
+        return True
+    return False
+
+
+def _assert_evaluation_window_open(tender: Tender) -> None:
+    """Evaluation may only start once the tender is closed.
+
+    A published application-window tender whose submission deadline has passed
+    is automatically closed first. Raises ValidationError if evaluation is
+    attempted before the tender is closed.
+    """
+    _auto_close_tender_on_deadline(tender)
+    if tender.status not in {TenderStatus.CLOSED, TenderStatus.EVALUATION}:
+        raise ValidationError(
+            {'detail': 'Evaluation can only start when the tender status is Closed. Close the tender before starting evaluation.'}
+        )
+    if tender.status == TenderStatus.CLOSED:
+        tender.status = TenderStatus.EVALUATION
+        tender.save(update_fields=['status', 'updated_at'])
 
 
 CONTRACT_ANNEX_SPECS = (
@@ -159,10 +229,52 @@ def _hydrate_contract_from_bid(contract: TenderContract):
 def _assignment_defaults(contract: TenderContract):
     bid = _get_contract_bid(contract)
     vendor = User.objects.filter(id=contract.vendor_id).first()
-    technology_type = contract.tender.category
-    if isinstance(contract.tender.technology_types, list) and contract.tender.technology_types:
-        technology_type = contract.tender.technology_types[0]
-    installation_target = len(list(bid.sites.all())) if bid else 0
+    technology_choices = _assignment_technology_choices(contract)
+    technology_type = technology_choices[0] if technology_choices else _normalize_technology_type(contract.tender.category)
+    if bid:
+        system_configuration = getattr(bid, 'system_configuration', None)
+        bid_technology_type = ''
+        if isinstance(system_configuration, dict):
+            bid_technology_type = _normalize_technology_type(system_configuration.get('technology_type'))
+        if not bid_technology_type:
+            bid_technology_type = _normalize_technology_type(getattr(bid, 'technology_type', ''))
+        if bid_technology_type and bid_technology_type in technology_choices:
+            technology_type = bid_technology_type
+    tender_target_districts = [
+        str(value or '').strip()
+        for value in (contract.tender.target_districts if isinstance(contract.tender.target_districts, list) else [])
+        if str(value or '').strip()
+    ]
+    bid_preferred_district = ''
+    if bid:
+        bid_preferred_district = str(getattr(bid, 'preferred_district', '') or '').strip()
+    
+    # Priority: bid_preferred_district > tender_target_districts > site districts > vendor zone
+    assignment_districts = []
+    if bid_preferred_district:
+        assignment_districts = [bid_preferred_district]
+    
+    # Even if bid has preferred, we might want to include tender targets as fallback or options?
+    # But requirement says "District should get the value of the selected primary district of the Bid"
+    
+    if not assignment_districts:
+        if tender_target_districts:
+            assignment_districts = tender_target_districts
+        elif bid:
+            for site in bid.sites.all():
+                district = str(getattr(site, 'district', '') or '').strip()
+                if district and district not in assignment_districts:
+                    assignment_districts.append(district)
+    
+    if not assignment_districts and vendor:
+        fallback_district = (
+            (vendor.verification_zone if vendor and vendor.verification_zone else '')
+            or (vendor.region if vendor and vendor.region else '')
+        )
+        if str(fallback_district or '').strip():
+            assignment_districts = [str(fallback_district).strip()]
+    
+    installation_target = contract.tender.approximate_installation_target or (len(list(bid.sites.all())) if bid else 0)
     start_date = contract.tender.awarded_at.date() if contract.tender.awarded_at else timezone.now().date()
     contract_value = _contract_value(contract)
     return {
@@ -170,10 +282,8 @@ def _assignment_defaults(contract: TenderContract):
         'installation_target': installation_target or 1,
         'technology_type': _normalize_technology_type(technology_type),
         'energy_output_target_kwh': '20000.00',
-        'district_zone': (
-            (vendor.verification_zone if vendor and vendor.verification_zone else '')
-            or (vendor.region if vendor and vendor.region else '')
-        ),
+        'district_zone': ', '.join(assignment_districts),
+        'district_zones': assignment_districts,
         'verification_method': VerificationMethod.MANUAL,
         'female_target_pct': 50,
         'vulnerable_target_pct': 30,
@@ -181,6 +291,21 @@ def _assignment_defaults(contract: TenderContract):
         'start_date': start_date.isoformat(),
         'disbursement_preview': _disbursement_preview(contract_value),
     }
+
+
+def _assignment_technology_choices(contract: TenderContract) -> list[str]:
+    tender_technology_types = contract.tender.technology_types if isinstance(contract.tender.technology_types, list) else []
+    normalized_choices = []
+    for value in tender_technology_types:
+        normalized = _normalize_technology_type(value)
+        if normalized and normalized not in normalized_choices:
+            normalized_choices.append(normalized)
+    if normalized_choices:
+        return normalized_choices
+    normalized_category = _normalize_technology_type(contract.tender.category)
+    if normalized_category:
+        return [normalized_category]
+    return [choice for choice, _label in Project._meta.get_field('technology_type').choices]
 
 
 def _contract_value(contract: TenderContract) -> Decimal:
@@ -224,6 +349,10 @@ def _disbursement_preview(contract_value: Decimal) -> dict:
 def _create_project_assignment(request, contract: TenderContract, assignment_data: dict):
     tender = contract.tender
     vendor = assignment_data['vendor']
+    
+    district_zones = [str(value or '').strip() for value in assignment_data.get('district_zones', []) if str(value or '').strip()]
+    primary_district = district_zones[0] if district_zones else str(assignment_data.get('district_zone') or '').strip()
+    district_zone_label = ', '.join(district_zones) if district_zones else primary_district
     start_date = assignment_data.get('start_date') or (
         tender.awarded_at.date() if tender.awarded_at else timezone.now().date()
     )
@@ -245,8 +374,8 @@ def _create_project_assignment(request, contract: TenderContract, assignment_dat
         tech_type=_normalize_technology_type(assignment_data['technology_type']),
         technology_type=_normalize_technology_type(assignment_data['technology_type']),
         region=vendor.region or '',
-        district=str(assignment_data.get('district_zone') or ''),
-        district_zone=str(assignment_data.get('district_zone') or ''),
+        district=primary_district,
+        district_zone=district_zone_label,
         status=ProjectStatus.SETUP_PENDING,
         contract_file=contract.signed_file,
         created_by=request.user,
@@ -298,42 +427,7 @@ def _create_project_assignment(request, contract: TenderContract, assignment_dat
         new_status=project.status,
         notes='Project created and milestone assignment saved from approved contract.',
     )
-    target_payload = [
-        {
-            'external_id': f'target_{project.id}_installations',
-            'metric': 'installation_target',
-            'target_value': project.installation_target,
-            'country': 'LS',
-            'reporting_phase': f'PRJ-{project.id}',
-            'program': 'RBF Lesotho',
-            'effective_date': project.start_date.isoformat() if project.start_date else timezone.now().date().isoformat(),
-            'unit_of_measurement': 'number',
-        },
-        {
-            'external_id': f'target_{project.id}_female_pct',
-            'metric': 'female_beneficiary_target',
-            'target_value': 50,
-            'country': 'LS',
-            'reporting_phase': f'PRJ-{project.id}',
-            'program': 'RBF Lesotho',
-            'unit_of_measurement': 'percentage',
-        },
-        {
-            'external_id': f'target_{project.id}_energy_kwh',
-            'metric': 'monthly_energy_output_kwh',
-            'target_value': str(project.energy_output_target_kwh),
-            'country': 'LS',
-            'reporting_phase': f'PRJ-{project.id}',
-            'program': 'RBF Lesotho',
-            'unit_of_measurement': 'kWh',
-        },
-    ]
-    SyncToProspectJob.dispatch_async(
-        'pushTarget',
-        target_payload,
-        record_id=int(project.id),
-        record_type='project',
-    )
+    queue_project_targets_sync(str(project.id), run_immediately=True, record_type='project')
     NotificationService.send(
         str(vendor.id),
         'Project Assigned',
@@ -346,7 +440,7 @@ def _create_project_assignment(request, contract: TenderContract, assignment_dat
         request.user,
         'prospect_sync_queued',
         project,
-        {'endpoint': '/v1/in/targets', 'project_id': str(project.id)},
+        {'endpoint': '/v1/in/targets', 'project_id': str(project.id), 'mode': 'immediate'},
     )
     return project
 
@@ -505,18 +599,56 @@ def _copy_bid_documents(source_bid: TenderBid, target_bid: TenderBid):
 
 
 def _ensure_stage_two_draft(bid: TenderBid):
-    if bid.stage_two_unlocked:
+    return _ensure_stage_draft(bid, BidStage.TECHNICAL)
+
+
+def _ensure_stage_draft(bid: TenderBid, stage: str):
+    """Create (or return) a draft bid for a later stage (technical or financial).
+
+    In combined mode the technical bid record doubles as the financial record, so
+    only sequential tenders create a distinct financial draft.
+    """
+    stage = normalize_bid_stage(stage)
+    workflow = getattr(bid.tender, 'procurement_workflow', ProcurementWorkflow.SEQUENTIAL)
+
+    # Combined workflow: the technical bid record carries technical + financial content.
+    if stage == BidStage.FINANCIAL and workflow == ProcurementWorkflow.COMBINED:
         return bid
+
+    if stage == BidStage.TECHNICAL:
+        unlocked_flag, unlocked_at, source_field = (
+            'technical_stage_unlocked', 'technical_stage_unlocked_at', 'technical_stage_source_bid'
+        )
+    elif stage == BidStage.FINANCIAL:
+        unlocked_flag, unlocked_at, source_field = (
+            'financial_stage_unlocked', 'financial_stage_unlocked_at', 'financial_stage_source_bid'
+        )
+    if stage in (BidStage.EOI, BidStage.COMBINED):
+        return bid
+    if getattr(bid, 'bid_stage', '') and normalize_bid_stage(bid.bid_stage) == stage and getattr(bid, 'status', None) == BidStatus.DRAFT:
+        return bid
+
     existing = (
         TenderBid.objects.filter(
             tender=bid.tender,
             vendor_id=bid.vendor_id,
-            stage_two_unlocked=True,
+            bid_stage=stage,
             status=BidStatus.DRAFT,
         )
         .order_by('-version_number', '-created_at')
         .first()
     )
+    if existing is None:
+        existing = (
+            TenderBid.objects.filter(
+                tender=bid.tender,
+                vendor_id=bid.vendor_id,
+                stage_two_unlocked=True,
+                status=BidStatus.DRAFT,
+            )
+            .order_by('-version_number', '-created_at')
+            .first()
+        )
     if existing:
         _copy_bid_documents(bid, existing)
         _copy_bid_sites_if_missing(bid, existing)
@@ -537,7 +669,8 @@ def _ensure_stage_two_draft(bid: TenderBid):
         bid_amount=bid.bid_amount,
         subsidy_requested=bid.subsidy_requested,
         proposal_file=bid.proposal_file,
-        stage=tender_stage_label('site_specific'),
+        stage=bid_stage_label(stage),
+        bid_stage=stage,
         concept_note=bid.concept_note,
         technical_proposal=bid.technical_proposal,
         financial_proposal=bid.financial_proposal,
@@ -560,13 +693,42 @@ def _ensure_stage_two_draft(bid: TenderBid):
         collection_method=bid.collection_method,
         version_number=next_version,
         status=BidStatus.DRAFT,
-        stage_two_unlocked=True,
-        stage_two_unlocked_at=timezone.now(),
-        stage_two_source_bid=bid,
+        **{unlocked_flag: True, unlocked_at: timezone.now(), source_field: bid},
+        **({
+            'stage_two_unlocked': True,
+            'stage_two_unlocked_at': timezone.now(),
+            'stage_two_source_bid': bid,
+        } if stage == BidStage.TECHNICAL else {}),
     )
     _copy_bid_documents(bid, draft)
     _clone_sites_to_bid(bid, draft)
     return draft
+
+
+def _unlock_stage_for_bid(bid: TenderBid, stage: str):
+    """Open the given stage for an accepted bid and return its draft."""
+    stage = normalize_bid_stage(stage)
+    workflow = getattr(bid.tender, 'procurement_workflow', ProcurementWorkflow.SEQUENTIAL)
+    if stage == BidStage.TECHNICAL:
+        unlocked_flag, unlocked_at = 'technical_stage_unlocked', 'technical_stage_unlocked_at'
+    elif stage == BidStage.FINANCIAL:
+        unlocked_flag, unlocked_at = 'financial_stage_unlocked', 'financial_stage_unlocked_at'
+    else:
+        return bid
+    if workflow == ProcurementWorkflow.COMBINED:
+        # Financial is unlocked/already carried on the technical/combined record.
+        if stage == BidStage.FINANCIAL:
+            bid.financial_stage_unlocked = True
+            if not bid.financial_unsealed_at:
+                bid.financial_unsealed_at = timezone.now()
+            bid.financial_sealed = False
+            bid.save(update_fields=['financial_stage_unlocked', 'financial_unsealed_at', 'financial_sealed', 'updated_at'])
+            return bid
+    if not getattr(bid, unlocked_flag, False):
+        setattr(bid, unlocked_flag, True)
+        setattr(bid, unlocked_at, timezone.now())
+        bid.save(update_fields=[unlocked_flag, unlocked_at, 'updated_at'])
+    return _ensure_stage_draft(bid, stage)
 
 
 def _has_stage_two_shortlist_access(bid: TenderBid | None) -> bool:
@@ -574,6 +736,41 @@ def _has_stage_two_shortlist_access(bid: TenderBid | None) -> bool:
         return False
     source_bid = bid.stage_two_source_bid
     return bool(source_bid and source_bid.status == BidStatus.ACCEPTED)
+
+
+def _has_technical_stage_access(bid: TenderBid | None) -> bool:
+    if bid is None:
+        return False
+    if getattr(bid, 'bid_stage', '') == BidStage.TECHNICAL:
+        if getattr(bid, 'technical_stage_unlocked', False):
+            return True
+        if getattr(bid, 'stage_two_unlocked', False):
+            return _has_stage_two_shortlist_access(bid)
+        return True
+    return False
+
+
+def _has_financial_stage_access(bid: TenderBid | None) -> bool:
+    if bid is None:
+        return False
+    return bool(getattr(bid, 'financial_stage_unlocked', False))
+
+
+def _bid_stage_spec(bid: TenderBid | None, tender: Tender):
+    """Resolve the stage + applicable deadline for a bid (or a new opening bid)."""
+    if bid is not None and getattr(bid, 'bid_stage', ''):
+        stage = normalize_bid_stage(bid.bid_stage)
+    else:
+        stage = BidStage.EOI
+    workflow = getattr(tender, 'procurement_workflow', ProcurementWorkflow.SEQUENTIAL)
+    if stage == BidStage.FINANCIAL:
+        deadline = getattr(tender, 'financial_deadline', None)
+    elif stage in (BidStage.TECHNICAL, BidStage.COMBINED):
+        deadline = getattr(tender, 'technical_deadline', None)
+    else:
+        deadline = getattr(tender, 'eoi_deadline', None)
+    deadline = deadline or tender.master_deadline()
+    return {'stage': stage, 'deadline': deadline, 'workflow': workflow}
 
 
 def _backfill_stage_two_drafts_for_vendor(vendor_id: str):
@@ -591,37 +788,55 @@ def _backfill_stage_two_drafts_for_vendor(vendor_id: str):
         _ensure_stage_two_draft(bid)
 
 
-def _send_vendor_stage_one_outcome_email(bid: TenderBid, subject: str, message: str):
-    email_configured = bool(settings.EMAIL_HOST_USER and settings.EMAIL_HOST_PASSWORD) or settings.DEBUG
-    if not email_configured or not bid.vendor_email:
-        return False
-    try:
-        send_mail(
-            subject,
-            message,
-            settings.DEFAULT_FROM_EMAIL,
-            [bid.vendor_email],
-            fail_silently=False,
+def _technical_passing_bids(tender: Tender):
+    """Return technical/combined bids whose technical score clears the threshold."""
+    threshold = Decimal(str(tender.technical_threshold or 70))
+    passing = []
+    bids = (
+        TenderBid.objects.filter(
+            tender=tender,
+            bid_stage__in=[BidStage.TECHNICAL, BidStage.COMBINED],
         )
-        return True
-    except Exception:
+        .prefetch_related('evaluations')
+    )
+    for bid in bids:
+        score = _technical_score_for_bid(bid)
+        if score is not None and score >= threshold:
+            passing.append(bid)
+    return passing
+
+
+def _open_financial_stage_for_tender(tender: Tender):
+    """Batch-open the Financial stage for every technical-passing bidder at once."""
+    opened = []
+    for bid in _technical_passing_bids(tender):
+        _unlock_stage_for_bid(bid, BidStage.FINANCIAL)
+        opened.append(bid)
+    return opened
+
+
+def _send_vendor_stage_one_outcome_email(bid: TenderBid, subject: str, message: str):
+    if not email_configured() or not bid.vendor_email:
         return False
+    return NotificationService.dispatch_email(subject, message, [bid.vendor_email]) > 0
 
 
 def _notify_stage_one_outcome(bid: TenderBid, passed: bool, draft: TenderBid | None = None):
-    if normalize_tender_stage(bid.tender.stage_type) != 'pre_qualification':
+    is_eoi_bid = normalize_bid_stage(getattr(bid, 'bid_stage', '')) == BidStage.EOI
+    is_legacy = normalize_tender_stage(getattr(bid.tender, 'stage_type', '')) == 'pre_qualification'
+    if not (is_eoi_bid or is_legacy):
         return
 
-    event = 'stage_one_passed' if passed else 'stage_one_failed'
+    event = 'eoi_passed' if passed else 'eoi_failed'
     title = (
-        f'Stage 1 Passed: {bid.tender.reference_number}'
+        f'EOI Shortlisted: {bid.tender.reference_number}'
         if passed else
-        f'Stage 1 Unsuccessful: {bid.tender.reference_number}'
+        f'EOI Unsuccessful: {bid.tender.reference_number}'
     )
     body = (
-        f'Your Stage 1 submission passed technical review. Stage 2 is now unlocked as draft version {draft.version_number}.'
+        f'Congratulations! Your EOI passed the shortlisting review. The next stage is now open as draft version {draft.version_number}.'
         if passed and draft is not None else
-        'Your Stage 1 submission did not meet the technical threshold. Please review the outcome in My Bids.'
+        'Your EOI did not pass the shortlisting review. Please review the outcome in My Bids.'
     )
     if not Notification.objects.filter(
         recipient_id=bid.vendor_id,
@@ -778,10 +993,7 @@ def _notify_intent_to_award(tender: Tender, ranking_payload: dict, send_email=Tr
     bids_by_vendor = {row['vendor_id']: row for row in ranking_payload.get('rows', [])}
     cooling_off_until = tender.cooling_off_until
     cooling_date_text = cooling_off_until.strftime('%Y-%m-%d %H:%M:%S') if cooling_off_until else 'N/A'
-    email_enabled = send_email and bool(
-        (settings.EMAIL_HOST_USER and settings.EMAIL_HOST_PASSWORD)
-        or str(getattr(settings, 'EMAIL_HOST', '')).lower() in {'mailhog', 'localhost'}
-    )
+    email_enabled = send_email and email_configured()
 
     vendors = User.objects.filter(id__in=list(bids_by_vendor.keys())).only('id', 'email', 'full_name', 'username')
     for vendor in vendors:
@@ -814,7 +1026,7 @@ def _notify_intent_to_award(tender: Tender, ranking_payload: dict, send_email=Tr
         Notification.objects.create(
             recipient_id=str(vendor.id),
             recipient_name=vendor.full_name or vendor.username or vendor.email,
-            type=NotificationChannel.EMAIL if email_enabled else NotificationChannel.IN_APP,
+            type=NotificationChannel.IN_APP,
             event='intent_to_award',
             title=title,
             body=body,
@@ -823,31 +1035,26 @@ def _notify_intent_to_award(tender: Tender, ranking_payload: dict, send_email=Tr
         )
 
         if email_enabled and vendor.email:
-            try:
-                send_mail(
-                    subject=title,
-                    message=body,
-                    from_email=settings.DEFAULT_FROM_EMAIL,
-                    recipient_list=[vendor.email],
-                    fail_silently=True,
-                )
-            except Exception:
-                pass
+            NotificationService.dispatch_email(title, body, [vendor.email])
 
 
 class IsRbfOfficialOrReadOnly(BasePermission):
     """
-    Allows only the RBF Management Team to perform write actions; others can read.
+    Allows only the RBF Management Team to perform write actions; 
+    authenticated users can read; optionally allows public read for GET requests.
     """
 
     def has_permission(self, request, view):
+        # Allow public (unauthenticated) read access for GET requests
         if request.method in SAFE_METHODS:
-            return request.user and request.user.is_authenticated
-        return (
-            request.user
-            and request.user.is_authenticated
-            and getattr(request.user, 'role', None) in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}
-        )
+            # Check if this is a public API request (e.g., from public portal)
+            # For now, allow unauthenticated read access for all GET requests
+            # This enables the public impact portal to work without authentication
+            return True  # Allow both authenticated and unauthenticated read access
+        if not request.user or not request.user.is_authenticated:
+            return False
+        action = 'create' if request.method == 'POST' else 'edit'
+        return has_module_permission(request.user, 'tenders', action)
 
 
 class TenderFilterSet(FilterSet):
@@ -867,10 +1074,16 @@ class TenderFilterSet(FilterSet):
         fields = ['status', 'category', 'department', 'is_verified', 'procurement_method']
 
 
+class TenderPagination(PageNumberPagination):
+    page_size = 50
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
 class TenderViewSet(viewsets.ModelViewSet):
-    queryset = Tender.objects.all().order_by('-created_at')
+    queryset = Tender.objects.all().order_by(Coalesce('published_at', 'created_at').desc())
     serializer_class = TenderSerializer
-    permission_classes = [IsAuthenticated, IsRbfOfficialOrReadOnly]
+    permission_classes = [IsRbfOfficialOrReadOnly]
+    pagination_class = TenderPagination
     parser_classes = [MultiPartParser, FormParser, *viewsets.ModelViewSet.parser_classes]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_class = TenderFilterSet
@@ -879,9 +1092,17 @@ class TenderViewSet(viewsets.ModelViewSet):
 
     WRITE_ROLES = {UserRole.RBF_OFFICIAL, UserRole.ADMIN}
 
+    def get_permissions(self):
+        if self.action == 'create_challenge':
+            return [IsAuthenticated()]
+        return super().get_permissions()
+
     def get_queryset(self):
-        qs = Tender.objects.all().order_by('-created_at')
+        qs = Tender.objects.all().order_by(Coalesce('published_at', 'created_at').desc())
         user = self.request.user
+        # Handle unauthenticated users - return all published tenders
+        if not user.is_authenticated:
+            return qs.filter(status=TenderStatus.PUBLISHED)
         if user.role == UserRole.VENDOR:
             is_approved = VendorPrequalification.objects.filter(
                 vendor=user,
@@ -897,6 +1118,47 @@ class TenderViewSet(viewsets.ModelViewSet):
             return TenderListSerializer
         return TenderSerializer
 
+    def retrieve(self, request, *args, **kwargs):
+        instance = self.get_object()
+        user = request.user
+        if (
+            user.is_authenticated
+            and getattr(user, 'role', None) == UserRole.VENDOR
+            and instance.status == TenderStatus.PUBLISHED
+        ):
+            vendor_name = (
+                getattr(user, 'organization_name', '')
+                or getattr(user, 'full_name', '')
+                or user.get_username()
+            )
+            TenderViewLog.objects.get_or_create(
+                tender=instance,
+                vendor=user,
+                defaults={'vendor_name': vendor_name},
+            )
+        serializer = self.get_serializer(instance)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['get'], url_path='viewers')
+    def viewers(self, request, pk=None):
+        """List the vendors that have viewed this tender."""
+        if getattr(request.user, 'role', None) not in {
+            UserRole.RBF_OFFICIAL,
+            UserRole.ADMIN,
+        }:
+            raise PermissionDenied('Only RMT and Admin users can view tender viewers.')
+
+        tender = self.get_object()
+        viewers = tender.view_logs.values(
+            'vendor_id',
+            'vendor_name',
+            'viewed_at',
+        )
+        return Response({
+            'total_viewers': tender.view_logs.count(),
+            'viewers': list(viewers),
+        })
+
     def _assert_write_permission(self):
         user = self.request.user
         if getattr(user, 'role', None) not in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}:
@@ -905,19 +1167,56 @@ class TenderViewSet(viewsets.ModelViewSet):
     def check_permissions(self, request):
         super().check_permissions(request)
         if request.method not in SAFE_METHODS and getattr(request.user, 'role', None) not in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}:
-            self.permission_denied(request, message='Only the RBF Management Team can create or modify tenders.')
+            if self.action != 'create_challenge':
+                self.permission_denied(request, message='Only the RBF Management Team can create or modify tenders.')
 
     def create(self, request, *args, **kwargs):
         self._assert_write_permission()
-        return super().create(request, *args, **kwargs)
+        data = request.data
+        if not data.get('stage_type'):
+            data = {**data, 'stage_type': 'Pre-Qualification'}
+        response = super().create(request, *args, **kwargs)
+        tender = self.get_queryset().get(pk=response.data['id'])
+        log_audit(
+            request.user,
+            'tender_created',
+            tender,
+            {'module': 'tenders', 'reference_number': tender.reference_number, 'notes': 'Tender created.'},
+        )
+        return response
+
+    def _update_with_audit(self, request, partial, *args, **kwargs):
+        self._assert_write_permission()
+        tender = self.get_object()
+        old_status = tender.status
+        changed_fields = sorted(str(field) for field in request.data.keys())
+        serializer = self.get_serializer(tender, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        if getattr(tender, '_prefetched_objects_cache', None):
+            tender._prefetched_objects_cache = {}
+        response = Response(serializer.data)
+        tender.refresh_from_db()
+        log_audit(
+            request.user,
+            'tender_updated',
+            tender,
+            {
+                'module': 'tenders',
+                'reference_number': tender.reference_number,
+                'changed_fields': changed_fields,
+                'old_status': old_status,
+                'new_status': tender.status,
+                'notes': f'Tender edited. Fields changed: {", ".join(changed_fields) or "none"}.',
+            },
+        )
+        return response
 
     def update(self, request, *args, **kwargs):
-        self._assert_write_permission()
-        return super().update(request, *args, **kwargs)
+        return self._update_with_audit(request, False, *args, **kwargs)
 
     def partial_update(self, request, *args, **kwargs):
-        self._assert_write_permission()
-        return super().partial_update(request, *args, **kwargs)
+        return self._update_with_audit(request, True, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
         self._assert_write_permission()
@@ -927,11 +1226,155 @@ class TenderViewSet(viewsets.ModelViewSet):
     def verify(self, request, pk=None):
         self._assert_write_permission()
         tender = self.get_object()
+        old_status = tender.status
 
         tender.is_verified = True
         tender.verified_at = timezone.now()
         tender.save(update_fields=['is_verified', 'verified_at', 'updated_at'])
-        log_audit(request.user, 'tender_verified', tender, {'reference_number': tender.reference_number})
+        log_audit(
+            request.user,
+            'tender_verified',
+            tender,
+            {
+                'reference_number': tender.reference_number,
+                'old_status': old_status,
+                'new_status': tender.status,
+                'notes': f'Tender {tender.reference_number} marked as verified.',
+            },
+        )
+        return Response(TenderSerializer(tender).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['get'])
+    def activity(self, request, pk=None):
+        """Audit trail specific to this tender's own lifecycle events (newest first)."""
+        tender = self.get_object()
+        logs = AuditLog.objects.filter(
+            entity_type='Tender',
+            entity_id=str(tender.id),
+            record_type='Tender',
+            record_id=tender.id,
+        ).order_by('-created_at')
+        serializer = AuditLogSerializer(logs, many=True, context={'request': request})
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+    @action(detail=False, methods=['get'])
+    def pending_publish_approvals(self, request):
+        """Super Admin-only list of tenders awaiting publish approval."""
+        user = request.user
+        if not user.is_authenticated or getattr(user, 'role', None) != UserRole.ADMIN:
+            raise PermissionDenied('Only the Platform Administrator (Super Admin) can view pending publish approvals.')
+        qs = Tender.objects.filter(
+            status=TenderStatus.PENDING_PUBLISH_APPROVAL,
+            publish_approval_status=PublishApprovalStatus.PENDING,
+        ).order_by('-publish_approval_requested_at')
+        serializer = TenderSerializer(qs, many=True, context=self.get_serializer_context())
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def request_publish_approval(self, request, pk=None):
+        """RBF submits a tender for Super Admin approval before publication."""
+        self._assert_write_permission()
+        tender = self.get_object()
+
+        if not tender.is_verified:
+            return Response({'detail': 'Tender must be verified before requesting publish approval.'}, status=status.HTTP_400_BAD_REQUEST)
+        if tender.status == TenderStatus.PUBLISHED:
+            return Response({'detail': 'Tender is already published.'}, status=status.HTTP_400_BAD_REQUEST)
+        if tender.status == TenderStatus.CLOSED:
+            return Response({'detail': 'Closed tender cannot be published.'}, status=status.HTTP_400_BAD_REQUEST)
+        if tender.publish_approval_status == PublishApprovalStatus.PENDING:
+            return Response({'detail': 'Publish approval has already been requested and is pending review.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        old_status = tender.status
+        old_pub_status = tender.publish_approval_status
+        tender.status = TenderStatus.PENDING_PUBLISH_APPROVAL
+        tender.publish_approval_status = PublishApprovalStatus.PENDING
+        tender.publish_approval_requested_at = timezone.now()
+        tender.publish_approval_reviewed_at = None
+        tender.publish_approval_reviewed_by = ''
+        tender.publish_approval_notes = ''
+        tender.save(update_fields=[
+            'status', 'publish_approval_status', 'publish_approval_requested_at',
+            'publish_approval_reviewed_at', 'publish_approval_reviewed_by',
+            'publish_approval_notes', 'updated_at',
+        ])
+        log_audit(
+            request.user,
+            'tender_publish_approval_requested',
+            tender,
+            {
+                'reference_number': tender.reference_number,
+                'old_status': old_status,
+                'new_status': tender.status,
+                'notes': f'Tender {tender.reference_number} submitted for Super Admin publish approval (was {old_pub_status}).',
+            },
+        )
+        return Response(TenderSerializer(tender).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def approve_publish(self, request, pk=None):
+        """Super Admin approves the tender for publication."""
+        self._assert_admin_approval_permission()
+        tender = self.get_object()
+
+        if tender.status != TenderStatus.PENDING_PUBLISH_APPROVAL or tender.publish_approval_status != PublishApprovalStatus.PENDING:
+            return Response({'detail': 'Tender is not awaiting publish approval.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        old_status = tender.status
+        tender.publish_approval_status = PublishApprovalStatus.APPROVED
+        tender.publish_approval_reviewed_at = timezone.now()
+        tender.publish_approval_reviewed_by = self._admin_reference(request.user)
+        tender.publish_approval_notes = (request.data.get('notes') or '').strip()
+        tender.status = TenderStatus.DRAFT  # Return to draft so RBF can proceed to publish
+        tender.save(update_fields=[
+            'publish_approval_status', 'publish_approval_reviewed_at',
+            'publish_approval_reviewed_by', 'publish_approval_notes', 'status', 'updated_at',
+        ])
+        log_audit(
+            request.user,
+            'tender_publish_approved',
+            tender,
+            {
+                'reference_number': tender.reference_number,
+                'old_status': old_status,
+                'new_status': tender.status,
+                'notes': f'Tender {tender.reference_number} approved for publication by Super Admin.',
+            },
+        )
+        return Response(TenderSerializer(tender).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def reject_publish(self, request, pk=None):
+        """Super Admin rejects the tender publication request."""
+        self._assert_admin_approval_permission()
+        tender = self.get_object()
+
+        if tender.status != TenderStatus.PENDING_PUBLISH_APPROVAL or tender.publish_approval_status != PublishApprovalStatus.PENDING:
+            return Response({'detail': 'Tender is not awaiting publish approval.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        old_status = tender.status
+        tender.publish_approval_status = PublishApprovalStatus.REJECTED
+        tender.publish_approval_reviewed_at = timezone.now()
+        tender.publish_approval_reviewed_by = self._admin_reference(request.user)
+        tender.publish_approval_notes = (request.data.get('notes') or '').strip()
+        tender.status = TenderStatus.DRAFT
+        tender.save(update_fields=[
+            'publish_approval_status', 'publish_approval_reviewed_at',
+            'publish_approval_reviewed_by', 'publish_approval_notes', 'status', 'updated_at',
+        ])
+        log_audit(
+            request.user,
+            'tender_publish_rejected',
+            tender,
+            {
+                'reference_number': tender.reference_number,
+                'old_status': old_status,
+                'new_status': tender.status,
+                'notes': f'Tender {tender.reference_number} publish approval rejected by Super Admin.'
+                         + (f' Reason: {tender.publish_approval_notes}' if tender.publish_approval_notes else ''),
+            },
+        )
         return Response(TenderSerializer(tender).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'])
@@ -943,11 +1386,33 @@ class TenderViewSet(viewsets.ModelViewSet):
             return Response({'detail': 'Tender must be verified before publishing.'}, status=status.HTTP_400_BAD_REQUEST)
         if tender.status == TenderStatus.CLOSED:
             return Response({'detail': 'Closed tender cannot be published.'}, status=status.HTTP_400_BAD_REQUEST)
+        if tender.publish_approval_status != PublishApprovalStatus.APPROVED:
+            return Response({'detail': 'This tender must be approved by the Super Admin before it can be published.'}, status=status.HTTP_400_BAD_REQUEST)
 
+        old_status = tender.status
         tender.status = TenderStatus.PUBLISHED
         tender.published_at = timezone.now()
-        tender.save(update_fields=['status', 'published_at', 'updated_at'])
-        log_audit(request.user, 'tender_published', tender, {'reference_number': tender.reference_number})
+        tender.publish_approval_status = PublishApprovalStatus.NOT_REQUESTED
+        tender.publish_approval_requested_at = None
+        tender.publish_approval_reviewed_at = None
+        tender.publish_approval_reviewed_by = ''
+        tender.publish_approval_notes = ''
+        tender.save(update_fields=[
+            'status', 'published_at', 'publish_approval_status', 'publish_approval_requested_at',
+            'publish_approval_reviewed_at', 'publish_approval_reviewed_by', 'publish_approval_notes', 'updated_at',
+        ])
+        log_audit(
+            request.user,
+            'tender_published',
+            tender,
+            {
+                'reference_number': tender.reference_number,
+                'old_status': old_status,
+                'new_status': tender.status,
+                'publishApprovalStatus': 'approved',
+                'notes': f'Tender {tender.reference_number} published.',
+            },
+        )
 
         # Always notify all approved (pre-qualified) vendors on publish
         send_email = True
@@ -969,13 +1434,25 @@ class TenderViewSet(viewsets.ModelViewSet):
         data['notification_summary'] = notification_summary
         return Response(data, status=status.HTTP_200_OK)
 
+    def _assert_admin_approval_permission(self):
+        user = self.request.user
+        if getattr(user, 'role', None) != UserRole.ADMIN:
+            raise PermissionDenied('Only the Platform Administrator (Super Admin) can approve or reject tender publication.')
+
+    def _admin_reference(self, user):
+        name = (getattr(user, 'full_name', None) or '').strip()
+        return name or getattr(user, 'username', None) or str(user.id)
+
     def _notify_vendors_of_publish(self, tender: Tender, send_email=True, notify_all=True):
         from rbf.users.models import User, VendorPrequalification, PrequalificationStatus
 
         # Always notify approved (pre-qualified) vendors
-        vendors = User.objects.filter(role=UserRole.VENDOR)
-        vendors = vendors.filter(prequalifications__status=PrequalificationStatus.APPROVED)
-        vendors = list(vendors.distinct().only('id', 'email', 'full_name', 'username'))
+        vendors = list(
+            User.objects.filter(role=UserRole.VENDOR)
+            .filter(prequalifications__status=PrequalificationStatus.APPROVED)
+            .distinct()
+            .only('id', 'email', 'full_name', 'username', 'role')
+        )
         stakeholders = list(
             User.objects.filter(role__in={UserRole.DOE_OFFICER, UserRole.UNDP_DONOR})
             .distinct()
@@ -983,55 +1460,61 @@ class TenderViewSet(viewsets.ModelViewSet):
         )
         recipients = vendors + stakeholders
         recipient_count = len(recipients)
-        
-        notifications = []
-        email_subject = f"Tender Published: {tender.name}"
-        email_body = (
+
+        subject = f"Tender Published: {tender.name}"
+        body = (
             f"A new tender has been published.\n\n"
             f"Reference: {tender.reference_number}\n"
             f"Name: {tender.name}\n"
             f"Category: {tender.category}\n"
             f"Deadline: {tender.deadline}\n"
-            f"View details: {settings.FRONTEND_URL}/tenders/{tender.id}\n"
         )
 
-        email_enabled = send_email and bool(
-            (settings.EMAIL_HOST_USER and settings.EMAIL_HOST_PASSWORD)
-            or str(getattr(settings, 'EMAIL_HOST', '')).lower() in {'mailhog', 'localhost'}
+        vendor_link = build_frontend_url(f'/vendor/tenders?view=details&tenderId={tender.id}', request=self.request)
+        official_link = build_frontend_url(f'/rbf-official/tenders?view=details&tenderId={tender.id}', request=self.request)
+
+        # In-app notifications
+        NotificationService.notify_users(
+            users=vendors,
+            title=subject,
+            body=f"{body}View details: {vendor_link}\n",
+            event='tender_published',
+            linked_entity_id=tender.id,
+        )
+        NotificationService.notify_users(
+            users=stakeholders,
+            title=subject,
+            body=f"{body}View details: {official_link}\n",
+            event='tender_published',
+            linked_entity_id=tender.id,
         )
 
-        for recipient in recipients:
-            notifications.append(
-                Notification(
-                    recipient_id=str(recipient.id),
-                    recipient_name=recipient.full_name or recipient.username or recipient.email,
-                    type=NotificationChannel.IN_APP,
-                    event='tender_published',
-                    title=email_subject,
-                    body=email_body,
-                    status=NotificationStatus.SENT,
-                    linked_entity_id=str(tender.id),
-                )
-            )
-
-        if notifications:
-            Notification.objects.bulk_create(notifications, ignore_conflicts=True)
+        email_enabled = send_email and email_configured()
 
         email_recipients = []
         email_error = None
         if email_enabled:
-            email_recipients = list(dict.fromkeys([recipient.email for recipient in recipients if recipient.email]))
-            if email_recipients:
-                try:
-                    send_mail(
-                        subject=email_subject,
-                        message=email_body,
-                        from_email=settings.DEFAULT_FROM_EMAIL,
-                        recipient_list=email_recipients,
-                        fail_silently=False,
+            # Role-aware deep links: vendors land on the vendor portal, staff on the RBF portal.
+            groups = [
+                (vendors, vendor_link),
+                (stakeholders, official_link),
+            ]
+            for group_recipients, group_link in groups:
+                group_emails = list(
+                    dict.fromkeys(
+                        r.email for r in group_recipients if r.email
                     )
-                except Exception as exc:
-                    email_error = str(exc)
+                )
+                if not group_emails:
+                    continue
+                email_recipients.extend(group_emails)
+                sent = NotificationService.dispatch_email(
+                    subject,
+                    f"{body}View details: {group_link}\n",
+                    group_emails,
+                )
+                if sent <= 0:
+                    email_error = email_error or f'Email delivery failed for {len(group_emails)} recipient(s).'
 
         return {
             'recipient_count': recipient_count,
@@ -1111,6 +1594,7 @@ class TenderViewSet(viewsets.ModelViewSet):
             )
 
         now = timezone.now()
+        tender.status = TenderStatus.STANDSTILL
         tender.intent_to_award_bid = bid
         tender.intent_to_award_at = now
         tender.awarded_vendor_id = awarded_vendor_id
@@ -1119,6 +1603,7 @@ class TenderViewSet(viewsets.ModelViewSet):
         tender.cooling_off_until = now + timedelta(days=cooling_off_days)
         tender.save(
             update_fields=[
+                'status',
                 'intent_to_award_bid',
                 'intent_to_award_at',
                 'awarded_vendor_id',
@@ -1165,6 +1650,28 @@ class TenderViewSet(viewsets.ModelViewSet):
     def confirm_award(self, request, pk=None):
         self._assert_write_permission()
         tender = self.get_object()
+
+        if tender.status == TenderStatus.AWARDED:
+            return Response(
+                {'detail': 'Tender has already been awarded.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if tender.status == TenderStatus.DISPUTED:
+            return Response(
+                {'detail': 'Cannot finalize award while a dispute is active. Resolve all challenges first.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if tender.status == TenderStatus.CLOSED:
+            return Response(
+                {'detail': 'Closed tender cannot be awarded.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if tender.status not in {TenderStatus.STANDSTILL, TenderStatus.EVALUATION}:
+            return Response(
+                {'detail': 'Final award can only be issued from Standstill or Evaluation state.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         bid = tender.intent_to_award_bid
         if bid is None:
             return Response(
@@ -1185,12 +1692,16 @@ class TenderViewSet(viewsets.ModelViewSet):
             tender.awarded_vendor_id = bid.vendor_id
             tender.awarded_vendor_name = bid.vendor_name
             tender.awarded_at = timezone.now()
+            tender.cooling_off_until = None
+            tender.dispute_started_at = None
             tender.save(
                 update_fields=[
                     'status',
                     'awarded_vendor_id',
                     'awarded_vendor_name',
                     'awarded_at',
+                    'cooling_off_until',
+                    'dispute_started_at',
                     'updated_at',
                 ]
             )
@@ -1225,6 +1736,531 @@ class TenderViewSet(viewsets.ModelViewSet):
             ).data
         return Response(response_data, status=status.HTTP_200_OK)
 
+    @action(detail=True, methods=['post'])
+    def pause_award(self, request, pk=None):
+        """
+        Pause the award process and freeze the cooling-off clock.
+        Sets tender status to DISPUTED so challenges can be reviewed.
+        """
+        self._assert_write_permission()
+        tender = self.get_object()
+
+        if tender.status == TenderStatus.DISPUTED:
+            return Response(
+                {'detail': 'Award process is already paused.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not tender.intent_to_award_at:
+            return Response(
+                {'detail': 'No intent to award has been issued yet. Nothing to pause.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if tender.status == TenderStatus.AWARDED:
+            return Response(
+                {'detail': 'Tender has already been awarded. Cannot pause.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        old_status = tender.status
+        tender.status = TenderStatus.DISPUTED
+        tender.dispute_started_at = timezone.now()
+        tender.save(update_fields=['status', 'dispute_started_at', 'updated_at'])
+
+        log_audit(
+            request.user,
+            'award_paused',
+            tender,
+            {
+                'reference_number': tender.reference_number,
+                'previous_status': old_status,
+                'cooling_off_until': tender.cooling_off_until.isoformat() if tender.cooling_off_until else None,
+                'dispute_started_at': tender.dispute_started_at.isoformat(),
+            },
+        )
+
+        # Notify all bidders that award is paused
+        self._notify_award_paused(tender)
+
+        return Response(TenderSerializer(tender).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def revoke_intent(self, request, pk=None):
+        """
+        Revoke the intent to award, clearing all award fields.
+        Tender returns to EVALUATION status.
+        """
+        self._assert_write_permission()
+        tender = self.get_object()
+
+        if not tender.intent_to_award_at:
+            return Response(
+                {'detail': 'No intent to award has been issued yet.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if tender.status == TenderStatus.AWARDED:
+            return Response(
+                {'detail': 'Tender has already been awarded. Cannot revoke intent.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        previous_bid_id = str(tender.intent_to_award_bid.id) if tender.intent_to_award_bid else None
+        previous_vendor_id = tender.awarded_vendor_id
+        previous_vendor_name = tender.awarded_vendor_name
+
+        tender.intent_to_award_bid = None
+        tender.intent_to_award_at = None
+        tender.awarded_vendor_id = ''
+        tender.awarded_vendor_name = ''
+        tender.cooling_off_until = None
+        tender.dispute_started_at = None
+        tender.status = TenderStatus.EVALUATION
+        tender.save(update_fields=[
+            'intent_to_award_bid',
+            'intent_to_award_at',
+            'awarded_vendor_id',
+            'awarded_vendor_name',
+            'cooling_off_until',
+            'dispute_started_at',
+            'status',
+            'updated_at',
+        ])
+
+        log_audit(
+            request.user,
+            'intent_revoked',
+            tender,
+            {
+                'reference_number': tender.reference_number,
+                'previous_bid_id': previous_bid_id,
+                'previous_vendor_id': previous_vendor_id,
+                'previous_vendor_name': previous_vendor_name,
+            },
+        )
+
+        self._notify_intent_revoked(tender, previous_vendor_id, previous_vendor_name)
+
+        return Response(TenderSerializer(tender).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def create_challenge(self, request, pk=None):
+        """
+        Log a challenge/protest filed by an unsuccessful bidder.
+        Sets tender to DISPUTED status and freezes cooling-off.
+        """
+        try:
+            tender = Tender.objects.get(id=pk)
+        except Tender.DoesNotExist:
+            return Response(
+                {'detail': 'Tender not found.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if not tender.intent_to_award_at:
+            return Response(
+                {'detail': 'No intent to award has been issued. Cannot file a challenge.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if tender.status == TenderStatus.AWARDED:
+            return Response(
+                {'detail': 'Tender has already been awarded. Cannot file a challenge.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        filed_by_vendor_id = str(request.data.get('filed_by_vendor_id') or '').strip()
+        filed_by_vendor_name = str(request.data.get('filed_by_vendor_name') or '').strip()
+        grounds = str(request.data.get('grounds') or '').strip()
+        challenger_bid_id = request.data.get('challenger_bid_id')
+
+        if not filed_by_vendor_id or not filed_by_vendor_name:
+            return Response(
+                {'detail': 'filed_by_vendor_id and filed_by_vendor_name are required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not grounds:
+            return Response(
+                {'detail': 'grounds is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        challenger_bid = None
+        if challenger_bid_id:
+            try:
+                challenger_bid = TenderBid.objects.get(id=challenger_bid_id, tender=tender)
+            except TenderBid.DoesNotExist:
+                return Response(
+                    {'detail': 'Challenger bid not found for this tender.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        challenge = TenderChallenge.objects.create(
+            tender=tender,
+            filed_by_vendor_id=filed_by_vendor_id,
+            filed_by_vendor_name=filed_by_vendor_name,
+            challenger_bid=challenger_bid,
+            grounds=grounds,
+            status=ChallengeStatus.SUBMITTED,
+        )
+
+        # Auto-pause award if not already paused
+        was_already_disputed = tender.status == TenderStatus.DISPUTED
+        if not was_already_disputed:
+            tender.status = TenderStatus.DISPUTED
+            tender.dispute_started_at = timezone.now()
+            tender.save(update_fields=['status', 'dispute_started_at', 'updated_at'])
+
+        log_audit(
+            request.user,
+            'challenge_filed',
+            tender,
+            {
+                'reference_number': tender.reference_number,
+                'challenge_id': str(challenge.id),
+                'filed_by_vendor_id': filed_by_vendor_id,
+                'filed_by_vendor_name': filed_by_vendor_name,
+            },
+        )
+
+        # Only notify bidders that the award is paused if this challenge newly
+        # paused the award (pause_award already notified on its own path).
+        if not was_already_disputed:
+            self._notify_award_paused(tender)
+
+        from .serializers import TenderChallengeSerializer
+        data = TenderChallengeSerializer(challenge, context={'request': request}).data
+        data['tender'] = TenderSerializer(tender, context={'request': request}).data
+        return Response(data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['get'])
+    def challenges(self, request, pk=None):
+        """List all challenges for this tender."""
+        tender = self.get_object()
+        challenges = tender.challenges.all()
+        from .serializers import TenderChallengeSerializer
+        return Response(
+            TenderChallengeSerializer(challenges, many=True, context={'request': request}).data,
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=True, methods=['post'])
+    def resolve_challenge(self, request, pk=None):
+        """
+        Resolve a challenge with outcome 'upheld' or 'dismissed'.
+        If upheld: revokes old intent, sets challenger as new recommended winner, resets cooling-off.
+        If dismissed: returns tender to EVALUATION, resumes cooling-off clock.
+        """
+        self._assert_write_permission()
+        tender = self.get_object()
+
+        challenge_id = request.data.get('challenge_id')
+        outcome = request.data.get('outcome', '').strip().lower()
+        resolution_notes = request.data.get('resolution_notes', '')
+
+        if not challenge_id:
+            return Response(
+                {'detail': 'challenge_id is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if outcome not in {'upheld', 'dismissed'}:
+            return Response(
+                {'detail': 'outcome must be "upheld" or "dismissed".'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            challenge = tender.challenges.get(id=challenge_id)
+        except TenderChallenge.DoesNotExist:
+            return Response(
+                {'detail': 'Challenge not found for this tender.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if challenge.status in {ChallengeStatus.UPHELD, ChallengeStatus.DISMISSED}:
+            return Response(
+                {'detail': f'Challenge has already been resolved as {challenge.status}.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        challenge.status = ChallengeStatus.UPHELD if outcome == 'upheld' else ChallengeStatus.DISMISSED
+        challenge.reviewed_by = request.user
+        challenge.resolution_notes = resolution_notes
+        challenge.resolved_at = timezone.now()
+        challenge.save(update_fields=['status', 'reviewed_by', 'resolution_notes', 'resolved_at'])
+
+        if outcome == 'dismissed':
+            remaining_seconds = 0
+            if tender.dispute_started_at and tender.cooling_off_until:
+                total_cooling = (tender.cooling_off_until - tender.dispute_started_at).total_seconds()
+                elapsed = (timezone.now() - tender.dispute_started_at).total_seconds()
+                remaining_seconds = max(0, total_cooling - elapsed)
+            tender.cooling_off_until = timezone.now() + timedelta(seconds=remaining_seconds)
+            tender.dispute_started_at = None
+            tender.status = TenderStatus.STANDSTILL
+            tender.save(update_fields=['cooling_off_until', 'dispute_started_at', 'status', 'updated_at'])
+
+            log_audit(
+                request.user,
+                'challenge_dismissed',
+                tender,
+                {
+                    'reference_number': tender.reference_number,
+                    'challenge_id': str(challenge.id),
+                    'filed_by': challenge.filed_by_vendor_name,
+                    'resolution_notes': resolution_notes,
+                },
+            )
+
+            self._notify_challenge_dismissed(tender, challenge)
+
+        elif outcome == 'upheld':
+            previous_bid_id = str(tender.intent_to_award_bid.id) if tender.intent_to_award_bid else None
+            previous_vendor_id = tender.awarded_vendor_id
+            previous_vendor_name = tender.awarded_vendor_name
+
+            challenger_bid = challenge.challenger_bid
+            if not challenger_bid:
+                return Response(
+                    {'detail': 'Challenger bid is not set. Cannot re-issue intent.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            tender.intent_to_award_bid = challenger_bid
+            tender.intent_to_award_at = timezone.now()
+            tender.awarded_vendor_id = challenger_bid.vendor_id
+            tender.awarded_vendor_name = challenger_bid.vendor_name
+            cooling_off_days = tender.cooling_off_days if tender.cooling_off_days is not None else 7
+            tender.cooling_off_until = timezone.now() + timedelta(days=cooling_off_days)
+            tender.dispute_started_at = None
+            tender.status = TenderStatus.STANDSTILL
+            tender.save(update_fields=[
+                'intent_to_award_bid',
+                'intent_to_award_at',
+                'awarded_vendor_id',
+                'awarded_vendor_name',
+                'cooling_off_until',
+                'dispute_started_at',
+                'status',
+                'updated_at',
+            ])
+
+            log_audit(
+                request.user,
+                'intent_revoked',
+                tender,
+                {
+                    'reference_number': tender.reference_number,
+                    'previous_bid_id': previous_bid_id,
+                    'previous_vendor_id': previous_vendor_id,
+                    'previous_vendor_name': previous_vendor_name,
+                    'reason': f'Challenge UPHELD — challenge_id={challenge.id}',
+                },
+            )
+            log_audit(
+                request.user,
+                'challenge_upheld',
+                tender,
+                {
+                    'reference_number': tender.reference_number,
+                    'challenge_id': str(challenge.id),
+                    'filed_by': challenge.filed_by_vendor_name,
+                    'new_intent_bid_id': str(challenger_bid.id),
+                    'new_intent_vendor_id': challenger_bid.vendor_id,
+                    'new_intent_vendor_name': challenger_bid.vendor_name,
+                    'new_cooling_off_until': tender.cooling_off_until.isoformat(),
+                    'resolution_notes': resolution_notes,
+                },
+            )
+            log_audit(
+                request.user,
+                'intent_reissued',
+                tender,
+                {
+                    'reference_number': tender.reference_number,
+                    'bid_id': str(challenger_bid.id),
+                    'vendor_id': challenger_bid.vendor_id,
+                    'vendor_name': challenger_bid.vendor_name,
+                    'new_cooling_off_until': tender.cooling_off_until.isoformat(),
+                },
+            )
+
+            if previous_vendor_id:
+                self._notify_intent_revoked(tender, previous_vendor_id, previous_vendor_name)
+            self._notify_challenge_upheld(tender, challenge, challenger_bid)
+
+        return Response(TenderSerializer(tender).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def update_cooling_off(self, request, pk=None):
+        """
+        Extend or shorten the cooling-off period for a tender with active intent to award.
+        Body: { "action": "extend" | "shorten", "days": <positive integer> }
+        """
+        self._assert_write_permission()
+        tender = self.get_object()
+
+        action = request.data.get('action', '').strip().lower()
+        days_str = request.data.get('days')
+
+        if action not in {'extend', 'shorten'}:
+            return Response(
+                {'detail': 'action must be "extend" or "shorten".'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            days = int(days_str)
+        except (TypeError, ValueError):
+            return Response(
+                {'detail': 'days must be a positive integer.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if days <= 0:
+            return Response(
+                {'detail': 'days must be a positive integer.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not tender.cooling_off_until:
+            return Response(
+                {'detail': 'Cooling-off period is not active. No intent to award has been issued.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if tender.status == TenderStatus.AWARDED:
+            return Response(
+                {'detail': 'Cannot adjust cooling-off after final award.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        prev_cooling_off_until = tender.cooling_off_until
+
+        if action == 'extend':
+            tender.cooling_off_until += timedelta(days=days)
+        else:  # shorten
+            min_allowed = timezone.now() + timedelta(hours=1)
+            new_cooling_off = tender.cooling_off_until - timedelta(days=days)
+            if new_cooling_off < min_allowed:
+                return Response(
+                    {'detail': 'Shortening by that many days would leave less than 1 hour before the deadline.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            tender.cooling_off_until = new_cooling_off
+
+        tender.save(update_fields=['cooling_off_until', 'updated_at'])
+
+        log_audit(
+            request.user,
+            'cooling_off_adjusted',
+            tender,
+            {
+                'reference_number': tender.reference_number,
+                'action': action,
+                'days': days,
+                'previous_cooling_off_until': prev_cooling_off_until.isoformat(),
+                'new_cooling_off_until': tender.cooling_off_until.isoformat(),
+            },
+        )
+
+        return Response(TenderSerializer(tender).data, status=status.HTTP_200_OK)
+
+    def _notify_award_paused(self, tender: Tender):
+        """Notify all bidders that the award process has been paused."""
+        from rbf.users.models import User
+        bids = TenderBid.objects.filter(tender=tender, status__in={
+            BidStatus.SUBMITTED, BidStatus.UNDER_REVIEW, BidStatus.ACCEPTED, BidStatus.AWARDED,
+        }).values('vendor_id').distinct()
+        vendor_ids = [b['vendor_id'] for b in bids]
+        vendors = User.objects.filter(id__in=vendor_ids).only('id', 'email', 'full_name', 'username')
+        title = f'Award Process Paused: {tender.reference_number}'
+        body = (
+            f"The award process for {tender.name} ({tender.reference_number}) has been paused.\n"
+            f"A challenge has been filed and is under review.\n"
+            f"You will be notified when the process resumes.\n"
+        )
+        for vendor in vendors:
+            Notification.objects.create(
+                recipient_id=str(vendor.id),
+                recipient_name=vendor.full_name or vendor.username or vendor.email,
+                type=NotificationChannel.IN_APP,
+                event='award_paused',
+                title=title,
+                body=body,
+                status=NotificationStatus.SENT,
+                linked_entity_id=str(tender.id),
+            )
+
+    def _notify_intent_revoked(self, tender: Tender, vendor_id: str, vendor_name: str):
+        """Notify the previously selected winner that intent has been revoked."""
+        from rbf.users.models import User
+        try:
+            vendor = User.objects.get(id=vendor_id)
+        except User.DoesNotExist:
+            return
+        title = f'Intent to Award Revoked: {tender.reference_number}'
+        body = (
+            f"The Intent to Award previously issued for {tender.name} ({tender.reference_number}) "
+            f"has been revoked.\n"
+            f"A challenge was upheld by the review committee.\n"
+        )
+        Notification.objects.create(
+            recipient_id=str(vendor.id),
+            recipient_name=vendor.full_name or vendor.username or vendor.email,
+            type=NotificationChannel.IN_APP,
+            event='intent_revoked',
+            title=title,
+            body=body,
+            status=NotificationStatus.SENT,
+            linked_entity_id=str(tender.id),
+        )
+
+    def _notify_challenge_dismissed(self, tender: Tender, challenge: TenderChallenge):
+        """Notify the challenging vendor that their challenge was dismissed."""
+        from rbf.users.models import User
+        try:
+            vendor = User.objects.get(id=challenge.filed_by_vendor_id)
+        except User.DoesNotExist:
+            return
+        title = f'Challenge Dismissed: {tender.reference_number}'
+        body = (
+            f"Your challenge for {tender.name} ({tender.reference_number}) has been reviewed and dismissed.\n"
+            f"The award process will continue with the current intent to award.\n"
+        )
+        Notification.objects.create(
+            recipient_id=str(vendor.id),
+            recipient_name=vendor.full_name or vendor.username or vendor.email,
+            type=NotificationChannel.IN_APP,
+            event='challenge_dismissed',
+            title=title,
+            body=body,
+            status=NotificationStatus.SENT,
+            linked_entity_id=str(tender.id),
+        )
+
+    def _notify_challenge_upheld(self, tender: Tender, challenge: TenderChallenge, new_bid: TenderBid):
+        """Notify the challenging vendor that their challenge was upheld and they are the new winner."""
+        from rbf.users.models import User
+        try:
+            vendor = User.objects.get(id=challenge.filed_by_vendor_id)
+        except User.DoesNotExist:
+            return
+        cooling_date_text = tender.cooling_off_until.strftime('%Y-%m-%d %H:%M:%S') if tender.cooling_off_until else 'N/A'
+        title = f'Challenge Upheld — New Intent to Award: {tender.reference_number}'
+        body = (
+            f"Your challenge for {tender.name} ({tender.reference_number}) has been upheld.\n"
+            f"You are now the Best Evaluated Bidder.\n"
+            f"Cooling-off period ends on: {cooling_date_text}\n"
+            f"The final award will occur after the cooling-off period expires without further protest.\n"
+        )
+        Notification.objects.create(
+            recipient_id=str(vendor.id),
+            recipient_name=vendor.full_name or vendor.username or vendor.email,
+            type=NotificationChannel.IN_APP,
+            event='challenge_upheld_new_intent',
+            title=title,
+            body=body,
+            status=NotificationStatus.SENT,
+            linked_entity_id=str(tender.id),
+        )
+        # Also notify the new winner via email if possible
+        if vendor.email:
+            NotificationService.dispatch_email(title, body, [vendor.email])
+
     def _notify_award(self, tender: Tender, vendor_id: str, vendor_name: str, send_email=True):
         """Send award notification to winning vendor"""
         from rbf.users.models import User
@@ -1244,16 +2280,13 @@ class TenderViewSet(viewsets.ModelViewSet):
             f"Next step: Log in, open the Contracting tab, review the generated agreement package, and sign the Performance-Based Agreement.\n"
         )
 
-        email_enabled = send_email and bool(
-            (settings.EMAIL_HOST_USER and settings.EMAIL_HOST_PASSWORD)
-            or str(getattr(settings, 'EMAIL_HOST', '')).lower() in {'mailhog', 'localhost'}
-        )
+        email_enabled = send_email and email_configured()
 
         # In-app notification
         Notification.objects.create(
             recipient_id=str(vendor.id),
             recipient_name=vendor.full_name or vendor.username or vendor.email,
-            type=NotificationChannel.EMAIL if email_enabled else NotificationChannel.IN_APP,
+            type=NotificationChannel.IN_APP,
             event='tender_awarded',
             title=email_subject,
             body=email_body,
@@ -1263,16 +2296,7 @@ class TenderViewSet(viewsets.ModelViewSet):
 
         # Email notification
         if email_enabled and vendor.email:
-            try:
-                send_mail(
-                    subject=email_subject,
-                    message=email_body,
-                    from_email=settings.DEFAULT_FROM_EMAIL,
-                    recipient_list=[vendor.email],
-                    fail_silently=True,
-                )
-            except Exception:
-                pass
+            NotificationService.dispatch_email(email_subject, email_body, [vendor.email])
 
     def _ensure_award_contract(self, tender: Tender, bid: TenderBid, vendor_id: str):
         """Create a generated contract on award if one doesn't exist."""
@@ -1355,6 +2379,48 @@ class TenderViewSet(viewsets.ModelViewSet):
             {'reference_number': tender.reference_number},
         )
         return Response(TenderSerializer(tender).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def open_financial_stage(self, request, pk=None):
+        """Batch-open the Financial stage for all technical-passing bidders.
+
+        Only the RBF Management Team may perform this action. It unlocks the
+        Financial stage (and unseals combined pricing) for every bid that cleared
+        the technical threshold, once all technical bids have been evaluated.
+        """
+        self._assert_write_permission()
+        tender = self.get_object()
+        workflow = getattr(tender, 'procurement_workflow', ProcurementWorkflow.SEQUENTIAL)
+
+        passing_bids = _technical_passing_bids(tender)
+        submitted_technical = TenderBid.objects.filter(
+            tender=tender,
+            bid_stage__in=[BidStage.TECHNICAL, BidStage.COMBINED],
+            status=BidStatus.SUBMITTED,
+        )
+        if submitted_technical.exists():
+            return Response(
+                {'detail': 'Not all technical bids have been evaluated yet. Evaluate every technical submission before opening the Financial stage.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        opened = _open_financial_stage_for_tender(tender)
+        log_audit(
+            request.user,
+            'financial_stage_opened',
+            tender,
+            {
+                'reference_number': tender.reference_number,
+                'workflow': workflow,
+                'opened_bids': len(opened),
+                'notes': 'Financial stage opened for all technical-passing bidders.',
+            },
+        )
+        return Response({
+            'detail': f'Financial stage opened for {len(opened)} bidder(s).',
+            'opened_bids': [str(b.id) for b in opened],
+            'workflow': workflow,
+        }, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'])
     def verify_security(self, request, pk=None):
@@ -1442,11 +2508,31 @@ class TenderBidViewSet(viewsets.ModelViewSet):
         latest_prequalification = _latest_vendor_prequalification(str(request.user.id))
         if latest_prequalification is None or latest_prequalification.status != PrequalificationStatus.APPROVED:
             raise ValidationError({'detail': 'Complete pre-qualification first'})
+        _auto_close_tender_on_deadline(tender)
         if tender.status != TenderStatus.PUBLISHED:
             raise ValidationError({'tender': 'Tender is not open for bidding.'})
-        deadline = tender.last_date_submission or tender.deadline
-        if deadline and timezone.now() > deadline:
+
+        workflow = getattr(tender, 'procurement_workflow', ProcurementWorkflow.SEQUENTIAL)
+        spec = _bid_stage_spec(bid, tender)
+        stage = spec['stage']
+        deadline = spec['deadline']
+        if _uses_hard_deadline(tender) and deadline and timezone.now() >= deadline:
             raise ValidationError({'tender': 'Bidding deadline has passed.'})
+
+        if stage == BidStage.EOI:
+            # Normal EOI access; no prior shortlisting requirement.
+            pass
+        elif stage == BidStage.TECHNICAL:
+            if bid is not None and not _has_technical_stage_access(bid):
+                raise ValidationError({'detail': 'Only shortlisted vendors can submit a Technical proposal.'})
+        elif stage == BidStage.FINANCIAL:
+            if not _has_financial_stage_access(bid):
+                raise ValidationError({'detail': 'The Financial stage is not yet open for this vendor.'})
+        elif stage == BidStage.COMBINED:
+            if bid is not None and not _has_technical_stage_access(bid):
+                raise ValidationError({'detail': 'Only shortlisted vendors can submit a combined Technical & Financial proposal.'})
+
+        # Prevent duplicate submissions within the SAME stage lineage.
         existing_submitted_bid = TenderBid.objects.filter(
             tender=tender,
             vendor_id=str(request.user.id),
@@ -1457,14 +2543,19 @@ class TenderBidViewSet(viewsets.ModelViewSet):
             existing_submitted_bid = existing_submitted_bid.exclude(id=bid.id)
             if bid.stage_two_source_bid_id:
                 existing_submitted_bid = existing_submitted_bid.exclude(id=bid.stage_two_source_bid_id)
+            if bid.technical_stage_source_bid_id:
+                existing_submitted_bid = existing_submitted_bid.exclude(id=bid.technical_stage_source_bid_id)
+            if bid.financial_stage_source_bid_id:
+                existing_submitted_bid = existing_submitted_bid.exclude(id=bid.financial_stage_source_bid_id)
         if existing_submitted_bid.exists():
             raise ValidationError({'tender': 'You have already submitted a bid for this tender.'})
 
     def _assert_stage_one_review_permission(self, request, bid: TenderBid):
         if request.user.role not in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}:
-            raise PermissionDenied('Only the RBF Management Team can decide Stage 1 submissions.')
-        if normalize_tender_stage(getattr(bid.tender, 'stage_type', '')) != 'pre_qualification':
-            raise ValidationError({'detail': 'Stage 1 review actions only apply to pre-qualification bids.'})
+            raise PermissionDenied('Only the RBF Management Team can decide EOI submissions.')
+        if normalize_tender_stage(getattr(bid.tender, 'stage_type', '')) not in {'pre_qualification'} \
+                and normalize_bid_stage(getattr(bid, 'bid_stage', '')) != BidStage.EOI:
+            raise ValidationError({'detail': 'EOI review actions only apply to EOI submissions.'})
 
     def create(self, request, *args, **kwargs):
         """Submit a bid for a tender"""
@@ -1496,7 +2587,10 @@ class TenderBidViewSet(viewsets.ModelViewSet):
         payload['vendor_email'] = request.user.email
         payload['version_number'] = next_version
         payload['status'] = bid_status
-        payload['stage'] = tender_stage_label(tender.stage_type)
+        new_stage = normalize_bid_stage(payload.get('bid_stage') or BidStage.EOI)
+        if not payload.get('bid_stage'):
+            payload['bid_stage'] = new_stage
+        payload['stage'] = bid_stage_label(new_stage)
 
         serializer = self.get_serializer(data=payload)
         serializer.is_valid(raise_exception=True)
@@ -1517,13 +2611,30 @@ class TenderBidViewSet(viewsets.ModelViewSet):
         bid = self.get_object()
         if request.user.role != UserRole.VENDOR or bid.vendor_id != str(request.user.id):
             raise PermissionDenied('Only the submitting vendor can update this bid.')
-        if bid.status not in {BidStatus.DRAFT, BidStatus.REVISION_REQUIRED}:
+        if bid.status not in {BidStatus.DRAFT, BidStatus.REVISION_REQUIRED, BidStatus.SUBMITTED}:
             raise ValidationError({'detail': 'Submitted bids are locked. Create or edit a draft before final submission.'})
         self._assert_vendor_submission_access(request, bid.tender, bid=bid)
 
         submitting = self._is_submitting(bid, request)
-        payload = request.data.copy()
-        payload['stage'] = tender_stage_label('site_specific' if bid.stage_two_unlocked else bid.tender.stage_type)
+        
+        payload = {}
+        for key in request.data.keys():
+            value = request.data.getlist(key) if len(request.data.getlist(key)) > 1 else request.data.get(key)
+            payload[key] = value
+        
+        payload['stage'] = bid_stage_label(getattr(bid, 'bid_stage', None) or bid.stage or 'eoi')
+        
+        if submitting:
+            latest_version = (
+                TenderBid.objects.filter(tender=bid.tender, vendor_id=str(request.user.id))
+                .order_by('-version_number')
+                .values_list('version_number', flat=True)
+                .first()
+            )
+            next_version = (latest_version or 0) + 1
+            payload['version_number'] = next_version
+            payload['status'] = BidStatus.SUBMITTED
+        
         serializer = self.get_serializer(bid, data=payload)
         serializer.is_valid(raise_exception=True)
         self.perform_update(serializer)
@@ -1539,13 +2650,30 @@ class TenderBidViewSet(viewsets.ModelViewSet):
         bid = self.get_object()
         if request.user.role != UserRole.VENDOR or bid.vendor_id != str(request.user.id):
             raise PermissionDenied('Only the submitting vendor can update this bid.')
-        if bid.status not in {BidStatus.DRAFT, BidStatus.REVISION_REQUIRED}:
+        if bid.status not in {BidStatus.DRAFT, BidStatus.REVISION_REQUIRED, BidStatus.SUBMITTED}:
             raise ValidationError({'detail': 'Submitted bids are locked. Create or edit a draft before final submission.'})
         self._assert_vendor_submission_access(request, bid.tender, bid=bid)
 
         submitting = self._is_submitting(bid, request)
-        payload = request.data.copy()
-        payload['stage'] = tender_stage_label('site_specific' if bid.stage_two_unlocked else bid.tender.stage_type)
+        
+        payload = {}
+        for key in request.data.keys():
+            value = request.data.getlist(key) if len(request.data.getlist(key)) > 1 else request.data.get(key)
+            payload[key] = value
+        
+        payload['stage'] = bid_stage_label(getattr(bid, 'bid_stage', None) or bid.stage or 'eoi')
+        
+        if submitting:
+            latest_version = (
+                TenderBid.objects.filter(tender=bid.tender, vendor_id=str(request.user.id))
+                .order_by('-version_number')
+                .values_list('version_number', flat=True)
+                .first()
+            )
+            next_version = (latest_version or 0) + 1
+            payload['version_number'] = next_version
+            payload['status'] = BidStatus.SUBMITTED
+        
         serializer = self.get_serializer(bid, data=payload, partial=True)
         serializer.is_valid(raise_exception=True)
         self.perform_update(serializer)
@@ -1557,9 +2685,20 @@ class TenderBidViewSet(viewsets.ModelViewSet):
             self._record_bid_submission(request, bid)
         return Response(TenderBidSerializer(bid, context=self.get_serializer_context()).data, status=status.HTTP_200_OK)
 
+    def destroy(self, request, *args, **kwargs):
+        bid = self.get_object()
+        if request.user.role != UserRole.VENDOR or bid.vendor_id != str(request.user.id):
+            raise PermissionDenied('Only the submitting vendor can delete this bid.')
+        if bid.status not in {BidStatus.DRAFT, BidStatus.REVISION_REQUIRED, BidStatus.WITHDRAWN}:
+            return Response(
+                {'detail': 'Only draft or withdrawn bids can be deleted. Please contact the RBF Management Team to withdraw a submitted bid.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return super().destroy(request, *args, **kwargs)
+
     def _is_submitting(self, bid: TenderBid, request) -> bool:
         target_status = request.data.get('status')
-        return target_status == BidStatus.SUBMITTED and bid.status in {BidStatus.DRAFT, BidStatus.REVISION_REQUIRED}
+        return target_status == BidStatus.SUBMITTED and bid.status in {BidStatus.DRAFT, BidStatus.REVISION_REQUIRED, BidStatus.SUBMITTED}
 
     def _record_bid_submission(self, request, bid: TenderBid):
         log_audit(
@@ -1592,13 +2731,12 @@ class TenderBidViewSet(viewsets.ModelViewSet):
                 module='tenders',
                 record_id=bid.id,
             )
-        Notification.objects.create(
+        NotificationService.notify_user(
             recipient_id=bid.vendor_id,
             recipient_name=bid.vendor_name,
-            type=NotificationChannel.IN_APP,
-            event='bid_submitted',
             title=f'Bid Submitted: {bid.tender.reference_number}',
             body=f'Your bid was submitted successfully. Ref: {bid.tender.reference_number} • Version {bid.version_number}.',
+            event='bid_submitted',
             linked_entity_id=str(bid.tender.id),
         )
 
@@ -1612,16 +2750,11 @@ class TenderBidViewSet(viewsets.ModelViewSet):
                 {'detail': 'Only submitted bids can be reviewed.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        
+
         bid.status = BidStatus.UNDER_REVIEW
         bid.reviewed_at = timezone.now()
         bid.reviewed_by = f"{request.user.full_name or request.user.username}"
         bid.save(update_fields=['status', 'reviewed_at', 'reviewed_by'])
-        if bid.tender.status == TenderStatus.PUBLISHED:
-            deadline = bid.tender.last_date_submission or bid.tender.deadline
-            if deadline and timezone.now() > deadline:
-                bid.tender.status = TenderStatus.EVALUATION
-                bid.tender.save(update_fields=['status', 'updated_at'])
         log_audit(request.user, 'bid_under_review', bid, {'tender_id': str(bid.tender_id)})
         
         return Response(TenderBidSerializer(bid).data, status=status.HTTP_200_OK)
@@ -1640,22 +2773,35 @@ class TenderBidViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        deadline = bid.tender.last_date_submission or bid.tender.deadline
-        if deadline and timezone.now() > deadline:
+        spec = _bid_stage_spec(bid, bid.tender)
+        total_deadline = spec['deadline']
+        if _uses_hard_deadline(bid.tender) and total_deadline and timezone.now() >= total_deadline:
             return Response(
                 {'detail': 'Bidding deadline has passed.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        if is_site_specific_stage(bid.tender.stage_type or bid.stage):
+        stage = spec['stage']
+        if stage in (BidStage.TECHNICAL, BidStage.COMBINED):
             if not bid.technical_proposal_file or not bid.financial_proposal_file:
                 return Response(
-                    {'detail': 'Technical and financial proposal files are required for site-specific bids.'},
+                    {'detail': 'Technical and financial proposal files are required for technical submissions.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             if not bid.boq_file:
                 return Response(
-                    {'detail': 'BOQ file is required for site-specific bids.'},
+                    {'detail': 'BOQ file is required for technical submissions.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        elif stage == BidStage.FINANCIAL:
+            if not bid.financial_proposal_file:
+                return Response(
+                    {'detail': 'Financial Proposal file is required for the Financial stage.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if not bid.boq_file:
+                return Response(
+                    {'detail': 'BOQ file is required for the Financial stage.'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
@@ -1663,13 +2809,12 @@ class TenderBidViewSet(viewsets.ModelViewSet):
         bid.submitted_at = timezone.now()
         bid.save(update_fields=['status', 'submitted_at', 'updated_at'])
         log_audit(request.user, 'bid_submitted', bid, {'tender_id': str(bid.tender_id), 'version': bid.version_number})
-        Notification.objects.create(
+        NotificationService.notify_user(
             recipient_id=bid.vendor_id,
             recipient_name=bid.vendor_name,
-            type=NotificationChannel.IN_APP,
-            event='bid_submitted',
             title=f'Bid Submitted: {bid.tender.reference_number}',
             body=f'Your bid was submitted successfully. Ref: {bid.tender.reference_number} • Version {bid.version_number}.',
+            event='bid_submitted',
             linked_entity_id=str(bid.tender.id),
         )
 
@@ -1693,8 +2838,13 @@ class TenderBidViewSet(viewsets.ModelViewSet):
         bid.save(update_fields=['status', 'reviewed_at', 'reviewed_by'])
         log_audit(request.user, 'bid_accepted', bid, {'tender_id': str(bid.tender_id)})
 
-        if normalize_tender_stage(getattr(bid.tender, 'stage_type', '')) == 'pre_qualification':
-            draft = _ensure_stage_two_draft(bid)
+        is_eoi_bid = normalize_bid_stage(getattr(bid, 'bid_stage', '')) == BidStage.EOI
+        is_legacy = normalize_tender_stage(getattr(bid.tender, 'stage_type', '')) == 'pre_qualification'
+        if is_eoi_bid or is_legacy:
+            workflow = getattr(bid.tender, 'procurement_workflow', ProcurementWorkflow.SEQUENTIAL)
+            draft = _unlock_stage_for_bid(bid, BidStage.TECHNICAL)
+            if workflow == ProcurementWorkflow.COMBINED:
+                _unlock_stage_for_bid(bid, BidStage.FINANCIAL)
             Notification.objects.create(
                 recipient_id=bid.vendor_id,
                 recipient_name=bid.vendor_name,
@@ -1820,8 +2970,31 @@ class TenderBidEvaluationViewSet(viewsets.ModelViewSet):
         if request.user.role not in {UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.TAC}:
             raise PermissionDenied('Only the RBF Management Team or TAC members can score bids.')
 
+    def _assert_tender_closed_for_evaluation(self, bid):
+        stage = normalize_bid_stage(getattr(bid, 'bid_stage', '') or bid.stage)
+        is_detailed = stage in (BidStage.TECHNICAL, BidStage.COMBINED) or getattr(bid, 'stage_two_unlocked', False)
+        if is_detailed:
+            if getattr(bid, 'financial_stage_unlocked', False) is False \
+                    and getattr(bid, 'financial_sealed', True) \
+                    and getattr(self.request.user, 'role', None) == UserRole.TAC:
+                raise PermissionDenied('Financial pricing is sealed until the Technical stage clears.')
+            _assert_evaluation_window_open(bid.tender)
+            return
+        _auto_close_tender_on_deadline(bid.tender)
+        if bid.tender.status not in {TenderStatus.PUBLISHED, TenderStatus.CLOSED, TenderStatus.EVALUATION}:
+            raise ValidationError(
+                {'detail': 'EOI evaluation requires the tender to be Published, Closed, or in Evaluation.'}
+            )
+
     def create(self, request, *args, **kwargs):
         self._assert_eval_permission(request)
+        bid_id = request.data.get('bid')
+        if bid_id:
+            try:
+                bid = TenderBid.objects.get(id=bid_id)
+            except TenderBid.DoesNotExist:
+                raise ValidationError({'bid': 'Bid not found.'})
+            self._assert_tender_closed_for_evaluation(bid)
         data = request.data.copy()
         data['evaluator'] = request.user.id
         existing = TenderBidEvaluation.objects.filter(
@@ -1846,6 +3019,7 @@ class TenderBidEvaluationViewSet(viewsets.ModelViewSet):
     def update(self, request, *args, **kwargs):
         self._assert_eval_permission(request)
         evaluation = self.get_object()
+        self._assert_tender_closed_for_evaluation(evaluation.bid)
         if request.user.role != UserRole.ADMIN and str(getattr(evaluation, 'evaluator_id', '')) != str(request.user.id):
             raise PermissionDenied('You can only edit your own evaluation record.')
         return super().update(request, *args, **kwargs)
@@ -2046,6 +3220,8 @@ class TenderContractViewSet(viewsets.ModelViewSet):
             contract_value = _contract_value(contract)
             defaults = _assignment_defaults(contract)
             technology_type = defaults['technology_type']
+            technology_choices = _assignment_technology_choices(contract)
+            bid_preferred_district = str(getattr(contract.bid, 'preferred_district', '') or '').strip() if contract.bid else ''
             return Response({
                 'contract': TenderContractSerializer(contract, context={'request': request}).data,
                 'contract_details': {
@@ -2054,14 +3230,16 @@ class TenderContractViewSet(viewsets.ModelViewSet):
                     'technology': technology_type,
                     'bid_amount': str(contract_value),
                     'signed_date': contract.signed_at.isoformat() if contract.signed_at else None,
+                    'bid_preferred_district': bid_preferred_district,
                 },
                 'assignment_defaults': defaults,
                 'assignment_fields': {
                     'project_duration_months': [6, 12, 18],
-                    'technology_type': [choice for choice, _label in Project._meta.get_field('technology_type').choices],
-                    'technology_type_read_only': bool(contract.bid_id),
+                    'technology_type': technology_choices,
+                    'technology_type_read_only': len(technology_choices) == 1,
                     'verification_method': [choice for choice, _label in Project._meta.get_field('verification_method').choices],
-                    'district_zone': LESOTHO_DISTRICTS,
+                    'district_zone': contract.tender.target_districts if contract.tender.target_districts else LESOTHO_DISTRICTS,
+                    'district_zones': contract.tender.target_districts if contract.tender.target_districts else LESOTHO_DISTRICTS,
                 },
                 'disbursement_preview': defaults['disbursement_preview'],
             })
@@ -2106,3 +3284,126 @@ class TenderContractViewSet(viewsets.ModelViewSet):
             linked_entity_id=str(contract.tender.id),
         )
         return Response(TenderContractSerializer(contract).data, status=status.HTTP_200_OK)
+
+
+class NoticeViewSet(viewsets.ModelViewSet):
+    queryset = Notice.objects.all().order_by('-is_pinned', '-published_at')
+    serializer_class = NoticeSerializer
+    pagination_class = TenderPagination
+    permission_classes = []
+
+    def get_queryset(self):
+        qs = Notice.objects.all().order_by('-is_pinned', '-published_at')
+        status = self.request.query_params.get('status')
+        category = self.request.query_params.get('category')
+        if status:
+            qs = qs.filter(status=status)
+        else:
+            qs = qs.filter(status='published')
+        if category and category != 'All':
+            qs = qs.filter(category=category)
+        return qs
+
+    def get_serializer_class(self):
+        if self.action == 'list':
+            return NoticeListSerializer
+        return NoticeSerializer
+
+    def _assert_write_permission(self):
+        user = self.request.user
+        if not user.is_authenticated or user.role not in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}:
+            raise PermissionDenied('Only RBF Officials can manage notices.')
+
+    def create(self, request, *args, **kwargs):
+        self._assert_write_permission()
+        return super().create(request, *args, **kwargs)
+
+    def update(self, request, *args, **kwargs):
+        self._assert_write_permission()
+        return super().update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        self._assert_write_permission()
+        return super().destroy(request, *args, **kwargs)
+
+    @action(detail=True, methods=['post'])
+    def publish(self, request, pk=None):
+        self._assert_write_permission()
+        try:
+            notice = Notice.objects.get(pk=pk)
+            notice.status = 'published'
+            notice.published_at = timezone.now()
+            notice.save(update_fields=['status', 'published_at', 'updated_at'])
+
+            data = NoticeSerializer(notice).data
+            if notice.send_email_notification:
+                data['notification_summary'] = self._notify_notice_recipients(notice)
+            return Response(data, status=status.HTTP_200_OK)
+        except Notice.DoesNotExist:
+            return Response({'error': 'Notice not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    def _notify_notice_recipients(self, notice: Notice):
+        from rbf.users.models import VendorPrequalification, PrequalificationStatus
+
+        vendors = list(
+            User.objects.filter(role=UserRole.VENDOR)
+            .filter(prequalifications__status=PrequalificationStatus.APPROVED)
+            .distinct()
+            .only('id', 'email', 'full_name', 'username', 'role')
+        )
+        stakeholders = list(
+            User.objects.filter(role__in={UserRole.DOE_OFFICER, UserRole.UNDP_DONOR})
+            .distinct()
+            .only('id', 'email', 'full_name', 'username', 'role')
+        )
+        recipients = vendors + stakeholders
+
+        subject = f"Notice Published: {notice.title}"
+        body = (
+            f"A new notice has been published.\n\n"
+            f"Title: {notice.title}\n"
+            f"Category: {notice.get_category_display()}\n"
+            f"{f'Summary: {notice.summary}\n' if notice.summary else ''}"
+        )
+        notice_link = build_frontend_url('/', request=self.request)
+
+        NotificationService.notify_users(
+            users=recipients,
+            title=subject,
+            body=f"{body}View notices: {notice_link}\n",
+            event='notice_published',
+            linked_entity_id=notice.id,
+        )
+
+        email_enabled = email_configured()
+        email_recipients = []
+        email_error = None
+        if email_enabled:
+            email_recipients = list(dict.fromkeys(r.email for r in recipients if r.email))
+            if email_recipients:
+                sent = NotificationService.dispatch_email(
+                    subject,
+                    f"{body}View notices: {notice_link}\n",
+                    email_recipients,
+                )
+                if sent <= 0:
+                    email_error = 'Email delivery failed.'
+
+        return {
+            'recipient_count': len(recipients),
+            'email_enabled': email_enabled,
+            'email_recipient_count': len(email_recipients),
+            'email_error': email_error,
+        }
+
+    @action(detail=True, methods=['post'])
+    def unpublish(self, request, pk=None):
+        self._assert_write_permission()
+        try:
+            notice = Notice.objects.get(pk=pk)
+            notice.status = 'draft'
+            notice.published_at = None
+            notice.save(update_fields=['status', 'published_at', 'updated_at'])
+            return Response(NoticeSerializer(notice).data, status=status.HTTP_200_OK)
+        except Notice.DoesNotExist:
+            return Response({'error': 'Notice not found'}, status=status.HTTP_404_NOT_FOUND)

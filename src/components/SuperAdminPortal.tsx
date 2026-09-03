@@ -1,0 +1,1903 @@
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import {
+  Activity,
+  AlertTriangle,
+  Bell,
+  CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
+  Download,
+  Eye,
+  Globe,
+  HelpCircle,
+  History,
+  Info,
+  Loader2,
+  Mail,
+  Map,
+  MapPin,
+  Plus,
+  RefreshCw,
+  Save,
+  Search,
+  Settings,
+  ShieldCheck,
+  Target,
+  Trash2,
+  UserCog,
+  Users,
+} from "lucide-react";
+import { ReportsHub } from "./ReportsHub";
+import {
+  checkProspectConnection,
+  createAdminManagedUser,
+  createOrganization,
+  deactivateAdminManagedUser,
+  deleteOrganization,
+  exportSystemAuditLogs,
+  fetchAdminManagedUsers,
+  fetchAdminUserDetail,
+  fetchOrganizations,
+  fetchPlatformConfiguration,
+  fetchProspectSyncLogs,
+  fetchProspectSyncSummary,
+  fetchSuperAdminDashboardSummary,
+  fetchRolePermissions,
+  fetchSystemAuditLogs,
+  fetchSystemHealth,
+  fetchUserManagementMeta,
+  refreshProspectSyncPanel,
+  resetAdminManagedUserPassword,
+  retryAllFailedProspectSyncJobs,
+  retryProspectSyncJob,
+  triggerProjectProspectSync,
+  updateAdminManagedUser,
+  updateOrganization,
+  updatePlatformConfiguration,
+  updateRolePermissions,
+  USER_KEY,
+} from "../api";
+import {
+  AuditLog,
+  Notification,
+  Organization,
+  PlatformConfiguration,
+  ProspectSyncLog,
+  SuperAdminDashboardSummary,
+  RolePermissionMatrix,
+  SystemHealthPayload,
+  User,
+  UserRole,
+} from "../types";
+
+const DISTRICTS = [
+  "Maseru",
+  "Leribe",
+  "Berea",
+  "Mafeteng",
+  "Mohale's Hoek",
+  "Quthing",
+  "Qacha's Nek",
+  "Mokhotlong",
+  "Thaba-Tseka",
+  "Butha-Buthe",
+];
+
+const ADMIN_DISTRICT_REQUIRED_ROLES: ReadonlyArray<{ value: UserRole; label: string; reason: string; scope: "regional" | "national" }> = [
+  { value: UserRole.FIELD_VERIFIER, label: "Field Verifier", reason: "Verification tasks, installations and KPIs are scoped to assigned districts.", scope: "regional" },
+  { value: UserRole.DOE_OFFICER, label: "DoE Officer", reason: "Regional dashboard, map, vendor directory and KPI review are scoped to assigned districts.", scope: "regional" },
+  { value: UserRole.RBF_OFFICIAL, label: "RBF Management Team", reason: "National visibility — no district assignment needed.", scope: "national" },
+  { value: UserRole.TAC, label: "TAC Member", reason: "National visibility — no district assignment needed.", scope: "national" },
+  { value: UserRole.UNDP_DONOR, label: "Project Steering Committee", reason: "National visibility — no district assignment needed.", scope: "national" },
+  { value: UserRole.AUDITOR, label: "Auditor", reason: "National read-only visibility — no district assignment needed.", scope: "national" },
+];
+
+const getAdminRoleMeta = (roleValue?: string) => {
+  const match = ADMIN_DISTRICT_REQUIRED_ROLES.find((entry) => entry.value === roleValue);
+  return match ?? {
+    value: roleValue as UserRole,
+    label: roleValue ?? "",
+    reason: "",
+    scope: "national" as const,
+  };
+};
+
+const emptyUserForm = {
+  fullName: "",
+  email: "",
+  role: "",
+  gender: "Male" as "Male" | "Female" | "Other",
+  district: "",
+  districts: [] as string[],
+  isActive: true,
+};
+
+const emptyOrganizationForm = {
+  id: "",
+  name: "",
+  type: "Government" as "Government" | "International" | "NGO",
+  contactPerson: "",
+  email: "",
+  phone: "",
+  address: "",
+};
+
+const statusPill = (ok: boolean) =>
+  ok ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700";
+
+const formatDateTime = (value?: string | null) => (value ? new Date(value).toLocaleString() : "N/A");
+
+const formatRelativeTime = (value?: string | null) => {
+  if (!value) return "Never";
+  const delta = Date.now() - new Date(value).getTime();
+  if (!Number.isFinite(delta)) return "Unknown";
+  const minutes = Math.round(delta / 60000);
+  if (minutes < 1) return "Just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} hr ago`;
+  const days = Math.round(hours / 24);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
+};
+
+const formatBytes = (value?: number) => {
+  const bytes = Number(value ?? 0);
+  if (bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const normalized = bytes / 1024 ** index;
+  return `${normalized.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
+};
+
+const formatJsonBlock = (value: unknown) => {
+  if (value == null) return "No payload captured.";
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+};
+
+const saveBlob = (blob: Blob, filename: string) => {
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download = filename;
+  anchor.click();
+  URL.revokeObjectURL(objectUrl);
+};
+
+const toneForNotification = (status: Notification["status"]) => {
+  if (status === "Delivered") return "bg-emerald-100 text-emerald-700";
+  if (status === "Read") return "bg-blue-100 text-blue-700";
+  if (status === "Failed") return "bg-rose-100 text-rose-700";
+  return "bg-slate-100 text-slate-600";
+};
+
+type AdminSection =
+  | "dashboard"
+  | "users"
+  | "permissions"
+  | "organizations"
+  | "system_configuration"
+  | "prospect_sync"
+  | "audit_logs"
+  | "reports"
+  | "notifications"
+  | "system_health";
+
+type Props = {
+  section: AdminSection;
+  notifications: Notification[];
+  onNotificationSelect?: (note: Notification) => void;
+  initialAction?: string;
+  initialId?: string;
+  onNavigate?: (action?: string, id?: string) => void;
+};
+
+export default function SuperAdminPortal({ section, notifications, onNotificationSelect, initialAction, initialId, onNavigate }: Props) {
+  const [banner, setBanner] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const [dashboard, setDashboard] = useState<SuperAdminDashboardSummary | null>(null);
+  const [dashboardLoading, setDashboardLoading] = useState(false);
+  const [recentActivityPage, setRecentActivityPage] = useState(1);
+  const recentActivityPerPage = 8;
+
+  const [users, setUsers] = useState<User[]>([]);
+  const [selectedUser, setSelectedUser] = useState<User | null>(null);
+  const [userView, setUserView] = useState<"list" | "create" | "edit" | "detail">("list");
+  const [roleOptions, setRoleOptions] = useState<Array<{ label: string; value: string }>>([]);
+  const [userFilters, setUserFilters] = useState({ role: "", district: "", status: "" });
+  const [userSearch, setUserSearch] = useState("");
+  const [userForm, setUserForm] = useState(emptyUserForm);
+  const [usersLoading, setUsersLoading] = useState(false);
+  const [userSubmitting, setUserSubmitting] = useState(false);
+  const [permissionMatrix, setPermissionMatrix] = useState<RolePermissionMatrix | null>(null);
+  const [permissionsLoading, setPermissionsLoading] = useState(false);
+  const [permissionsSubmitting, setPermissionsSubmitting] = useState(false);
+
+  const [organizations, setOrganizations] = useState<Organization[]>([]);
+  const [organizationForm, setOrganizationForm] = useState(emptyOrganizationForm);
+  const [organizationsLoading, setOrganizationsLoading] = useState(false);
+  const [organizationSubmitting, setOrganizationSubmitting] = useState(false);
+
+  const [configuration, setConfiguration] = useState<PlatformConfiguration | null>(null);
+  const [configurationLoading, setConfigurationLoading] = useState(false);
+  const [configurationSubmitting, setConfigurationSubmitting] = useState(false);
+  const [showEmailGuide, setShowEmailGuide] = useState(false);
+
+  const [connectionStatus, setConnectionStatus] = useState<{ readTokenOk: boolean; writeTokenOk: boolean; baseUrl?: string } | null>(null);
+  const [prospectSummary, setProspectSummary] = useState<Awaited<ReturnType<typeof fetchProspectSyncSummary>> | null>(null);
+  const [prospectLogs, setProspectLogs] = useState<ProspectSyncLog[]>([]);
+  const [prospectLoading, setProspectLoading] = useState(false);
+  const [expandedPayloadLogId, setExpandedPayloadLogId] = useState<string | null>(null);
+
+  const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [auditFilters, setAuditFilters] = useState({
+    actor: "",
+    actorRole: "",
+    action: "",
+    module: "",
+    dateFrom: "",
+    dateTo: "",
+    recordId: "",
+  });
+
+  const [health, setHealth] = useState<SystemHealthPayload | null>(null);
+  const [healthLoading, setHealthLoading] = useState(false);
+
+  const clearFlash = () => {
+    setBanner(null);
+    setError(null);
+  };
+
+  const loadUsers = async () => {
+    setUsersLoading(true);
+    try {
+      const [list, meta] = await Promise.all([
+        fetchAdminManagedUsers({
+          role: userFilters.role || undefined,
+          district: userFilters.district || undefined,
+          status: userFilters.status ? (userFilters.status as "active" | "inactive") : undefined,
+        }),
+        fetchUserManagementMeta(),
+      ]);
+      setUsers(list);
+      setRoleOptions(meta.roles ?? []);
+      setUserForm((prev) => ({ ...prev, role: prev.role || meta.roles?.[0]?.value || "" }));
+    } catch (err: any) {
+      setError(String(err?.message || "Unable to load users."));
+    } finally {
+      setUsersLoading(false);
+    }
+  };
+
+  const loadDashboard = async () => {
+    setDashboardLoading(true);
+    try {
+      setDashboard(await fetchSuperAdminDashboardSummary());
+    } catch (err: any) {
+      setError(String(err?.message || "Unable to load dashboard."));
+    } finally {
+      setDashboardLoading(false);
+    }
+  };
+
+  const loadOrganizations = async () => {
+    setOrganizationsLoading(true);
+    try {
+      setOrganizations(await fetchOrganizations());
+    } catch (err: any) {
+      setError(String(err?.message || "Unable to load organizations."));
+    } finally {
+      setOrganizationsLoading(false);
+    }
+  };
+
+  const loadConfiguration = async () => {
+    setConfigurationLoading(true);
+    try {
+      setConfiguration(await fetchPlatformConfiguration());
+    } catch (err: any) {
+      setError(String(err?.message || "Unable to load configuration."));
+    } finally {
+      setConfigurationLoading(false);
+    }
+  };
+
+  const loadProspect = async () => {
+    setProspectLoading(true);
+    try {
+      const [summary, logs, connection] = await Promise.all([
+        fetchProspectSyncSummary(),
+        fetchProspectSyncLogs({ pageSize: 50 }),
+        checkProspectConnection(),
+      ]);
+      setProspectSummary(summary);
+      setProspectLogs(logs);
+      setConnectionStatus(connection);
+    } catch (err: any) {
+      setError(String(err?.message || "Unable to load Prospect sync data."));
+    } finally {
+      setProspectLoading(false);
+    }
+  };
+
+  const loadAudit = async () => {
+    setAuditLoading(true);
+    try {
+      setAuditLogs(await fetchSystemAuditLogs(auditFilters));
+    } catch (err: any) {
+      setError(String(err?.message || "Unable to load audit logs."));
+    } finally {
+      setAuditLoading(false);
+    }
+  };
+
+  const loadHealth = async () => {
+    setHealthLoading(true);
+    try {
+      setHealth(await fetchSystemHealth());
+    } catch (err: any) {
+      setError(String(err?.message || "Unable to load system health."));
+    } finally {
+      setHealthLoading(false);
+    }
+  };
+
+  const loadPermissions = async () => {
+    setPermissionsLoading(true);
+    try {
+      setPermissionMatrix(await fetchRolePermissions());
+    } catch (err: any) {
+      setError(String(err?.message || "Unable to load role permissions."));
+    } finally {
+      setPermissionsLoading(false);
+    }
+  };
+
+  const savePermissions = async () => {
+    if (!permissionMatrix) return;
+    setPermissionsSubmitting(true);
+    try {
+      await updateRolePermissions(permissionMatrix);
+      setBanner("Role permissions updated successfully.");
+      await loadPermissions();
+    } catch (err: any) {
+      setError(String(err?.message || "Unable to update role permissions."));
+    } finally {
+      setPermissionsSubmitting(false);
+    }
+  };
+
+  const togglePermission = (role: string, module: string, action: string) => {
+    setPermissionMatrix((current) => {
+      if (!current || role === UserRole.ADMIN) return current;
+      return {
+        ...current,
+        roles: current.roles.map((roleEntry) => roleEntry.role !== role ? roleEntry : {
+          ...roleEntry,
+          permissions: roleEntry.permissions.map((permission) => permission.module !== module ? permission : {
+            ...permission,
+            actions: permission.actions.includes(action)
+              ? permission.actions.filter((value) => value !== action)
+              : [...permission.actions, action],
+          }),
+        }),
+      };
+    });
+  };
+
+  useEffect(() => {
+    clearFlash();
+    if (section === "dashboard") void loadDashboard();
+    if (section === "users") {
+      void loadUsers();
+      if (initialAction === "create") {
+        resetUserForm();
+        setUserView("create");
+      } else if ((initialAction === "edit" || initialAction === "detail") && initialId) {
+        setUserView(initialAction as "edit" | "detail");
+        void openUserDetail(initialId, initialAction as "edit" | "detail");
+      }
+    }
+    if (section === "organizations") void loadOrganizations();
+    if (section === "system_configuration") void loadConfiguration();
+    if (section === "prospect_sync") void loadProspect();
+    if (section === "audit_logs") void loadAudit();
+    if (section === "system_health") void loadHealth();
+    if (section === "permissions") void loadPermissions();
+  }, [section]);
+
+  useEffect(() => {
+    if (section === "users") void loadUsers();
+  }, [userFilters.role, userFilters.district, userFilters.status]);
+
+  const visibleUsers = useMemo(() => {
+    const query = userSearch.trim().toLowerCase();
+    if (!query) return users;
+    return users.filter((user) =>
+      `${user.fullName} ${user.email} ${user.roleLabel || user.role} ${user.district || user.region || ""}`
+        .toLowerCase()
+        .includes(query),
+    );
+  }, [userSearch, users]);
+
+  const visibleNotifications = useMemo(() => {
+    return notifications.slice().sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
+  }, [notifications]);
+
+  const resetUserForm = () => {
+    setUserForm({ ...emptyUserForm, role: roleOptions[0]?.value || "" });
+    setSelectedUser(null);
+  };
+
+  const openUserCreate = () => {
+    resetUserForm();
+    setUserView("create");
+    onNavigate?.("create");
+  };
+
+  const openUserDetail = async (userId: string, nextView: "detail" | "edit") => {
+    setUsersLoading(true);
+    try {
+      const detail = await fetchAdminUserDetail(userId);
+      setSelectedUser(detail);
+      setUserForm({
+        fullName: detail.fullName || "",
+        email: detail.email || "",
+        role: detail.role || roleOptions[0]?.value || "",
+        gender: detail.gender || "Male",
+        district: detail.district || detail.region || detail.verificationZone || "",
+        districts: detail.districts || [],
+        isActive: detail.isActive ?? detail.status === "Active",
+      });
+      setUserView(nextView);
+    } catch (err: any) {
+      setError(String(err?.message || "Unable to load user detail."));
+    } finally {
+      setUsersLoading(false);
+    }
+  };
+
+  const saveUser = async (event: React.FormEvent) => {
+    event.preventDefault();
+    clearFlash();
+    const requiresDistrict = [UserRole.FIELD_VERIFIER, UserRole.DOE_OFFICER].includes(userForm.role as UserRole);
+    if (!userForm.fullName.trim() || !userForm.email.trim() || !userForm.role || !userForm.gender) {
+      setError("Full name, email, role, and gender are required.");
+      return;
+    }
+    if (requiresDistrict && userForm.districts.length === 0 && !userForm.district.trim()) {
+      setError("At least one district is required for Field Officer and DoE roles.");
+      return;
+    }
+    setUserSubmitting(true);
+    try {
+      if (userView === "create") {
+        const result = await createAdminManagedUser({
+          fullName: userForm.fullName.trim(),
+          email: userForm.email.trim(),
+          role: userForm.role,
+          gender: userForm.gender,
+          district: userForm.district.trim() || undefined,
+          districts: userForm.districts.length > 0 ? userForm.districts : undefined,
+        });
+        setBanner(
+          result.initialPassword
+            ? `User created. Temporary password: ${result.initialPassword}`
+            : result.emailError
+              ? `User created, but email delivery failed: ${result.emailError}`
+              : "User created and credentials email sent.",
+        );
+      } else if (selectedUser) {
+        await updateAdminManagedUser(selectedUser.id, {
+          fullName: userForm.fullName.trim(),
+          email: userForm.email.trim(),
+          role: userForm.role,
+          gender: userForm.gender,
+          district: userForm.district.trim() || undefined,
+          districts: userForm.districts.length > 0 ? userForm.districts : undefined,
+          isActive: userForm.isActive,
+        });
+        const freshDetail = await fetchAdminUserDetail(selectedUser.id);
+        setSelectedUser(freshDetail);
+        const currentStored = localStorage.getItem(USER_KEY);
+        if (currentStored) {
+          const parsed = JSON.parse(currentStored);
+          parsed.districts = freshDetail.districts || [];
+          parsed.district = freshDetail.district || "";
+          localStorage.setItem(USER_KEY, JSON.stringify(parsed));
+        }
+        setBanner("User updated successfully.");
+      }
+      setUserView("list");
+      onNavigate?.("list");
+      await loadUsers();
+    } catch (err: any) {
+      setError(String(err?.message || "Unable to save user."));
+    } finally {
+      setUserSubmitting(false);
+    }
+  };
+
+  const deactivateUser = async (id: string) => {
+    if (!window.confirm("Deactivate this user immediately?")) return;
+    setUserSubmitting(true);
+    try {
+      await deactivateAdminManagedUser(id);
+      setBanner("User deactivated.");
+      await loadUsers();
+      if (selectedUser?.id === id) {
+        setSelectedUser(await fetchAdminUserDetail(id));
+      }
+    } catch (err: any) {
+      setError(String(err?.message || "Unable to deactivate user."));
+    } finally {
+      setUserSubmitting(false);
+    }
+  };
+
+  const resetPassword = async (id: string) => {
+    setUserSubmitting(true);
+    try {
+      const result = await resetAdminManagedUserPassword(id);
+      setBanner(
+        result.temporaryPassword
+          ? `Temporary password reset: ${result.temporaryPassword}`
+          : result.emailError
+            ? `Password reset completed, but email delivery failed: ${result.emailError}`
+            : "Password reset email sent.",
+      );
+      if (selectedUser?.id === id) {
+        setSelectedUser(await fetchAdminUserDetail(id));
+      }
+    } catch (err: any) {
+      setError(String(err?.message || "Unable to reset password."));
+    } finally {
+      setUserSubmitting(false);
+    }
+  };
+
+  const saveOrganization = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!organizationForm.name.trim()) {
+      setError("Organization name is required.");
+      return;
+    }
+    setOrganizationSubmitting(true);
+    try {
+      if (organizationForm.id) {
+        await updateOrganization(organizationForm.id, organizationForm);
+        setBanner("Organization updated.");
+      } else {
+        await createOrganization(organizationForm);
+        setBanner("Organization created.");
+      }
+      setOrganizationForm(emptyOrganizationForm);
+      await loadOrganizations();
+    } catch (err: any) {
+      setError(String(err?.message || "Unable to save organization."));
+    } finally {
+      setOrganizationSubmitting(false);
+    }
+  };
+
+  const removeOrganization = async (id: string) => {
+    if (!window.confirm("Delete this organization?")) return;
+    setOrganizationSubmitting(true);
+    try {
+      await deleteOrganization(id);
+      setBanner("Organization deleted.");
+      await loadOrganizations();
+      if (organizationForm.id === id) setOrganizationForm(emptyOrganizationForm);
+    } catch (err: any) {
+      setError(String(err?.message || "Unable to delete organization."));
+    } finally {
+      setOrganizationSubmitting(false);
+    }
+  };
+
+  const saveConfiguration = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!configuration) return;
+    setConfigurationSubmitting(true);
+    try {
+      const updated = await updatePlatformConfiguration(configuration);
+      setConfiguration(updated);
+      setBanner("System configuration updated.");
+    } catch (err: any) {
+      setError(String(err?.message || "Unable to update configuration."));
+    } finally {
+      setConfigurationSubmitting(false);
+    }
+  };
+
+  const retryFailedJobs = async () => {
+    try {
+      const result = await retryAllFailedProspectSyncJobs();
+      setBanner(`Queued ${result.count} failed Prospect sync job(s).`);
+      await loadProspect();
+      if (section === "dashboard") await loadDashboard();
+    } catch (err: any) {
+      setError(String(err?.message || "Unable to retry Prospect sync jobs."));
+    }
+  };
+
+   const retryJob = async (id: string) => {
+     try {
+       await retryProspectSyncJob(id);
+       setBanner("Prospect retry queued.");
+       await loadProspect();
+     } catch (err: any) {
+       setError(String(err?.message || "Unable to retry this job."));
+     }
+   };
+
+   const manualSyncMethod = async (log: ProspectSyncLog) => {
+     try {
+       const methodName = log.methodName;
+       // Map methodName to action - assuming direct mapping for now
+       // In a real implementation, you might need a more sophisticated mapping
+       const action = methodName as 
+         | "push_target"
+         | "push_agent"
+         | "push_installations"
+         | "push_installation_updates"
+         | "push_installation_timeseries"
+         | "push_report"
+         | "refresh_status"
+         | "sync_all_available";
+      
+       // For refresh_status, use the refresh panel endpoint
+       if (action === "refresh_status" || methodName === "getInstallations" || methodName === "getTargets") {
+         const projectId = log.recordId && /^\d+$/.test(log.recordId) ? log.recordId : undefined;
+         await refreshProspectSyncPanel({ projectId: projectId, size: 100, page: 1 });
+         setBanner(`Manual sync triggered for ${methodName}`);
+         await loadProspect();
+         return;
+       }
+       
+       // Using recordId as projectId if it's numeric
+       const projectId = log.recordId && /^\d+$/.test(log.recordId) ? log.recordId : "default"; // This would need to be replaced with actual logic
+       
+       await triggerProjectProspectSync(projectId, action);
+       setBanner(`Manual sync triggered for ${methodName}`);
+       await loadProspect();
+     } catch (err: any) {
+       setError(String(err?.message || `Unable to trigger manual sync for ${log.methodName}.`));
+     }
+   };
+
+   const exportAudit = async (format: "csv" | "pdf") => {
+    try {
+      const blob = await exportSystemAuditLogs(format, auditFilters);
+      saveBlob(blob, format === "csv" ? "audit_logs.csv" : "audit_logs.pdf");
+    } catch (err: any) {
+      setError(String(err?.message || `Unable to export ${format.toUpperCase()}.`));
+    }
+  };
+
+  const sectionHeader = {
+    dashboard: ["System Overview", "Live operational summary across the full Super Admin portal."],
+    users: ["User Management", "Create, edit, deactivate, and audit all non-vendor accounts."],
+    organizations: ["Organizations", "Manage stakeholder organizations and their points of contact."],
+    system_configuration: ["System Configuration", "Control thresholds, notification behavior, and boundary assets."],
+    permissions: ["Role Permissions", "Control which modules and actions each platform role can access."],
+    prospect_sync: ["Prospect Sync", "Monitor connectivity, failed jobs, and recent sync activity."],
+    audit_logs: ["Audit Logs", "Filter the full platform audit trail and export reports."],
+    reports: ["Reports", "Generate and export KPI, financial, verification, and portfolio reports."],
+    notifications: ["Notifications", "Review delivery history and open linked workflow items."],
+    system_health: ["System Health", "Check database, queue, storage, and recent errors."],
+  }[section];
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-900">{sectionHeader[0]}</h1>
+          <p className="text-sm text-slate-500">{sectionHeader[1]}</p>
+        </div>
+        <button
+          onClick={() => {
+            if (section === "dashboard") void loadDashboard();
+            if (section === "users") void loadUsers();
+            if (section === "organizations") void loadOrganizations();
+            if (section === "system_configuration") void loadConfiguration();
+            if (section === "prospect_sync") void loadProspect();
+            if (section === "audit_logs") void loadAudit();
+            if (section === "system_health") void loadHealth();
+            if (section === "permissions") void loadPermissions();
+          }}
+          className="btn-secondary flex items-center gap-2"
+        >
+          <RefreshCw size={16} /> Refresh
+        </button>
+      </div>
+
+      {banner && <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">{banner}</div>}
+      {error && <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div>}
+
+      {section === "dashboard" && (
+        <div className="space-y-6">
+          {dashboardLoading || !dashboard ? (
+            <div className="card p-10 text-center text-slate-500">Loading dashboard summary...</div>
+          ) : (
+            <>
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+                {[
+                  ["Total Users", dashboard.stats.totalUsers, Users],
+                  ["Active Projects", dashboard.stats.activeProjects, Activity],
+                  ["Total Vendors", dashboard.stats.totalVendors, UserCog],
+                  ["Pending Prequalifications", dashboard.stats.pendingPrequalifications, AlertTriangle],
+                ].map(([label, value, Icon]: any) => (
+                  <div key={label} className="card p-5">
+                    <div className="flex items-start justify-between">
+                      <div>
+                        <p className="text-xs font-bold uppercase tracking-widest text-slate-400">{label}</p>
+                        <p className="mt-3 text-3xl font-bold text-slate-900">{value}</p>
+                      </div>
+                      <div className="rounded-xl bg-emerald-50 p-3 text-emerald-600">
+                        <Icon size={20} />
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
+                <div className="card p-6 xl:col-span-1">
+                  <h3 className="text-lg font-bold text-slate-900">System Health</h3>
+                  <div className="mt-4 space-y-3 text-sm">
+                    {[
+                      ["Database", dashboard.systemHealth.database.status === "Connected", dashboard.systemHealth.database.status],
+                      ["Queue Worker", dashboard.systemHealth.queue.workerStatus === "Running", dashboard.systemHealth.queue.workerStatus],
+                      ["Scheduler", dashboard.systemHealth.scheduler.status === "Running", dashboard.systemHealth.scheduler.status],
+                      ["Prospect API", dashboard.systemHealth.prospectApi.status === "Connected", dashboard.systemHealth.prospectApi.status],
+                      ["Storage", dashboard.systemHealth.storage.freeBytes > 0, `${formatBytes(dashboard.systemHealth.storage.freeBytes)} free`],
+                    ].map(([label, ok, value]) => (
+                      <div key={String(label)} className="flex items-center justify-between rounded-xl border border-slate-100 px-4 py-3">
+                        <span className="text-slate-600">{label}</span>
+                        <span className={`rounded-full px-2 py-1 text-xs font-bold ${statusPill(Boolean(ok))}`}>{value}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="card p-6 xl:col-span-2">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-lg font-bold text-slate-900">Prospect Sync Summary</h3>
+                    <button onClick={() => void retryFailedJobs()} className="btn-secondary text-xs">
+                      Retry All Failed
+                    </button>
+                  </div>
+                  <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
+                    <div className="rounded-2xl bg-rose-50 p-5">
+                      <p className="text-xs font-bold uppercase tracking-widest text-rose-500">Failed Jobs</p>
+                      <p className="mt-3 text-3xl font-bold text-rose-700">{dashboard.prospectSyncSummary.failedJobs}</p>
+                    </div>
+                    <div className="rounded-2xl bg-blue-50 p-5">
+                      <p className="text-xs font-bold uppercase tracking-widest text-blue-500">Last Sync</p>
+                      <p className="mt-3 text-lg font-bold text-slate-900">{formatRelativeTime(dashboard.prospectSyncSummary.lastSyncAt)}</p>
+                      <p className="text-xs text-slate-500">{formatDateTime(dashboard.prospectSyncSummary.lastSyncAt)}</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="card p-6">
+                <h3 className="text-lg font-bold text-slate-900">Recent Activity</h3>
+                {(() => {
+                  const recentActivityTotalPages = Math.max(1, Math.ceil(dashboard.recentActivity.length / recentActivityPerPage));
+                  const recentActivitySafePage = Math.min(Math.max(1, recentActivityPage), recentActivityTotalPages);
+                  const paginatedRecentActivity = dashboard.recentActivity.slice(
+                    (recentActivitySafePage - 1) * recentActivityPerPage,
+                    recentActivitySafePage * recentActivityPerPage,
+                  );
+                  return (
+                    <>
+                      <div className="mt-4 space-y-3">
+                        {paginatedRecentActivity.map((item) => (
+                          <div key={item.id} className="rounded-xl border border-slate-100 px-4 py-3">
+                            <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                              <div>
+                                <p className="font-semibold text-slate-900">{item.action}</p>
+                                <p className="text-xs text-slate-500">
+                                  {item.actor} {item.role ? `• ${item.role}` : ""} {item.module ? `• ${item.module}` : ""} {item.record ? `• ${item.record}` : ""}
+                                </p>
+                              </div>
+                              <span className="text-xs text-slate-400">{formatDateTime(item.timestamp)}</span>
+                            </div>
+                            {(item.notes || item.oldStatus || item.newStatus) && (
+                              <p className="mt-2 text-xs text-slate-600">
+                                {[item.oldStatus && `Old: ${item.oldStatus}`, item.newStatus && `New: ${item.newStatus}`, item.notes].filter(Boolean).join(" • ")}
+                              </p>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                      {dashboard.recentActivity.length > recentActivityPerPage && (
+                        <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-3">
+                          <p className="text-xs text-slate-500">
+                            Showing <span className="font-semibold text-slate-700">{((recentActivitySafePage - 1) * recentActivityPerPage) + 1}</span>
+                            {"–"}
+                            <span className="font-semibold text-slate-700">{Math.min(recentActivitySafePage * recentActivityPerPage, dashboard.recentActivity.length)}</span>
+                            {" of "}
+                            <span className="font-semibold text-slate-700">{dashboard.recentActivity.length}</span>
+                          </p>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => setRecentActivityPage((p) => Math.max(1, p - 1))}
+                              disabled={recentActivitySafePage <= 1}
+                              className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:border-emerald-300 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-slate-200 disabled:hover:bg-white"
+                            >
+                              <ChevronLeft size={14} /> Previous
+                            </button>
+                            <span className="text-xs font-bold text-slate-600">
+                              Page {recentActivitySafePage} of {recentActivityTotalPages}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => setRecentActivityPage((p) => Math.min(recentActivityTotalPages, p + 1))}
+                              disabled={recentActivitySafePage >= recentActivityTotalPages}
+                              className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:border-emerald-300 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-slate-200 disabled:hover:bg-white"
+                            >
+                              Next <ChevronRight size={14} />
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  );
+                })()}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {section === "permissions" && (
+        <div className="card overflow-hidden">
+          {permissionsLoading || !permissionMatrix ? (
+            <div className="p-10 text-center text-slate-500">Loading role permissions...</div>
+          ) : (
+            <>
+              <div className="flex flex-col gap-3 border-b border-slate-100 p-5 md:flex-row md:items-center md:justify-between">
+                <p className="text-sm text-slate-600">Super Admin always has full access. Configure permissions for every other role.</p>
+                <button type="button" onClick={() => void savePermissions()} disabled={permissionsSubmitting} className="btn-primary disabled:opacity-60">
+                  {permissionsSubmitting ? "Saving..." : "Save Permissions"}
+                </button>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="min-w-[980px] w-full text-left text-sm">
+                  <thead className="bg-slate-50 text-xs uppercase tracking-wider text-slate-500">
+                    <tr>
+                      <th className="sticky left-0 z-10 bg-slate-50 px-5 py-3">Role / Module</th>
+                      {permissionMatrix.actions.map((action) => <th key={action} className="px-3 py-3 text-center">{action}</th>)}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {permissionMatrix.roles.map((roleEntry) => roleEntry.permissions.map((permission, index) => (
+                      <tr key={`${roleEntry.role}-${permission.module}`} className={index === 0 ? "border-t-2 border-slate-200" : ""}>
+                        <td className="sticky left-0 z-10 bg-white px-5 py-3">
+                          <div className="font-semibold text-slate-900">{index === 0 ? roleEntry.label : ""}</div>
+                          <div className="text-xs text-slate-500">{permission.label}</div>
+                        </td>
+                        {permissionMatrix.actions.map((action) => (
+                          <td key={action} className="px-3 py-3 text-center">
+                            <input
+                              type="checkbox"
+                              checked={permission.actions.includes(action)}
+                              disabled={roleEntry.role === UserRole.ADMIN}
+                              onChange={() => togglePermission(roleEntry.role, permission.module, action)}
+                              className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 disabled:opacity-60"
+                            />
+                          </td>
+                        ))}
+                      </tr>
+                    )))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {section === "users" && (
+        <div className="space-y-6">
+          {(userView === "create" || userView === "edit") && (() => {
+            const userRoleMeta = getAdminRoleMeta(userForm.role);
+            const userDistrictRequired = userRoleMeta.scope === "regional";
+            const allRequiredRoles = ADMIN_DISTRICT_REQUIRED_ROLES.filter((entry) => entry.scope === "regional");
+            const allNationalRoles = ADMIN_DISTRICT_REQUIRED_ROLES.filter((entry) => entry.scope === "national");
+            return (
+            <>
+              <div className="rounded-2xl border border-blue-200 bg-blue-50/60 p-5">
+                <div className="flex items-start gap-3">
+                  <HelpCircle className="mt-0.5 h-5 w-5 flex-shrink-0 text-blue-600" />
+                  <div className="flex-1 space-y-3">
+                    <div>
+                      <p className="text-sm font-bold text-slate-900">Which roles need districts?</p>
+                      <p className="mt-1 text-xs text-slate-600">District assignment controls what data the user can see. Pick the role first, then assign districts based on the rule below.</p>
+                    </div>
+                    <div className="grid gap-2 md:grid-cols-2">
+                      <div className="rounded-xl border border-emerald-200 bg-white p-3">
+                        <div className="flex items-center gap-2">
+                          <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                          <p className="text-xs font-bold uppercase tracking-widest text-emerald-700">District required</p>
+                        </div>
+                        <ul className="mt-2 space-y-1 text-xs text-slate-700">
+                          {allRequiredRoles.map((entry) => (
+                            <li key={entry.value} className="flex items-start gap-2">
+                              <span className="mt-1.5 h-1.5 w-1.5 flex-shrink-0 rounded-full bg-emerald-500" />
+                              <span><span className="font-semibold">{entry.label}</span> — {entry.reason}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                      <div className="rounded-xl border border-slate-200 bg-white p-3">
+                        <div className="flex items-center gap-2">
+                          <ShieldCheck className="h-4 w-4 text-slate-600" />
+                          <p className="text-xs font-bold uppercase tracking-widest text-slate-700">National visibility</p>
+                        </div>
+                        <ul className="mt-2 space-y-1 text-xs text-slate-700">
+                          {allNationalRoles.map((entry) => (
+                            <li key={entry.value} className="flex items-start gap-2">
+                              <span className="mt-1.5 h-1.5 w-1.5 flex-shrink-0 rounded-full bg-slate-400" />
+                              <span><span className="font-semibold">{entry.label}</span> — {entry.reason}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div className="card p-6">
+              <div className="mb-5 flex items-center gap-3">
+                <button onClick={() => { setUserView("list"); onNavigate?.("list"); }} className="rounded-lg p-2 text-slate-500 hover:bg-slate-100">
+                  <ChevronRight className="rotate-180" size={18} />
+                </button>
+                <div>
+                  <h3 className="text-lg font-bold text-slate-900">{userView === "create" ? "Create User" : "Edit User"}</h3>
+                  <p className="text-sm text-slate-500">Temp password, credentials email, Prospect sync, and audit logging are handled server-side.</p>
+                </div>
+              </div>
+              <form onSubmit={saveUser} className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <input className="input-field" placeholder="Full Name *" value={userForm.fullName} onChange={(e) => setUserForm((prev) => ({ ...prev, fullName: e.target.value }))} />
+                <input className="input-field" placeholder="Email *" type="email" value={userForm.email} onChange={(e) => setUserForm((prev) => ({ ...prev, email: e.target.value }))} />
+                <div className="space-y-2">
+                  <select className="input-field" value={userForm.role} onChange={(e) => setUserForm((prev) => ({ ...prev, role: e.target.value }))}>
+                    {roleOptions.map((option) => {
+                      const meta = getAdminRoleMeta(option.value);
+                      const suffix = meta.scope === "regional" ? " — districts required" : " — national visibility";
+                      return <option key={option.value} value={option.value}>{option.label}{suffix}</option>;
+                    })}
+                  </select>
+                  {userRoleMeta.reason && (
+                    <div className={`flex items-start gap-2 rounded-lg border px-3 py-2 text-xs ${userDistrictRequired ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-slate-200 bg-slate-50 text-slate-700"}`}>
+                      {userDistrictRequired
+                        ? <MapPin className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-emerald-700" />
+                        : <ShieldCheck className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-slate-500" />}
+                      <span><span className="font-semibold">{userRoleMeta.label}:</span> {userRoleMeta.reason}</span>
+                    </div>
+                  )}
+                </div>
+                <select className="input-field" value={userForm.gender} onChange={(e) => setUserForm((prev) => ({ ...prev, gender: e.target.value as "Male" | "Female" | "Other" }))}>
+                  <option value="Male">Male</option>
+                  <option value="Female">Female</option>
+                  <option value="Other">Other</option>
+                </select>
+                {userDistrictRequired && (
+                  <div className="md:col-span-2 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <label className="text-sm font-bold text-slate-700">
+                        Assigned Districts <span className="text-rose-600">*</span>
+                      </label>
+                      <span className="text-[11px] font-semibold uppercase tracking-widest text-emerald-700">
+                        {userForm.districts.length} selected
+                      </span>
+                    </div>
+                    <div className="rounded-xl border border-emerald-200 bg-emerald-50/60 p-3">
+                      <div className="flex flex-wrap gap-2">
+                        {DISTRICTS.map((district) => {
+                          const isSelected = userForm.districts.includes(district);
+                          return (
+                            <button
+                              key={district}
+                              type="button"
+                              onClick={() => {
+                                if (isSelected) {
+                                  setUserForm((prev) => ({ ...prev, districts: prev.districts.filter((d) => d !== district) }));
+                                } else {
+                                  setUserForm((prev) => ({ ...prev, districts: [...prev.districts, district] }));
+                                }
+                              }}
+                              className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${
+                                isSelected
+                                  ? "bg-emerald-600 border-emerald-600 text-white shadow-sm"
+                                  : "bg-white border-emerald-200 text-slate-700 hover:border-emerald-400 hover:bg-emerald-50"
+                              }`}
+                            >
+                              {isSelected && <span className="mr-1">✓</span>}
+                              {district}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-emerald-800">
+                        <Info className="h-3.5 w-3.5" />
+                        <span>Pick one or more districts. The user will only see projects, verifications and KPI data for these districts.</span>
+                        {userForm.districts.length > 0 && (
+                          <button type="button" onClick={() => setUserForm((prev) => ({ ...prev, districts: [] }))} className="ml-auto font-semibold text-emerald-700 hover:underline">
+                            Clear all
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+                {userView === "edit" && (
+                  <select className="input-field" value={userForm.isActive ? "active" : "inactive"} onChange={(e) => setUserForm((prev) => ({ ...prev, isActive: e.target.value === "active" }))}>
+                    <option value="active">Active</option>
+                    <option value="inactive">Inactive</option>
+                  </select>
+                )}
+                <div className="md:col-span-2 flex gap-3">
+                  <button type="button" onClick={() => { setUserView("list"); onNavigate?.("list"); }} className="btn-secondary">Cancel</button>
+                  <button type="submit" disabled={userSubmitting} className="btn-primary flex items-center gap-2">
+                    {userSubmitting ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
+                    {userView === "create" ? "Create User" : "Save Changes"}
+                  </button>
+                </div>
+              </form>
+            </div>
+            </>
+            );
+          })()}
+
+          {userView === "detail" && selectedUser && (
+            <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
+              <div className="card p-6">
+                <div className="mb-4 flex items-center gap-3">
+                  <button onClick={() => { setUserView("list"); onNavigate?.("list"); }} className="rounded-lg p-2 text-slate-500 hover:bg-slate-100">
+                    <ChevronRight className="rotate-180" size={18} />
+                  </button>
+                  <div>
+                    <h3 className="text-lg font-bold text-slate-900">{selectedUser.fullName}</h3>
+                    <p className="text-sm text-slate-500">{selectedUser.email}</p>
+                  </div>
+                </div>
+                <div className="space-y-2 text-sm text-slate-600">
+                  <p><strong>Role:</strong> {selectedUser.roleLabel || selectedUser.role}</p>
+                  <p><strong>District:</strong> {selectedUser.district || "—"}</p>
+                  <p><strong>Status:</strong> {selectedUser.status}</p>
+                  <p><strong>Last Login:</strong> {formatDateTime(selectedUser.lastLogin)}</p>
+                </div>
+                <div className="mt-5 flex flex-wrap gap-2">
+                  <button onClick={() => { setUserView("edit"); onNavigate?.("edit", selectedUser?.id); }} className="btn-primary text-xs">Edit</button>
+                  <button onClick={() => void resetPassword(selectedUser.id)} className="btn-secondary text-xs">Reset Password</button>
+                  {(selectedUser.isActive !== false && selectedUser.status !== "Inactive") && (
+                    <button onClick={() => void deactivateUser(selectedUser.id)} className="btn-secondary text-xs text-rose-700">Deactivate</button>
+                  )}
+                </div>
+              </div>
+              <div className="card p-6 xl:col-span-2">
+                <h3 className="text-lg font-bold text-slate-900">Recent Audit Trail</h3>
+                <div className="mt-4 space-y-3">
+                  {(selectedUser.recentAuditLogs || []).map((log) => (
+                    <div key={String(log.id)} className="rounded-xl border border-slate-100 p-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="font-semibold text-slate-900">{log.action}</span>
+                        <span className="text-xs text-slate-400">{formatDateTime(log.createdAt)}</span>
+                      </div>
+                      <p className="mt-1 text-xs text-slate-500">{log.module || "users"} • {log.recordType || "user"} #{log.recordId ?? "—"}</p>
+                    </div>
+                  ))}
+                </div>
+                <h3 className="mt-6 text-lg font-bold text-slate-900">Prospect Sync Status</h3>
+                <div className="mt-4 space-y-3">
+                  {(selectedUser.prospectSyncStatus || []).map((log) => (
+                    <div key={log.id} className="rounded-xl border border-slate-100 p-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="font-semibold text-slate-900">{log.methodName}</span>
+                        <span className={`rounded-full px-2 py-1 text-[10px] font-bold ${log.status === "success" ? "bg-emerald-100 text-emerald-700" : log.status === "failed" ? "bg-rose-100 text-rose-700" : "bg-amber-100 text-amber-700"}`}>{log.status}</span>
+                      </div>
+                      <p className="mt-1 text-xs text-slate-500">Attempts: {log.attempts} • {formatDateTime(log.createdAt)}</p>
+                      {log.errorMessage && <p className="mt-2 text-xs text-rose-600">{log.errorMessage}</p>}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {userView === "list" && (
+            <>
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+                <div className="card p-5"><p className="text-xs font-bold uppercase tracking-widest text-slate-400">Total Users</p><p className="mt-3 text-3xl font-bold text-slate-900">{users.length}</p></div>
+                <div className="card p-5"><p className="text-xs font-bold uppercase tracking-widest text-slate-400">Active</p><p className="mt-3 text-3xl font-bold text-slate-900">{users.filter((user) => user.isActive !== false && user.status !== "Inactive").length}</p></div>
+                <div className="card p-5"><p className="text-xs font-bold uppercase tracking-widest text-slate-400">Inactive</p><p className="mt-3 text-3xl font-bold text-slate-900">{users.filter((user) => user.isActive === false || user.status === "Inactive").length}</p></div>
+                <div className="card p-5"><p className="text-xs font-bold uppercase tracking-widest text-slate-400">Roles Covered</p><p className="mt-3 text-3xl font-bold text-slate-900">{new Set(users.map((user) => user.role)).size}</p></div>
+              </div>
+
+              <div className="card">
+                <div className="flex flex-col gap-4 border-b border-slate-100 p-6 lg:flex-row lg:items-center lg:justify-between">
+                  <div>
+                    <h3 className="text-lg font-bold">All Non-Vendor Accounts</h3>
+                    <p className="text-sm text-slate-500">Columns match the Super Admin directory and link to detailed activity.</p>
+                  </div>
+                  <button onClick={openUserCreate} className="btn-primary flex items-center gap-2">
+                    <Plus size={16} /> Create User
+                  </button>
+                </div>
+                <div className="flex flex-col gap-3 border-b border-slate-100 p-6 lg:flex-row">
+                  <div className="relative flex-1">
+                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+                    <input className="input-field pl-9" placeholder="Search name, email, role, district..." value={userSearch} onChange={(e) => setUserSearch(e.target.value)} />
+                  </div>
+                  <select className="input-field lg:w-48" value={userFilters.role} onChange={(e) => setUserFilters((prev) => ({ ...prev, role: e.target.value }))}>
+                    <option value="">All Roles</option>
+                    {roleOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                  </select>
+                  <select className="input-field lg:w-48" value={userFilters.district} onChange={(e) => setUserFilters((prev) => ({ ...prev, district: e.target.value }))}>
+                    <option value="">All Districts</option>
+                    {DISTRICTS.map((district) => <option key={district} value={district}>{district}</option>)}
+                  </select>
+                  <select className="input-field lg:w-40" value={userFilters.status} onChange={(e) => setUserFilters((prev) => ({ ...prev, status: e.target.value }))}>
+                    <option value="">All Status</option>
+                    <option value="active">Active</option>
+                    <option value="inactive">Inactive</option>
+                  </select>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left">
+                    <thead>
+                      <tr className="bg-slate-50">
+                        <th className="px-6 py-4 text-xs font-bold uppercase text-slate-500">Name</th>
+                        <th className="px-6 py-4 text-xs font-bold uppercase text-slate-500">Email</th>
+                        <th className="px-6 py-4 text-xs font-bold uppercase text-slate-500">Role</th>
+                        <th className="px-6 py-4 text-xs font-bold uppercase text-slate-500">District</th>
+                        <th className="px-6 py-4 text-xs font-bold uppercase text-slate-500">Status</th>
+                        <th className="px-6 py-4 text-xs font-bold uppercase text-slate-500">Last Login</th>
+                        <th className="px-6 py-4 text-xs font-bold uppercase text-slate-500 text-right">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {usersLoading && (
+                        <tr><td colSpan={7} className="px-6 py-10 text-center text-slate-500">Loading users...</td></tr>
+                      )}
+                      {!usersLoading && visibleUsers.length === 0 && (
+                        <tr><td colSpan={7} className="px-6 py-10 text-center text-slate-500">No users matched the selected filters.</td></tr>
+                      )}
+                      {!usersLoading && visibleUsers.map((user) => {
+                        const userRoleMeta = getAdminRoleMeta(user.role);
+                        const userDistricts = (user.districts && user.districts.length > 0)
+                          ? user.districts
+                          : (user.district || user.region ? [user.district || user.region] : []);
+                        const missingDistricts = userRoleMeta.scope === "regional" && userDistricts.length === 0;
+                        return (
+                        <tr key={user.id} className="hover:bg-slate-50">
+                          <td className="px-6 py-4 font-semibold text-slate-900">{user.fullName}</td>
+                          <td className="px-6 py-4 text-sm text-slate-600">{user.email}</td>
+                          <td className="px-6 py-4">
+                            <span className={`rounded px-2 py-1 text-xs font-medium ${userRoleMeta.scope === "regional" ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-600"}`}>
+                              {user.roleLabel || user.role}
+                            </span>
+                          </td>
+                          <td className="px-6 py-4">
+                            {userDistricts.length > 0 ? (
+                              <div className="flex flex-wrap gap-1">
+                                {userDistricts.map((district) => (
+                                  <span key={district} className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-semibold ${userRoleMeta.scope === "regional" ? "bg-emerald-50 text-emerald-800 border border-emerald-200" : "bg-slate-100 text-slate-700 border border-slate-200"}`}>
+                                    <MapPin className="h-3 w-3" />
+                                    {district}
+                                  </span>
+                                ))}
+                              </div>
+                            ) : (
+                              <span className="text-sm text-slate-400">—</span>
+                            )}
+                            {missingDistricts && (
+                              <button
+                                onClick={() => { onNavigate?.("edit", user.id); void openUserDetail(user.id, "edit"); }}
+                                className="mt-1 inline-flex items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-800 hover:bg-amber-100"
+                                title="This role requires district assignment. Click to fix."
+                              >
+                                <AlertTriangle className="h-3 w-3" />
+                                Needs district
+                              </button>
+                            )}
+                          </td>
+                          <td className="px-6 py-4"><span className={`rounded-full px-2 py-1 text-[10px] font-bold ${(user.isActive !== false && user.status !== "Inactive") ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-600"}`}>{(user.isActive !== false && user.status !== "Inactive") ? "Active" : "Inactive"}</span></td>
+                          <td className="px-6 py-4 text-sm text-slate-500">{formatDateTime(user.lastLogin)}</td>
+                          <td className="px-6 py-4">
+                            <div className="flex justify-end gap-3 text-xs font-semibold">
+                              <button onClick={() => { onNavigate?.("detail", user.id); void openUserDetail(user.id, "detail"); }} className="text-emerald-700">View</button>
+                              <button onClick={() => { onNavigate?.("edit", user.id); void openUserDetail(user.id, "edit"); }} className="text-slate-700">Edit</button>
+                              <button onClick={() => void resetPassword(user.id)} className="text-blue-700">Reset Password</button>
+                            </div>
+                          </td>
+                        </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {section === "organizations" && (
+        <div className="grid grid-cols-1 gap-6 xl:grid-cols-[1.1fr,0.9fr]">
+          <div className="card overflow-hidden">
+            <div className="border-b border-slate-100 p-6">
+              <h3 className="text-lg font-bold text-slate-900">Stakeholder Organizations</h3>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left">
+                <thead>
+                  <tr className="bg-slate-50">
+                    <th className="px-6 py-4 text-xs font-bold uppercase text-slate-500">Organization</th>
+                    <th className="px-6 py-4 text-xs font-bold uppercase text-slate-500">Type</th>
+                    <th className="px-6 py-4 text-xs font-bold uppercase text-slate-500">Contact</th>
+                    <th className="px-6 py-4 text-xs font-bold uppercase text-slate-500 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {organizationsLoading && <tr><td colSpan={4} className="px-6 py-10 text-center text-slate-500">Loading organizations...</td></tr>}
+                  {!organizationsLoading && organizations.map((org) => (
+                    <tr key={org.id} className="hover:bg-slate-50">
+                      <td className="px-6 py-4">
+                        <p className="font-semibold text-slate-900">{org.name}</p>
+                        <p className="text-xs text-slate-500">{org.address || "No address"}</p>
+                      </td>
+                      <td className="px-6 py-4 text-sm text-slate-600">{org.type}</td>
+                      <td className="px-6 py-4 text-sm text-slate-600">
+                        {org.contactPerson || "—"}
+                        <div className="text-xs text-slate-400">{org.email || org.phone || "No contact details"}</div>
+                      </td>
+                      <td className="px-6 py-4">
+                        <div className="flex justify-end gap-3 text-xs font-semibold">
+                          <button onClick={() => setOrganizationForm({
+                            id: org.id,
+                            name: org.name,
+                            type: org.type,
+                            contactPerson: org.contactPerson || "",
+                            email: org.email || "",
+                            phone: org.phone || "",
+                            address: org.address || "",
+                          })} className="text-slate-700">Edit</button>
+                          <button onClick={() => void removeOrganization(org.id)} className="text-rose-700">Delete</button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="card p-6">
+            <h3 className="text-lg font-bold text-slate-900">{organizationForm.id ? "Edit Organization" : "Create Organization"}</h3>
+            <form onSubmit={saveOrganization} className="mt-4 space-y-4">
+              <input className="input-field" placeholder="Organization Name" value={organizationForm.name} onChange={(e) => setOrganizationForm((prev) => ({ ...prev, name: e.target.value }))} />
+              <select className="input-field" value={organizationForm.type} onChange={(e) => setOrganizationForm((prev) => ({ ...prev, type: e.target.value as Organization["type"] }))}>
+                <option value="Government">Government</option>
+                <option value="International">International</option>
+                <option value="NGO">NGO</option>
+              </select>
+              <input className="input-field" placeholder="Contact Person" value={organizationForm.contactPerson} onChange={(e) => setOrganizationForm((prev) => ({ ...prev, contactPerson: e.target.value }))} />
+              <input className="input-field" placeholder="Email" type="email" value={organizationForm.email} onChange={(e) => setOrganizationForm((prev) => ({ ...prev, email: e.target.value }))} />
+              <input className="input-field" placeholder="Phone" value={organizationForm.phone} onChange={(e) => setOrganizationForm((prev) => ({ ...prev, phone: e.target.value }))} />
+              <textarea className="input-field min-h-[120px]" placeholder="Address" value={organizationForm.address} onChange={(e) => setOrganizationForm((prev) => ({ ...prev, address: e.target.value }))} />
+              <div className="flex gap-3">
+                {organizationForm.id && <button type="button" onClick={() => setOrganizationForm(emptyOrganizationForm)} className="btn-secondary">Cancel</button>}
+                <button type="submit" disabled={organizationSubmitting} className="btn-primary flex items-center gap-2">
+                  {organizationSubmitting ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
+                  {organizationForm.id ? "Save Organization" : "Create Organization"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {section === "system_configuration" && configuration && (
+        <><form onSubmit={saveConfiguration} className="space-y-6">
+          <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+            <div className="card p-6 space-y-4">
+              <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                <Settings size={18} className="text-emerald-600" />
+                General Settings
+              </h3>
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">National/Main Program Budget</label>
+                  <input
+                    className="input-field"
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={configuration.nationalMainProgramBudget}
+                    onChange={(e) =>
+                      setConfiguration((prev) =>
+                        prev ? { ...prev, nationalMainProgramBudget: Number(e.target.value || 0) } : prev,
+                      )
+                    }
+                    placeholder="Enter total program budget"
+                  />
+                  <p className="text-xs text-slate-500 mt-1">This budget is the national payment pool for all program disbursements.</p>
+                </div>
+              </div>
+            </div>
+
+            <div className="card p-6 space-y-4">
+              <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                <Bell size={18} className="text-emerald-600" />
+                Notification & File Settings
+              </h3>
+              <div className="space-y-3">
+                <div className="flex items-center justify-between rounded-xl border border-slate-100 px-4 py-3">
+                  <div>
+                    <span className="text-sm font-medium text-slate-900">Email notifications</span>
+                    <p className="text-xs text-slate-500">Send email alerts to users</p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    id="email-notifications"
+                    checked={configuration.emailNotificationsEnabled}
+                    onChange={(e) => setConfiguration((prev) => prev ? { ...prev, emailNotificationsEnabled: e.target.checked } : prev)}
+                    className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                  />
+                </div>
+                <div className="flex items-center justify-between rounded-xl border border-slate-100 px-4 py-3">
+                  <div>
+                    <span className="text-sm font-medium text-slate-900">SMS notifications</span>
+                    <p className="text-xs text-slate-500">Send SMS alerts to users</p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    id="sms-notifications"
+                    checked={configuration.smsNotificationsEnabled}
+                    onChange={(e) => setConfiguration((prev) => prev ? { ...prev, smsNotificationsEnabled: e.target.checked } : prev)}
+                    className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Max File Size (MB)</label>
+                    <input className="input-field" type="number" min="1" max="100" value={configuration.maxFileSizeMb} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, maxFileSizeMb: Number(e.target.value || 0) } : prev)} />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Allowed File Types</label>
+                    <input className="input-field" value={configuration.allowedFileTypes.join(", ")} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, allowedFileTypes: e.target.value.split(",").map((item) => item.trim().toUpperCase()).filter(Boolean) } : prev)} placeholder="PDF, DOCX, JPG, PNG" />
+                    <p className="text-xs text-slate-500 mt-1">Separate with commas</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="card p-6 space-y-4">
+            <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+              <Globe size={18} className="text-emerald-600" />
+              Public Portal Contact Information
+              <span className="ml-2 text-xs font-medium text-slate-500 bg-slate-100 px-2 py-1 rounded-full">Shown on /public</span>
+            </h3>
+            <p className="text-sm text-slate-600">
+              Contact details displayed on the public-facing portal. Visitors will see these values on the public landing page, How-to-Apply sidebar, and FAQ section.
+            </p>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Organisation Name</label>
+                <input className="input-field" value={configuration.contactOrganisationName} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, contactOrganisationName: e.target.value } : prev)} placeholder="RBF Management Team, Ministry of Energy" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Contact Email</label>
+                <input className="input-field" type="email" value={configuration.contactEmail} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, contactEmail: e.target.value } : prev)} placeholder="rbf@energy.gov.ls" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Contact Phone</label>
+                <input className="input-field" value={configuration.contactPhone} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, contactPhone: e.target.value } : prev)} placeholder="+266 2231 0000" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Office Hours</label>
+                <input className="input-field" value={configuration.contactOfficeHours} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, contactOfficeHours: e.target.value } : prev)} placeholder="Mon-Fri, 08:00-17:00 SAST" />
+              </div>
+              <div className="col-span-2">
+                <label className="block text-sm font-medium text-slate-700 mb-1">Office Address</label>
+                <textarea className="input-field" rows={2} value={configuration.contactAddress} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, contactAddress: e.target.value } : prev)} placeholder="Corner Constitution & Parliament Road, Maseru 100, Lesotho" />
+                <p className="text-xs text-slate-500 mt-1">Full postal address shown in the public contact section</p>
+              </div>
+            </div>
+          </div>
+
+          <div className="card p-6 space-y-4">
+            <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+              <Mail size={18} className="text-emerald-600" />
+              Email Configuration
+              <button type="button" onClick={() => setShowEmailGuide(true)} className="ml-auto text-slate-400 hover:text-emerald-600 transition-colors" title="Email setup guide">
+                <HelpCircle size={16} />
+              </button>
+            </h3>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">SMTP Host</label>
+                <input className="input-field" value={configuration.emailHost} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, emailHost: e.target.value } : prev)} placeholder="smtp.gmail.com" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">SMTP Port</label>
+                <input className="input-field" type="number" value={configuration.emailPort} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, emailPort: Number(e.target.value || 587) } : prev)} placeholder="587" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">SMTP Username</label>
+                <input className="input-field" value={configuration.emailHostUser} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, emailHostUser: e.target.value } : prev)} placeholder="user@gmail.com" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">SMTP Password</label>
+                <input className="input-field" type="password" value={configuration.emailHostPassword} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, emailHostPassword: e.target.value } : prev)} placeholder={configuration.emailHostPasswordSet ? "········" : "Enter SMTP password"} />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Default From Email</label>
+                <input className="input-field" value={configuration.defaultFromEmail} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, defaultFromEmail: e.target.value } : prev)} placeholder="no-reply@rbf.local" />
+              </div>
+              <div className="flex items-end pb-2">
+                <label className="flex items-center gap-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={configuration.emailUseTls}
+                    onChange={(e) => setConfiguration((prev) => prev ? { ...prev, emailUseTls: e.target.checked } : prev)}
+                    className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                  />
+                  <span className="text-sm font-medium text-slate-700">Use TLS</span>
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+            <div className="card p-6 space-y-4">
+              <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                <Target size={18} className="text-emerald-600" />
+                KPI Thresholds
+              </h3>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Female Target (%)</label>
+                  <input className="input-field" type="number" min="0" max="100" value={configuration.femaleTargetMinimum} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, femaleTargetMinimum: Number(e.target.value || 0) } : prev)} />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Vulnerable Target (%)</label>
+                  <input className="input-field" type="number" min="0" max="100" value={configuration.vulnerableTargetMinimum} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, vulnerableTargetMinimum: Number(e.target.value || 0) } : prev)} />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Low Income Target (%)</label>
+                  <input className="input-field" type="number" min="0" max="100" value={configuration.lowIncomeTargetMinimum} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, lowIncomeTargetMinimum: Number(e.target.value || 0) } : prev)} />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Uptime Target (%)</label>
+                  <input className="input-field" type="number" min="0" max="100" value={configuration.uptimeTarget} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, uptimeTarget: Number(e.target.value || 0) } : prev)} />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Anomaly Deviation (%)</label>
+                  <input className="input-field" type="number" min="0" max="100" value={configuration.anomalyDeviationThreshold} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, anomalyDeviationThreshold: Number(e.target.value || 0) } : prev)} />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">GPS Duplicate Radius (m)</label>
+                  <input className="input-field" type="number" min="1" max="1000" value={configuration.gpsDuplicateRadiusM} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, gpsDuplicateRadiusM: Number(e.target.value || 0) } : prev)} />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">GPS Verification Max Distance (m)</label>
+                  <input className="input-field" type="number" min="1" max="5000" value={configuration.gpsVerificationMaxDistanceM} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, gpsVerificationMaxDistanceM: Number(e.target.value || 0) } : prev)} />
+                </div>
+              </div>
+            </div>
+
+            <div className="card p-6 space-y-4">
+              <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                <Target size={18} className="text-emerald-600" />
+                Milestone Verification Thresholds
+              </h3>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">M2 Verification Required (%)</label>
+                  <input className="input-field" type="number" min="0" max="100" value={configuration.m2VerificationRequiredPct} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, m2VerificationRequiredPct: Number(e.target.value || 0) } : prev)} />
+                  <p className="text-xs text-slate-500 mt-1">Percentage of M2 submissions requiring verification</p>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">M3 Verification Required (%)</label>
+                  <input className="input-field" type="number" min="0" max="100" value={configuration.m3VerificationRequiredPct} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, m3VerificationRequiredPct: Number(e.target.value || 0) } : prev)} />
+                  <p className="text-xs text-slate-500 mt-1">Percentage of M3 submissions requiring verification</p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-center justify-end gap-3">
+            <button type="button" onClick={() => void loadConfiguration()} className="btn-secondary">
+              Reset Changes
+            </button>
+            <button type="submit" disabled={configurationSubmitting || configurationLoading} className="btn-primary flex items-center gap-2">
+              {configurationSubmitting ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
+              {configurationSubmitting ? "Saving..." : "Save Configuration"}
+            </button>
+          </div>
+        </form>
+
+        {showEmailGuide && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[9999] overflow-y-auto p-4" onClick={() => setShowEmailGuide(false)}>
+            <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full p-6 relative" onClick={(e) => e.stopPropagation()}>
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                  <HelpCircle size={18} className="text-emerald-600" />
+                  Email Configuration Guide
+                </h3>
+                <button type="button" onClick={() => setShowEmailGuide(false)} className="text-slate-400 hover:text-slate-600">
+                  {'\u00D7'}
+                </button>
+              </div>
+              <div className="space-y-4 text-sm text-slate-700">
+                <p>To set up the system email, configure an SMTP server. Below are the settings for common providers:</p>
+
+                <div className="rounded-xl border border-slate-200 overflow-hidden">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="bg-slate-50 text-left">
+                        <th className="px-3 py-2 font-semibold text-slate-700">Provider</th>
+                        <th className="px-3 py-2 font-semibold text-slate-700">SMTP Host</th>
+                        <th className="px-3 py-2 font-semibold text-slate-700">Port</th>
+                        <th className="px-3 py-2 font-semibold text-slate-700">TLS</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      <tr>
+                        <td className="px-3 py-2 font-medium">Gmail</td>
+                        <td className="px-3 py-2 text-slate-600">smtp.gmail.com</td>
+                        <td className="px-3 py-2 text-slate-600">587</td>
+                        <td className="px-3 py-2 text-slate-600">Yes</td>
+                      </tr>
+                      <tr>
+                        <td className="px-3 py-2 font-medium">Outlook / Office 365</td>
+                        <td className="px-3 py-2 text-slate-600">smtp.office365.com</td>
+                        <td className="px-3 py-2 text-slate-600">587</td>
+                        <td className="px-3 py-2 text-slate-600">Yes</td>
+                      </tr>
+                      <tr>
+                        <td className="px-3 py-2 font-medium">SendGrid</td>
+                        <td className="px-3 py-2 text-slate-600">smtp.sendgrid.net</td>
+                        <td className="px-3 py-2 text-slate-600">587</td>
+                        <td className="px-3 py-2 text-slate-600">Yes</td>
+                      </tr>
+                      <tr>
+                        <td className="px-3 py-2 font-medium">Mailgun</td>
+                        <td className="px-3 py-2 text-slate-600">smtp.mailgun.org</td>
+                        <td className="px-3 py-2 text-slate-600">587</td>
+                        <td className="px-3 py-2 text-slate-600">Yes</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="rounded-xl bg-amber-50 border border-amber-200 p-4">
+                  <p className="font-semibold text-amber-800 mb-1">Gmail requires an App Password</p>
+                  <p className="text-amber-700">
+                    If using Gmail, enable 2-Factor Authentication, then generate an
+                    App Password at{" "}
+                    <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener noreferrer" className="underline font-medium">myaccount.google.com/apppasswords</a>.
+                    Use that App Password as the SMTP Password — not your regular password.
+                  </p>
+                </div>
+
+                <div className="rounded-xl bg-blue-50 border border-blue-200 p-4">
+                  <p className="font-semibold text-blue-800 mb-1">Tips</p>
+                  <ul className="list-disc list-inside text-blue-700 space-y-1">
+                    <li>Port <strong>587</strong> with TLS is recommended for most providers.</li>
+                    <li>Port <strong>465</strong> with SSL is also supported (set Use TLS to No).</li>
+                    <li>The <strong>Default From Email</strong> should match the SMTP Username for delivery compliance.</li>
+                    <li><strong>SMTP Username</strong> is typically the full email address (e.g. <code className="bg-blue-100 px-1 rounded text-xs">user@gmail.com</code>).</li>
+                    <li>After saving, the system applies new email settings immediately.</li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+        </>
+      )}
+
+      {section === "prospect_sync" && (
+        <div className="space-y-6">
+          <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
+            <div className="card p-6 xl:col-span-1">
+              <div className="flex items-center justify-between">
+                <h3 className="text-lg font-bold text-slate-900">Connection Status</h3>
+                <button onClick={() => void loadProspect()} className="btn-secondary text-xs">Check Connection</button>
+              </div>
+              <div className="mt-4 space-y-3">
+                <div className="flex items-center justify-between rounded-xl border border-slate-100 px-4 py-3">
+                  <span>Read token</span>
+                  <span className={`rounded-full px-2 py-1 text-[10px] font-bold ${statusPill(Boolean(connectionStatus?.readTokenOk))}`}>{connectionStatus?.readTokenOk ? "Working" : "Unavailable"}</span>
+                </div>
+                <div className="flex items-center justify-between rounded-xl border border-slate-100 px-4 py-3">
+                  <span>Write token</span>
+                  <span className={`rounded-full px-2 py-1 text-[10px] font-bold ${statusPill(Boolean(connectionStatus?.writeTokenOk))}`}>{connectionStatus?.writeTokenOk ? "Working" : "Unavailable"}</span>
+                </div>
+                <p className="text-xs text-slate-500">{connectionStatus?.baseUrl || "No Prospect base URL configured."}</p>
+              </div>
+            </div>
+
+            <div className="card p-6 xl:col-span-2">
+              <div className="flex items-center justify-between">
+                <h3 className="text-lg font-bold text-slate-900">Sync Summary</h3>
+                <button onClick={() => void retryFailedJobs()} className="btn-secondary text-xs">Retry All Failed</button>
+              </div>
+              <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
+                <div className="rounded-2xl bg-rose-50 p-5">
+                  <p className="text-xs font-bold uppercase tracking-widest text-rose-500">Failed Jobs</p>
+                  <p className="mt-3 text-3xl font-bold text-rose-700">{prospectSummary?.failedJobs ?? 0}</p>
+                </div>
+                <div className="rounded-2xl bg-blue-50 p-5">
+                  <p className="text-xs font-bold uppercase tracking-widest text-blue-500">Last Sync</p>
+                  <p className="mt-3 text-lg font-bold text-slate-900">{formatRelativeTime(prospectSummary?.lastSyncAt)}</p>
+                  <p className="text-xs text-slate-500">{formatDateTime(prospectSummary?.lastSyncAt)}</p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="card overflow-hidden">
+            <div className="border-b border-slate-100 p-6"><h3 className="text-lg font-bold text-slate-900">Counts Comparison</h3></div>
+            <table className="w-full text-left">
+              <thead>
+                <tr className="bg-slate-50">
+                  <th className="px-6 py-4 text-xs font-bold uppercase text-slate-500">Data Type</th>
+                  <th className="px-6 py-4 text-xs font-bold uppercase text-slate-500">Our Count</th>
+                  <th className="px-6 py-4 text-xs font-bold uppercase text-slate-500">Prospect Count</th>
+                  <th className="px-6 py-4 text-xs font-bold uppercase text-slate-500">Match</th>
+                  <th className="px-6 py-4 text-xs font-bold uppercase text-slate-500">Last Sync</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {(prospectSummary?.rows || []).map((row) => (
+                  <tr key={row.dataType}>
+                    <td className="px-6 py-4 font-semibold text-slate-900">{row.dataType}<div className="text-xs text-slate-500">{row.note}</div></td>
+                    <td className="px-6 py-4 text-sm text-slate-600">{row.ourCount}</td>
+                    <td className="px-6 py-4 text-sm text-slate-600">{row.prospectCount}</td>
+                    <td className="px-6 py-4"><span className={`rounded-full px-2 py-1 text-[10px] font-bold ${row.match ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>{row.match ? "Match" : "Mismatch"}</span></td>
+                    <td className="px-6 py-4 text-sm text-slate-500">{formatDateTime(row.lastSync)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="card overflow-hidden">
+            <div className="border-b border-slate-100 p-6"><h3 className="text-lg font-bold text-slate-900">Failed Jobs and Recent Sync Logs</h3></div>
+            <table className="w-full text-left">
+              <thead>
+                <tr className="bg-slate-50">
+                  <th className="px-6 py-4 text-xs font-bold uppercase text-slate-500">Method</th>
+                  <th className="px-6 py-4 text-xs font-bold uppercase text-slate-500">Record</th>
+                  <th className="px-6 py-4 text-xs font-bold uppercase text-slate-500">Attempts</th>
+                  <th className="px-6 py-4 text-xs font-bold uppercase text-slate-500">Status</th>
+                  <th className="px-6 py-4 text-xs font-bold uppercase text-slate-500">Error</th>
+                  <th className="px-6 py-4 text-xs font-bold uppercase text-slate-500 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {prospectLoading && <tr><td colSpan={6} className="px-6 py-10 text-center text-slate-500">Loading sync logs...</td></tr>}
+                {!prospectLoading && prospectLogs.map((log) => {
+                  const isExpanded = expandedPayloadLogId === log.id;
+                  return (
+                    <React.Fragment key={log.id}>
+                      <tr>
+                        <td className="px-6 py-4 font-semibold text-slate-900">{log.methodName}</td>
+                        <td className="px-6 py-4 text-sm text-slate-600">{log.recordType || "—"} {log.recordId || ""}</td>
+                        <td className="px-6 py-4 text-sm text-slate-600">{log.attempts}</td>
+                        <td className="px-6 py-4"><span className={`rounded-full px-2 py-1 text-[10px] font-bold ${log.status === "success" ? "bg-emerald-100 text-emerald-700" : log.status === "failed" ? "bg-rose-100 text-rose-700" : "bg-amber-100 text-amber-700"}`}>{log.status}</span></td>
+                        <td className="px-6 py-4 text-xs text-slate-500">{log.errorMessage || "—"}</td>
+                           <td className="px-6 py-4">
+                             <div className="flex justify-end gap-3">
+                               <button
+                                 onClick={() => setExpandedPayloadLogId((current) => current === log.id ? null : log.id)}
+                                 className="inline-flex items-center gap-2 text-xs font-semibold text-emerald-700"
+                               >
+                                 <Eye size={14} />
+                                 {isExpanded ? "Hide payload" : "View payload"}
+                               </button>
+{log.status !== "success" && <button onClick={() => void retryJob(log.id)} className="text-xs font-semibold text-emerald-700">Retry</button>}
+                                {(log.status === "failed" || log.status === "pending") && <button onClick={() => void manualSyncMethod(log)} className="text-xs font-semibold text-emerald-700">Manual Sync</button>}
+                             </div>
+                           </td>
+                      </tr>
+                      {isExpanded && (
+                        <tr className="bg-slate-50/70">
+                          <td colSpan={6} className="px-6 pb-6 pt-1">
+                            <div className="rounded-2xl border border-slate-200 bg-white shadow-sm">
+                              <div className="border-b border-slate-100 px-4 py-3">
+                                <p className="text-xs font-bold uppercase tracking-widest text-slate-500">Sent/Post Data Structure</p>
+                                <p className="mt-1 text-xs text-slate-500">{log.methodName} payload captured for this sync job.</p>
+                              </div>
+                              <pre className="max-h-[32rem] overflow-auto rounded-b-2xl bg-slate-950/95 p-5 text-[12px] leading-6 text-slate-100 whitespace-pre-wrap break-words">
+                                {formatJsonBlock(log.payload)}
+                              </pre>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {section === "audit_logs" && (
+        <div className="space-y-6">
+          <div className="card p-6">
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+              <input className="input-field" placeholder="Actor" value={auditFilters.actor} onChange={(e) => setAuditFilters((prev) => ({ ...prev, actor: e.target.value }))} />
+              <input className="input-field" placeholder="Role" value={auditFilters.actorRole} onChange={(e) => setAuditFilters((prev) => ({ ...prev, actorRole: e.target.value }))} />
+              <input className="input-field" placeholder="Action" value={auditFilters.action} onChange={(e) => setAuditFilters((prev) => ({ ...prev, action: e.target.value }))} />
+              <input className="input-field" placeholder="Module" value={auditFilters.module} onChange={(e) => setAuditFilters((prev) => ({ ...prev, module: e.target.value }))} />
+              <input className="input-field" type="date" value={auditFilters.dateFrom} onChange={(e) => setAuditFilters((prev) => ({ ...prev, dateFrom: e.target.value }))} />
+              <input className="input-field" type="date" value={auditFilters.dateTo} onChange={(e) => setAuditFilters((prev) => ({ ...prev, dateTo: e.target.value }))} />
+              <input className="input-field" placeholder="Record ID" value={auditFilters.recordId} onChange={(e) => setAuditFilters((prev) => ({ ...prev, recordId: e.target.value }))} />
+              <div className="flex gap-3">
+                <button onClick={() => void loadAudit()} className="btn-primary flex-1">Apply</button>
+                <button onClick={() => void exportAudit("csv")} className="btn-secondary flex items-center gap-2"><Download size={14} /> CSV</button>
+                <button onClick={() => void exportAudit("pdf")} className="btn-secondary flex items-center gap-2"><Download size={14} /> PDF</button>
+              </div>
+            </div>
+          </div>
+
+          <div className="card overflow-hidden">
+            <table className="w-full text-left">
+              <thead>
+                <tr className="bg-slate-50">
+                  <th className="px-6 py-4 text-xs font-bold uppercase text-slate-500">Timestamp</th>
+                  <th className="px-6 py-4 text-xs font-bold uppercase text-slate-500">Actor</th>
+                  <th className="px-6 py-4 text-xs font-bold uppercase text-slate-500">Role</th>
+                  <th className="px-6 py-4 text-xs font-bold uppercase text-slate-500">Action</th>
+                  <th className="px-6 py-4 text-xs font-bold uppercase text-slate-500">Module</th>
+                  <th className="px-6 py-4 text-xs font-bold uppercase text-slate-500">Record</th>
+                  <th className="px-6 py-4 text-xs font-bold uppercase text-slate-500">Old Status</th>
+                  <th className="px-6 py-4 text-xs font-bold uppercase text-slate-500">New Status</th>
+                  <th className="px-6 py-4 text-xs font-bold uppercase text-slate-500">Notes</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {auditLoading && <tr><td colSpan={9} className="px-6 py-10 text-center text-slate-500">Loading audit logs...</td></tr>}
+                {!auditLoading && auditLogs.map((log) => (
+                  <tr key={log.id}>
+                    <td className="px-6 py-4 text-sm text-slate-500">{formatDateTime(log.createdAt)}</td>
+                    <td className="px-6 py-4 text-sm text-slate-700">{log.actor || "System"}</td>
+                    <td className="px-6 py-4 text-sm text-slate-600">{log.actorRole || "—"}</td>
+                    <td className="px-6 py-4 font-semibold text-slate-900">{log.action}</td>
+                    <td className="px-6 py-4 text-sm text-slate-600">{log.module || "—"}</td>
+                    <td className="px-6 py-4 text-sm text-slate-600">{log.entityId || log.recordId || "—"}</td>
+                    <td className="px-6 py-4 text-sm text-slate-600">{log.oldStatus || "—"}</td>
+                    <td className="px-6 py-4 text-sm text-slate-600">{log.newStatus || "—"}</td>
+                    <td className="px-6 py-4 text-sm text-slate-600">{log.notes || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {section === "notifications" && (
+        <div className="card overflow-hidden">
+          <table className="w-full text-left">
+            <thead>
+              <tr className="bg-slate-50">
+                <th className="px-6 py-4 text-xs font-bold uppercase text-slate-500">Recipient</th>
+                <th className="px-6 py-4 text-xs font-bold uppercase text-slate-500">Channel</th>
+                <th className="px-6 py-4 text-xs font-bold uppercase text-slate-500">Event</th>
+                <th className="px-6 py-4 text-xs font-bold uppercase text-slate-500">Status</th>
+                <th className="px-6 py-4 text-xs font-bold uppercase text-slate-500">Timestamp</th>
+                <th className="px-6 py-4 text-xs font-bold uppercase text-slate-500 text-right">Action</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {visibleNotifications.map((note) => (
+                <tr key={note.id} className="hover:bg-slate-50">
+                  <td className="px-6 py-4">
+                    <p className="font-semibold text-slate-900">{note.recipientName}</p>
+                    <p className="text-xs text-slate-400">{note.recipientId}</p>
+                  </td>
+                  <td className="px-6 py-4 text-sm text-slate-600">{note.type}</td>
+                  <td className="px-6 py-4 text-sm text-slate-600">{note.event}</td>
+                  <td className="px-6 py-4"><span className={`rounded-full px-2 py-1 text-[10px] font-bold ${toneForNotification(note.status)}`}>{note.status}</span></td>
+                  <td className="px-6 py-4 text-sm text-slate-500">{formatDateTime(note.timestamp)}</td>
+                  <td className="px-6 py-4">
+                    <div className="flex justify-end">
+                      <button onClick={() => onNotificationSelect?.(note)} className="text-xs font-semibold text-emerald-700">Open Linked Item</button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+              {visibleNotifications.length === 0 && (
+                <tr><td colSpan={6} className="px-6 py-10 text-center text-slate-500">No notifications available.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {section === "system_health" && (
+        <div className="space-y-6">
+          {healthLoading || !health ? (
+            <div className="card p-10 text-center text-slate-500">Loading system health...</div>
+          ) : (
+            <>
+              <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
+                <div className="card p-6">
+                  <h3 className="text-lg font-bold text-slate-900">Database</h3>
+                  <div className="mt-4 space-y-3 text-sm text-slate-600">
+                    <div className="flex items-center justify-between"><span>Connection status</span><span className={`rounded-full px-2 py-1 text-[10px] font-bold ${statusPill(health.database.status === "Connected")}`}>{health.database.status}</span></div>
+                    <div className="flex items-center justify-between"><span>Slow queries (24h)</span><span>{health.database.slowQueriesLast24h}</span></div>
+                    {Object.entries(health.database.tableSizes).map(([name, size]) => (
+                      <div key={name} className="flex items-center justify-between"><span>{name}</span><span>{size}</span></div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="card p-6">
+                  <h3 className="text-lg font-bold text-slate-900">Queue</h3>
+                  <div className="mt-4 space-y-3 text-sm text-slate-600">
+                    <div className="flex items-center justify-between"><span>Worker status</span><span className={`rounded-full px-2 py-1 text-[10px] font-bold ${statusPill(health.queue.workerStatus === "Running")}`}>{health.queue.workerStatus}</span></div>
+                    <div className="flex items-center justify-between"><span>Pending jobs</span><span>{health.queue.pendingJobsCount}</span></div>
+                    <div className="flex items-center justify-between"><span>Failed jobs</span><span>{health.queue.failedJobsCount}</span></div>
+                    <div className="flex items-center justify-between"><span>Processing rate</span><span>{health.queue.processingRateLast24h}/24h</span></div>
+                  </div>
+                </div>
+
+                <div className="card p-6">
+                  <h3 className="text-lg font-bold text-slate-900">Storage</h3>
+                  <div className="mt-4 space-y-3 text-sm text-slate-600">
+                    <div className="flex items-center justify-between"><span>Total</span><span>{formatBytes(health.storage.totalBytes)}</span></div>
+                    <div className="flex items-center justify-between"><span>Used</span><span>{formatBytes(health.storage.usedBytes)}</span></div>
+                    <div className="flex items-center justify-between"><span>Available</span><span>{formatBytes(health.storage.freeBytes)}</span></div>
+                    <div className="flex items-center justify-between"><span>Files uploaded today</span><span>{health.storage.filesUploadedToday}</span></div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="card p-6">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-lg font-bold text-slate-900">Recent Application Errors</h3>
+                  <span className="text-xs text-slate-400">Latest failed Prospect-related events</span>
+                </div>
+                <div className="mt-4 space-y-3">
+                  {health.errors.map((item) => (
+                    <div key={item.id} className="rounded-xl border border-slate-100 px-4 py-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="font-semibold text-slate-900">{item.methodName}</p>
+                        <span className="text-xs text-slate-400">{formatDateTime(item.updatedAt)}</span>
+                      </div>
+                      <p className="mt-2 text-xs text-rose-600">{item.errorMessage || "Unknown error"}</p>
+                    </div>
+                  ))}
+                  {health.errors.length === 0 && <p className="text-sm text-slate-500">No recent errors logged.</p>}
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {section === "reports" && <ReportsHub currentUser={{ role: UserRole.ADMIN }} />}
+    </div>
+  );
+}

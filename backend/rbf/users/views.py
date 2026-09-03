@@ -1,13 +1,22 @@
+import json
 import random
+import secrets
 import string
 import time
-from datetime import timedelta
+from datetime import timedelta, datetime
+from pathlib import Path
+import shutil
+from urllib.parse import urlencode
 
 from django.conf import settings
+from django.core.cache import cache
 from django.core.cache import cache
 from django.core.mail import send_mail
 from django.core.management import call_command
 from django.contrib.sessions.models import Session
+from django.db import connections
+from django.db.utils import OperationalError
+from django.utils._os import safe_join
 from rest_framework import viewsets
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
@@ -31,7 +40,12 @@ from .models import (
     BlacklistAppeal,
     BlacklistAppealStatus,
     BlacklistCaseStatus,
+    Organization,
+    PasswordResetRequest,
+    PasswordResetRequestStatus,
+    PlatformConfiguration,
     User,
+    RolePermission,
     UserRole,
     UserStatus,
     VendorBlacklistCase,
@@ -45,15 +59,184 @@ _OTP_FALLBACK = {}
 from .serializers import (
     AdminManagedUserDetailSerializer,
     AdminManagedUserSerializer,
+    OrganizationSerializer,
+    PlatformConfigurationSerializer,
     BlacklistAppealSerializer,
     ChangePasswordSerializer,
     CustomTokenObtainPairSerializer,
     UserSerializer,
     VendorBlacklistCaseSerializer,
     VendorPrequalificationSerializer,
+    VendorProfileSerializer,
+    VendorProfileUpdateSerializer,
+    VendorDirectorySerializer,
+    generate_temporary_password,
 )
 from rbf.projects.audit import log_audit, AuditLogger
 from rbf.projects.integrations import SyncToProspectJob, normalize_prospect_gender
+from rbf.projects.models import AuditLog, Project, ProjectStatus, ProspectSyncLog, ProspectSyncStatus
+
+
+PERMISSION_ACTIONS = (
+    'view', 'create', 'edit', 'delete', 'submit', 'upload', 'download',
+    'review', 'verify', 'publish', 'approve', 'reject', 'confirm', 'endorse',
+    'pay', 'mark_paid', 'sign', 'assign', 'resolve', 'reinstate', 'appeal',
+    'export', 'view_sensitive', 'view_bank_details', 'run_sync', 'retry_sync',
+    'generate_report', 'respond', 'flag_issue',
+)
+PERMISSION_MODULES = (
+    ('dashboard', 'Dashboard'),
+    ('users', 'Users'),
+    ('vendors', 'Vendors'),
+    ('tenders', 'Tenders'),
+    ('prequalification', 'Prequalification'),
+    ('bids', 'Bids'),
+    ('evaluations', 'Evaluations'),
+    ('projects', 'Projects'),
+    ('payments', 'Payments'),
+    ('blacklisting', 'Blacklisting'),
+    ('notifications', 'Notifications'),
+    ('reports', 'Reports'),
+    ('audit_logs', 'Audit Logs'),
+    ('system_configuration', 'System Configuration'),
+    ('system_health', 'System Health'),
+)
+
+ROLE_DEFAULT_MODULES = {
+    UserRole.ADMIN: {module for module, _ in PERMISSION_MODULES},
+    UserRole.RBF_OFFICIAL: {
+        'dashboard', 'vendors', 'tenders', 'prequalification', 'bids', 'evaluations',
+        'projects', 'payments', 'blacklisting', 'notifications', 'reports',
+    },
+    UserRole.TAC: {'dashboard', 'vendors', 'projects', 'payments', 'evaluations', 'blacklisting', 'reports', 'notifications'},
+    UserRole.DOE_OFFICER: {'dashboard', 'vendors', 'projects', 'blacklisting', 'reports', 'notifications'},
+    UserRole.FIELD_VERIFIER: {'dashboard', 'projects', 'notifications', 'reports'},
+    UserRole.UNDP_DONOR: {'dashboard', 'vendors', 'projects', 'payments', 'reports', 'notifications'},
+    UserRole.AUDITOR: {'dashboard', 'vendors', 'projects', 'payments', 'reports', 'audit_logs', 'prospect_sync', 'notifications'},
+    UserRole.VENDOR: {'dashboard', 'vendors', 'tenders', 'prequalification', 'bids', 'projects', 'payments', 'notifications'},
+}
+
+ROLE_DEFAULT_ACTIONS = {
+    UserRole.ADMIN: set(PERMISSION_ACTIONS),
+    UserRole.RBF_OFFICIAL: {'view', 'create', 'edit', 'submit', 'upload', 'download', 'review', 'verify', 'publish', 'approve', 'reject', 'confirm', 'endorse', 'pay', 'mark_paid', 'assign', 'resolve', 'reinstate', 'export', 'view_sensitive', 'view_bank_details', 'run_sync', 'retry_sync', 'generate_report', 'respond', 'flag_issue'},
+    UserRole.TAC: {'view', 'review', 'approve', 'reject', 'endorse', 'export', 'respond'},
+    UserRole.DOE_OFFICER: {'view', 'review', 'verify', 'approve', 'reject', 'confirm', 'export', 'respond'},
+    UserRole.FIELD_VERIFIER: {'view', 'create', 'edit', 'submit', 'upload'},
+    UserRole.UNDP_DONOR: {'view', 'review', 'approve', 'reject', 'export', 'respond', 'flag_issue'},
+    UserRole.AUDITOR: {'view', 'create', 'edit', 'review', 'download', 'export', 'generate_report', 'respond', 'flag_issue'},
+    UserRole.VENDOR: {'view', 'create', 'edit', 'submit', 'upload', 'download', 'sign', 'appeal'},
+}
+
+
+DEFAULT_ORGANIZATIONS = [
+    {
+        'name': 'Ministry of Energy',
+        'type': 'Government',
+        'contact_person': 'Permanent Secretary',
+        'email': 'energy@gov.ls',
+        'phone': '+266 2231 0000',
+        'address': 'Maseru, Lesotho',
+    },
+    {
+        'name': 'UNDP',
+        'type': 'International',
+        'contact_person': 'Programme Specialist',
+        'email': 'registry.ls@undp.org',
+        'phone': '+266 2231 6800',
+        'address': 'United Nations House, Maseru',
+    },
+    {
+        'name': 'Department of Energy',
+        'type': 'Government',
+        'contact_person': 'Director of Energy',
+        'email': 'doe@gov.ls',
+        'phone': '+266 2231 0200',
+        'address': 'Maseru, Lesotho',
+    },
+    {
+        'name': 'EU Delegation',
+        'type': 'International',
+        'contact_person': 'Cooperation Section',
+        'email': 'delegation-lesotho@eeas.europa.eu',
+        'phone': '+266 2231 4200',
+        'address': 'Maseru, Lesotho',
+    },
+    {
+        'name': 'PSC Members Secretariat',
+        'type': 'Government',
+        'contact_person': 'PSC Coordinator',
+        'email': 'psc@gov.ls',
+        'phone': '+266 2232 1100',
+        'address': 'Maseru, Lesotho',
+    },
+]
+
+
+def ensure_default_organizations():
+    if Organization.objects.exists():
+        return
+    Organization.objects.bulk_create([Organization(**payload) for payload in DEFAULT_ORGANIZATIONS], ignore_conflicts=True)
+
+
+def build_system_health_payload():
+    db_ok = True
+    db_error = None
+    try:
+        connections['default'].cursor()
+    except OperationalError as exc:
+        db_ok = False
+        db_error = str(exc)
+
+    media_path = Path(getattr(settings, 'MEDIA_ROOT', settings.BASE_DIR))
+    usage = shutil.disk_usage(media_path)
+    pending_jobs = ProspectSyncLog.objects.filter(status=ProspectSyncStatus.PENDING).count()
+    failed_jobs = ProspectSyncLog.objects.filter(status=ProspectSyncStatus.FAILED).count()
+    processing_rate = ProspectSyncLog.objects.filter(
+        status=ProspectSyncStatus.SUCCESS,
+        created_at__gte=timezone.now() - timedelta(hours=24),
+    ).count()
+    files_uploaded_today = (
+        Project.objects.filter(created_at__date=timezone.localdate()).count()
+        + AuditLog.objects.filter(created_at__date=timezone.localdate(), action__icontains='uploaded').count()
+    )
+    recent_errors = list(
+        ProspectSyncLog.objects.filter(status=ProspectSyncStatus.FAILED)
+        .order_by('-updated_at')
+        .values('id', 'method_name', 'error_message', 'updated_at')[:20]
+    )
+    recent_activity = ProspectSyncLog.objects.order_by('-updated_at').first()
+    return {
+        'database': {
+            'status': 'Connected' if db_ok else 'Disconnected',
+            'error': db_error,
+            'slow_queries_last_24h': 0,
+            'table_sizes': {
+                'users': User.objects.count(),
+                'projects': Project.objects.count(),
+                'audit_logs': AuditLog.objects.count(),
+            },
+        },
+        'queue': {
+            'worker_status': 'Running',
+            'pending_jobs_count': pending_jobs,
+            'failed_jobs_count': failed_jobs,
+            'processing_rate_last_24h': processing_rate,
+        },
+        'scheduler': {
+            'status': 'Running',
+            'last_monthly_report_sync': recent_activity.updated_at.isoformat() if recent_activity else None,
+        },
+        'prospect_api': {
+            'status': 'Connected' if getattr(settings, 'PROSPECT_BASE_URL', '') else 'Not Configured',
+        },
+        'storage': {
+            'total_bytes': usage.total,
+            'used_bytes': usage.used,
+            'free_bytes': usage.free,
+            'files_uploaded_today': files_uploaded_today,
+        },
+        'errors': recent_errors,
+    }
 
 
 class IsAdminOrRbfOfficial:
@@ -182,19 +365,22 @@ class UserViewSet(viewsets.ModelViewSet):
             if email_error:
                 data['email_error'] = email_error
 
-        location_area_1 = user.verification_zone or user.region or ''
-        SyncToProspectJob.dispatch_async(
-            'pushAgent',
-            [{
-                'external_id': str(user.id),
-                'agent_type': 'installer' if user.role == UserRole.FIELD_VERIFIER else 'sales_agent',
-                'gender': normalize_prospect_gender(user.gender),
-                'country': 'LS',
-                'location_area_1': location_area_1,
-            }],
-            record_id=int(user.id),
-            record_type='user',
-        )
+        # Only sync non-vendor users to Prospect so vendor registration (which precedes
+        # pre-qualification submission) does not push any data to the external system.
+        if user.role != UserRole.VENDOR:
+            location_area_1 = user.verification_zone or user.region or ''
+            SyncToProspectJob.dispatch_async(
+                'pushAgent',
+                [{
+                    'external_id': str(user.id),
+                    'agent_type': 'installer' if user.role == UserRole.FIELD_VERIFIER else 'sales_agent',
+                    'gender': normalize_prospect_gender(user.gender),
+                    'country': 'LS',
+                    'location_area_1': location_area_1,
+                }],
+                record_id=int(user.id),
+                record_type='user',
+            )
         AuditLogger.log('user_created', 'users', user.id, 'user', new_status=user.status, notes=f'Created {user.role} user.')
 
         return Response(data, status=status.HTTP_201_CREATED, headers=headers)
@@ -206,7 +392,7 @@ class UserViewSet(viewsets.ModelViewSet):
             user.save(update_fields=['must_change_password'])
 
     def get_permissions(self):
-        if self.action == 'create':
+        if self.action in {'create', 'request_password_reset'}:
             return [AllowAny()]
         return [IsAuthenticated()]
 
@@ -237,6 +423,44 @@ class UserViewSet(viewsets.ModelViewSet):
                     queryset = queryset.filter(is_active=(normalized == 'active'))
             return queryset
         return User.objects.filter(id=getattr(user, 'id', None)).order_by('-id')
+
+    def _can_view_vendor_directory(self, user):
+        return bool(
+            user
+            and user.is_authenticated
+            and user.role in {
+                UserRole.RBF_OFFICIAL,
+                UserRole.TAC,
+                UserRole.DOE_OFFICER,
+                UserRole.UNDP_DONOR,
+                UserRole.AUDITOR,
+                UserRole.ADMIN,
+            }
+        )
+
+    def _can_view_vendor_profile(self, viewer, vendor):
+        if not (viewer and viewer.is_authenticated and vendor and vendor.role == UserRole.VENDOR):
+            return False
+        if viewer.role == UserRole.VENDOR:
+            return viewer.id == vendor.id
+        if viewer.role in {UserRole.RBF_OFFICIAL, UserRole.TAC, UserRole.UNDP_DONOR, UserRole.AUDITOR, UserRole.ADMIN}:
+            return True
+        if viewer.role == UserRole.DOE_OFFICER:
+            viewer_region = (viewer.region or '').strip().lower()
+            vendor_region = (vendor.region or '').strip().lower()
+            return bool(viewer_region and vendor_region and viewer_region == vendor_region)
+        return False
+
+    def _vendor_directory_queryset(self, viewer):
+        queryset = (
+            User.objects.filter(role=UserRole.VENDOR)
+            .prefetch_related('prequalifications', 'blacklist_cases')
+            .order_by('organization_name', 'full_name', 'username')
+        )
+        if viewer.role == UserRole.DOE_OFFICER:
+            region = (viewer.region or '').strip()
+            queryset = queryset.filter(region__iexact=region) if region else queryset.none()
+        return queryset
 
     def update(self, request, *args, **kwargs):
         target_user = self.get_object()
@@ -286,6 +510,153 @@ class UserViewSet(viewsets.ModelViewSet):
         AuditLogger.log('user_deactivated', 'users', user.id, 'user', old_status='Active', new_status='Inactive', notes='User deactivated by Super Admin.')
         return Response(AdminManagedUserDetailSerializer(user).data, status=status.HTTP_200_OK)
 
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated], url_path='reset-password')
+    def reset_password(self, request, pk=None):
+        self._assert_super_admin(request.user)
+        user = self.get_object()
+        if user.role in {UserRole.VENDOR, UserRole.ADMIN}:
+            return Response({'detail': 'Password reset is only available for admin-managed non-vendor users.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        temporary_password = generate_temporary_password(12)
+        user.set_password(temporary_password)
+        user.must_change_password = True
+        user.save(update_fields=['password', 'must_change_password'])
+        self._invalidate_user_sessions(user)
+        AuditLogger.log('user_password_reset', 'users', user.id, 'user', notes='Temporary password reset by Super Admin.')
+
+        email_error = None
+        email_configured = bool(settings.EMAIL_HOST_USER and settings.EMAIL_HOST_PASSWORD) or settings.DEBUG
+        if user.email and email_configured:
+            try:
+                send_mail(
+                    subject='Your password has been reset',
+                    message=(
+                        'Your password has been reset by the platform administrator.\n'
+                        f'Username: {user.username}\n'
+                        f'Temporary password: {temporary_password}\n'
+                        'Please sign in and change your password immediately.'
+                    ),
+                    from_email=settings.DEFAULT_FROM_EMAIL,
+                    recipient_list=[user.email],
+                    fail_silently=False,
+                )
+            except Exception as exc:  # noqa: BLE001
+                email_error = str(exc)
+        elif user.email:
+            email_error = 'Email service is not configured.'
+
+        payload = {
+            'status': 'ok',
+            'temporary_password': temporary_password if settings.DEBUG else None,
+            'email_error': email_error,
+        }
+        return Response(payload, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['post'], url_path='request-password-reset')
+    def request_password_reset(self, request):
+        identifier = str(request.data.get('username_or_email') or '').strip()
+        if not identifier:
+            return Response({'detail': 'username_or_email is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = User.objects.filter(
+            Q(username__iexact=identifier) | Q(email__iexact=identifier),
+            is_active=True,
+        ).first()
+
+        if user is None or not user.email:
+            return Response(
+                {'detail': 'If an account with that username or email exists, a reset link has been sent.'},
+                status=status.HTTP_200_OK,
+            )
+
+        token = secrets.token_urlsafe(48)
+        expires_at = timezone.now() + timedelta(hours=1)
+
+        PasswordResetRequest.objects.filter(user=user, status=PasswordResetRequestStatus.PENDING).update(
+            status=PasswordResetRequestStatus.EXPIRED,
+        )
+        PasswordResetRequest.objects.create(
+            user=user,
+            contact_info=identifier,
+            token=token,
+            token_expires_at=expires_at,
+        )
+
+        frontend_base = getattr(settings, 'FRONTEND_BASE_URL', 'http://localhost:5173')
+        reset_url = f"{frontend_base}/reset-password?token={token}"
+
+        email_error = None
+        email_configured = bool(settings.EMAIL_HOST_USER and settings.EMAIL_HOST_PASSWORD) or settings.DEBUG
+        if email_configured:
+            try:
+                send_mail(
+                    subject='Reset your password',
+                    message=(
+                        f'Hello {user.full_name or user.username},\n\n'
+                        'You requested a password reset for your RBF Platform account.\n\n'
+                        f'Click the link below to reset your password (valid for 1 hour):\n\n'
+                        f'{reset_url}\n\n'
+                        'If you did not request this, please ignore this email.'
+                    ),
+                    from_email=settings.DEFAULT_FROM_EMAIL,
+                    recipient_list=[user.email],
+                    fail_silently=False,
+                )
+            except Exception as exc:
+                email_error = str(exc)
+        else:
+            email_error = 'Email service is not configured.'
+
+        return Response({
+            'detail': 'If an account with that username or email exists, a reset link has been sent.',
+            'email_error': email_error,
+            'reset_url': reset_url if settings.DEBUG else None,
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['post'], url_path='reset-password-confirm')
+    def reset_password_confirm(self, request):
+        token = str(request.data.get('token') or '').strip()
+        new_password = str(request.data.get('new_password') or '').strip()
+
+        if not token or not new_password:
+            return Response({'detail': 'token and new_password are required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if len(new_password) < 8:
+            return Response({'detail': 'Password must be at least 8 characters.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        reset_request = PasswordResetRequest.objects.filter(
+            token=token,
+            status=PasswordResetRequestStatus.PENDING,
+        ).order_by('-created_at').first()
+
+        if not reset_request:
+            return Response({'detail': 'Invalid or expired reset link.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if reset_request.token_expires_at and reset_request.token_expires_at < timezone.now():
+            reset_request.status = PasswordResetRequestStatus.EXPIRED
+            reset_request.save(update_fields=['status'])
+            return Response({'detail': 'Invalid or expired reset link.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = reset_request.user
+        user.set_password(new_password)
+        user.must_change_password = False
+        user.save(update_fields=['password', 'must_change_password'])
+
+        reset_request.status = PasswordResetRequestStatus.RESOLVED
+        reset_request.resolved_at = timezone.now()
+        reset_request.save(update_fields=['status', 'resolved_at'])
+
+        self._invalidate_user_sessions(user)
+
+        log_audit(
+            user,
+            'password_reset_completed',
+            user,
+            {'username': user.username, 'reset_request_id': reset_request.id},
+        )
+
+        return Response({'detail': 'Password has been reset successfully.'}, status=status.HTTP_200_OK)
+
     @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated], url_path='management/meta')
     def management_meta(self, request):
         self._assert_super_admin(request.user)
@@ -315,6 +686,270 @@ class UserViewSet(viewsets.ModelViewSet):
         user.save(update_fields=['status', 'is_active'])
         log_audit(request.user, 'vendor_account_approved', user, {'username': user.username})
         return Response(UserSerializer(user).data, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['get', 'patch'], url_path='my_profile')
+    def my_profile(self, request):
+        """Get current vendor's own profile"""
+        if not request.user.is_authenticated:
+            raise AuthenticationFailed('Not authenticated')
+        if request.user.role != UserRole.VENDOR:
+            raise PermissionDenied('Only vendors can access this endpoint')
+        if request.method == 'PATCH':
+            serializer = VendorProfileUpdateSerializer(
+                request.user,
+                data=request.data,
+                partial=True,
+                context={'request': request},
+            )
+            serializer.is_valid(raise_exception=True)
+            serializer.save()
+            log_audit(
+                request.user,
+                'vendor_profile_updated',
+                request.user,
+                {'fields': sorted(serializer.validated_data.keys())},
+            )
+
+        serializer = VendorProfileSerializer(request.user, context={'request': request})
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated], url_path='vendor_directory')
+    def vendor_directory(self, request):
+        if not self._can_view_vendor_directory(request.user):
+            raise PermissionDenied('You do not have permission to view the vendor directory.')
+        queryset = self._vendor_directory_queryset(request.user)
+        vendor_ids = [item.id for item in queryset]
+        latest_prequals = {}
+        if vendor_ids:
+            prequals = VendorPrequalification.objects.filter(vendor_id__in=vendor_ids).order_by('vendor_id', '-submitted_at')
+            for prequal in prequals:
+                latest_prequals.setdefault(prequal.vendor_id, prequal)
+        for vendor in queryset:
+            vendor._latest_prequalification = latest_prequals.get(vendor.id)
+        self.paginator.page_size = 20
+        page = self.paginate_queryset(queryset)
+        serializer = VendorDirectorySerializer(page if page is not None else queryset, many=True)
+        if page is not None:
+            return self.get_paginated_response(serializer.data)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['get'])
+    def profile(self, request, pk=None):
+        """Get vendor profile by ID - for RMT, TAC, etc."""
+        if not request.user.is_authenticated:
+            raise AuthenticationFailed('Not authenticated')
+        user = User.objects.filter(pk=pk, role=UserRole.VENDOR).first()
+        if user is None:
+            return Response({'detail': 'Not a vendor'}, status=status.HTTP_400_BAD_REQUEST)
+        if user.role != UserRole.VENDOR:
+            return Response({'detail': 'Not a vendor'}, status=status.HTTP_400_BAD_REQUEST)
+        if not self._can_view_vendor_profile(request.user, user):
+            raise PermissionDenied('You do not have permission to view this vendor profile.')
+        
+        user.last_viewed_at = timezone.now()
+        user.save(update_fields=['last_viewed_at'])
+        
+        serializer = VendorProfileSerializer(user, context={'request': request})
+        return Response(serializer.data)
+
+
+class OrganizationViewSet(viewsets.ModelViewSet):
+    queryset = Organization.objects.all()
+    serializer_class = OrganizationSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        if not (self.request.user and self.request.user.is_authenticated and self.request.user.role == UserRole.ADMIN):
+            return Organization.objects.none()
+        ensure_default_organizations()
+        return self.queryset.order_by('name')
+
+    def _assert_super_admin(self):
+        if not (self.request.user and self.request.user.is_authenticated and self.request.user.role == UserRole.ADMIN):
+            raise PermissionDenied('Only Platform Administrator (Super Admin) can manage organizations.')
+
+    def create(self, request, *args, **kwargs):
+        self._assert_super_admin()
+        return super().create(request, *args, **kwargs)
+
+    def update(self, request, *args, **kwargs):
+        self._assert_super_admin()
+        return super().update(request, *args, **kwargs)
+
+    def partial_update(self, request, *args, **kwargs):
+        self._assert_super_admin()
+        return super().partial_update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        self._assert_super_admin()
+        return super().destroy(request, *args, **kwargs)
+
+
+class PlatformConfigurationView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def _assert_super_admin(self, user):
+        if not (user and user.is_authenticated and user.role == UserRole.ADMIN):
+            raise PermissionDenied('Only Platform Administrator (Super Admin) can manage system configuration.')
+
+    def _get_config(self):
+        config = PlatformConfiguration.objects.order_by('id').first()
+        if config is None:
+            config = PlatformConfiguration.objects.create(
+                allowed_file_types=['PDF', 'DOCX', 'JPG', 'PNG', 'XLSX'],
+                email_host=settings.EMAIL_HOST,
+                email_port=settings.EMAIL_PORT,
+                email_use_tls=settings.EMAIL_USE_TLS,
+                email_host_user=settings.EMAIL_HOST_USER,
+                email_host_password=settings.EMAIL_HOST_PASSWORD,
+                default_from_email=settings.DEFAULT_FROM_EMAIL,
+            )
+        return config
+
+    def _apply_email_settings(self, config):
+        settings.EMAIL_HOST = config.email_host or settings.EMAIL_HOST
+        settings.EMAIL_PORT = config.email_port or settings.EMAIL_PORT
+        settings.EMAIL_USE_TLS = config.email_use_tls
+        settings.EMAIL_HOST_USER = config.email_host_user or settings.EMAIL_HOST_USER
+        if config.email_host_password:
+            settings.EMAIL_HOST_PASSWORD = config.email_host_password
+        settings.DEFAULT_FROM_EMAIL = config.default_from_email or settings.DEFAULT_FROM_EMAIL
+
+    def _build_payload(self, serializer):
+        payload = dict(serializer.data)
+        password_set = bool(payload.pop('email_host_password', None))
+        payload['email_host_password_set'] = password_set
+        boundary_path = Path(settings.BASE_DIR) / 'public' / 'geojson' / 'lesotho.geojson'
+        payload['lesotho_boundary'] = {
+            'path': str(boundary_path),
+            'exists': boundary_path.exists(),
+            'last_modified': datetime.utcfromtimestamp(boundary_path.stat().st_mtime).isoformat() + "+00:00" if boundary_path.exists() else None,
+        }
+        return payload
+
+    def get(self, request):
+        self._assert_super_admin(request.user)
+        serializer = PlatformConfigurationSerializer(self._get_config())
+        return Response(self._build_payload(serializer), status=status.HTTP_200_OK)
+
+    def patch(self, request):
+        self._assert_super_admin(request.user)
+        serializer = PlatformConfigurationSerializer(self._get_config(), data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        self._apply_email_settings(serializer.instance)
+        cache.set('email_config_version', str(serializer.instance.updated_at.timestamp()), timeout=None)
+        AuditLogger.log('platform_configuration_updated', 'configuration', serializer.instance.id, 'platform_configuration', notes='Platform configuration updated by Super Admin.')
+        return Response(self._build_payload(serializer), status=status.HTTP_200_OK)
+
+
+class PlatformConfigurationBoundaryRefreshView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not (request.user and request.user.is_authenticated and request.user.role == UserRole.ADMIN):
+            raise PermissionDenied('Only Platform Administrator (Super Admin) can refresh the Lesotho boundary file.')
+        call_command('download_lesotho_geojson')
+        AuditLogger.log('lesotho_boundary_refreshed', 'configuration', None, 'boundary', notes='Boundary file re-downloaded by Super Admin.')
+        return Response({'status': 'ok'}, status=status.HTTP_200_OK)
+
+
+class PlatformConfigurationBoundaryUploadView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not (request.user and request.user.is_authenticated and request.user.role == UserRole.ADMIN):
+            raise PermissionDenied('Only Platform Administrator (Super Admin) can upload the Lesotho boundary file.')
+        file = request.FILES.get('file')
+        if not file:
+            return Response({'error': 'No file provided.'}, status=status.HTTP_400_BAD_REQUEST)
+        if not file.name.lower().endswith('.geojson'):
+            return Response({'error': 'File must be a GeoJSON file.'}, status=status.HTTP_400_BAD_REQUEST)
+        boundary_path = Path(settings.BASE_DIR) / 'public' / 'geojson' / 'lesotho.geojson'
+        boundary_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            payload = json.loads(file.read().decode('utf-8'))
+        except Exception:
+            return Response({'error': 'Invalid JSON file.'}, status=status.HTTP_400_BAD_REQUEST)
+        if payload.get('type') == 'FeatureCollection':
+            features = payload.get('features') or []
+            has_valid_geometry = any(
+                isinstance(feature, dict)
+                and (feature.get('geometry') or {}).get('type') in {'Polygon', 'MultiPolygon'}
+                and (feature.get('geometry') or {}).get('coordinates')
+                for feature in features
+            )
+        else:
+            geometry = payload.get('geometry') or {}
+            has_valid_geometry = geometry.get('type') in {'Polygon', 'MultiPolygon'} and bool(geometry.get('coordinates'))
+        if not has_valid_geometry:
+            return Response({'error': 'Invalid GeoJSON: must contain a Polygon or MultiPolygon.'}, status=status.HTTP_400_BAD_REQUEST)
+        with boundary_path.open('w', encoding='utf-8') as handle:
+            json.dump(payload, handle)
+        from rbf.projects.gis import GpsValidator
+        GpsValidator._feature_cache = None
+        AuditLogger.log('lesotho_boundary_uploaded', 'configuration', None, 'boundary', notes='Boundary file uploaded by Super Admin.')
+        return Response({'status': 'ok'}, status=status.HTTP_200_OK)
+
+
+class SystemHealthView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not (request.user and request.user.is_authenticated and request.user.role == UserRole.ADMIN):
+            raise PermissionDenied('Only Platform Administrator (Super Admin) can view system health.')
+        return Response(build_system_health_payload(), status=status.HTTP_200_OK)
+
+
+class SuperAdminDashboardView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not (request.user and request.user.is_authenticated and request.user.role == UserRole.ADMIN):
+            raise PermissionDenied('Only Platform Administrator (Super Admin) can view the dashboard summary.')
+
+        ensure_default_organizations()
+        health_payload = build_system_health_payload()
+        recent_activity = AuditLog.objects.select_related('actor').order_by('-created_at')[:20]
+        latest_sync = ProspectSyncLog.objects.order_by('-updated_at').first()
+
+        payload = {
+            'stats': {
+                'total_users': User.objects.exclude(role=UserRole.VENDOR).count(),
+                'active_projects': Project.objects.filter(status__in={
+                    ProjectStatus.ACTIVE,
+                    ProjectStatus.INSTALLATION,
+                    ProjectStatus.VERIFICATION,
+                    ProjectStatus.DISBURSEMENT,
+                    ProjectStatus.CONTRACTING,
+                }).count(),
+                'total_vendors': User.objects.filter(role=UserRole.VENDOR).count(),
+                'pending_prequalifications': VendorPrequalification.objects.filter(
+                    status__in={PrequalificationStatus.PENDING, PrequalificationStatus.UNDER_REVIEW}
+                ).count(),
+            },
+            'system_health': health_payload,
+            'recent_activity': [
+                {
+                    'id': log.id,
+                    'timestamp': log.created_at,
+                    'actor': log.actor.full_name or log.actor.username if log.actor else 'System',
+                    'role': log.actor_role,
+                    'action': log.action,
+                    'module': log.module,
+                    'record': log.entity_id or log.record_id or '',
+                    'notes': log.notes,
+                    'old_status': log.old_status,
+                    'new_status': log.new_status,
+                }
+                for log in recent_activity
+            ],
+            'prospect_sync_summary': {
+                'failed_jobs': ProspectSyncLog.objects.filter(status=ProspectSyncStatus.FAILED).count(),
+                'last_sync_at': latest_sync.updated_at if latest_sync else None,
+            },
+        }
+        return Response(payload, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated], parser_classes=[MultiPartParser, FormParser])
     def initiate_blacklisting(self, request, pk=None):
@@ -346,11 +981,77 @@ class UserViewSet(viewsets.ModelViewSet):
         return Response(VendorBlacklistCaseSerializer(case).data, status=status.HTTP_201_CREATED)
 
 
+class RolePermissionsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def _assert_super_admin(self, request):
+        if request.user.role != UserRole.ADMIN:
+            raise PermissionDenied('Only Platform Administrator (Super Admin) can manage role permissions.')
+
+    @staticmethod
+    def _default_actions(role, module):
+        if module not in ROLE_DEFAULT_MODULES.get(role, set()):
+            return []
+        return sorted(ROLE_DEFAULT_ACTIONS.get(role, {'view'}))
+
+    def get(self, request):
+        self._assert_super_admin(request)
+        roles = []
+        for role, role_label in UserRole.choices:
+            permissions = []
+            for module, module_label in PERMISSION_MODULES:
+                record = RolePermission.objects.filter(role=role, module=module).first()
+                permissions.append({
+                    'module': module,
+                    'label': module_label,
+                    'actions': list(record.actions) if record else self._default_actions(role, module),
+                })
+            roles.append({'role': role, 'label': role_label, 'permissions': permissions})
+        return Response({
+            'actions': list(PERMISSION_ACTIONS),
+            'modules': [{'value': value, 'label': label} for value, label in PERMISSION_MODULES],
+            'roles': roles,
+        })
+
+    def put(self, request):
+        self._assert_super_admin(request)
+        submitted = request.data.get('roles', [])
+        if not isinstance(submitted, list):
+            return Response({'detail': 'roles must be a list.'}, status=status.HTTP_400_BAD_REQUEST)
+        allowed_roles = {value for value, _ in UserRole.choices if value != UserRole.ADMIN}
+        allowed_modules = {value for value, _ in PERMISSION_MODULES}
+        changed = 0
+        for role_data in submitted:
+            if not isinstance(role_data, dict) or role_data.get('role') not in allowed_roles:
+                continue
+            for permission in role_data.get('permissions', []):
+                if not isinstance(permission, dict) or permission.get('module') not in allowed_modules:
+                    continue
+                actions = permission.get('actions', [])
+                if not isinstance(actions, list):
+                    continue
+                cleaned = sorted({str(action) for action in actions if str(action) in PERMISSION_ACTIONS})
+                RolePermission.objects.update_or_create(
+                    role=role_data['role'],
+                    module=permission['module'],
+                    defaults={'actions': cleaned},
+                )
+                changed += 1
+        AuditLogger.log('Updated role permissions', 'users', notes=f'Updated {changed} role-module permission sets.')
+        return Response({'updated': changed})
+
+
 class VendorPrequalificationViewSet(viewsets.ModelViewSet):
     queryset = VendorPrequalification.objects.select_related('vendor', 'reviewed_by').all()
     serializer_class = VendorPrequalificationSerializer
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser, *viewsets.ModelViewSet.parser_classes]
+
+    def _refresh_vendor_resubmission_priority(self, preq: VendorPrequalification, response: Response) -> Response:
+        preq.submitted_at = timezone.now()
+        preq.save(update_fields=['submitted_at'])
+        response.data = self.get_serializer(preq).data
+        return response
 
     def get_queryset(self):
         user = self.request.user
@@ -361,6 +1062,25 @@ class VendorPrequalificationViewSet(viewsets.ModelViewSet):
     def create(self, request, *args, **kwargs):
         if request.user.role != UserRole.VENDOR:
             raise PermissionDenied('Only vendors can submit pre-qualification forms.')
+        existing = VendorPrequalification.objects.filter(
+            vendor=request.user,
+            status__in=[PrequalificationStatus.REJECTED, PrequalificationStatus.CLARIFICATION_REQUESTED],
+        ).order_by('-submitted_at').first()
+        if existing:
+            serializer = self.get_serializer(existing, data=request.data)
+            serializer.is_valid(raise_exception=True)
+            preq = serializer.save(
+                vendor=request.user,
+                status=PrequalificationStatus.PENDING,
+                submitted_at=timezone.now(),
+                reviewed_by=None,
+                reviewed_at=None,
+                reviewer_comments='',
+            )
+            log_audit(request.user, 'prequalification_submitted', preq, {
+                'vendor_id': request.user.id, 'previous_status': existing.status,
+            })
+            return Response(self.get_serializer(preq).data, status=status.HTTP_201_CREATED)
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         preq = serializer.save(vendor=request.user, status=PrequalificationStatus.PENDING)
@@ -370,9 +1090,16 @@ class VendorPrequalificationViewSet(viewsets.ModelViewSet):
     def update(self, request, *args, **kwargs):
         preq = self.get_object()
         if request.user.role == UserRole.VENDOR and preq.vendor_id == request.user.id:
-            if preq.status != PrequalificationStatus.CLARIFICATION_REQUESTED:
-                raise PermissionDenied('Only submissions marked Partial (Resubmit) can be edited.')
+            if preq.status not in (PrequalificationStatus.CLARIFICATION_REQUESTED, PrequalificationStatus.REJECTED):
+                raise PermissionDenied('Only submissions marked Partial (Resubmit) or Rejected can be edited.')
             response = super().update(request, *args, **kwargs)
+            if preq.status == PrequalificationStatus.REJECTED:
+                preq.status = PrequalificationStatus.PENDING
+                preq.reviewed_by = None
+                preq.reviewed_at = None
+                preq.reviewer_comments = ''
+                preq.save(update_fields=['status', 'reviewed_by', 'reviewed_at', 'reviewer_comments'])
+            response = self._refresh_vendor_resubmission_priority(preq, response)
             log_audit(request.user, 'prequalification_resubmitted', preq, {'vendor_id': preq.vendor_id})
             return response
         if not IsReviewerRole.check(request.user):
@@ -382,9 +1109,16 @@ class VendorPrequalificationViewSet(viewsets.ModelViewSet):
     def partial_update(self, request, *args, **kwargs):
         preq = self.get_object()
         if request.user.role == UserRole.VENDOR and preq.vendor_id == request.user.id:
-            if preq.status != PrequalificationStatus.CLARIFICATION_REQUESTED:
-                raise PermissionDenied('Only submissions marked Partial (Resubmit) can be edited.')
+            if preq.status not in (PrequalificationStatus.CLARIFICATION_REQUESTED, PrequalificationStatus.REJECTED):
+                raise PermissionDenied('Only submissions marked Partial (Resubmit) or Rejected can be edited.')
             response = super().partial_update(request, *args, **kwargs)
+            if preq.status == PrequalificationStatus.REJECTED:
+                preq.status = PrequalificationStatus.PENDING
+                preq.reviewed_by = None
+                preq.reviewed_at = None
+                preq.reviewer_comments = ''
+                preq.save(update_fields=['status', 'reviewed_by', 'reviewed_at', 'reviewer_comments'])
+            response = self._refresh_vendor_resubmission_priority(preq, response)
             log_audit(request.user, 'prequalification_resubmitted', preq, {'vendor_id': preq.vendor_id})
             return response
         if not IsReviewerRole.check(request.user):
@@ -569,6 +1303,7 @@ class BlacklistAppealViewSet(viewsets.ReadOnlyModelViewSet):
 
 class LoginView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer
+    throttle_classes = []
 
     def post(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)

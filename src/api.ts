@@ -1,5 +1,6 @@
 import {
   Tender,
+  TenderViewersResponse,
   Project,
   ProjectSetup,
   Notification,
@@ -11,13 +12,20 @@ import {
   InstallationReport,
   SmartMeterReading,
   VerificationTask,
+  FieldVerificationRecord,
   VendorPrequalification,
   VendorPrequalificationSubmission,
+  VendorBankDetails,
+  VendorProfile,
+  VendorDirectoryEntry,
+  DisbursementSheet,
   PaymentClaim,
   PaymentClaimSubmission,
   Disbursement,
   AuditLog,
   AnomalyFlag,
+  AnomalyReviewEvent,
+  AnomalyEvidenceFile,
   MapInstallationsResponse,
   MapInstallationRecord,
   TenderBid,
@@ -31,15 +39,37 @@ import {
   ProjectKpiSummary,
   PortfolioKpiSummary,
   ProspectSyncLog,
+  Organization,
+  PlatformConfiguration,
+  SystemHealthPayload,
+  SuperAdminDashboardSummary,
+  RolePermissionMatrix,
+  ReportTemplate,
+  ReportHistoryItem,
+  ReportFormat,
+  Concern,
+  ConcernResponse,
+  AuditFinding,
+  ConcernType,
+  ConcernSeverity,
+  ConcernStatus,
+  FindingCategory,
+  RiskLevel,
+  Notice,
+  NoticeAttachment,
+  NoticeCategory,
+  NoticeStatus,
 } from "./types";
 
 const env = (import.meta as any)?.env ?? {};
-const configuredApiBase = (env?.VITE_API_URL as string | undefined)?.replace(/\/$/, "");
-const requestTimeoutMs = Number(env?.VITE_API_TIMEOUT_MS ?? 15000);
+const buildTimeApiBase = (env?.VITE_API_URL as string | undefined)?.replace(/\/$/, "");
+let configuredApiBase = buildTimeApiBase;
+let requestTimeoutMs = Number(env?.VITE_API_TIMEOUT_MS ?? 60000);
 const isDevMode = Boolean(env?.DEV);
 const ACCESS_TOKEN_KEY = "rbf_access_token";
 const REFRESH_TOKEN_KEY = "rbf_refresh_token";
-const USER_KEY = "rbf_user";
+export const USER_KEY = "rbf_user";
+export const SESSION_EXPIRED_KEY = "rbf_session_expired";
 const DEMO_USERNAMES = new Set([
   "vendor_approved",
   "admin_user",
@@ -74,6 +104,34 @@ function stripApiSuffix(base: string): string {
   return base.replace(/\/$/, "").replace(/\/api$/i, "");
 }
 
+function getBrowserOrigin(): string {
+  if (typeof window === "undefined") return "";
+  return window.location.origin.replace(/\/$/, "");
+}
+
+export async function initRuntimeConfig(): Promise<void> {
+  if (typeof window === "undefined") return;
+  try {
+    const res = await fetch("/config.json");
+    if (!res.ok) return;
+    const cfg = await res.json();
+    if (cfg.VITE_API_URL) {
+      configuredApiBase = String(cfg.VITE_API_URL).replace(/\/$/, "");
+    }
+    if (cfg.VITE_API_TIMEOUT_MS) {
+      requestTimeoutMs = Number(cfg.VITE_API_TIMEOUT_MS);
+    }
+    recomputeApiBase();
+  } catch {
+    // /config.json is optional; keep build-time defaults
+  }
+}
+
+function getConfiguredApiOrigin(): string {
+  if (!configuredApiBase || !/^https?:\/\//i.test(configuredApiBase)) return "";
+  return stripApiSuffix(configuredApiBase);
+}
+
 function joinApiUrl(base: string, url: string): string {
   if (!base) return url;
   const normalizedBase = base.replace(/\/$/, "");
@@ -86,18 +144,73 @@ function joinApiUrl(base: string, url: string): string {
 function normalizeFileUrl(raw?: string): string | undefined {
   if (!raw) return raw;
   if (typeof window === "undefined") return raw;
-  if (!/^https?:\/\//i.test(raw)) return raw;
-  try {
-    const url = new URL(raw);
-    if (url.hostname === "127.0.0.1" || url.hostname === "localhost") {
-      url.hostname = window.location.hostname;
-      url.port = "8000";
-      return url.toString();
+  if (/^https?:\/\//i.test(raw)) {
+    try {
+      const url = new URL(raw);
+      if (url.hostname === "127.0.0.1" || url.hostname === "localhost") {
+        const preferredOrigin = getConfiguredApiOrigin() || getBrowserOrigin();
+        if (!preferredOrigin) return raw;
+        return `${preferredOrigin}${url.pathname}${url.search}${url.hash}`;
+      }
+    } catch {
+      return raw;
     }
-  } catch {
     return raw;
   }
-  return raw;
+  if (raw.startsWith('/')) {
+    const apiOrigin = getConfiguredApiOrigin();
+    if (apiOrigin) return `${apiOrigin}${raw}`;
+    return raw;
+  }
+  const clean = raw.replace(/^\/+/, "");
+  const mediaPath = clean.startsWith("media/") ? `/${clean}` : `/media/${clean}`;
+  const apiOrigin = getConfiguredApiOrigin();
+  if (apiOrigin) return `${apiOrigin}${mediaPath}`;
+  return mediaPath;
+}
+
+function normalizeTechnologyType(raw?: string): string | undefined {
+  const value = String(raw || "").trim();
+  if (!value) return undefined;
+  const key = value.toLowerCase();
+  const mapping: Record<string, string> = {
+    shs: "SHS",
+    "solar home system": "SHS",
+    ics: "ICS",
+    "improved cookstove": "ICS",
+    gmg: "GMG",
+    "mini-grid": "GMG",
+    "mini grid": "GMG",
+    "solar mini-grid": "GMG",
+    "solar mini grid": "GMG",
+    swp: "SWP",
+    "solar water pump": "SWP",
+    pue: "PUE",
+    "productive use": "PUE",
+  };
+  return mapping[key] || value.toUpperCase();
+}
+
+function flattenErrorValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (value == null) return "";
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const nested = flattenErrorValue(item);
+      if (nested) return nested;
+    }
+    return "";
+  }
+  if (typeof value === "object") {
+    const parts: string[] = [];
+    for (const [key, sub] of Object.entries(value as Record<string, unknown>)) {
+      const nested = flattenErrorValue(sub);
+      if (nested) parts.push(`${key}: ${nested}`);
+    }
+    return parts.join("; ");
+  }
+  return "";
 }
 
 function extractApiErrorDetail(text: string): string {
@@ -108,14 +221,13 @@ function extractApiErrorDetail(text: string): string {
     const payload = JSON.parse(trimmed);
     if (typeof payload?.detail === "string") return payload.detail;
     if (Array.isArray(payload?.non_field_errors) && payload.non_field_errors.length) {
-      return String(payload.non_field_errors[0]);
+      return flattenErrorValue(payload.non_field_errors);
     }
     if (payload && typeof payload === "object") {
       const firstKey = Object.keys(payload)[0];
       if (firstKey) {
-        const value = payload[firstKey];
-        if (Array.isArray(value) && value.length) return `${firstKey}: ${String(value[0])}`;
-        if (typeof value === "string") return `${firstKey}: ${value}`;
+        const flattened = flattenErrorValue(payload[firstKey]);
+        if (flattened) return `${firstKey}: ${flattened}`;
       }
     }
   } catch {
@@ -123,6 +235,42 @@ function extractApiErrorDetail(text: string): string {
   }
 
   return trimmed;
+}
+
+const SESSION_EXPIRED_MESSAGE = "Your session has expired. Please log in again to continue.";
+
+export const IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+export const IDLE_WARNING_MS = 28 * 60 * 1000;
+export const IDLE_EVENT_NAME = "rbf-idle-timeout";
+export const IDLE_WARNING_EVENT_NAME = "rbf-idle-warning";
+
+function dispatchSessionExpired(message: string) {
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent("rbf-session-expired", { detail: { message } }));
+  }
+}
+
+function dispatchIdleEvent(eventName: string) {
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent(eventName));
+  }
+}
+
+export function triggerIdleLogout(message?: string) {
+  const finalMessage = message || "You were logged out due to inactivity. Please log in again to continue.";
+  logoutUser(finalMessage);
+  dispatchSessionExpired(finalMessage);
+  dispatchIdleEvent(IDLE_EVENT_NAME);
+}
+
+function isSessionExpiredError(raw: string): boolean {
+  const lower = raw.toLowerCase();
+  return (
+    lower.includes("token_not_valid") ||
+    lower.includes("token is expired") ||
+    lower.includes("given token not valid") ||
+    (lower.includes("no active account") && lower.includes("401"))
+  );
 }
 
 function headersInitToObject(input?: HeadersInit): Record<string, string> {
@@ -159,41 +307,42 @@ function getHeaderValue(headers: Record<string, string>, name: string): string |
 }
 
 function getApiBaseCandidates(): string[] {
-  const normalizedConfigured = configuredApiBase ? stripApiSuffix(configuredApiBase) : "";
-  const browserBackends: string[] = [];
+  const normalizedConfigured = getConfiguredApiOrigin();
+  const bases: string[] = [""];
 
   if (typeof window !== "undefined") {
     const { protocol, hostname } = window.location;
-    if (hostname === "127.0.0.1" || hostname === "localhost") {
-      // Prefer direct backend in local development to avoid proxy-only failure modes.
-      browserBackends.push("http://127.0.0.1:8000", "http://localhost:8000");
-    } else if (hostname) {
-      browserBackends.push(`${protocol}//${hostname}:8000`, `http://${hostname}:8000`);
+    if (normalizedConfigured) bases.push(normalizedConfigured);
+    if (isDevMode && hostname) {
+      if (hostname === "127.0.0.1" || hostname === "localhost") {
+        bases.push(`${protocol}//${hostname}:8000`);
+      } else {
+        bases.push(`${protocol}//${hostname}:8000`, `http://${hostname}:8000`);
+      }
+      bases.push("http://127.0.0.1:8000", "http://localhost:8000");
     }
-  }
-
-  const bases: string[] = [];
-
-  if (isDevMode) {
-    // In local development, prefer Vite proxy (/api) first.
-    bases.push("");
-    if (normalizedConfigured) bases.push(normalizedConfigured);
-    bases.push(...browserBackends);
   } else {
-    bases.push(""); // same-origin first for production deployments
     if (normalizedConfigured) bases.push(normalizedConfigured);
-    bases.push(...browserBackends);
+    if (isDevMode) bases.push("http://127.0.0.1:8000", "http://localhost:8000");
   }
-
-  bases.push("http://127.0.0.1:8000", "http://localhost:8000");
   return uniq(bases);
 }
 
-const API_BASE_CANDIDATES = getApiBaseCandidates();
-export const API_BASE: string =
-  (configuredApiBase ? stripApiSuffix(configuredApiBase) : "") ||
+let API_BASE_CANDIDATES = getApiBaseCandidates();
+export let API_BASE: string =
+  getConfiguredApiOrigin() ||
+  getBrowserOrigin() ||
   API_BASE_CANDIDATES.find((base) => Boolean(base)) ||
-  "http://127.0.0.1:8000";
+  "";
+
+function recomputeApiBase(): void {
+  API_BASE_CANDIDATES = getApiBaseCandidates();
+  API_BASE =
+    getConfiguredApiOrigin() ||
+    getBrowserOrigin() ||
+    API_BASE_CANDIDATES.find((base) => Boolean(base)) ||
+    "";
+}
 
 // ============ Mapping helpers ============
 
@@ -206,6 +355,10 @@ function mapTenderFromApi(api: any): Tender {
     category: api.category ?? "",
     status: api.status ?? "Draft",
     deadline: api.deadline ?? "",
+    procurementWorkflow: api.procurement_workflow ?? "sequential",
+    eoiDeadline: api.eoi_deadline ?? undefined,
+    technicalDeadline: api.technical_deadline ?? undefined,
+    financialDeadline: api.financial_deadline ?? undefined,
     budget: api.budget != null ? Number(api.budget) : undefined,
     applicationType: api.application_type ?? undefined,
     stageType: api.stage_type ?? undefined,
@@ -218,17 +371,17 @@ function mapTenderFromApi(api: any): Tender {
     invitedBy: api.invited_by ?? undefined,
     biddingCurrency: api.bidding_currency ?? undefined,
     instruction: api.instruction ?? undefined,
-    lastDateSecurity: api.last_date_security ?? undefined,
-    lastDateSubmission: api.last_date_submission ?? undefined,
-    dateOpening: api.date_opening ?? undefined,
     preTenderMeetingInfo: api.pre_tender_meeting_info ?? undefined,
     biddersSchedulePurchase: api.bidders_schedule_purchase ?? undefined,
     tenderSecurityRequired: api.tender_security_required ?? undefined,
     contactDetails: api.contact_details ?? undefined,
     technologyTypes: api.technology_types ?? undefined,
+    targetDistricts: Array.isArray(api.target_districts) ? api.target_districts : undefined,
     targetSiteType: api.target_site_type ?? undefined,
     isVerified: api.is_verified ?? undefined,
     fundingSource: api.funding_source ?? undefined,
+    minimumServiceTier: api.minimum_service_tier ?? undefined,
+    approximateInstallationTarget: api.approximate_installation_target != null ? Number(api.approximate_installation_target) : undefined,
     technicalWeight: api.technical_weight != null ? Number(api.technical_weight) : undefined,
     financialWeight: api.financial_weight != null ? Number(api.financial_weight) : undefined,
     technicalThreshold: api.technical_threshold != null ? Number(api.technical_threshold) : undefined,
@@ -239,15 +392,31 @@ function mapTenderFromApi(api: any): Tender {
     intentToAwardBidId: api.intent_to_award_bid != null ? String(api.intent_to_award_bid) : undefined,
     intentToAwardAt: api.intent_to_award_at ?? undefined,
     coolingOffUntil: api.cooling_off_until ?? undefined,
+    disputeStartedAt: api.dispute_started_at ?? undefined,
     createdAt: api.created_at ?? undefined,
     updatedAt: api.updated_at ?? undefined,
     publishedAt: api.published_at ?? undefined,
     verifiedAt: api.verified_at ?? undefined,
     awardedAt: api.awarded_at ?? undefined,
     closedAt: api.closed_at ?? undefined,
+    publishApprovalStatus: api.publish_approval_status ?? undefined,
+    publishApprovalRequestedAt: api.publish_approval_requested_at ?? undefined,
+    publishApprovalReviewedAt: api.publish_approval_reviewed_at ?? undefined,
+    publishApprovalReviewedBy: api.publish_approval_reviewed_by ?? undefined,
+    publishApprovalNotes: api.publish_approval_notes ?? undefined,
     awardedVendorName: api.awarded_vendor_name ?? undefined,
     awardedVendorId: api.awarded_vendor_id ?? undefined,
     bidCount: api.bid_count ?? undefined,
+    requiredDocuments: Array.isArray(api.required_documents)
+      ? api.required_documents.map((d: any) => ({
+          id: d.id != null ? String(d.id) : undefined,
+          name: d.name ?? "",
+          expected_type: d.expected_type ?? "",
+          bid_stage: d.bid_stage ?? "eoi",
+          bid_stage_label: d.bid_stage_label ?? undefined,
+          position: d.position != null ? d.position : undefined,
+        }))
+      : undefined,
   };
 }
 
@@ -261,6 +430,7 @@ function mapUserFromApi(api: any): User {
     gender: api.gender === "Male" || api.gender === "Female" || api.gender === "Other" ? api.gender : "Other",
     region: api.region ?? undefined,
     district: api.district ?? api.verification_zone ?? api.region ?? undefined,
+    districts: Array.isArray(api.districts) ? api.districts : [],
     mobileNumber: api.mobile_number ?? undefined,
     nationalId: api.national_id ?? undefined,
     address: api.address ?? undefined,
@@ -293,6 +463,335 @@ function mapUserFromApi(api: any): User {
       : undefined,
     vendorTag: api.vendor_tag ?? undefined,
     blacklistSummary: api.blacklist_summary ?? undefined,
+    permissions: api.permissions && typeof api.permissions === "object" ? api.permissions : undefined,
+  };
+}
+
+function mapVendorProfileFromApi(api: any): VendorProfile {
+  return {
+    id: String(api.id ?? ""),
+    username: api.username ?? "",
+    email: api.email ?? "",
+    full_name: api.full_name ?? "",
+    gender: api.gender ?? "",
+    role: api.role ?? "",
+    mobile_number: api.mobile_number ?? "",
+    national_id: api.national_id ?? undefined,
+    address: api.address ?? undefined,
+    organization_name: api.organization_name ?? undefined,
+    organization_type: api.organization_type ?? undefined,
+    technology_types: Array.isArray(api.technology_types) ? api.technology_types : [],
+    registration_certificate_name: api.registration_certificate_name ?? undefined,
+    tax_id: api.tax_id ?? undefined,
+    bank_name: api.bank_name ?? undefined,
+    bank_branch: api.bank_branch ?? undefined,
+    bank_swift_code: api.bank_swift_code ?? undefined,
+    bank_sort_code: api.bank_sort_code ?? undefined,
+    bank_account_name: api.bank_account_name ?? undefined,
+    bank_account_number: api.bank_account_number ?? undefined,
+    tier_assignment: api.tier_assignment ?? undefined,
+    verification_zone: api.verification_zone ?? undefined,
+    region: api.region ?? undefined,
+    status: api.status ?? "",
+    date_joined: api.date_joined ?? "",
+    last_login: api.last_login ?? undefined,
+    prequalification: api.prequalification
+      ? {
+          status: api.prequalification.status ?? "",
+          approved_at: api.prequalification.approved_at ?? undefined,
+          submitted_at: api.prequalification.submitted_at ?? undefined,
+          company_name: api.prequalification.company_name ?? undefined,
+          organization_type: api.prequalification.organization_type ?? undefined,
+          tax_id: api.prequalification.tax_id ?? undefined,
+          hq_address: api.prequalification.hq_address ?? undefined,
+          tech_tier: api.prequalification.tech_tier ?? undefined,
+          technology_types: Array.isArray(api.prequalification.technology_types) ? api.prequalification.technology_types : [],
+          female_beneficiary_target: Number(api.prequalification.female_beneficiary_target ?? 0),
+          vulnerable_group_target: Number(api.prequalification.vulnerable_group_target ?? 0),
+          years_experience: Number(api.prequalification.years_experience ?? 0),
+          prior_projects: Number(api.prequalification.prior_projects ?? 0),
+          annual_revenue: api.prequalification.annual_revenue != null ? Number(api.prequalification.annual_revenue) : undefined,
+          districts_covered: Number(api.prequalification.districts_covered ?? 0),
+          contact_number: api.prequalification.contact_number ?? undefined,
+          email: api.prequalification.email ?? undefined,
+          gender_of_focal_person: api.prequalification.gender_of_focal_person ?? undefined,
+          bank_name: api.prequalification.bank_name ?? undefined,
+          bank_branch: api.prequalification.bank_branch ?? undefined,
+          bank_swift_code: api.prequalification.bank_swift_code ?? undefined,
+          bank_sort_code: api.prequalification.bank_sort_code ?? undefined,
+          bank_account_name: api.prequalification.bank_account_name ?? undefined,
+          bank_account_number: api.prequalification.bank_account_number ?? undefined,
+          trading_license: normalizeFileUrl(api.prequalification.trading_license ?? undefined),
+          registration_certificate: normalizeFileUrl(api.prequalification.registration_certificate ?? undefined),
+          tax_compliance_certificate: normalizeFileUrl(api.prequalification.tax_compliance_certificate ?? undefined),
+          authorized_signatory_id: normalizeFileUrl(api.prequalification.authorized_signatory_id ?? undefined),
+          experience_financial_proof: normalizeFileUrl(api.prequalification.experience_financial_proof ?? undefined),
+        }
+      : undefined,
+    blacklist_status: {
+      status: api.blacklist_status?.status ?? "Clear",
+      reason: api.blacklist_status?.reason ?? undefined,
+      description: api.blacklist_status?.description ?? undefined,
+      expiry_date: api.blacklist_status?.expiry_date ?? undefined,
+      is_permanent: api.blacklist_status?.is_permanent ?? undefined,
+      initiated_at: api.blacklist_status?.initiated_at ?? undefined,
+      reviewed_at: api.blacklist_status?.reviewed_at ?? undefined,
+      confirmed_at: api.blacklist_status?.confirmed_at ?? undefined,
+      reinstated_at: api.blacklist_status?.reinstated_at ?? undefined,
+    },
+    bid_count: Number(api.bid_count ?? 0),
+    project_count: Number(api.project_count ?? 0),
+    total_contract_value: Number(api.total_contract_value ?? 0),
+    documents: api.documents
+      ? {
+          prequalification_documents: Array.isArray(api.documents.prequalification_documents)
+            ? api.documents.prequalification_documents.map((doc: any) => ({
+                label: doc.label ?? "",
+                category: doc.category ?? "",
+                url: normalizeFileUrl(doc.url ?? "") ?? "",
+                uploaded_at: doc.uploaded_at ?? undefined,
+              }))
+            : [],
+          project_documents: Array.isArray(api.documents.project_documents)
+            ? api.documents.project_documents.map((doc: any) => ({
+                id: String(doc.id ?? ""),
+                project_id: String(doc.project_id ?? ""),
+                project_reference: doc.project_reference ?? undefined,
+                title: doc.title ?? "",
+                url: normalizeFileUrl(doc.url ?? "") ?? "",
+                uploaded_at: doc.uploaded_at ?? undefined,
+                uploaded_by: doc.uploaded_by ?? undefined,
+              }))
+            : [],
+          contract_documents: Array.isArray(api.documents.contract_documents)
+            ? api.documents.contract_documents.map((doc: any) => ({
+                contract_id: String(doc.contract_id ?? ""),
+                reference_number: doc.reference_number ?? undefined,
+                title: doc.title ?? "",
+                url: normalizeFileUrl(doc.url ?? "") ?? "",
+                uploaded_at: doc.uploaded_at ?? undefined,
+              }))
+            : [],
+        }
+      : undefined,
+    bids_data: api.bids_data
+      ? {
+          summary: {
+            total_bids: Number(api.bids_data.summary?.total_bids ?? 0),
+            awarded: Number(api.bids_data.summary?.awarded ?? 0),
+            accepted: Number(api.bids_data.summary?.accepted ?? 0),
+            rejected: Number(api.bids_data.summary?.rejected ?? 0),
+            pending: Number(api.bids_data.summary?.pending ?? 0),
+            win_rate_pct: Number(api.bids_data.summary?.win_rate_pct ?? 0),
+          },
+          bids: Array.isArray(api.bids_data.bids) ? api.bids_data.bids.map(mapTenderBidFromApi) : [],
+          evaluations: Array.isArray(api.bids_data.evaluations) ? api.bids_data.evaluations.map(mapBidEvaluationFromApi) : [],
+          contracts: Array.isArray(api.bids_data.contracts) ? api.bids_data.contracts.map(mapTenderContractFromApi) : [],
+        }
+      : null,
+    projects_data: api.projects_data
+      ? {
+          projects: Array.isArray(api.projects_data.projects) ? api.projects_data.projects.map(mapProjectFromApi) : [],
+          recent_updates: Array.isArray(api.projects_data.recent_updates) ? api.projects_data.recent_updates : [],
+          recent_documents: Array.isArray(api.projects_data.recent_documents)
+            ? api.projects_data.recent_documents.map((doc: any) => ({
+                id: String(doc.id ?? ""),
+                project_id: String(doc.project_id ?? ""),
+                project_reference: doc.project_reference ?? undefined,
+                title: doc.title ?? "",
+                url: normalizeFileUrl(doc.url ?? "") ?? "",
+                uploaded_at: doc.uploaded_at ?? undefined,
+              }))
+            : [],
+        }
+      : undefined,
+    performance_data: api.performance_data
+      ? {
+          kpi_rows: Array.isArray(api.performance_data.kpi_rows) ? api.performance_data.kpi_rows : [],
+          installation_summary: {
+            submitted: Number(api.performance_data.installation_summary?.submitted ?? 0),
+            verified: Number(api.performance_data.installation_summary?.verified ?? 0),
+            flagged: Number(api.performance_data.installation_summary?.flagged ?? 0),
+            paused: Number(api.performance_data.installation_summary?.paused ?? 0),
+            terminated: Number(api.performance_data.installation_summary?.terminated ?? 0),
+            verification_rate_pct: Number(api.performance_data.installation_summary?.verification_rate_pct ?? 0),
+          },
+          anomaly_summary: {
+            total: Number(api.performance_data.anomaly_summary?.total ?? 0),
+            resolved: Number(api.performance_data.anomaly_summary?.resolved ?? 0),
+            unresolved: Number(api.performance_data.anomaly_summary?.unresolved ?? 0),
+            by_type: Array.isArray(api.performance_data.anomaly_summary?.by_type) ? api.performance_data.anomaly_summary.by_type : [],
+          },
+          meter_summary: {
+            average_uptime_pct: Number(api.performance_data.meter_summary?.average_uptime_pct ?? 0),
+            total_energy_kwh: Number(api.performance_data.meter_summary?.total_energy_kwh ?? 0),
+            target_energy_kwh: Number(api.performance_data.meter_summary?.target_energy_kwh ?? 0),
+            reading_count: Number(api.performance_data.meter_summary?.reading_count ?? 0),
+          },
+          performance_notes: Array.isArray(api.performance_data.performance_notes) ? api.performance_data.performance_notes : [],
+        }
+      : undefined,
+    payments_data: api.payments_data
+      ? {
+          summary: {
+            total_contracted_value: Number(api.payments_data.summary?.total_contracted_value ?? 0),
+            total_disbursed: Number(api.payments_data.summary?.total_disbursed ?? 0),
+            total_pending: Number(api.payments_data.summary?.total_pending ?? 0),
+          },
+          claims: Array.isArray(api.payments_data.claims) ? api.payments_data.claims.map(mapPaymentClaimFromApi) : [],
+        }
+      : null,
+    audit_trail: api.audit_trail
+      ? {
+          limited: Boolean(api.audit_trail.limited),
+          entries: Array.isArray(api.audit_trail.entries) ? api.audit_trail.entries.map(mapAuditLogFromApi) : [],
+        }
+      : null,
+    prospect_sync_logs: Array.isArray(api.prospect_sync_logs) ? api.prospect_sync_logs.map(mapProspectSyncLogFromApi) : [],
+  };
+}
+
+function mapVendorDirectoryEntryFromApi(api: any): VendorDirectoryEntry {
+  return {
+    id: String(api.id ?? ""),
+    username: api.username ?? "",
+    fullName: api.full_name ?? api.username ?? "",
+    email: api.email ?? "",
+    organizationName: api.organization_name ?? undefined,
+    organizationType: api.organization_type ?? undefined,
+    technologyTypes: Array.isArray(api.technology_types) ? api.technology_types : [],
+    region: api.region ?? undefined,
+    status: api.status ?? "",
+    vendorTag: api.vendor_tag ?? undefined,
+    lastLogin: api.last_login ?? undefined,
+    prequalificationStatus: api.prequalification_status ?? undefined,
+    prequalificationApprovedAt: api.prequalification_approved_at ?? undefined,
+    blacklistStatus: api.blacklist_status ?? undefined,
+    operationalStanding: api.operational_standing ?? "Active",
+    projectCount: Number(api.project_count ?? 0),
+    bidCount: Number(api.bid_count ?? 0),
+    hasPendingPasswordReset: api.has_pending_password_reset ?? false,
+  };
+}
+
+function mapOrganizationFromApi(api: any): Organization {
+  return {
+    id: String(api.id ?? ""),
+    name: api.name ?? "",
+    type: api.type ?? "Government",
+    contactPerson: api.contact_person ?? undefined,
+    email: api.email ?? undefined,
+    phone: api.phone ?? undefined,
+    address: api.address ?? undefined,
+    createdAt: api.created_at ?? undefined,
+    updatedAt: api.updated_at ?? undefined,
+  };
+}
+
+function mapPlatformConfigurationFromApi(api: any): PlatformConfiguration {
+  return {
+    id: api.id != null ? String(api.id) : undefined,
+    nationalMainProgramBudget: Number(api.national_main_program_budget ?? 0),
+    femaleTargetMinimum: Number(api.female_target_minimum ?? 0),
+    vulnerableTargetMinimum: Number(api.vulnerable_target_minimum ?? 0),
+    lowIncomeTargetMinimum: Number(api.low_income_target_minimum ?? 0),
+    uptimeTarget: Number(api.uptime_target ?? 0),
+    anomalyDeviationThreshold: Number(api.anomaly_deviation_threshold ?? 0),
+    gpsDuplicateRadiusM: Number(api.gps_duplicate_radius_m ?? 0),
+    gpsVerificationMaxDistanceM: Number(api.gps_verification_max_distance_m ?? 0),
+    m2VerificationRequiredPct: Number(api.m2_verification_required_pct ?? 0),
+    m3VerificationRequiredPct: Number(api.m3_verification_required_pct ?? 0),
+    emailNotificationsEnabled: Boolean(api.email_notifications_enabled),
+    smsNotificationsEnabled: Boolean(api.sms_notifications_enabled),
+    emailHost: api.email_host ?? "",
+    emailPort: Number(api.email_port ?? 587),
+    emailUseTls: Boolean(api.email_use_tls),
+    emailHostUser: api.email_host_user ?? "",
+    emailHostPassword: "",
+    emailHostPasswordSet: Boolean(api.email_host_password_set),
+    defaultFromEmail: api.default_from_email ?? "",
+    maxFileSizeMb: Number(api.max_file_size_mb ?? 0),
+    allowedFileTypes: Array.isArray(api.allowed_file_types) ? api.allowed_file_types : [],
+    contactEmail: api.contact_email ?? "",
+    contactPhone: api.contact_phone ?? "",
+    contactAddress: api.contact_address ?? "",
+    contactOfficeHours: api.contact_office_hours ?? "",
+    contactOrganisationName: api.contact_organisation_name ?? "",
+    lesothoBoundary: api.lesotho_boundary
+      ? {
+          path: api.lesotho_boundary.path ?? "",
+          exists: Boolean(api.lesotho_boundary.exists),
+          lastModified: api.lesotho_boundary.last_modified ?? undefined,
+        }
+      : undefined,
+  };
+}
+
+function mapSystemHealthFromApi(api: any): SystemHealthPayload {
+  return {
+    database: {
+      status: api.database?.status ?? "",
+      error: api.database?.error ?? undefined,
+      slowQueriesLast24h: Number(api.database?.slow_queries_last_24h ?? 0),
+      tableSizes: api.database?.table_sizes ?? {},
+    },
+    queue: {
+      workerStatus: api.queue?.worker_status ?? "",
+      pendingJobsCount: Number(api.queue?.pending_jobs_count ?? 0),
+      failedJobsCount: Number(api.queue?.failed_jobs_count ?? 0),
+      processingRateLast24h: Number(api.queue?.processing_rate_last_24h ?? 0),
+    },
+    scheduler: {
+      status: api.scheduler?.status ?? "",
+      lastMonthlyReportSync: api.scheduler?.last_monthly_report_sync ?? undefined,
+    },
+    prospectApi: {
+      status: api.prospect_api?.status ?? "",
+    },
+    storage: {
+      totalBytes: Number(api.storage?.total_bytes ?? 0),
+      usedBytes: Number(api.storage?.used_bytes ?? 0),
+      freeBytes: Number(api.storage?.free_bytes ?? 0),
+      filesUploadedToday: Number(api.storage?.files_uploaded_today ?? 0),
+    },
+    errors: Array.isArray(api.errors)
+      ? api.errors.map((item: any) => ({
+          id: String(item.id ?? ""),
+          methodName: item.method_name ?? "",
+          errorMessage: item.error_message ?? undefined,
+          updatedAt: item.updated_at ?? undefined,
+        }))
+      : [],
+  };
+}
+
+function mapSuperAdminDashboardSummaryFromApi(api: any): SuperAdminDashboardSummary {
+  return {
+    stats: {
+      totalUsers: Number(api.stats?.total_users ?? 0),
+      activeProjects: Number(api.stats?.active_projects ?? 0),
+      totalVendors: Number(api.stats?.total_vendors ?? 0),
+      pendingPrequalifications: Number(api.stats?.pending_prequalifications ?? 0),
+    },
+    systemHealth: mapSystemHealthFromApi(api.system_health ?? {}),
+    recentActivity: Array.isArray(api.recent_activity)
+      ? api.recent_activity.map((item: any) => ({
+          id: String(item.id ?? ""),
+          timestamp: item.timestamp ?? undefined,
+          actor: item.actor ?? "System",
+          role: item.role ?? undefined,
+          action: item.action ?? "",
+          module: item.module ?? undefined,
+          record: item.record != null ? String(item.record) : undefined,
+          notes: item.notes ?? undefined,
+          oldStatus: item.old_status ?? undefined,
+          newStatus: item.new_status ?? undefined,
+        }))
+      : [],
+    prospectSyncSummary: {
+      failedJobs: Number(api.prospect_sync_summary?.failed_jobs ?? 0),
+      lastSyncAt: api.prospect_sync_summary?.last_sync_at ?? undefined,
+    },
   };
 }
 
@@ -308,7 +807,11 @@ function mapTenderToApi(ui: Partial<Tender>): any {
     department: ui.department ?? "",
     category: ui.category ?? "",
     status: ui.status ?? "Draft",
-    deadline: ui.deadline ?? ui.lastDateSubmission ?? null,
+    deadline: ui.deadline && ui.deadline !== "" ? ui.deadline : null,
+    procurement_workflow: ui.procurementWorkflow ?? "sequential",
+    eoi_deadline: ui.eoiDeadline && ui.eoiDeadline !== "" ? ui.eoiDeadline : null,
+    technical_deadline: ui.technicalDeadline && ui.technicalDeadline !== "" ? ui.technicalDeadline : null,
+    financial_deadline: ui.financialDeadline && ui.financialDeadline !== "" ? ui.financialDeadline : null,
     budget: ui.budget ?? null,
     application_type: ui.applicationType ?? null,
     stage_type: ui.stageType ?? null,
@@ -321,21 +824,22 @@ function mapTenderToApi(ui: Partial<Tender>): any {
     invited_by: ui.invitedBy ?? "",
     bidding_currency: ui.biddingCurrency ?? null,
     instruction: ui.instruction ?? "",
-    last_date_security: ui.lastDateSecurity ?? null,
-    last_date_submission: ui.lastDateSubmission ?? ui.deadline ?? null,
-    date_opening: ui.dateOpening ?? ui.deadline ?? null,
     pre_tender_meeting_info: ui.preTenderMeetingInfo ?? "",
     bidders_schedule_purchase: ui.biddersSchedulePurchase ?? false,
     tender_security_required: ui.tenderSecurityRequired ?? false,
     contact_details: ui.contactDetails ?? "",
     technology_types: ui.technologyTypes ?? [],
+    target_districts: ui.targetDistricts ?? [],
     target_site_type: ui.targetSiteType ?? null,
     is_verified: ui.isVerified ?? false,
     funding_source: ui.fundingSource ?? null,
+    minimum_service_tier: ui.minimumServiceTier ?? null,
+    approximate_installation_target: ui.approximateInstallationTarget ?? null,
     technical_weight: ui.technicalWeight ?? 70,
     financial_weight: ui.financialWeight ?? 30,
     technical_threshold: ui.technicalThreshold ?? 70,
     cooling_off_days: ui.coolingOffDays ?? 7,
+    required_documents: Array.isArray(ui.requiredDocuments) ? ui.requiredDocuments : undefined,
   };
 }
 
@@ -344,9 +848,13 @@ function buildTenderForm(payload: Partial<Tender> & { scheduleFile?: File | null
   const form = new FormData();
   Object.entries(apiPayload).forEach(([k, v]) => {
     if (v == null) return;
-    if (k === 'technology_types' && Array.isArray(v)) {
+    if (k === 'required_documents' && Array.isArray(v)) {
+      form.append(k, JSON.stringify(v));
+      return;
+    }
+    if ((k === 'technology_types' || k === 'target_districts') && Array.isArray(v)) {
       // JSONField expects JSON-encoded string
-      form.append('technology_types', JSON.stringify(v));
+      form.append(k, JSON.stringify(v));
       return;
     }
     if (Array.isArray(v)) {
@@ -393,6 +901,7 @@ function mapProjectFromApi(api: any): Project {
     techType: api.tech_type ?? "",
     region: api.region ?? "",
     district: api.district ?? undefined,
+    assignedDistrict: api.assigned_district ?? undefined,
     status: api.status ?? "Pre-Qualification",
     progress: Number(api.progress ?? 0),
     startDate: api.start_date ?? undefined,
@@ -416,6 +925,7 @@ function mapProjectFromApi(api: any): Project {
     verificationMethodConfirmed: Boolean(api.verification_method_confirmed),
     setupCompletedAt: api.setup_completed_at ?? undefined,
     projectSetup: mapProjectSetupFromApi(api.project_setup),
+    setupStatusBanner: api.setup_status_banner ?? undefined,
     claimCount: api.claim_count != null ? Number(api.claim_count) : undefined,
     unresolvedFlagCount: api.unresolved_flag_count != null ? Number(api.unresolved_flag_count) : undefined,
     latestAuditEntry: api.latest_audit_entry ? mapAuditLogFromApi(api.latest_audit_entry) : undefined,
@@ -454,6 +964,13 @@ function mapProjectSetupFromApi(api: any): ProjectSetup | undefined {
     checklistSiteReady: Boolean(api.checklist_site_ready),
     checklistSafetyReady: Boolean(api.checklist_safety_ready),
     checklistLogisticsReady: Boolean(api.checklist_logistics_ready),
+    reviewStatus: api.review_status ?? undefined,
+    submittedAt: api.submitted_at ?? undefined,
+    reviewedBy: api.reviewed_by != null ? String(api.reviewed_by) : undefined,
+    reviewedByUsername: api.reviewed_by_username ?? undefined,
+    reviewedAt: api.reviewed_at ?? undefined,
+    reviewNotes: api.review_notes ?? undefined,
+    previousReviewNotes: api.previous_review_notes ?? undefined,
     setupCompletedAt: api.setup_completed_at ?? undefined,
     createdAt: api.created_at ?? undefined,
     updatedAt: api.updated_at ?? undefined,
@@ -469,7 +986,7 @@ function mapMilestoneFromApi(api: any): Milestone {
     name: api.name ?? "",
     description: api.description ?? undefined,
     percentage: Number(api.percentage ?? 0),
-    status: api.status ?? "Pending",
+    status: api.status ?? "Submitted",
     amount: Number(api.amount ?? 0),
     amountLsl: api.amount_lsl != null ? Number(api.amount_lsl) : undefined,
     progressPercentage: Number(api.progress_percentage ?? 0),
@@ -523,8 +1040,9 @@ function mapInstallationReportFromApi(api: any): InstallationReport {
     submittedAt: api.submitted_at ?? "",
     beneficiaryName: api.beneficiary_name ?? undefined,
     householdType: api.household_type ?? undefined,
+    installationDate: api.installation_date ?? undefined,
     verificationStatus: api.verification_status ?? undefined,
-    verifiedBy: api.verified_by ?? undefined,
+    verifiedBy: api.verified_by_username ?? api.verified_by ?? undefined,
     gisStatus: api.gis_status ?? undefined,
   };
 }
@@ -563,6 +1081,28 @@ function mapVerificationTaskFromApi(api: any): VerificationTask {
     status: api.status ?? "Pending",
     createdAt: api.created_at ?? "",
     updatedAt: api.updated_at ?? "",
+    concernMessage: api.concern_message ?? undefined,
+    fieldVerification: api.field_verification ? mapFieldVerificationFromApi(api.field_verification) : undefined,
+  };
+}
+
+function mapFieldVerificationFromApi(api: any): FieldVerificationRecord {
+  return {
+    id: String(api.id ?? ""),
+    fieldOfficerUsername: api.field_officer_username ?? undefined,
+    beneficiaryPresent: Boolean(api.beneficiary_present),
+    beneficiaryGender: api.beneficiary_gender ?? "unknown",
+    systemWorking: Boolean(api.system_working),
+    officerLatitude: Number(api.officer_latitude ?? 0),
+    officerLongitude: Number(api.officer_longitude ?? 0),
+    locationMatch: Boolean(api.location_match),
+    locationDistanceMeters: Number(api.location_distance_meters ?? 0),
+    sitePhotos: Array.isArray(api.site_photos) ? api.site_photos.map((path: string) => normalizeFileUrl(path)).filter(Boolean) : [],
+    serialVisible: Boolean(api.serial_visible),
+    observationNotes: api.observation_notes ?? "",
+    verificationStatus: api.verification_status ?? "",
+    flagReason: api.flag_reason ?? undefined,
+    verifiedAt: api.verified_at ?? "",
   };
 }
 
@@ -740,6 +1280,7 @@ function mapTenderBidFromApi(api: any): TenderBid {
     stage_key: api.stage_key ?? undefined,
     stage_badge: api.stage_badge ?? undefined,
     technology_type: api.technology_type ?? undefined,
+    tender_technology_types: Array.isArray(api.tender_technology_types) ? api.tender_technology_types : undefined,
     device_brand: api.device_brand ?? undefined,
     device_model: api.device_model ?? undefined,
     co_financing_amount: api.co_financing_amount != null ? Number(api.co_financing_amount) : undefined,
@@ -762,6 +1303,7 @@ function mapTenderBidFromApi(api: any): TenderBid {
     om_plan_document: normalizeFileUrl(api.om_plan_document ?? api.om_plan_file ?? undefined),
     reporting_templates_file: normalizeFileUrl(api.reporting_templates_file ?? undefined),
     distribution_map_file: normalizeFileUrl(api.distribution_map_file ?? undefined),
+    tender_security_file: normalizeFileUrl(api.tender_security_file ?? undefined),
     female_target_pct: api.female_target_pct != null ? Number(api.female_target_pct) : undefined,
     gender_inclusion_target: api.gender_inclusion_target != null ? Number(api.gender_inclusion_target) : undefined,
     vulnerable_target_pct: api.vulnerable_target_pct != null ? Number(api.vulnerable_target_pct) : undefined,
@@ -777,6 +1319,7 @@ function mapTenderBidFromApi(api: any): TenderBid {
     paygo_platform: api.paygo_platform ?? undefined,
     daily_payment_amount_lsl: api.daily_payment_amount_lsl != null ? Number(api.daily_payment_amount_lsl) : undefined,
     collection_method: api.collection_method ?? undefined,
+    preferred_district: api.preferred_district ?? undefined,
     technical_summary: api.technical_summary ?? api.technical_proposal ?? undefined,
     financial_summary: api.financial_summary ?? api.financial_proposal ?? undefined,
     aftersales_description: api.aftersales_description ?? undefined,
@@ -785,8 +1328,33 @@ function mapTenderBidFromApi(api: any): TenderBid {
     stage_two_unlocked_at: api.stage_two_unlocked_at ?? undefined,
     stage_two_source_bid: api.stage_two_source_bid != null ? String(api.stage_two_source_bid) : undefined,
     stage_two_ready: api.stage_two_ready != null ? Boolean(api.stage_two_ready) : undefined,
+    bid_stage: api.bid_stage ?? undefined,
+    eoi_narrative: api.eoi_narrative ?? undefined,
+    company_credentials_file: normalizeFileUrl(api.company_credentials_file ?? undefined),
+    financial_standing_file: normalizeFileUrl(api.financial_standing_file ?? undefined),
+    technical_experience_file: normalizeFileUrl(api.technical_experience_file ?? undefined),
+    track_record_file: normalizeFileUrl(api.track_record_file ?? undefined),
+    financial_standing_summary: api.financial_standing_summary ?? undefined,
+    technical_experience_summary: api.technical_experience_summary ?? undefined,
+    track_record_summary: api.track_record_summary ?? undefined,
+    technical_stage_unlocked: api.technical_stage_unlocked != null ? Boolean(api.technical_stage_unlocked) : undefined,
+    technical_stage_unlocked_at: api.technical_stage_unlocked_at ?? undefined,
+    technical_stage_source_bid: api.technical_stage_source_bid != null ? String(api.technical_stage_source_bid) : undefined,
+    financial_stage_unlocked: api.financial_stage_unlocked != null ? Boolean(api.financial_stage_unlocked) : undefined,
+    financial_stage_unlocked_at: api.financial_stage_unlocked_at ?? undefined,
+    financial_stage_source_bid: api.financial_stage_source_bid != null ? String(api.financial_stage_source_bid) : undefined,
+    financial_sealed: api.financial_sealed != null ? Boolean(api.financial_sealed) : undefined,
+    financial_unsealed_at: api.financial_unsealed_at ?? undefined,
+    tender_procurement_workflow: api.tender_procurement_workflow ?? undefined,
+    financial_stage_open: api.financial_stage_open != null ? Boolean(api.financial_stage_open) : undefined,
     document_requirements: Array.isArray(api.document_requirements) ? api.document_requirements : [],
     document_counts: api.document_counts ?? undefined,
+    customDocuments: Array.isArray(api.custom_documents) ? api.custom_documents.map((cd: any) => ({
+      name: cd?.name ?? "",
+      expected_type: cd?.expected_type ?? "",
+      file_name: cd?.file_name ?? "",
+      file_url: cd?.file_url ? normalizeFileUrl(cd.file_url) : undefined,
+    })) : [],
     deadline: api.deadline ?? undefined,
     deadline_passed: api.deadline_passed != null ? Boolean(api.deadline_passed) : undefined,
     deadline_countdown_seconds: api.deadline_countdown_seconds != null ? Number(api.deadline_countdown_seconds) : undefined,
@@ -836,6 +1404,10 @@ function mapVendorPrequalificationFromApi(api: any): VendorPrequalification {
     districtsCovered: Number(api.districts_covered ?? 0),
     femaleBeneficiaryTarget: Number(api.female_beneficiary_target ?? 50),
     vulnerableGroupTarget: Number(api.vulnerable_group_target ?? 30),
+    bankName: api.bank_name ?? undefined,
+    bankBranch: api.bank_branch ?? undefined,
+    bankSwiftCode: api.bank_swift_code ?? undefined,
+    bankSortCode: api.bank_sort_code ?? undefined,
     bankAccountName: api.bank_account_name ?? undefined,
     bankAccountNumber: api.bank_account_number ?? undefined,
     contactNumber: api.contact_number ?? undefined,
@@ -871,6 +1443,7 @@ function mapPaymentClaimFromApi(api: any): PaymentClaim {
     projectId: String(api.project ?? ""),
     vendorId: String(api.vendor ?? ""),
     milestoneId: api.milestone != null ? String(api.milestone) : undefined,
+    milestone_details: api.milestone_details ? mapMilestoneFromApi(api.milestone_details) : undefined,
     completionDate: api.completion_date ?? undefined,
     claimAmount: Number(api.claim_amount ?? 0),
     actualBeneficiaries: Number(api.actual_beneficiaries ?? 0),
@@ -888,6 +1461,13 @@ function mapPaymentClaimFromApi(api: any): PaymentClaim {
     reviewedBy: api.reviewed_by != null ? String(api.reviewed_by) : undefined,
     reviewedByUsername: api.reviewed_by_username ?? undefined,
     vendorUsername: api.vendor_username ?? undefined,
+    vendorLegalName: api.vendor_legal_name ?? undefined,
+    vendorBankName: api.vendor_bank_name ?? undefined,
+    vendorBankBranch: api.vendor_bank_branch ?? undefined,
+    vendorBankSwiftCode: api.vendor_bank_swift_code ?? undefined,
+    vendorBankSortCode: api.vendor_bank_sort_code ?? undefined,
+    vendorAccountHolderName: api.vendor_account_holder_name ?? undefined,
+    vendorAccountNumber: api.vendor_account_number ?? undefined,
     disbursement: api.disbursement ? mapDisbursementFromApi(api.disbursement) : undefined,
     paymentLocked: Boolean(api.payment_locked),
     paymentLockReason: api.payment_lock_reason ?? undefined,
@@ -903,12 +1483,15 @@ function mapAuditLogFromApi(api: any): AuditLog {
     details: api.details && typeof api.details === "object" ? api.details : {},
     actor: api.actor != null ? String(api.actor) : undefined,
     actorUsername: api.actor_username ?? undefined,
+    actorFullName: api.actor_full_name ?? undefined,
     createdAt: api.created_at ?? "",
     notes: api.notes ?? undefined,
     recordId: api.record_id != null ? String(api.record_id) : undefined,
     recordType: api.record_type ?? undefined,
     actorRole: api.actor_role ?? undefined,
     module: api.module ?? undefined,
+    oldStatus: api.old_status ?? undefined,
+    newStatus: api.new_status ?? undefined,
   };
 }
 
@@ -925,6 +1508,35 @@ function mapSmartMeterReadingFromApi(api: any): SmartMeterReading {
   };
 }
 
+function mapAnomalyReviewEventFromApi(api: any): AnomalyReviewEvent {
+  return {
+    id: String(api.id ?? ""),
+    flag: String(api.flag ?? ""),
+    actor: api.actor != null ? String(api.actor) : undefined,
+    actorUsername: api.actor_username ?? undefined,
+    actorRole: api.actor_role ?? undefined,
+    fromStatus: api.from_status ?? undefined,
+    toStatus: String(api.to_status ?? ""),
+    investigationNotes: api.investigation_notes ?? undefined,
+    correctiveAction: api.corrective_action ?? undefined,
+    resolutionReason: api.resolution_reason ?? undefined,
+    evidenceReference: api.evidence_reference ?? undefined,
+    createdAt: api.created_at ?? "",
+  };
+}
+
+function mapAnomalyEvidenceFileFromApi(api: any): AnomalyEvidenceFile {
+  return {
+    id: String(api.id ?? ""),
+    flag: String(api.flag ?? ""),
+    file: String(api.file ?? ""),
+    originalName: api.original_name ?? undefined,
+    uploadedBy: api.uploaded_by != null ? String(api.uploaded_by) : undefined,
+    uploadedByUsername: api.uploaded_by_username ?? undefined,
+    uploadedAt: api.uploaded_at ?? "",
+  };
+}
+
 function mapAnomalyFlagFromApi(api: any): AnomalyFlag {
   return {
     id: String(api.id ?? ""),
@@ -933,8 +1545,19 @@ function mapAnomalyFlagFromApi(api: any): AnomalyFlag {
     flagType: api.flag_type ?? "",
     description: api.description ?? undefined,
     isResolved: Boolean(api.is_resolved),
+    status: api.status ?? (api.is_resolved ? "resolved" : "open"),
+    severity: api.severity ?? "medium",
+    assignedTo: api.assigned_to != null ? String(api.assigned_to) : undefined,
+    assignedToUsername: api.assigned_to_username ?? undefined,
+    investigationNotes: api.investigation_notes ?? undefined,
+    correctiveAction: api.corrective_action ?? undefined,
+    resolutionReason: api.resolution_reason ?? undefined,
+    evidenceReference: api.evidence_reference ?? undefined,
+    dueDate: api.due_date ?? undefined,
     createdAt: api.created_at ?? "",
     resolvedAt: api.resolved_at ?? undefined,
+    reviewEvents: Array.isArray(api.review_events) ? api.review_events.map(mapAnomalyReviewEventFromApi) : [],
+    evidenceFiles: Array.isArray(api.evidence_files) ? api.evidence_files.map(mapAnomalyEvidenceFileFromApi) : [],
   };
 }
 
@@ -944,6 +1567,7 @@ function mapProspectSyncLogFromApi(api: any): ProspectSyncLog {
     methodName: api.method_name ?? "",
     status: api.status ?? "",
     attempts: Number(api.attempts ?? 0),
+    payload: api.payload ?? undefined,
     errorMessage: api.error_message ?? undefined,
     createdAt: api.created_at ?? undefined,
     updatedAt: api.updated_at ?? undefined,
@@ -1017,6 +1641,15 @@ async function http<T>(url: string, init?: ApiRequestInit): Promise<T> {
         const text = await res.text().catch(() => "");
         const detail = extractApiErrorDetail(text);
         const statusError = new Error(`HTTP ${res.status} ${res.statusText}: ${detail || text}`);
+        (statusError as any).status = res.status;
+        try {
+          const parsed = JSON.parse((text || "").trim());
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            (statusError as any).detailPayload = parsed;
+          }
+        } catch {
+          // Non-JSON error body; only the message is available.
+        }
         if (res.status === 401 && !skipAuth) {
           const refreshed = await refreshAccessToken();
           if (refreshed) {
@@ -1033,6 +1666,13 @@ async function http<T>(url: string, init?: ApiRequestInit): Promise<T> {
               return (await retryRes.json()) as T;
             }
           }
+          if (isSessionExpiredError(detail || text || "")) {
+            dispatchSessionExpired(SESSION_EXPIRED_MESSAGE);
+            const expiredError = new Error(SESSION_EXPIRED_MESSAGE);
+            (expiredError as any).status = 401;
+            (expiredError as any).isSessionExpired = true;
+            throw expiredError;
+          }
         }
         // If same-origin /api path doesn't exist, try explicit backends.
         if (!isAbsolute && res.status === 404 && requestUrls.length > 1) {
@@ -1045,7 +1685,10 @@ async function http<T>(url: string, init?: ApiRequestInit): Promise<T> {
         return undefined as T;
       }
       return (await res.json()) as T;
-    } catch (error: any) {
+} catch (error: any) {
+      if (error?.isSessionExpired) {
+        throw error;
+      }
       const rawMessage = String(error?.message || "");
       if (rawMessage.startsWith("HTTP ")) {
         // Preserve real API/auth errors instead of masking them with fallback failures.
@@ -1057,6 +1700,7 @@ async function http<T>(url: string, init?: ApiRequestInit): Promise<T> {
       } else {
         lastError = error instanceof Error ? error : new Error(String(error));
       }
+      (lastError as any).isNetworkError = true;
 
       if (isLastAttempt) {
         throw lastError;
@@ -1065,8 +1709,79 @@ async function http<T>(url: string, init?: ApiRequestInit): Promise<T> {
       clearTimeout(timeoutId);
     }
   }
-
   throw lastError ?? new Error("Request failed");
+}
+
+async function httpBlob(url: string, init?: ApiRequestInit): Promise<Blob> {
+  const token = typeof window !== "undefined" ? localStorage.getItem(ACCESS_TOKEN_KEY) : null;
+  const initHeaders = headersInitToObject(init?.headers as HeadersInit | undefined);
+  const skipAuth = Boolean(getHeaderValue(initHeaders, "X-Skip-Auth"));
+  const timeoutMs = init?.timeoutMs ?? requestTimeoutMs;
+  const headers: Record<string, string> = { ...initHeaders };
+
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === "x-skip-auth") {
+      delete headers[key];
+    }
+  }
+  if (token && !skipAuth) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+
+  const { headers: _ignoredHeaders, timeoutMs: _ignoredTimeoutMs, ...requestInit } = init ?? {};
+  const requestUrls = /^https?:\/\//i.test(url)
+    ? [url]
+    : API_BASE_CANDIDATES.map((base) => joinApiUrl(base, url));
+
+  let lastError: Error | null = null;
+  for (let i = 0; i < requestUrls.length; i += 1) {
+    const requestUrl = requestUrls[i];
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(requestUrl, {
+        ...requestInit,
+        headers,
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        const detail = extractApiErrorDetail(text);
+        if (res.status === 401 && !skipAuth) {
+          const refreshed = await refreshAccessToken();
+          if (refreshed) {
+            const retryHeaders = { ...headers, Authorization: `Bearer ${refreshed}` };
+            const retryRes = await fetch(requestUrl, {
+              ...requestInit,
+              headers: retryHeaders,
+              signal: controller.signal,
+            });
+            if (retryRes.ok) {
+              return await retryRes.blob();
+            }
+          }
+          if (isSessionExpiredError(detail || text || "")) {
+            dispatchSessionExpired(SESSION_EXPIRED_MESSAGE);
+            const expiredError = new Error(SESSION_EXPIRED_MESSAGE);
+            (expiredError as any).status = 401;
+            (expiredError as any).isSessionExpired = true;
+            throw expiredError;
+          }
+        }
+        throw new Error(`HTTP ${res.status} ${res.statusText}: ${detail || text}`);
+      }
+      return await res.blob();
+    } catch (error: any) {
+      if (error?.isSessionExpired) {
+        throw error;
+      }
+      lastError = error instanceof Error ? error : new Error(String(error));
+      if (i === requestUrls.length - 1) throw lastError;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+  throw lastError ?? new Error("Download failed");
 }
 
 async function refreshAccessToken(): Promise<string | null> {
@@ -1086,16 +1801,21 @@ async function refreshAccessToken(): Promise<string | null> {
       }
       return data.access;
     }
-  } catch {
-    logoutUser();
+  } catch (err: any) {
+    if (err?.isNetworkError) {
+      return null;
+    }
+    logoutUser(SESSION_EXPIRED_MESSAGE);
+    dispatchSessionExpired(SESSION_EXPIRED_MESSAGE);
   }
   return null;
 }
 
 // ============ API functions ============
 
-export async function fetchTenders(): Promise<Tender[]> {
-  const data = await http<any>(`/api/tenders/`);
+export async function fetchTenders(pageSize?: number): Promise<Tender[]> {
+  const query = pageSize ? `?page_size=${pageSize}` : "";
+  const data = await http<any>(`/api/tenders/${query}`);
   return unwrapListResponse<any>(data).map(mapTenderFromApi);
 }
 
@@ -1117,6 +1837,20 @@ export async function updateTender(
 export async function fetchTender(tenderId: string): Promise<Tender> {
   const data = await http<any>(`/api/tenders/${tenderId}/`);
   return mapTenderFromApi(data);
+}
+
+export async function fetchTenderViewers(tenderId: string): Promise<TenderViewersResponse> {
+  const data = await http<any>(`/api/tenders/${tenderId}/viewers/`);
+  return {
+    totalViewers: Number(data?.total_viewers ?? 0),
+    viewers: Array.isArray(data?.viewers)
+      ? data.viewers.map((viewer: any) => ({
+          vendorId: String(viewer.vendor_id ?? ""),
+          vendorName: viewer.vendor_name ?? "Unknown vendor",
+          viewedAt: viewer.viewed_at ?? "",
+        }))
+      : [],
+  };
 }
 
 export async function verifyTender(tenderId: string): Promise<Tender> {
@@ -1142,6 +1876,45 @@ export async function publishTender(
     tender: mapTenderFromApi(data),
     summary: data?.notification_summary ?? undefined,
   };
+}
+
+export async function requestPublishApproval(
+  tenderId: string,
+): Promise<Tender> {
+  const data = await http<any>(`/api/tenders/${tenderId}/request_publish_approval/`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  return mapTenderFromApi(data);
+}
+
+export async function approvePublish(
+  tenderId: string,
+  notes?: string,
+): Promise<Tender> {
+  const data = await http<any>(`/api/tenders/${tenderId}/approve_publish/`, {
+    method: "POST",
+    body: JSON.stringify({ notes: notes ?? "" }),
+  });
+  return mapTenderFromApi(data);
+}
+
+export async function rejectPublish(
+  tenderId: string,
+  notes?: string,
+): Promise<Tender> {
+  const data = await http<any>(`/api/tenders/${tenderId}/reject_publish/`, {
+    method: "POST",
+    body: JSON.stringify({ notes: notes ?? "" }),
+  });
+  return mapTenderFromApi(data);
+}
+
+export async function fetchPendingPublishApprovals(): Promise<Tender[]> {
+  const data = await http<any>(`/api/tenders/pending_publish_approvals/`, {
+    method: "GET",
+  });
+  return (Array.isArray(data) ? data : (data?.results ?? [])).map(mapTenderFromApi);
 }
 
 export async function awardTender(
@@ -1190,6 +1963,67 @@ export async function confirmTenderAward(
     body: JSON.stringify({
       send_email: payload?.sendEmail ?? true,
     }),
+  });
+  return mapTenderFromApi(data);
+}
+
+export async function pauseTenderAward(tenderId: string): Promise<Tender> {
+  const data = await http<any>(`/api/tenders/${tenderId}/pause_award/`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  return mapTenderFromApi(data);
+}
+
+export async function revokeIntentToAward(tenderId: string): Promise<Tender> {
+  const data = await http<any>(`/api/tenders/${tenderId}/revoke_intent/`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  return mapTenderFromApi(data);
+}
+
+export async function resolveChallenge(
+  tenderId: string,
+  payload: { challengeId: string; outcome: "upheld" | "dismissed"; resolutionNotes?: string }
+): Promise<Tender> {
+  const data = await http<any>(`/api/tenders/${tenderId}/resolve_challenge/`, {
+    method: "POST",
+    body: JSON.stringify({
+      challenge_id: payload.challengeId,
+      outcome: payload.outcome,
+      resolution_notes: payload.resolutionNotes ?? "",
+    }),
+  });
+  return mapTenderFromApi(data);
+}
+
+export async function fetchTenderChallenges(tenderId: string): Promise<any[]> {
+  return await http<any[]>(`/api/tenders/${tenderId}/challenges/`);
+}
+
+export async function createChallenge(
+  tenderId: string,
+  payload: { filedByVendorId: string; filedByVendorName: string; grounds: string; challengerBidId?: string }
+): Promise<any> {
+  return await http<any>(`/api/tenders/${tenderId}/create_challenge/`, {
+    method: "POST",
+    body: JSON.stringify({
+      filed_by_vendor_id: payload.filedByVendorId,
+      filed_by_vendor_name: payload.filedByVendorName,
+      grounds: payload.grounds,
+      challenger_bid_id: payload.challengerBidId ?? "",
+    }),
+  });
+}
+
+export async function updateCoolingOff(
+  tenderId: string,
+  payload: { action: "extend" | "shorten"; days: number }
+): Promise<Tender> {
+  const data = await http<any>(`/api/tenders/${tenderId}/update_cooling_off/`, {
+    method: "POST",
+    body: JSON.stringify(payload),
   });
   return mapTenderFromApi(data);
 }
@@ -1245,12 +2079,9 @@ export async function submitTenderBid(payload: Partial<TenderBid>): Promise<Tend
   if (payload.system_configuration) form.append('system_configuration', JSON.stringify(payload.system_configuration));
   if (payload.boq_details) form.append('boq_details', JSON.stringify(payload.boq_details));
   else if (payload.boq_items) form.append('boq_items', JSON.stringify(payload.boq_items));
-  if (payload.gender_inclusion_target != null) form.append('gender_inclusion_target', String(payload.gender_inclusion_target));
-  else if (payload.female_target_pct != null) form.append('female_target_pct', String(payload.female_target_pct));
-  if (payload.vulnerable_group_target != null) form.append('vulnerable_group_target', String(payload.vulnerable_group_target));
-  else if (payload.vulnerable_target_pct != null) form.append('vulnerable_target_pct', String(payload.vulnerable_target_pct));
-  if (payload.low_income_target != null) form.append('low_income_target', String(payload.low_income_target));
-  else if (payload.low_income_target_pct != null) form.append('low_income_target_pct', String(payload.low_income_target_pct));
+  if (payload.female_target_pct != null) form.append('female_target_pct', String(payload.female_target_pct));
+  if (payload.vulnerable_target_pct != null) form.append('vulnerable_target_pct', String(payload.vulnerable_target_pct));
+  if (payload.low_income_target_pct != null) form.append('low_income_target_pct', String(payload.low_income_target_pct));
   if (payload.inclusion_commitment_confirmed != null) form.append('inclusion_commitment_confirmed', String(payload.inclusion_commitment_confirmed));
   form.append('om_strategy_summary', payload.om_strategy_summary ?? "");
   form.append('aftersales_description', payload.aftersales_description ?? "");
@@ -1263,6 +2094,29 @@ export async function submitTenderBid(payload: Partial<TenderBid>): Promise<Tend
   form.append('collection_method', payload.collection_method ?? "");
   if (payload.sites) form.append('sites', JSON.stringify(payload.sites.map(mapTenderBidSiteToApi)));
   form.append('status', payload.status ?? BidStatus.DRAFT);
+  if (payload.preferred_district) form.append('preferred_district', payload.preferred_district);
+  if (payload.bid_stage != null) form.append('bid_stage', payload.bid_stage);
+  form.append('eoi_narrative', payload.eoi_narrative ?? "");
+  form.append('financial_standing_summary', payload.financial_standing_summary ?? "");
+  form.append('technical_experience_summary', payload.technical_experience_summary ?? "");
+  form.append('track_record_summary', payload.track_record_summary ?? "");
+
+  const companyCredentialsFile = (payload as any).company_credentials_file;
+  if (companyCredentialsFile instanceof File) {
+    form.append('company_credentials_file', companyCredentialsFile);
+  }
+  const financialStandingFile = (payload as any).financial_standing_file;
+  if (financialStandingFile instanceof File) {
+    form.append('financial_standing_file', financialStandingFile);
+  }
+  const technicalExperienceFile = (payload as any).technical_experience_file;
+  if (technicalExperienceFile instanceof File) {
+    form.append('technical_experience_file', technicalExperienceFile);
+  }
+  const trackRecordFile = (payload as any).track_record_file;
+  if (trackRecordFile instanceof File) {
+    form.append('track_record_file', trackRecordFile);
+  }
 
   const technicalProposalFile = (payload as any).technical_proposal_file;
   if (technicalProposalFile instanceof File) {
@@ -1299,6 +2153,19 @@ export async function submitTenderBid(payload: Partial<TenderBid>): Promise<Tend
   const distributionMapFile = (payload as any).distribution_map_file;
   if (distributionMapFile instanceof File) {
     form.append('distribution_map_file', distributionMapFile);
+  }
+  const tenderSecurityFile = (payload as any).tender_security_file;
+  if (tenderSecurityFile instanceof File) {
+    form.append('tender_security_file', tenderSecurityFile);
+  }
+
+  const customDocuments = (payload as any).custom_documents;
+  if (Array.isArray(customDocuments) && customDocuments.length) {
+    form.append('custom_documents', JSON.stringify(customDocuments));
+  }
+  const customDocumentsFiles = (payload as any).custom_documents_files;
+  if (Array.isArray(customDocumentsFiles) && customDocumentsFiles.length) {
+    customDocumentsFiles.forEach((f: File) => form.append('custom_documents_files', f));
   }
 
   const data = await http<any>(`/api/tender-bids/`, {
@@ -1322,12 +2189,9 @@ export async function updateTenderBid(bidId: string, payload: Partial<TenderBid>
   if (payload.system_configuration != null) form.append('system_configuration', JSON.stringify(payload.system_configuration));
   if (payload.boq_details != null) form.append('boq_details', JSON.stringify(payload.boq_details));
   else if (payload.boq_items != null) form.append('boq_items', JSON.stringify(payload.boq_items));
-  if (payload.gender_inclusion_target != null) form.append('gender_inclusion_target', String(payload.gender_inclusion_target));
-  else if (payload.female_target_pct != null) form.append('female_target_pct', String(payload.female_target_pct));
-  if (payload.vulnerable_group_target != null) form.append('vulnerable_group_target', String(payload.vulnerable_group_target));
-  else if (payload.vulnerable_target_pct != null) form.append('vulnerable_target_pct', String(payload.vulnerable_target_pct));
-  if (payload.low_income_target != null) form.append('low_income_target', String(payload.low_income_target));
-  else if (payload.low_income_target_pct != null) form.append('low_income_target_pct', String(payload.low_income_target_pct));
+  if (payload.female_target_pct != null) form.append('female_target_pct', String(payload.female_target_pct));
+  if (payload.vulnerable_target_pct != null) form.append('vulnerable_target_pct', String(payload.vulnerable_target_pct));
+  if (payload.low_income_target_pct != null) form.append('low_income_target_pct', String(payload.low_income_target_pct));
   if (payload.inclusion_commitment_confirmed != null) form.append('inclusion_commitment_confirmed', String(payload.inclusion_commitment_confirmed));
   if (payload.om_strategy_summary != null) form.append('om_strategy_summary', payload.om_strategy_summary);
   if (payload.aftersales_description != null) form.append('aftersales_description', payload.aftersales_description);
@@ -1340,6 +2204,29 @@ export async function updateTenderBid(bidId: string, payload: Partial<TenderBid>
   if (payload.collection_method != null) form.append('collection_method', payload.collection_method);
   if (payload.sites != null) form.append('sites', JSON.stringify(payload.sites.map(mapTenderBidSiteToApi)));
   if (payload.status != null) form.append('status', payload.status);
+  if (payload.preferred_district != null) form.append('preferred_district', payload.preferred_district);
+  if (payload.bid_stage != null) form.append('bid_stage', payload.bid_stage);
+  if (payload.eoi_narrative != null) form.append('eoi_narrative', payload.eoi_narrative);
+  if (payload.financial_standing_summary != null) form.append('financial_standing_summary', payload.financial_standing_summary);
+  if (payload.technical_experience_summary != null) form.append('technical_experience_summary', payload.technical_experience_summary);
+  if (payload.track_record_summary != null) form.append('track_record_summary', payload.track_record_summary);
+
+  const companyCredentialsFile = (payload as any).company_credentials_file;
+  if (companyCredentialsFile instanceof File) {
+    form.append('company_credentials_file', companyCredentialsFile);
+  }
+  const financialStandingFile = (payload as any).financial_standing_file;
+  if (financialStandingFile instanceof File) {
+    form.append('financial_standing_file', financialStandingFile);
+  }
+  const technicalExperienceFile = (payload as any).technical_experience_file;
+  if (technicalExperienceFile instanceof File) {
+    form.append('technical_experience_file', technicalExperienceFile);
+  }
+  const trackRecordFile = (payload as any).track_record_file;
+  if (trackRecordFile instanceof File) {
+    form.append('track_record_file', trackRecordFile);
+  }
 
   const technicalProposalFile = (payload as any).technical_proposal_file;
   if (technicalProposalFile instanceof File) {
@@ -1377,6 +2264,19 @@ export async function updateTenderBid(bidId: string, payload: Partial<TenderBid>
   if (distributionMapFile instanceof File) {
     form.append('distribution_map_file', distributionMapFile);
   }
+  const tenderSecurityFile = (payload as any).tender_security_file;
+  if (tenderSecurityFile instanceof File) {
+    form.append('tender_security_file', tenderSecurityFile);
+  }
+
+  const customDocuments = (payload as any).custom_documents;
+  if (Array.isArray(customDocuments) && customDocuments.length) {
+    form.append('custom_documents', JSON.stringify(customDocuments));
+  }
+  const customDocumentsFiles = (payload as any).custom_documents_files;
+  if (Array.isArray(customDocumentsFiles) && customDocumentsFiles.length) {
+    customDocumentsFiles.forEach((f: File) => form.append('custom_documents_files', f));
+  }
 
   const data = await http<any>(`/api/tender-bids/${bidId}/`, {
     method: "PATCH",
@@ -1393,10 +2293,11 @@ export async function submitTenderBidFinal(bidId: string): Promise<TenderBid> {
   return mapTenderBidFromApi(data);
 }
 
-export async function fetchTenderBids(tenderId?: string): Promise<TenderBid[]> {
-  const url = tenderId
-    ? `/api/tender-bids/?tender=${tenderId}`
-    : `/api/tender-bids/`;
+export async function fetchTenderBids(tenderId?: string, pageSize?: number): Promise<TenderBid[]> {
+  const query = new URLSearchParams();
+  if (tenderId) query.set("tender", tenderId);
+  if (pageSize) query.set("page_size", String(pageSize));
+  const url = `/api/tender-bids/${query.toString() ? `?${query.toString()}` : ""}`;
   const data = await http<any>(url);
   return unwrapListResponse<any>(data).map(mapTenderBidFromApi);
 }
@@ -1415,6 +2316,20 @@ export async function acceptTenderBid(bidId: string): Promise<TenderBid> {
     body: JSON.stringify({}),
   });
   return mapTenderBidFromApi(data);
+}
+
+export async function openFinancialStage(
+  tenderId: string
+): Promise<{ detail: string; opened_bids: string[]; workflow: string }> {
+  const data = await http<any>(`/api/tenders/${tenderId}/open_financial_stage/`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  return {
+    detail: data?.detail ?? "",
+    opened_bids: Array.isArray(data?.opened_bids) ? data.opened_bids.map(String) : [],
+    workflow: data?.workflow ?? "sequential",
+  };
 }
 
 export async function rejectTenderBid(
@@ -1486,11 +2401,12 @@ export async function updateBidEvaluation(id: string, payload: Partial<TenderBid
   return mapBidEvaluationFromApi(data);
 }
 
-export async function fetchTenderContracts(params?: { tenderId?: string; vendorId?: string; status?: string }): Promise<TenderContract[]> {
+export async function fetchTenderContracts(params?: { tenderId?: string; vendorId?: string; status?: string; pageSize?: number }): Promise<TenderContract[]> {
   const query = new URLSearchParams();
   if (params?.tenderId) query.set("tender", params.tenderId);
   if (params?.vendorId) query.set("vendor_id", params.vendorId);
   if (params?.status) query.set("status", params.status);
+  if (params?.pageSize) query.set("page_size", String(params.pageSize));
   const url = query.toString() ? `/api/tender-contracts/?${query.toString()}` : `/api/tender-contracts/`;
   const data = await http<any>(url);
   return unwrapListResponse<any>(data).map(mapTenderContractFromApi);
@@ -1539,7 +2455,7 @@ export async function assignTenderContract(contractId: string, payload?: {
   targetInstallations?: number;
   techType?: string;
   energyOutput?: number;
-  district?: string;
+  districts?: string[];
   verificationMethod?: string;
   targetFemalePct?: number;
   targetVulnerablePct?: number;
@@ -1548,9 +2464,9 @@ export async function assignTenderContract(contractId: string, payload?: {
   const body: any = {};
   if (payload?.projectDurationMonths != null) body.project_duration_months = payload.projectDurationMonths;
   if (payload?.targetInstallations != null) body.installation_target = payload.targetInstallations;
-  if (payload?.techType) body.technology_type = payload.techType;
+  if (payload?.techType) body.technology_type = normalizeTechnologyType(payload.techType);
   if (payload?.energyOutput != null) body.energy_output_target_kwh = payload.energyOutput;
-  if (payload?.district) body.district_zone = payload.district;
+  if (payload?.districts?.length) body.district_zones = payload.districts;
   if (payload?.verificationMethod) body.verification_method = payload.verificationMethod;
   if (payload?.targetFemalePct != null) body.female_target_pct = payload.targetFemalePct;
   if (payload?.targetVulnerablePct != null) body.vulnerable_target_pct = payload.targetVulnerablePct;
@@ -1574,9 +2490,67 @@ export async function rejectTenderContract(contractId: string, reason: string): 
   return mapTenderContractFromApi(data);
 }
 
-export async function fetchProjects(): Promise<Project[]> {
-  const data = await http<any>(`/api/projects/`);
+export async function fetchProjects(pageSize?: number): Promise<Project[]> {
+  const query = pageSize ? `?page_size=${pageSize}` : "";
+  const data = await http<any>(`/api/projects/${query}`);
   return unwrapListResponse<any>(data).map(mapProjectFromApi);
+}
+
+export async function fetchProjectsSummary(): Promise<{
+  total: number;
+  active: number;
+  completed: number;
+  atRisk: number;
+}> {
+  const data = await http<any>(`/api/projects/projects-summary/`);
+  return {
+    total: data.total || 0,
+    active: data.active || 0,
+    completed: data.completed || 0,
+    atRisk: data.at_risk || 0,
+  };
+}
+
+export async function triggerProjectProspectSync(
+  projectId: string,
+  action:
+    | "push_target"
+    | "push_agent"
+    | "push_installations"
+    | "push_installation_updates"
+    | "push_installation_timeseries"
+    | "push_report"
+    | "refresh_status"
+    | "sync_all_available",
+): Promise<{ status: string; action: string; queued_methods: string[]; details?: Record<string, any>; message?: string }> {
+  return await http<any>(`/api/projects/${projectId}/prospect-sync/`, {
+    method: "POST",
+    body: JSON.stringify({ action }),
+  });
+}
+
+export async function triggerProspectReportSync(
+  payload: {
+    period: "monthly" | "quarterly";
+    mode: "all" | "project";
+    projectId?: string;
+  },
+): Promise<{
+  status: string;
+  period: "monthly" | "quarterly";
+  mode: "all" | "project";
+  report_start: string;
+  report_end: string;
+  queued_jobs: number;
+}> {
+  return await http<any>(`/api/projects/prospect-sync-reports/`, {
+    method: "POST",
+    body: JSON.stringify({
+      period: payload.period,
+      mode: payload.mode,
+      project_id: payload.projectId,
+    }),
+  });
 }
 
 export async function fetchProjectKpiSummary(projectId: string): Promise<ProjectKpiSummary> {
@@ -1585,6 +2559,14 @@ export async function fetchProjectKpiSummary(projectId: string): Promise<Project
 
 export async function fetchPortfolioKpiSummary(): Promise<PortfolioKpiSummary> {
   return await http<PortfolioKpiSummary>(`/api/kpi/portfolio`);
+}
+
+export async function fetchPublicPortfolioKpi(): Promise<Record<string, any>> {
+  return await http<Record<string, any>>(`/api/kpi/public-portfolio`, { headers: { "X-Skip-Auth": "true" } });
+}
+
+export async function fetchMapBoundaryGeoJson(): Promise<any> {
+  return await http<any>(`/api/map/boundary`);
 }
 
 export async function downloadProjectKpiPdf(projectId: string): Promise<void> {
@@ -1839,7 +2821,9 @@ export async function createInstallationReport(payload: {
   photoFiles?: File[];
   meterId?: string;
   kwhReading?: number;
-}): Promise<{ report: InstallationReport; warning?: string }> {
+  householdType?: string;
+  confirmOutsideDistrict?: boolean;
+}): Promise<{ report: InstallationReport; warning?: string; requiresConfirmation?: string }> {
   const form = new FormData();
   form.append("project", payload.projectId);
   if (payload.milestoneId) form.append("milestone", payload.milestoneId);
@@ -1849,6 +2833,8 @@ export async function createInstallationReport(payload: {
   form.append("beneficiary_id", payload.beneficiaryId);
   if (payload.meterId) form.append("meter_id", payload.meterId);
   if (payload.kwhReading != null) form.append("kwh_reading", String(payload.kwhReading));
+  if (payload.householdType) form.append("household_type", payload.householdType);
+  if (payload.confirmOutsideDistrict) form.append("confirm_outside_district", "true");
   if (payload.receiptFile instanceof File) {
     form.append("receipt_file", payload.receiptFile);
   }
@@ -1865,6 +2851,12 @@ export async function createInstallationReport(payload: {
       warning: typeof data.warning === "string" ? data.warning : undefined,
     };
   }
+  if (data?.errors) {
+    const errorMessages = Object.values(data.errors).flat().join(" ");
+    const err = new Error(errorMessages || "Unable to submit installation report.");
+    (err as any).fieldErrors = data.errors;
+    throw err;
+  }
   return {
     report: mapInstallationReportFromApi(data),
   };
@@ -1876,7 +2868,7 @@ export async function fetchMapInstallations(filters: Record<string, string | und
     if (value != null && value !== "") search.set(key, value);
   });
   const query = search.toString();
-  const data = await http<any>(`/api/installations/map-data${query ? `?${query}` : ""}`);
+  const data = await http<any>(`/api/map/installations${query ? `?${query}` : ""}`);
   const payload = data?.data ?? {};
   return {
     installations: Array.isArray(payload.installations) ? payload.installations.map(mapMapInstallationFromApi) : [],
@@ -1921,9 +2913,73 @@ export async function fetchNotifications(): Promise<Notification[]> {
   return unwrapListResponse<any>(data).map(mapNotificationFromApi);
 }
 
-export async function fetchVendorPrequalifications(): Promise<VendorPrequalification[]> {
-  const data = await http<any>(`/api/users/prequalifications/`);
+export async function fetchUnreadNotificationCount(): Promise<number> {
+  const data = await http<any>(`/api/notifications/unread_count/`);
+  return Number(data?.count ?? 0);
+}
+
+export async function markNotificationRead(id: string): Promise<void> {
+  await http<any>(`/api/notifications/${id}/mark_read/`, { method: "POST" });
+}
+
+export async function markAllNotificationsRead(): Promise<number> {
+  const data = await http<any>(`/api/notifications/mark_all_read/`, { method: "POST" });
+  return Number(data?.updated ?? 0);
+}
+
+export async function fetchVendorPrequalifications(pageSize?: number): Promise<VendorPrequalification[]> {
+  const query = pageSize ? `?page_size=${pageSize}` : "";
+  const data = await http<any>(`/api/users/prequalifications/${query}`);
   return unwrapListResponse<any>(data).map(mapVendorPrequalificationFromApi);
+}
+
+export async function fetchMyProfile(): Promise<VendorProfile> {
+  const data = await http<any>(`/api/users/my_profile/`);
+  return mapVendorProfileFromApi(data);
+}
+
+export async function updateMyProfile(payload: Partial<VendorProfile>): Promise<VendorProfile> {
+  const data = await http<any>(`/api/users/my_profile/`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      email: payload.email,
+      full_name: payload.full_name,
+      gender: payload.gender,
+      mobile_number: payload.mobile_number,
+      address: payload.address,
+      organization_name: payload.organization_name,
+      organization_type: payload.organization_type,
+      registration_certificate_name: payload.registration_certificate_name,
+      tax_id: payload.tax_id,
+      technology_types: payload.technology_types,
+      region: payload.region,
+    }),
+  });
+  return mapVendorProfileFromApi(data);
+}
+
+export async function fetchVendorProfile(vendorId: string): Promise<VendorProfile> {
+  const data = await http<any>(`/api/users/${vendorId}/profile/`);
+  return mapVendorProfileFromApi(data);
+}
+
+const VENDOR_DIRECTORY_PAGE_SIZE = 20;
+
+export async function fetchVendorDirectory(page: number = 1): Promise<{
+  vendors: VendorDirectoryEntry[];
+  total: number;
+  page: number;
+  totalPages: number;
+}> {
+  const data = await http<any>(`/api/users/vendor_directory/?page=${page}`);
+  if (Array.isArray(data)) {
+    const vendors = data.map(mapVendorDirectoryEntryFromApi);
+    return { vendors, total: vendors.length, page: 1, totalPages: 1 };
+  }
+  const results = (data.results || []).map(mapVendorDirectoryEntryFromApi);
+  const total = data.count ?? 0;
+  const totalPages = Math.ceil(total / VENDOR_DIRECTORY_PAGE_SIZE) || 1;
+  return { vendors: results, total, page, totalPages };
 }
 
 export async function fetchBlacklistCases(): Promise<VendorBlacklistCase[]> {
@@ -2041,6 +3097,10 @@ export async function submitVendorPrequalification(
   form.append('districts_covered', String(payload.districtsCovered ?? 0));
   form.append('female_beneficiary_target', String(payload.femaleBeneficiaryTarget ?? 50));
   form.append('vulnerable_group_target', String(payload.vulnerableGroupTarget ?? 30));
+  form.append('bank_name', payload.bankName ?? "");
+  form.append('bank_branch', payload.bankBranch ?? "");
+  form.append('bank_swift_code', payload.bankSwiftCode ?? "");
+  form.append('bank_sort_code', payload.bankSortCode ?? "");
   form.append('bank_account_name', payload.bankAccountName ?? "");
   form.append('bank_account_number', payload.bankAccountNumber ?? "");
   form.append('contact_number', payload.contactNumber ?? "");
@@ -2068,6 +3128,7 @@ export async function submitVendorPrequalification(
   const data = await http<any>(existingId ? `/api/users/prequalifications/${existingId}/` : `/api/users/prequalifications/`, {
     method: existingId ? "PATCH" : "POST",
     body: form,
+    timeoutMs: 300000,
   });
   return mapVendorPrequalificationFromApi(data);
 }
@@ -2114,8 +3175,15 @@ export async function rejectVendorPrequalification(
   return reviewVendorPrequalification(id, "reject", reviewerComments);
 }
 
-export async function fetchPaymentClaims(): Promise<PaymentClaim[]> {
-  const data = await http<any>(`/api/projects/claims/`);
+export async function fetchPaymentClaims(params?: {
+  projectId?: string;
+  pageSize?: number;
+}): Promise<PaymentClaim[]> {
+  const query = new URLSearchParams();
+  if (params?.projectId) query.set("project", params.projectId);
+  if (params?.pageSize) query.set("page_size", String(params.pageSize));
+  const url = query.toString() ? `/api/projects/claims/?${query.toString()}` : `/api/projects/claims/`;
+  const data = await http<any>(url);
   return unwrapListResponse<any>(data).map(mapPaymentClaimFromApi);
 }
 
@@ -2139,7 +3207,7 @@ export async function submitPaymentClaim(payload: PaymentClaimSubmission): Promi
 
 async function reviewPaymentClaim(
   id: string,
-  action: "verify" | "approve" | "reject" | "pay",
+  action: "verify" | "approve" | "reject" | "pay" | "confirm-paid",
   payload?: Record<string, any>
 ): Promise<PaymentClaim> {
   const data = await http<any>(`/api/projects/claims/${id}/${action}/`, {
@@ -2172,6 +3240,72 @@ export async function payPaymentClaim(
   });
 }
 
+export async function confirmPaymentClaim(
+  id: string,
+  paymentReference?: string,
+  notes?: string
+): Promise<PaymentClaim> {
+  return reviewPaymentClaim(id, "confirm-paid", {
+    payment_reference: paymentReference ?? "",
+    notes: notes ?? "",
+  });
+}
+
+export async function fetchVendorBankDetails(id: string): Promise<VendorBankDetails> {
+  const data = await http<any>(`/api/projects/claims/${id}/view_bank_details/`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  return {
+    vendorLegalName: data.vendor_legal_name ?? undefined,
+    vendorBankName: data.vendor_bank_name ?? undefined,
+    vendorBankBranch: data.vendor_bank_branch ?? undefined,
+    vendorBankSwiftCode: data.vendor_bank_swift_code ?? undefined,
+    vendorBankSortCode: data.vendor_bank_sort_code ?? undefined,
+    vendorAccountHolderName: data.vendor_account_holder_name ?? undefined,
+    vendorAccountNumber: data.vendor_account_number ?? undefined,
+  };
+}
+
+export async function fetchVendorBankDetailsWithAccess(
+  id: string,
+  revealFull = false
+): Promise<VendorBankDetails> {
+  const data = await http<any>(`/api/projects/claims/${id}/view_bank_details/`, {
+    method: "POST",
+    body: JSON.stringify({ reveal_full: revealFull }),
+  });
+  return {
+    vendorLegalName: data.vendor_legal_name ?? undefined,
+    vendorBankName: data.vendor_bank_name ?? undefined,
+    vendorBankBranch: data.vendor_bank_branch ?? undefined,
+    vendorBankSwiftCode: data.vendor_bank_swift_code ?? undefined,
+    vendorBankSortCode: data.vendor_bank_sort_code ?? undefined,
+    vendorAccountHolderName: data.vendor_account_holder_name ?? undefined,
+    vendorAccountNumber: data.vendor_account_number ?? undefined,
+  };
+}
+
+export async function fetchDisbursementSheet(id: string): Promise<DisbursementSheet> {
+  const data = await http<any>(`/api/projects/claims/${id}/disbursement-sheet/`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  return {
+    claimId: data.claim_id != null ? String(data.claim_id) : undefined,
+    projectId: data.project_id != null ? String(data.project_id) : undefined,
+    claimStatus: data.claim_status ?? undefined,
+    totalApprovedAmount: data.total_approved_amount != null ? Number(data.total_approved_amount) : undefined,
+    vendorLegalName: data.vendor_legal_name ?? undefined,
+    vendorBankName: data.vendor_bank_name ?? undefined,
+    vendorBankBranch: data.vendor_bank_branch ?? undefined,
+    vendorBankSwiftCode: data.vendor_bank_swift_code ?? undefined,
+    vendorBankSortCode: data.vendor_bank_sort_code ?? undefined,
+    vendorAccountHolderName: data.vendor_account_holder_name ?? undefined,
+    vendorAccountNumber: data.vendor_account_number ?? undefined,
+  };
+}
+
 export async function fetchDisbursements(): Promise<Disbursement[]> {
   const data = await http<any>(`/api/projects/disbursements/`);
   return unwrapListResponse<any>(data).map(mapDisbursementFromApi);
@@ -2179,10 +3313,108 @@ export async function fetchDisbursements(): Promise<Disbursement[]> {
 
 export async function fetchAuditLogs(projectId?: string): Promise<AuditLog[]> {
   const query = projectId
-    ? `?record_type=project&record_id=${encodeURIComponent(projectId)}`
+    ? `?record_id=${encodeURIComponent(projectId)}`
     : "";
   const data = await http<any>(`/api/projects/audit-logs/${query}`);
   return unwrapListResponse<any>(data).map(mapAuditLogFromApi);
+}
+
+export async function fetchReportTemplates(): Promise<ReportTemplate[]> {
+  const data = await http<any>(`/api/projects/reports/templates/`);
+  return unwrapListResponse<any>(data).map((item) => ({
+    id: String(item.id || ""),
+    title: String(item.title || ""),
+    description: String(item.description || ""),
+    category: item.category != null ? String(item.category) : undefined,
+    quick: item.quick != null ? Boolean(item.quick) : undefined,
+    formats: Array.isArray(item.formats)
+      ? item.formats
+          .map((format: any) => String(format).toLowerCase())
+          .filter((format: any) => format === "csv" || format === "pdf" || format === "excel") as ReportFormat[]
+      : [],
+  }));
+}
+
+export async function fetchReportHistory(): Promise<ReportHistoryItem[]> {
+  const data = await http<any>(`/api/projects/reports/history/`);
+  return unwrapListResponse<any>(data).map((item) => ({
+    id: String(item.id || ""),
+    reportType: String(item.report_type || item.reportType || ""),
+    format: String(item.format || "").toLowerCase() as ReportFormat,
+    generatedAt: String(item.generated_at || item.generatedAt || ""),
+    notes: String(item.notes || ""),
+    project: item.project != null ? String(item.project) : undefined,
+    generatedBy: item.generatedBy != null ? String(item.generatedBy) : undefined,
+    downloadUrl: item.downloadUrl != null ? String(item.downloadUrl) : undefined,
+  }));
+}
+
+export async function generateReport(
+  reportType: string,
+  format: ReportFormat,
+  filters?: Record<string, any>,
+): Promise<Blob> {
+  return await httpBlob(`/api/projects/reports/generate/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ report_type: reportType, format, filters: filters || {} }),
+  });
+}
+
+export async function downloadGeneratedReport(downloadUrl: string): Promise<Blob> {
+  return await httpBlob(downloadUrl);
+}
+
+export async function fetchSystemAuditLogs(params?: {
+  actor?: string;
+  actorRole?: string;
+  action?: string;
+  module?: string;
+  dateFrom?: string;
+  dateTo?: string;
+  recordId?: string;
+}): Promise<AuditLog[]> {
+  const query = new URLSearchParams();
+  if (params?.actor) query.set("actor", params.actor);
+  if (params?.actorRole) query.set("actor_role", params.actorRole);
+  if (params?.action) query.set("action", params.action);
+  if (params?.module) query.set("module", params.module);
+  if (params?.dateFrom) query.set("date_from", params.dateFrom);
+  if (params?.dateTo) query.set("date_to", params.dateTo);
+  if (params?.recordId) query.set("record_id", params.recordId);
+  const url = query.toString() ? `/api/projects/audit-logs/?${query.toString()}` : `/api/projects/audit-logs/`;
+  const data = await http<any>(url);
+  return unwrapListResponse<any>(data).map(mapAuditLogFromApi);
+}
+
+export async function fetchTenderActivity(tenderId: string): Promise<AuditLog[]> {
+  const data = await http<any>(`/api/tenders/${tenderId}/activity/`);
+  return unwrapListResponse<any>(data).map(mapAuditLogFromApi);
+}
+
+export async function exportSystemAuditLogs(
+  format: "csv" | "pdf",
+  params?: {
+    actor?: string;
+    actorRole?: string;
+    action?: string;
+    module?: string;
+    dateFrom?: string;
+    dateTo?: string;
+    recordId?: string;
+  },
+): Promise<Blob> {
+  const query = new URLSearchParams();
+  if (params?.actor) query.set("actor", params.actor);
+  if (params?.actorRole) query.set("actor_role", params.actorRole);
+  if (params?.action) query.set("action", params.action);
+  if (params?.module) query.set("module", params.module);
+  if (params?.dateFrom) query.set("date_from", params.dateFrom);
+  if (params?.dateTo) query.set("date_to", params.dateTo);
+  if (params?.recordId) query.set("record_id", params.recordId);
+  const base = format === "csv" ? "/api/projects/audit-logs/export-csv/" : "/api/projects/audit-logs/export-pdf/";
+  const url = query.toString() ? `${base}?${query.toString()}` : base;
+  return await httpBlob(url);
 }
 
 export async function fetchSmartMeterReadings(projectId?: string): Promise<SmartMeterReading[]> {
@@ -2191,10 +3423,50 @@ export async function fetchSmartMeterReadings(projectId?: string): Promise<Smart
   return unwrapListResponse<any>(data).map(mapSmartMeterReadingFromApi);
 }
 
-export async function fetchAnomalyFlags(projectId?: string): Promise<AnomalyFlag[]> {
-  const query = projectId ? `?project=${encodeURIComponent(projectId)}` : "";
-  const data = await http<any>(`/api/projects/anomaly-flags/${query}`);
+export async function fetchAnomalyFlags(params?: {
+  projectId?: string;
+  isResolved?: boolean;
+}): Promise<AnomalyFlag[]> {
+  const query = new URLSearchParams();
+  if (params?.projectId) query.set("project", params.projectId);
+  if (params?.isResolved !== undefined) query.set("is_resolved", String(params.isResolved));
+  const q = query.toString() ? `?${query.toString()}` : "";
+  const data = await http<any>(`/api/projects/anomaly-flags/${q}`);
   return unwrapListResponse<any>(data).map(mapAnomalyFlagFromApi);
+}
+
+export async function resolveAnomalyFlag(id: string): Promise<AnomalyFlag> {
+  const data = await http<any>(`/api/projects/anomaly-flags/${id}/resolve/`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  return mapAnomalyFlagFromApi(data);
+}
+
+export async function reviewAnomalyFlag(id: string, payload: {
+  status: AnomalyFlag["status"];
+  investigationNotes?: string;
+  correctiveAction?: string;
+  resolutionReason?: string;
+  evidenceReference?: string;
+  dueDate?: string;
+  evidenceFiles?: File[];
+}): Promise<AnomalyFlag> {
+  const body = new FormData();
+  body.append("status", payload.status);
+  body.append("investigation_notes", payload.investigationNotes ?? "");
+  body.append("corrective_action", payload.correctiveAction ?? "");
+  body.append("resolution_reason", payload.resolutionReason ?? "");
+  body.append("evidence_reference", payload.evidenceReference ?? "");
+  if (payload.dueDate) body.append("due_date", payload.dueDate);
+  for (const file of payload.evidenceFiles ?? []) {
+    body.append("evidence_files", file);
+  }
+  const data = await http<any>(`/api/projects/anomaly-flags/${id}/review/`, {
+    method: "POST",
+    body,
+  });
+  return mapAnomalyFlagFromApi(data);
 }
 
 export async function fetchProspectSyncLogs(params?: {
@@ -2207,6 +3479,62 @@ export async function fetchProspectSyncLogs(params?: {
   const url = query.toString() ? `/api/projects/prospect-sync-logs/?${query.toString()}` : `/api/projects/prospect-sync-logs/`;
   const data = await http<any>(url);
   return unwrapListResponse<any>(data).map(mapProspectSyncLogFromApi);
+}
+
+export async function fetchProspectSyncSummary(): Promise<{
+  failedJobs: number;
+  lastSyncAt?: string;
+  rows: Array<{
+    dataType: string;
+    ourCount: number;
+    prospectCount: number;
+    match: boolean;
+    lastSync?: string;
+    note?: string;
+  }>;
+}> {
+  const data = await http<any>(`/api/projects/prospect-sync-logs/summary/`);
+  return {
+    failedJobs: Number(data.failed_jobs ?? 0),
+    lastSyncAt: data.last_sync_at ?? undefined,
+    rows: Array.isArray(data.rows)
+      ? data.rows.map((row: any) => ({
+          dataType: row.data_type ?? "",
+          ourCount: Number(row.our_count ?? 0),
+          prospectCount: Number(row.prospect_count ?? 0),
+          match: Boolean(row.match),
+          lastSync: row.last_sync ?? undefined,
+          note: row.note ?? undefined,
+        }))
+      : [],
+  };
+}
+
+export async function checkProspectConnection(): Promise<{ readTokenOk: boolean; writeTokenOk: boolean; baseUrl?: string }> {
+  const data = await http<any>(`/api/projects/prospect-sync-logs/check-connection/`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  return {
+    readTokenOk: Boolean(data.read_token_ok),
+    writeTokenOk: Boolean(data.write_token_ok),
+    baseUrl: data.base_url ?? undefined,
+  };
+}
+
+export async function retryProspectSyncJob(id: string): Promise<void> {
+  await http<any>(`/api/projects/prospect-sync-logs/${id}/retry/`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export async function retryAllFailedProspectSyncJobs(): Promise<{ count: number }> {
+  const data = await http<any>(`/api/projects/prospect-sync-logs/retry-failed/`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  return { count: Number(data.count ?? 0) };
 }
 
 export async function refreshProspectSyncPanel(payload?: {
@@ -2230,11 +3558,52 @@ export async function refreshProspectSyncPanel(payload?: {
   });
 }
 
-export async function requestProjectSetupChange(projectId: string, message: string): Promise<{ status: string; message: string }> {
-  return await http<{ status: string; message: string }>(`/api/projects/${projectId}/setup/request-change/`, {
+export async function startProjectSetupReview(projectId: string): Promise<{ status: string; message: string; project: Project }> {
+  const data = await http<any>(`/api/projects/${projectId}/setup/start-review/`, {
     method: "POST",
-    body: JSON.stringify({ message }),
+    body: JSON.stringify({}),
   });
+  return {
+    status: data.status || "ok",
+    message: data.message || "Review claimed.",
+    project: mapProjectFromApi(data.project ?? data),
+  };
+}
+
+export async function approveProjectSetup(projectId: string, notes?: string): Promise<{ status: string; message: string; project: Project }> {
+  const data = await http<any>(`/api/projects/${projectId}/setup/approve/`, {
+    method: "POST",
+    body: JSON.stringify({ notes: notes || "" }),
+  });
+  return {
+    status: data.status || "ok",
+    message: data.message || "Setup approved.",
+    project: mapProjectFromApi(data.project ?? data),
+  };
+}
+
+export async function requestSetupChangesByRmt(projectId: string, notes: string): Promise<{ status: string; message: string; project: Project }> {
+  const data = await http<any>(`/api/projects/${projectId}/setup/request-changes/`, {
+    method: "POST",
+    body: JSON.stringify({ notes }),
+  });
+  return {
+    status: data.status || "ok",
+    message: data.message || "Change request sent.",
+    project: mapProjectFromApi(data.project ?? data),
+  };
+}
+
+export async function rejectProjectSetup(projectId: string, notes: string): Promise<{ status: string; message: string; project: Project }> {
+  const data = await http<any>(`/api/projects/${projectId}/setup/reject/`, {
+    method: "POST",
+    body: JSON.stringify({ notes }),
+  });
+  return {
+    status: data.status || "ok",
+    message: data.message || "Setup rejected.",
+    project: mapProjectFromApi(data.project ?? data),
+  };
 }
 
 export async function uploadProjectMeterCsv(projectId: string, file: File): Promise<{ status: string; rows_ingested: number; uploaded_at: string }> {
@@ -2309,12 +3678,7 @@ export async function loginUser(username: string, password: string): Promise<{ u
     localStorage.setItem(REFRESH_TOKEN_KEY, data.refresh);
   }
 
-  let user: User;
-  if (data?.user) {
-    user = mapUserFromApi(data.user);
-  } else {
-    user = await fetchCurrentUser();
-  }
+  const user = await fetchCurrentUser();
 
   if (typeof window !== "undefined") {
     localStorage.setItem(USER_KEY, JSON.stringify(user));
@@ -2323,11 +3687,27 @@ export async function loginUser(username: string, password: string): Promise<{ u
   return { user, access: data.access, refresh: data.refresh };
 }
 
-export function logoutUser() {
+export function logoutUser(sessionExpiredReason?: string) {
   if (typeof window !== "undefined") {
     localStorage.removeItem(ACCESS_TOKEN_KEY);
     localStorage.removeItem(REFRESH_TOKEN_KEY);
     localStorage.removeItem(USER_KEY);
+    if (sessionExpiredReason) {
+      localStorage.setItem(SESSION_EXPIRED_KEY, sessionExpiredReason);
+    } else {
+      localStorage.removeItem(SESSION_EXPIRED_KEY);
+    }
+  }
+}
+
+export function getSessionExpiredMessage(): string | null {
+  if (typeof window === "undefined") return null;
+  return localStorage.getItem(SESSION_EXPIRED_KEY);
+}
+
+export function clearSessionExpiredMessage() {
+  if (typeof window !== "undefined") {
+    localStorage.removeItem(SESSION_EXPIRED_KEY);
   }
 }
 
@@ -2392,17 +3772,25 @@ export async function createAdminManagedUser(payload: {
   gender: "Male" | "Female" | "Other";
   role: string;
   district?: string;
+  districts?: string[];
 }): Promise<{ user: User; initialPassword?: string; emailError?: string }> {
+  const body: Record<string, any> = {
+    full_name: payload.fullName,
+    email: payload.email,
+    gender: payload.gender,
+    role: payload.role,
+  };
+  if (payload.districts && payload.districts.length > 0) {
+    body.districts = payload.districts;
+    body.verification_zone = payload.districts[0];
+    body.region = payload.districts[0];
+  } else if (payload.district) {
+    body.region = payload.district;
+    body.verification_zone = payload.district;
+  }
   const data = await http<any>(`/api/users/`, {
     method: "POST",
-    body: JSON.stringify({
-      full_name: payload.fullName,
-      email: payload.email,
-      gender: payload.gender,
-      role: payload.role,
-      region: payload.district ?? "",
-      verification_zone: payload.district ?? "",
-    }),
+    body: JSON.stringify(body),
   });
   return {
     user: mapUserFromApi(data),
@@ -2417,19 +3805,26 @@ export async function updateAdminManagedUser(userId: string, payload: {
   gender?: "Male" | "Female" | "Other";
   role?: string;
   district?: string;
+  districts?: string[];
   isActive?: boolean;
 }): Promise<User> {
+  const body: Record<string, any> = {};
+  if (payload.fullName !== undefined) body.full_name = payload.fullName;
+  if (payload.email !== undefined) body.email = payload.email;
+  if (payload.gender !== undefined) body.gender = payload.gender;
+  if (payload.role !== undefined) body.role = payload.role;
+  if (payload.isActive !== undefined) body.is_active = payload.isActive;
+  if (payload.districts && payload.districts.length > 0) {
+    body.districts = payload.districts;
+    body.verification_zone = payload.districts[0];
+    body.region = payload.districts[0];
+  } else if (payload.district !== undefined) {
+    body.region = payload.district;
+    body.verification_zone = payload.district;
+  }
   const data = await http<any>(`/api/users/${userId}/`, {
     method: "PATCH",
-    body: JSON.stringify({
-      full_name: payload.fullName,
-      email: payload.email,
-      gender: payload.gender,
-      role: payload.role,
-      region: payload.district,
-      verification_zone: payload.district,
-      is_active: payload.isActive,
-    }),
+    body: JSON.stringify(body),
   });
   return mapUserFromApi(data);
 }
@@ -2440,6 +3835,166 @@ export async function deactivateAdminManagedUser(userId: string): Promise<User> 
     body: JSON.stringify({}),
   });
   return mapUserFromApi(data);
+}
+
+export async function resetAdminManagedUserPassword(userId: string): Promise<{ temporaryPassword?: string; emailError?: string }> {
+  const data = await http<any>(`/api/users/${userId}/reset-password/`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  return {
+    temporaryPassword: data?.temporary_password ?? undefined,
+    emailError: data?.email_error ?? undefined,
+  };
+}
+
+export async function requestPasswordReset(identifier: string): Promise<{ resetUrl?: string; emailError?: string }> {
+  const data = await http<any>(`/api/users/request-password-reset/`, {
+    method: "POST",
+    body: JSON.stringify({ username_or_email: identifier }),
+  });
+  return {
+    resetUrl: data?.reset_url ?? undefined,
+    emailError: data?.email_error ?? undefined,
+  };
+}
+
+export async function confirmResetPassword(token: string, newPassword: string): Promise<void> {
+  await http<any>(`/api/users/reset-password-confirm/`, {
+    method: "POST",
+    body: JSON.stringify({ token, new_password: newPassword }),
+  });
+}
+
+export async function fetchSuperAdminDashboardSummary(): Promise<SuperAdminDashboardSummary> {
+  const data = await http<any>(`/api/users/admin/dashboard/`);
+  return mapSuperAdminDashboardSummaryFromApi(data);
+}
+
+export async function fetchRolePermissions(): Promise<RolePermissionMatrix> {
+  return await http<RolePermissionMatrix>('/api/users/admin/permissions/');
+}
+
+export async function updateRolePermissions(matrix: RolePermissionMatrix): Promise<{ updated: number }> {
+  return await http<{ updated: number }>('/api/users/admin/permissions/', {
+    method: 'PUT',
+    body: JSON.stringify({ roles: matrix.roles }),
+  });
+}
+
+export async function fetchOrganizations(): Promise<Organization[]> {
+  const data = await http<any>(`/api/users/organizations/`);
+  return unwrapListResponse<any>(data).map(mapOrganizationFromApi);
+}
+
+export async function createOrganization(payload: {
+  name: string;
+  type: "Government" | "International" | "NGO";
+  contactPerson?: string;
+  email?: string;
+  phone?: string;
+  address?: string;
+}): Promise<Organization> {
+  const data = await http<any>(`/api/users/organizations/`, {
+    method: "POST",
+    body: JSON.stringify({
+      name: payload.name,
+      type: payload.type,
+      contact_person: payload.contactPerson ?? "",
+      email: payload.email ?? "",
+      phone: payload.phone ?? "",
+      address: payload.address ?? "",
+    }),
+  });
+  return mapOrganizationFromApi(data);
+}
+
+export async function updateOrganization(id: string, payload: {
+  name: string;
+  type: "Government" | "International" | "NGO";
+  contactPerson?: string;
+  email?: string;
+  phone?: string;
+  address?: string;
+}): Promise<Organization> {
+  const data = await http<any>(`/api/users/organizations/${id}/`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      name: payload.name,
+      type: payload.type,
+      contact_person: payload.contactPerson ?? "",
+      email: payload.email ?? "",
+      phone: payload.phone ?? "",
+      address: payload.address ?? "",
+    }),
+  });
+  return mapOrganizationFromApi(data);
+}
+
+export async function deleteOrganization(id: string): Promise<void> {
+  await http<void>(`/api/users/organizations/${id}/`, {
+    method: "DELETE",
+  });
+}
+
+export async function fetchPlatformConfiguration(): Promise<PlatformConfiguration> {
+  const data = await http<any>(`/api/users/platform-configuration/`);
+  return mapPlatformConfigurationFromApi(data);
+}
+
+export async function updatePlatformConfiguration(payload: Partial<PlatformConfiguration>): Promise<PlatformConfiguration> {
+  const data = await http<any>(`/api/users/platform-configuration/`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      national_main_program_budget: payload.nationalMainProgramBudget,
+      female_target_minimum: payload.femaleTargetMinimum,
+      vulnerable_target_minimum: payload.vulnerableTargetMinimum,
+      low_income_target_minimum: payload.lowIncomeTargetMinimum,
+      uptime_target: payload.uptimeTarget,
+      anomaly_deviation_threshold: payload.anomalyDeviationThreshold,
+      gps_duplicate_radius_m: payload.gpsDuplicateRadiusM,
+      gps_verification_max_distance_m: payload.gpsVerificationMaxDistanceM,
+      m2_verification_required_pct: payload.m2VerificationRequiredPct,
+      m3_verification_required_pct: payload.m3VerificationRequiredPct,
+      email_notifications_enabled: payload.emailNotificationsEnabled,
+      sms_notifications_enabled: payload.smsNotificationsEnabled,
+      email_host: payload.emailHost,
+      email_port: payload.emailPort,
+      email_use_tls: payload.emailUseTls,
+      email_host_user: payload.emailHostUser,
+      default_from_email: payload.defaultFromEmail,
+      ...(payload.emailHostPassword ? { email_host_password: payload.emailHostPassword } : {}),
+      max_file_size_mb: payload.maxFileSizeMb,
+      allowed_file_types: payload.allowedFileTypes,
+      contact_email: payload.contactEmail,
+      contact_phone: payload.contactPhone,
+      contact_address: payload.contactAddress,
+      contact_office_hours: payload.contactOfficeHours,
+      contact_organisation_name: payload.contactOrganisationName,
+    }),
+  });
+  return mapPlatformConfigurationFromApi(data);
+}
+
+export async function refreshBoundaryFile(): Promise<void> {
+  await http<void>(`/api/users/platform-configuration/refresh-boundary/`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export async function uploadBoundaryFile(file: File): Promise<void> {
+  const formData = new FormData();
+  formData.append("file", file);
+  await http<any>(`/api/users/platform-configuration/upload-boundary/`, {
+    method: "POST",
+    body: formData,
+  });
+}
+
+export async function fetchSystemHealth(): Promise<SystemHealthPayload> {
+  const data = await http<any>(`/api/users/system-health/`);
+  return mapSystemHealthFromApi(data);
 }
 
 export async function registerVendor(payload: {
@@ -2507,4 +4062,336 @@ export async function verifyRegistrationOtp(email: string, otp: string): Promise
     headers: { "X-Skip-Auth": "1" } as any,
     body: JSON.stringify({ email, otp }),
   });
+}
+
+function mapConcernFromApi(api: any): Concern {
+  return {
+    id: String(api.id ?? ""),
+    raisedBy: String(api.raised_by ?? ""),
+    raisedByUsername: api.raised_by_username ?? undefined,
+    raisedByRole: api.raised_by_role ?? "doe",
+    raisedByRegion: api.raised_by_region ?? undefined,
+    concernType: api.concern_type ?? ConcernType.OTHER,
+    severity: api.severity ?? ConcernSeverity.LOW,
+    linkedProject: api.linked_project ?? undefined,
+    linkedProjectName: api.linked_project_ref ?? api.linked_project_name ?? undefined,
+    linkedProjectVendor: api.linked_project_vendor ?? undefined,
+    linkedProjectDistrict: api.linked_project_district ?? undefined,
+    linkedInstallation: api.linked_installation ?? undefined,
+    linkedClaim: api.linked_claim ?? undefined,
+    description: api.description ?? "",
+    evidenceFiles: Array.isArray(api.evidence_files) ? api.evidence_files : undefined,
+    status: api.status ?? ConcernStatus.OPEN,
+    createdAt: api.created_at ?? "",
+    updatedAt: api.updated_at ?? undefined,
+    notifyRmt: api.notify_rmt,
+    notifyPsc: api.notify_psc,
+    responses: Array.isArray(api.responses) ? api.responses.map(mapConcernResponseFromApi) : undefined,
+  };
+}
+
+function mapConcernResponseFromApi(api: any): ConcernResponse {
+  return {
+    id: String(api.id ?? ""),
+    concernId: String(api.concern ?? ""),
+    respondedBy: String(api.responded_by ?? ""),
+    respondedByUsername: api.responded_by_username ?? undefined,
+    respondedByRole: api.responded_by_role ?? undefined,
+    responseText: api.response_text ?? "",
+    actionTaken: api.action_taken ?? "under_investigation",
+    evidenceFiles: Array.isArray(api.evidence_files) ? api.evidence_files : undefined,
+    createdAt: api.created_at ?? "",
+  };
+}
+
+function mapAuditFindingFromApi(api: any): AuditFinding {
+  return {
+    id: String(api.id ?? ""),
+    findingReference: api.finding_reference ?? undefined,
+    raisedBy: String(api.raised_by ?? ""),
+    raisedByUsername: api.raised_by_username ?? undefined,
+    raisedByRole: api.raised_by_role ?? undefined,
+    raisedByRegion: api.raised_by_region ?? undefined,
+    findingCategory: api.finding_category ?? FindingCategory.OTHER_COMPLIANCE,
+    riskLevel: api.risk_level ?? RiskLevel.OBSERVATION,
+    linkedProject: api.linked_project ?? undefined,
+    linkedProjectName: api.linked_project_ref ?? api.linked_project_name ?? undefined,
+    linkedProjectVendor: api.linked_project_vendor ?? undefined,
+    linkedProjectDistrict: api.linked_project_district ?? undefined,
+    linkedClaim: api.linked_claim ?? undefined,
+    linkedInstallation: api.linked_installation ?? undefined,
+    linkedAuditLog: api.linked_audit_log ?? undefined,
+    description: api.description ?? "",
+    recommendedAction: api.recommended_action ?? undefined,
+    evidenceFiles: Array.isArray(api.evidence_files) ? api.evidence_files : undefined,
+    status: api.status ?? ConcernStatus.OPEN,
+    rmtResponse: api.rmt_response ?? undefined,
+    rmtActionTaken: api.rmt_action_taken ?? undefined,
+    rmtRespondedAt: api.rmt_responded_at ?? undefined,
+    pscComment: api.psc_comment ?? undefined,
+    pscCommentedAt: api.psc_commented_at ?? undefined,
+    pscNotified: Boolean(api.psc_notified || api.notify_psc),
+    superAdminNotified: Boolean(api.super_admin_notified),
+    createdAt: api.created_at ?? "",
+    updatedAt: api.updated_at ?? undefined,
+  };
+}
+
+export async function fetchConcerns(): Promise<Concern[]> {
+  const data = await http<any>(`/api/projects/concerns/`);
+  const items = unwrapListResponse<any>(data);
+  return items.map(mapConcernFromApi);
+}
+
+export async function createConcern(concern: {
+  concern_type: ConcernType;
+  severity: ConcernSeverity;
+  linked_project?: string;
+  linked_installation?: string;
+  description: string;
+  evidence_files?: string[];
+  notify_rmt?: boolean;
+  notify_psc?: boolean;
+}): Promise<Concern> {
+  const data = await http<any>(`/api/projects/concerns/`, {
+    method: "POST",
+    body: JSON.stringify(concern),
+  });
+  return mapConcernFromApi(data);
+}
+
+export async function updateConcern(concernId: string, data: {
+  status?: string;
+  notify_psc?: boolean;
+  notify_rmt?: boolean;
+}): Promise<Concern> {
+  const result = await http<any>(`/api/projects/concerns/${concernId}/`, {
+    method: "PATCH",
+    body: JSON.stringify(data),
+  });
+  return mapConcernFromApi(result);
+}
+
+export async function fetchConcernResponses(concernId: string): Promise<ConcernResponse[]> {
+  const data = await http<any>(`/api/projects/concern-responses/?concern=${concernId}`);
+  const items = unwrapListResponse<any>(data);
+  return items.map(mapConcernResponseFromApi);
+}
+
+export async function createConcernResponse(concernId: string, response: {
+  response_text: string;
+  action_taken?: string;
+  evidence_files?: string[];
+  responded_by?: string | number;
+}): Promise<ConcernResponse> {
+  const data = await http<any>(`/api/projects/concern-responses/`, {
+    method: "POST",
+    body: JSON.stringify({ concern: concernId, responded_by: response.responded_by, response_text: response.response_text, action_taken: response.action_taken, evidence_files: response.evidence_files }),
+  });
+  return mapConcernResponseFromApi(data);
+}
+
+export async function fetchAuditFindings(): Promise<AuditFinding[]> {
+  const data = await http<any>(`/api/projects/audit-findings/`);
+  const items = unwrapListResponse<any>(data);
+  return items.map(mapAuditFindingFromApi);
+}
+
+export async function createAuditFinding(finding: {
+  finding_category: FindingCategory;
+  risk_level: RiskLevel;
+  linked_project?: string;
+  linked_claim?: string;
+  linked_installation?: string;
+  description: string;
+  recommended_action?: string;
+  evidence_files?: string[];
+  rised_to_rmt?: boolean;
+  rised_to_psc?: boolean;
+  rised_to_super_admin?: boolean;
+}): Promise<AuditFinding> {
+  const data = await http<any>(`/api/projects/audit-findings/`, {
+    method: "POST",
+    body: JSON.stringify(finding),
+  });
+  return mapAuditFindingFromApi(data);
+}
+
+export async function updateAuditFinding(findingId: string, data: {
+  status?: string;
+}): Promise<AuditFinding> {
+  const result = await http<any>(`/api/projects/audit-findings/${findingId}/`, {
+    method: "PATCH",
+    body: JSON.stringify(data),
+  });
+  return mapAuditFindingFromApi(result);
+}
+
+export async function respondAuditFinding(findingId: string, response: {
+  response: string;
+  action_taken: string;
+}): Promise<any> {
+  const data = await http<any>(`/api/projects/audit-findings/${findingId}/respond/`, {
+    method: "POST",
+    body: JSON.stringify(response),
+  });
+  return data;
+}
+
+// ======================== NOTICE API FUNCTIONS ========================
+
+function mapNoticeFromApi(data: any): Notice {
+  const attachments: NoticeAttachment[] = (data.attachments || []).map((a: any) => ({
+    id: a.id,
+    name: a.name || a.file_name || 'Document',
+    url: a.file || a.url,
+    size: a.size,
+    type: a.type || a.content_type,
+  }));
+
+  return {
+    id: data.id,
+    notice_id: data.notice_id,
+    title: data.title,
+    category: data.category as NoticeCategory,
+    summary: data.summary,
+    content: data.content,
+    linked_tender: data.linked_tender || null,
+    tender_reference: data.tender_reference || null,
+    tender_name: data.tender_name || null,
+    is_pinned: data.is_pinned || false,
+    send_email_notification: data.send_email_notification || false,
+    show_countdown: data.show_countdown || false,
+    countdown_date: data.countdown_date || null,
+    attachments: attachments,
+    status: data.status as NoticeStatus,
+    published_at: data.published_at || null,
+    publish_date: data.publish_date || null,
+    schedule_publish: data.schedule_publish || false,
+    created_at: data.created_at,
+    updated_at: data.updated_at,
+  };
+}
+
+function mapNoticeToApi(notice: Partial<Notice>): any {
+  const data: any = {};
+  if (notice.title !== undefined) data.title = notice.title;
+  if (notice.category !== undefined) data.category = notice.category;
+  if (notice.summary !== undefined) data.summary = notice.summary;
+  if (notice.content !== undefined) data.content = notice.content;
+  if (notice.linked_tender !== undefined) data.linked_tender = notice.linked_tender;
+  if (notice.is_pinned !== undefined) data.is_pinned = notice.is_pinned;
+  if (notice.send_email_notification !== undefined) data.send_email_notification = notice.send_email_notification;
+  if (notice.show_countdown !== undefined) data.show_countdown = notice.show_countdown;
+  if (notice.countdown_date !== undefined && notice.countdown_date !== null) data.countdown_date = notice.countdown_date;
+  if (notice.status !== undefined) data.status = notice.status;
+  if (notice.published_at !== undefined) data.published_at = notice.published_at;
+  if (notice.publish_date !== undefined) data.publish_date = notice.publish_date;
+  if (notice.schedule_publish !== undefined) data.schedule_publish = notice.schedule_publish;
+  if (notice.tender_reference !== undefined) data.tender_reference = notice.tender_reference;
+  if (notice.tender_name !== undefined) data.tender_name = notice.tender_name;
+  if (notice.attachments !== undefined) data.attachments = notice.attachments;
+  return data;
+}
+
+export async function fetchNotices(params?: {
+  status?: string;
+  category?: string;
+}): Promise<Notice[]> {
+  const query = new URLSearchParams();
+  if (params?.status) query.set("status", params.status);
+  if (params?.category) query.set("category", params.category);
+  const url = query.toString() ? `/api/notices/?${query.toString()}` : `/api/notices/`;
+  const data = await http<any>(url);
+  const items = unwrapListResponse<any>(data);
+  return items.map(mapNoticeFromApi);
+}
+
+export async function fetchNotice(noticeId: string): Promise<Notice> {
+  const data = await http<any>(`/api/notices/${noticeId}/`);
+  return mapNoticeFromApi(data);
+}
+
+export async function createNotice(notice: Partial<Notice>, attachments?: File[]): Promise<Notice> {
+  const mapped = mapNoticeToApi(notice);
+  if (attachments && attachments.length > 0) {
+    const form = new FormData();
+    
+    // Append mapped fields
+    Object.keys(mapped).forEach(key => {
+      if (key !== 'attachments' && mapped[key] !== undefined && mapped[key] !== null) {
+        form.append(key, String(mapped[key]));
+      } else if (mapped[key] === null) {
+        form.append(key, ""); // Send empty string for null to be handled by backend
+      }
+    });
+    
+    attachments.forEach((file, idx) => {
+      form.append(`attachments-${idx}`, file);
+    });
+    
+    const data = await http<any>(`/api/notices/`, {
+      method: "POST",
+      body: form,
+    });
+    return mapNoticeFromApi(data);
+  } else {
+    const data = await http<any>(`/api/notices/`, {
+      method: "POST",
+      body: JSON.stringify(mapped),
+    });
+    return mapNoticeFromApi(data);
+  }
+}
+
+export async function updateNotice(noticeId: string, notice: Partial<Notice>, attachments?: File[]): Promise<Notice> {
+  const mapped = mapNoticeToApi(notice);
+  if (attachments && attachments.length > 0) {
+    const form = new FormData();
+    
+    // Append mapped fields
+    Object.keys(mapped).forEach(key => {
+      if (key !== 'attachments' && mapped[key] !== undefined && mapped[key] !== null) {
+        form.append(key, String(mapped[key]));
+      } else if (mapped[key] === null) {
+        form.append(key, ""); // Send empty string for null
+      }
+    });
+    
+    attachments.forEach((file, idx) => {
+      form.append(`attachments-${idx}`, file);
+    });
+    
+    const data = await http<any>(`/api/notices/${noticeId}/`, {
+      method: "PATCH",
+      body: form,
+    });
+    return mapNoticeFromApi(data);
+  } else {
+    const data = await http<any>(`/api/notices/${noticeId}/`, {
+      method: "PATCH",
+      body: JSON.stringify(mapped),
+    });
+    return mapNoticeFromApi(data);
+  }
+}
+
+export async function deleteNotice(noticeId: string): Promise<void> {
+  await http<any>(`/api/notices/${noticeId}/`, {
+    method: "DELETE",
+  });
+}
+
+export async function publishNotice(noticeId: string): Promise<Notice> {
+  const data = await http<any>(`/api/notices/${noticeId}/publish/`, {
+    method: "POST",
+  });
+  return mapNoticeFromApi(data);
+}
+
+export async function unpublishNotice(noticeId: string): Promise<Notice> {
+  const data = await http<any>(`/api/notices/${noticeId}/unpublish/`, {
+    method: "POST",
+  });
+  return mapNoticeFromApi(data);
 }

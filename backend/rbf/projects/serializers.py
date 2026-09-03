@@ -3,6 +3,7 @@ from django.db.models import Q, Sum
 from .models import (
     Project,
     ProjectSetup,
+    ProjectSetupReviewStatus,
     Milestone,
     ProjectUpdate,
     ProjectDocument,
@@ -11,13 +12,21 @@ from .models import (
     VerificationTask,
     SmartMeterReading,
     PaymentClaim,
+    PaymentClaimStatus,
     Disbursement,
     AuditLog,
     ProspectSyncLog,
     AnomalyFlag,
+    AnomalyReviewEvent,
+    AnomalyEvidenceFile,
+    Concern,
+    ConcernResponse,
+    AuditFinding,
 )
 from rbf.tenders.models import TenderContract
 from django.conf import settings
+from rbf.users.models import UserRole
+from .bank_details import get_vendor_bank_snapshot
 
 
 class MilestoneSerializer(serializers.ModelSerializer):
@@ -84,6 +93,7 @@ class ProjectSerializer(serializers.ModelSerializer):
     unresolved_flag_count = serializers.SerializerMethodField()
     latest_audit_entry = serializers.SerializerMethodField()
     contract_value = serializers.SerializerMethodField()
+    awarded_bid_device_info = serializers.SerializerMethodField()
 
     def _get_contract(self, obj: Project):
         if not hasattr(self, '_contract_cache'):
@@ -133,15 +143,31 @@ class ProjectSerializer(serializers.ModelSerializer):
         return 'COMPLETE' if self._setup_complete(obj) else 'INCOMPLETE'
 
     def get_setup_status_banner(self, obj: Project):
+        setup = getattr(obj, 'project_setup', None)
         is_complete = self._setup_complete(obj)
+        review_status = getattr(setup, 'review_status', None) or (
+            ProjectSetupReviewStatus.APPROVED if is_complete else ProjectSetupReviewStatus.DRAFT
+        )
+        reviewed_by = getattr(setup, 'reviewed_by', None)
+        tone_map = {
+            ProjectSetupReviewStatus.DRAFT: ('INCOMPLETE', 'red', 'Project setup is incomplete. Complete setup before submitting installations.'),
+            ProjectSetupReviewStatus.SUBMITTED: ('PENDING', 'blue', 'Project setup has been submitted and is awaiting RMT review.'),
+            ProjectSetupReviewStatus.UNDER_REVIEW: ('PENDING', 'indigo', 'RMT is currently reviewing the project setup.'),
+            ProjectSetupReviewStatus.APPROVED: ('COMPLETE', 'green', 'Project setup is approved. Installation submission is unlocked.'),
+            ProjectSetupReviewStatus.CHANGES_REQUESTED: ('CHANGES_REQUESTED', 'amber', 'RMT requested changes. Update the setup and resubmit.'),
+            ProjectSetupReviewStatus.REJECTED: ('REJECTED', 'red', 'Project setup was rejected. Contact RMT for next steps.'),
+        }
+        status, tone, message = tone_map.get(review_status, ('INCOMPLETE', 'red', 'Project setup is incomplete.'))
         return {
-            'status': 'COMPLETE' if is_complete else 'INCOMPLETE',
-            'tone': 'green' if is_complete else 'red',
-            'message': (
-                'Project setup is complete. Installation submission is unlocked.'
-                if is_complete
-                else 'Project setup is incomplete. Complete setup before submitting installations.'
-            ),
+            'status': status,
+            'tone': tone,
+            'message': message,
+            'review_status': review_status,
+            'review_notes': getattr(setup, 'review_notes', '') or '',
+            'previous_review_notes': getattr(setup, 'previous_review_notes', '') or '',
+            'reviewed_at': setup.reviewed_at if setup else None,
+            'reviewed_by_username': getattr(reviewed_by, 'username', None) if reviewed_by else None,
+            'submitted_at': getattr(setup, 'submitted_at', None),
         }
 
     def get_installation_submission_enabled(self, obj: Project):
@@ -204,6 +230,42 @@ class ProjectSerializer(serializers.ModelSerializer):
             return obj.tender.budget
         return None
 
+    def get_awarded_bid_device_info(self, obj: Project):
+        tender = getattr(obj, 'tender', None)
+        if not tender:
+            return None
+        try:
+            contract = TenderContract.objects.filter(tender=tender, project_id=str(obj.id)).first()
+            if contract and contract.bid_id:
+                bid = contract.bid
+                if bid and bid.status == 'Awarded':
+                    sys_config = bid.system_configuration or {}
+                    return {
+                        'device_brand': sys_config.get('device_brand', ''),
+                        'device_model': sys_config.get('device_model', ''),
+                    }
+        except Exception:
+            pass
+        return None
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        role = getattr(user, 'role', None)
+
+        if role == UserRole.UNDP_DONOR:
+            for field_name in ('vendor_name', 'vendor_id'):
+                data.pop(field_name, None)
+            for field_name in ('budget', 'contract_value', 'tender_budget', 'milestone_total_amount'):
+                data[field_name] = None
+
+        if role in {UserRole.TAC, UserRole.DOE_OFFICER, UserRole.UNDP_DONOR}:
+            for field_name in ('budget', 'contract_value', 'tender_budget', 'milestone_total_amount'):
+                data[field_name] = None
+
+        return data
+
     class Meta:
         model = Project
         fields = '__all__'
@@ -217,6 +279,7 @@ class ProjectSetupSerializer(serializers.ModelSerializer):
     insurance_certificate_file_url = serializers.SerializerMethodField()
     meter_api_token = serializers.CharField(write_only=True, required=False, allow_blank=True)
     has_meter_api_token = serializers.SerializerMethodField()
+    reviewed_by_username = serializers.CharField(source='reviewed_by.username', read_only=True, default=None)
 
     def _file_url(self, file_field):
         if file_field:
@@ -286,6 +349,29 @@ class ProjectSetupSerializer(serializers.ModelSerializer):
         tech_tier = current('tech_tier', None)
         if tech_tier is not None and tech_tier not in {1, 2, 3, 4, 5}:
             raise serializers.ValidationError({'tech_tier': 'Technology tier must be between 1 and 5.'})
+
+        if project is not None:
+            tender = getattr(project, 'tender', None)
+            if tender:
+                try:
+                    contract = TenderContract.objects.filter(tender=tender, project_id=str(project.id)).first()
+                    if contract and contract.bid_id:
+                        bid = contract.bid
+                        if bid and bid.status == 'Awarded':
+                            bid_device_brand = str(bid.system_configuration.get('device_brand', '') or '').strip().lower()
+                            bid_device_model = str(bid.system_configuration.get('device_model', '') or '').strip().lower()
+                            setup_device_brand = str(current('device_brand', '') or '').strip().lower()
+                            setup_device_model = str(current('device_model', '') or '').strip().lower()
+                            if bid_device_brand and setup_device_brand and bid_device_brand != setup_device_brand:
+                                raise serializers.ValidationError({
+                                    'device_brand': f"Device brand must match the awarded bid's device brand: '{bid.system_configuration.get('device_brand', '')}'"
+                                })
+                            if bid_device_model and setup_device_model and bid_device_model != setup_device_model:
+                                raise serializers.ValidationError({
+                                    'device_model': f"Device model must match the awarded bid's device model: '{bid.system_configuration.get('device_model', '')}'"
+                                })
+                except Exception:
+                    pass
 
         if not is_submit or project is None:
             return attrs
@@ -377,11 +463,32 @@ class ProjectSetupSerializer(serializers.ModelSerializer):
             'checklist_site_ready',
             'checklist_safety_ready',
             'checklist_logistics_ready',
+            'review_status',
+            'submitted_at',
+            'reviewed_by',
+            'reviewed_by_username',
+            'reviewed_at',
+            'review_notes',
+            'previous_review_notes',
             'setup_completed_at',
             'created_at',
             'updated_at',
         ]
-        read_only_fields = ['id', 'project', 'vendor', 'setup_completed_at', 'created_at', 'updated_at']
+        read_only_fields = [
+            'id',
+            'project',
+            'vendor',
+            'review_status',
+            'submitted_at',
+            'reviewed_by',
+            'reviewed_by_username',
+            'reviewed_at',
+            'review_notes',
+            'previous_review_notes',
+            'setup_completed_at',
+            'created_at',
+            'updated_at',
+        ]
 
 
 class ProjectUpdateSerializer(serializers.ModelSerializer):
@@ -413,10 +520,73 @@ class DisbursementSerializer(serializers.ModelSerializer):
 
 class PaymentClaimSerializer(serializers.ModelSerializer):
     vendor_username = serializers.CharField(source='vendor.username', read_only=True)
+    vendor_legal_name = serializers.SerializerMethodField()
+    vendor_bank_name = serializers.SerializerMethodField()
+    vendor_bank_branch = serializers.SerializerMethodField()
+    vendor_bank_swift_code = serializers.SerializerMethodField()
+    vendor_bank_sort_code = serializers.SerializerMethodField()
+    vendor_account_holder_name = serializers.SerializerMethodField()
+    vendor_account_number = serializers.SerializerMethodField()
     reviewed_by_username = serializers.CharField(source='reviewed_by.username', read_only=True)
     disbursement = DisbursementSerializer(read_only=True)
     payment_locked = serializers.SerializerMethodField()
     payment_lock_reason = serializers.SerializerMethodField()
+    milestone_details = MilestoneSerializer(source='milestone', read_only=True)
+
+    def get_vendor_legal_name(self, obj: PaymentClaim):
+        if obj.vendor.organization_name:
+            return obj.vendor.organization_name
+        if obj.vendor.full_name:
+            return obj.vendor.full_name
+        return obj.vendor.username
+
+    def _has_partial_bank_visibility(self, obj: PaymentClaim):
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        return (
+            user is not None
+            and user.role == UserRole.UNDP_DONOR
+            and obj.status in {PaymentClaimStatus.TAC_ENDORSED, PaymentClaimStatus.PSC_APPROVED}
+        )
+
+    def get_vendor_bank_name(self, obj: PaymentClaim):
+        snapshot = get_vendor_bank_snapshot(obj.vendor)
+        if self._has_partial_bank_visibility(obj):
+            return snapshot['bank_name']
+        return None
+
+    def get_vendor_bank_branch(self, obj: PaymentClaim):
+        snapshot = get_vendor_bank_snapshot(obj.vendor)
+        if self._has_partial_bank_visibility(obj):
+            return snapshot['bank_branch']
+        return None
+
+    def get_vendor_bank_swift_code(self, obj: PaymentClaim):
+        snapshot = get_vendor_bank_snapshot(obj.vendor)
+        if self._has_partial_bank_visibility(obj):
+            return snapshot['bank_swift_code']
+        return None
+
+    def get_vendor_bank_sort_code(self, obj: PaymentClaim):
+        snapshot = get_vendor_bank_snapshot(obj.vendor)
+        if self._has_partial_bank_visibility(obj):
+            return snapshot['bank_sort_code']
+        return None
+
+    def get_vendor_account_holder_name(self, obj: PaymentClaim):
+        snapshot = get_vendor_bank_snapshot(obj.vendor)
+        if self._has_partial_bank_visibility(obj):
+            return snapshot['bank_account_name']
+        return None
+
+    def get_vendor_account_number(self, obj: PaymentClaim):
+        snapshot = get_vendor_bank_snapshot(obj.vendor)
+        account_number = snapshot['bank_account_number']
+        if self._has_partial_bank_visibility(obj):
+            if len(account_number) <= 4:
+                return '****'
+            return '*' * max(0, len(account_number) - 4) + account_number[-4:]
+        return None
 
     def get_payment_locked(self, obj: PaymentClaim):
         return bool(obj.vendor and obj.vendor.role == 'Vendor' and obj.vendor.status in {'Suspended', 'Blacklisted'})
@@ -425,6 +595,13 @@ class PaymentClaimSerializer(serializers.ModelSerializer):
         if self.get_payment_locked(obj):
             return 'Payment is locked because this transaction is linked to a suspended or blacklisted vendor.'
         return None
+
+    def validate(self, attrs):
+        instance = getattr(self, 'instance', None)
+        declaration_accepted = attrs.get('declaration_accepted', getattr(instance, 'declaration_accepted', False))
+        if not declaration_accepted:
+            raise serializers.ValidationError({'declaration_accepted': 'You must accept the declaration before submitting a claim.'})
+        return attrs
 
     class Meta:
         model = PaymentClaim
@@ -437,10 +614,18 @@ class PaymentClaimSerializer(serializers.ModelSerializer):
             'paid_at',
             'reviewed_by',
             'reviewed_by_username',
-            'vendor_username',
+                'vendor_username',
+            'vendor_legal_name',
+            'vendor_bank_name',
+            'vendor_bank_branch',
+            'vendor_bank_swift_code',
+            'vendor_bank_sort_code',
+            'vendor_account_holder_name',
+            'vendor_account_number',
             'disbursement',
             'payment_locked',
             'payment_lock_reason',
+            'milestone_details',
         ]
 
 
@@ -453,6 +638,22 @@ class InstallationReportSerializer(serializers.ModelSerializer):
             return obj.receipt_file.url
         return None
 
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        role = getattr(user, 'role', None)
+
+        if role in {UserRole.TAC, UserRole.AUDITOR}:
+            beneficiary_id = str(data.get('beneficiary_id') or '')
+            if beneficiary_id:
+                data['beneficiary_id'] = f"{'*' * max(0, len(beneficiary_id) - 4)}{beneficiary_id[-4:]}"
+        elif role in {UserRole.DOE_OFFICER, UserRole.UNDP_DONOR}:
+            data['beneficiary_id'] = ''
+            data['beneficiary_name'] = None
+
+        return data
+
     class Meta:
         model = InstallationReport
         fields = '__all__'
@@ -461,6 +662,7 @@ class InstallationReportSerializer(serializers.ModelSerializer):
 
 class VerificationTaskSerializer(serializers.ModelSerializer):
     assigned_verifier_username = serializers.CharField(source='assigned_verifier.username', read_only=True)
+    field_verification = serializers.SerializerMethodField()
 
     class Meta:
         model = VerificationTask
@@ -474,6 +676,12 @@ class VerificationTaskSerializer(serializers.ModelSerializer):
             'created_at',
             'updated_at',
         ]
+
+    def get_field_verification(self, obj):
+        field_verification = obj.report.field_verifications.first()
+        if field_verification is None:
+            return None
+        return FieldVerificationSerializer(field_verification, context=self.context).data
 
 
 class FieldVerificationSerializer(serializers.ModelSerializer):
@@ -494,11 +702,12 @@ class SmartMeterReadingSerializer(serializers.ModelSerializer):
 
 class AuditLogSerializer(serializers.ModelSerializer):
     actor_username = serializers.CharField(source='actor.username', read_only=True)
+    actor_full_name = serializers.CharField(source='actor.full_name', read_only=True)
 
     class Meta:
         model = AuditLog
         fields = '__all__'
-        read_only_fields = ['id', 'created_at', 'actor_username']
+        read_only_fields = ['id', 'created_at', 'actor_username', 'actor_full_name']
 
 
 class ProspectSyncLogSerializer(serializers.ModelSerializer):
@@ -508,8 +717,80 @@ class ProspectSyncLogSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at', 'updated_at']
 
 
+class AnomalyReviewEventSerializer(serializers.ModelSerializer):
+    actor_username = serializers.CharField(source='actor.username', read_only=True)
+
+    class Meta:
+        model = AnomalyReviewEvent
+        fields = [
+            'id', 'flag', 'actor', 'actor_username', 'actor_role',
+            'from_status', 'to_status', 'investigation_notes', 'corrective_action',
+            'resolution_reason', 'evidence_reference', 'created_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'actor_username']
+
+
+class AnomalyEvidenceFileSerializer(serializers.ModelSerializer):
+    uploaded_by_username = serializers.CharField(source='uploaded_by.username', read_only=True)
+
+    class Meta:
+        model = AnomalyEvidenceFile
+        fields = [
+            'id', 'flag', 'file', 'original_name', 'uploaded_by', 'uploaded_by_username', 'uploaded_at',
+        ]
+        read_only_fields = ['id', 'uploaded_at', 'uploaded_by_username']
+
+
 class AnomalyFlagSerializer(serializers.ModelSerializer):
+    assigned_to_username = serializers.CharField(source='assigned_to.username', read_only=True)
+    review_events = AnomalyReviewEventSerializer(many=True, read_only=True)
+    evidence_files = AnomalyEvidenceFileSerializer(many=True, read_only=True)
+
     class Meta:
         model = AnomalyFlag
+        fields = [
+            'id', 'installation', 'project', 'flag_type', 'description', 'is_resolved',
+            'status', 'severity', 'assigned_to', 'assigned_to_username',
+            'investigation_notes', 'corrective_action', 'resolution_reason',
+            'evidence_reference', 'due_date', 'created_at', 'resolved_at',
+            'review_events', 'evidence_files',
+        ]
+        read_only_fields = ['id', 'created_at', 'resolved_at', 'is_resolved', 'assigned_to_username']
+
+
+class ConcernResponseSerializer(serializers.ModelSerializer):
+    responded_by_username = serializers.CharField(source='responded_by.username', read_only=True)
+
+    class Meta:
+        model = ConcernResponse
         fields = '__all__'
-        read_only_fields = ['id', 'created_at', 'resolved_at']
+        read_only_fields = ['id', 'created_at', 'responded_by_username']
+
+
+class ConcernSerializer(serializers.ModelSerializer):
+    raised_by_username = serializers.CharField(source='raised_by.username', read_only=True)
+    raised_by_role = serializers.CharField(source='raised_by.get_role_display', read_only=True)
+    raised_by_region = serializers.CharField(source='raised_by.region', read_only=True)
+    linked_project_ref = serializers.CharField(source='linked_project.project_reference', read_only=True, allow_null=True)
+    linked_project_vendor = serializers.CharField(source='linked_project.vendor.name', read_only=True, allow_null=True)
+    linked_project_district = serializers.CharField(source='linked_project.district', read_only=True, allow_null=True)
+    responses = ConcernResponseSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Concern
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at', 'updated_at', 'raised_by', 'raised_by_username', 'raised_by_role', 'raised_by_region', 'linked_project_ref', 'linked_project_vendor', 'linked_project_district']
+
+
+class AuditFindingSerializer(serializers.ModelSerializer):
+    raised_by_username = serializers.CharField(source='raised_by.username', read_only=True)
+    raised_by_role = serializers.CharField(source='raised_by.get_role_display', read_only=True)
+    raised_by_region = serializers.CharField(source='raised_by.region', read_only=True)
+    linked_project_ref = serializers.CharField(source='linked_project.project_reference', read_only=True, allow_null=True)
+    linked_project_vendor = serializers.CharField(source='linked_project.vendor.name', read_only=True, allow_null=True)
+    linked_project_district = serializers.CharField(source='linked_project.district', read_only=True, allow_null=True)
+
+    class Meta:
+        model = AuditFinding
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at', 'updated_at', 'raised_by', 'raised_by_username', 'raised_by_role', 'raised_by_region', 'linked_project_ref', 'linked_project_vendor', 'linked_project_district']

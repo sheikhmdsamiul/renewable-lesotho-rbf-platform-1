@@ -16,6 +16,7 @@ DEBUG = env.bool('DJANGO_DEBUG')
 SECRET_KEY = env('SECRET_KEY', default='dev-secret-key')
 ALLOWED_HOSTS = env.list('ALLOWED_HOSTS', default=['localhost', '127.0.0.1'])
 API_REQUIRE_AUTH = env.bool('API_REQUIRE_AUTH', default=False)
+FRONTEND_BASE_URL = env('FRONTEND_BASE_URL', default='http://localhost:5173')
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -49,6 +50,7 @@ MIDDLEWARE = [
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'rbf.projects.middleware.RequestContextMiddleware',
+    'rbf.users.middleware.EmailConfigMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
@@ -144,8 +146,8 @@ if not CORS_ALLOW_ALL_ORIGINS:
 
 CSRF_TRUSTED_ORIGINS = env.list('CSRF_TRUSTED_ORIGINS', default=[])
 
-# Frontend URL for email notifications
-FRONTEND_URL = env('FRONTEND_URL', default='http://localhost:5173')
+# Frontend URL for email notifications and deep links. Leave blank to derive from request origin.
+FRONTEND_URL = env('FRONTEND_URL', default='')
 PBA_RENDER_SCRIPT = env('PBA_RENDER_SCRIPT', default=str(BASE_DIR / 'scripts' / 'render_pdf.mjs'))
 PBA_CHROME_PATH = env('PBA_CHROME_PATH', default='')
 
@@ -211,17 +213,26 @@ OTP_EXPIRY_SECONDS = env.int('OTP_EXPIRY_SECONDS', default=600)
 # Celery
 CELERY_BROKER_URL = env('REDIS_URL', default='redis://localhost:6379/0')
 CELERY_RESULT_BACKEND = env('REDIS_URL', default='redis://localhost:6379/0')
+CELERY_TASK_ALWAYS_EAGER = env.bool('CELERY_TASK_ALWAYS_EAGER', default=False)
+
+# Email dispatch: when enabled, notification emails are delivered via the
+# Celery worker (requires a running worker + broker). Off by default so the
+# existing single-container deployment keeps sending synchronously.
+EMAIL_ASYNC = env.bool('EMAIL_ASYNC', default=False)
 
 # Prospect integration
 PROSPECT_BASE_URL = env('PROSPECT_BASE_URL', default='')
+PROSPECT_API_SECRET = env('PROSPECT_API_SECRET', default='')
 PROSPECT_WRITE_TOKEN = env('PROSPECT_WRITE_TOKEN', default='')
-PROSPECT_READ_TOKEN = env('PROSPECT_READ_TOKEN', default='')
+PROSPECT_READ_TOKEN = env('PROSPECT_READ_TOKEN', default=PROSPECT_API_SECRET)
 PROSPECT_TOKEN_IN_AGENTS = env('PROSPECT_TOKEN_IN_AGENTS', default='')
 PROSPECT_TOKEN_IN_TARGETS = env('PROSPECT_TOKEN_IN_TARGETS', default='')
 PROSPECT_TOKEN_IN_CUSTOMERS = env('PROSPECT_TOKEN_IN_CUSTOMERS', default='')
 PROSPECT_TOKEN_IN_INSTALLATIONS = env('PROSPECT_TOKEN_IN_INSTALLATIONS', default='')
 PROSPECT_TOKEN_IN_INSTALLATIONS_TS = env('PROSPECT_TOKEN_IN_INSTALLATIONS_TS', default='')
 PROSPECT_TOKEN_IN_REPORTS = env('PROSPECT_TOKEN_IN_REPORTS', default='')
+PROSPECT_TOKEN_OUT_INSTALLATIONS = env('PROSPECT_TOKEN_OUT_INSTALLATIONS', default=PROSPECT_READ_TOKEN or PROSPECT_API_SECRET)
+PROSPECT_TOKEN_OUT_TARGETS = env('PROSPECT_TOKEN_OUT_TARGETS', default=PROSPECT_READ_TOKEN or PROSPECT_API_SECRET)
 PROSPECT_TIMEOUT_SECONDS = env.int('PROSPECT_TIMEOUT_SECONDS', default=30)
 PROSPECT_BATCH_SIZE = env.int('PROSPECT_BATCH_SIZE', default=10000)
 
@@ -229,6 +240,7 @@ PROSPECT_BATCH_SIZE = env.int('PROSPECT_BATCH_SIZE', default=10000)
 LESOTHO_BOUNDARY_PATH = env('LESOTHO_BOUNDARY_PATH', default='/public/geojson/lesotho.geojson')
 GPS_DUPLICATE_RADIUS_METERS = env.int('GPS_DUPLICATE_RADIUS_METERS', default=10)
 GPS_VERIFICATION_MAX_DISTANCE_METERS = env.int('GPS_VERIFICATION_MAX_DISTANCE_METERS', default=50)
+GPS_DISTRICT_TOLERANCE_METERS = env.int('GPS_DISTRICT_TOLERANCE_METERS', default=150)
 KPI_CACHE_MINUTES = env.int('KPI_CACHE_MINUTES', default=15)
 MILESTONE2_VERIFICATION_THRESHOLD = env.float('MILESTONE2_VERIFICATION_THRESHOLD', default=0.80)
 ANOMALY_DEVIATION_THRESHOLD = env.float('ANOMALY_DEVIATION_THRESHOLD', default=0.05)

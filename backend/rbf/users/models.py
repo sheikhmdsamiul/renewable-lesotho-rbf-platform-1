@@ -20,6 +20,8 @@ class UserStatus(models.TextChoices):
     REGISTERED = 'Registered'
     SUSPENDED = 'Suspended'
     BLACKLISTED = 'Blacklisted'
+    REINSTATED = 'Reinstated'
+    REQUALIFIED = 'Requalified'
 
 
 class User(AbstractUser):
@@ -37,13 +39,84 @@ class User(AbstractUser):
     registration_certificate_name = models.CharField(max_length=255, blank=True)
     tax_id = models.CharField(max_length=64, blank=True)
     device_id = models.CharField(max_length=64, blank=True)
+    bank_name = models.CharField(max_length=255, blank=True)
+    bank_branch = models.CharField(max_length=255, blank=True)
+    bank_swift_code = models.CharField(max_length=64, blank=True)
+    bank_sort_code = models.CharField(max_length=64, blank=True)
     tier_assignment = models.CharField(max_length=64, blank=True)
     verification_zone = models.CharField(max_length=128, blank=True)
+    districts = models.JSONField(default=list, blank=True)
     status = models.CharField(max_length=16, choices=UserStatus.choices, default=UserStatus.ACTIVE)
     must_change_password = models.BooleanField(default=False)
+    last_viewed_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
         return self.username or self.email or str(self.pk)
+
+    @property
+    def computed_status(self) -> str:
+        """Compute status based on prequalification and blacklist status."""
+        # Check blacklist status first (takes priority over prequalification)
+        active_blacklist = VendorBlacklistCase.objects.filter(
+            vendor=self,
+            status__in=[
+                BlacklistCaseStatus.INITIATED,
+                BlacklistCaseStatus.UNDER_REVIEW,
+                BlacklistCaseStatus.BLACKLISTED
+            ]
+        ).first()
+        
+        if active_blacklist:
+            return active_blacklist.status
+        
+        # Check if reinstated (after active blacklist)
+        reinstated = VendorBlacklistCase.objects.filter(
+            vendor=self,
+            status=BlacklistCaseStatus.REINSTATED
+        ).order_by('-reinstated_at').first()
+        
+        if reinstated:
+            return UserStatus.REINSTATED
+        
+        # Check if requalified
+        requalified = VendorBlacklistCase.objects.filter(
+            vendor=self,
+            status=BlacklistCaseStatus.REQUALIFIED
+        ).order_by('-reinstated_at').first()
+        
+        if requalified:
+            return UserStatus.REQUALIFIED
+        
+        # Then check prequalification status
+        prequal = VendorPrequalification.objects.filter(vendor=self).order_by('-submitted_at').first()
+        if prequal:
+            if prequal.status == PrequalificationStatus.APPROVED:
+                return UserStatus.ACTIVE
+            elif prequal.status == PrequalificationStatus.REJECTED:
+                return "Prequalification Rejected"
+            elif prequal.status in [PrequalificationStatus.PENDING, PrequalificationStatus.UNDER_REVIEW, PrequalificationStatus.CLARIFICATION_REQUESTED]:
+                return "Prequalification Under Review"
+        
+        # Default to pending if no prequal
+        return UserStatus.PENDING
+
+
+class RolePermission(models.Model):
+    """Module actions granted to a platform role."""
+
+    role = models.CharField(max_length=64, choices=UserRole.choices)
+    module = models.CharField(max_length=64)
+    actions = models.JSONField(default=list, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['role', 'module'], name='unique_role_permission_module'),
+        ]
+        ordering = ['role', 'module']
+
+    def __str__(self):
+        return f'{self.role}: {self.module}'
 
 
 class PrequalificationStatus(models.TextChoices):
@@ -95,6 +168,10 @@ class VendorPrequalification(models.Model):
     # Bank and contact details
     bank_account_name = models.CharField(max_length=255, blank=True)
     bank_account_number = models.CharField(max_length=32, blank=True)
+    bank_name = models.CharField(max_length=255, blank=True)
+    bank_branch = models.CharField(max_length=255, blank=True)
+    bank_swift_code = models.CharField(max_length=64, blank=True)
+    bank_sort_code = models.CharField(max_length=64, blank=True)
     contact_number = models.CharField(max_length=20, blank=True)
     email = models.EmailField(blank=True)
     gender_of_focal_person = models.CharField(max_length=16, choices=GENDER_CHOICES, blank=True)
@@ -138,6 +215,7 @@ class BlacklistCaseStatus(models.TextChoices):
     REJECTED = 'Rejected'
     EXPIRED = 'Expired'
     REINSTATED = 'Reinstated'
+    REQUALIFIED = 'Requalified'
 
 
 class BlacklistAppealStatus(models.TextChoices):
@@ -243,3 +321,99 @@ class BlacklistAppeal(models.Model):
 
     def __str__(self):
         return f"Appeal {self.id} - {self.vendor} ({self.status})"
+
+
+class OrganizationType(models.TextChoices):
+    GOVERNMENT = 'Government', 'Government'
+    INTERNATIONAL = 'International', 'International'
+    NGO = 'NGO', 'NGO'
+
+
+class Organization(models.Model):
+    name = models.CharField(max_length=255, unique=True)
+    type = models.CharField(max_length=32, choices=OrganizationType.choices)
+    contact_person = models.CharField(max_length=255, blank=True)
+    email = models.EmailField(blank=True)
+    phone = models.CharField(max_length=32, blank=True)
+    address = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['name']
+
+    def __str__(self):
+        return self.name
+
+
+class PlatformConfiguration(models.Model):
+    national_main_program_budget = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    female_target_minimum = models.PositiveIntegerField(default=50)
+    vulnerable_target_minimum = models.PositiveIntegerField(default=30)
+    low_income_target_minimum = models.PositiveIntegerField(default=60)
+    uptime_target = models.PositiveIntegerField(default=99)
+    anomaly_deviation_threshold = models.PositiveIntegerField(default=5)
+    gps_duplicate_radius_m = models.PositiveIntegerField(default=10)
+    gps_verification_max_distance_m = models.PositiveIntegerField(default=50)
+    m2_verification_required_pct = models.PositiveIntegerField(default=80)
+    m3_verification_required_pct = models.PositiveIntegerField(default=100)
+    email_notifications_enabled = models.BooleanField(default=True)
+    sms_notifications_enabled = models.BooleanField(default=False)
+    email_host = models.CharField(max_length=255, blank=True, default='')
+    email_port = models.PositiveIntegerField(default=587)
+    email_use_tls = models.BooleanField(default=True)
+    email_host_user = models.CharField(max_length=255, blank=True, default='')
+    email_host_password = models.CharField(max_length=255, blank=True, default='')
+    default_from_email = models.EmailField(max_length=255, blank=True, default='')
+    max_file_size_mb = models.PositiveIntegerField(default=10)
+    allowed_file_types = models.JSONField(default=list, blank=True)
+    contact_email = models.EmailField(max_length=255, blank=True, default='rbf@energy.gov.ls')
+    contact_phone = models.CharField(max_length=64, blank=True, default='+266 2231 0000')
+    contact_address = models.TextField(blank=True, default='Corner Constitution & Parliament Road, Maseru 100, Lesotho')
+    contact_office_hours = models.CharField(max_length=128, blank=True, default='Mon-Fri, 08:00-17:00 SAST')
+    contact_organisation_name = models.CharField(max_length=255, blank=True, default='RBF Management Team, Ministry of Energy')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Platform Configuration'
+        verbose_name_plural = 'Platform Configuration'
+
+    def __str__(self):
+        return f"Platform Configuration #{self.id}"
+
+
+class PasswordResetRequestStatus(models.TextChoices):
+    PENDING = 'Pending', 'Pending'
+    RESOLVED = 'Resolved', 'Resolved'
+    EXPIRED = 'Expired', 'Expired'
+
+
+class PasswordResetRequest(models.Model):
+    user = models.ForeignKey(User, related_name='password_reset_requests', on_delete=models.CASCADE)
+    contact_info = models.CharField(max_length=255, help_text='Username or email the requester entered.')
+    token = models.CharField(max_length=255, unique=True, blank=True, db_index=True)
+    token_expires_at = models.DateTimeField(null=True, blank=True)
+    status = models.CharField(
+        max_length=16,
+        choices=PasswordResetRequestStatus.choices,
+        default=PasswordResetRequestStatus.PENDING,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    resolved_by = models.ForeignKey(
+        User,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='resolved_password_resets',
+    )
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', 'status']),
+        ]
+
+    def __str__(self):
+        return f"Password reset for {self.user} ({self.status})"

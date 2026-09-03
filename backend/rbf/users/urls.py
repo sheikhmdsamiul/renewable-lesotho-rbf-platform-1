@@ -12,9 +12,17 @@ from .views import (
     BootstrapDemoUsersView,
     VendorBlacklistCaseViewSet,
     VendorPrequalificationViewSet,
+    OrganizationViewSet,
+    PlatformConfigurationView,
+    PlatformConfigurationBoundaryRefreshView,
+    PlatformConfigurationBoundaryUploadView,
+    SystemHealthView,
+    SuperAdminDashboardView,
+    RolePermissionsView,
 )
 
 router = DefaultRouter()
+router.register(r'organizations', OrganizationViewSet, basename='organization')
 router.register(r'prequalifications', VendorPrequalificationViewSet, basename='vendor-prequalification')
 router.register(r'blacklisting-cases', VendorBlacklistCaseViewSet, basename='vendor-blacklisting-case')
 router.register(r'blacklisting-appeals', BlacklistAppealViewSet, basename='vendor-blacklisting-appeal')
@@ -28,5 +36,11 @@ urlpatterns = [
     path('auth/request-otp/', RequestRegistrationOtpView.as_view(), name='request_registration_otp'),
     path('auth/verify-otp/', VerifyRegistrationOtpView.as_view(), name='verify_registration_otp'),
     path('auth/bootstrap-demo-users/', BootstrapDemoUsersView.as_view(), name='bootstrap_demo_users'),
+    path('admin/dashboard/', SuperAdminDashboardView.as_view(), name='super_admin_dashboard'),
+    path('admin/permissions/', RolePermissionsView.as_view(), name='role_permissions'),
+    path('platform-configuration/', PlatformConfigurationView.as_view(), name='platform_configuration'),
+    path('platform-configuration/refresh-boundary/', PlatformConfigurationBoundaryRefreshView.as_view(), name='platform_configuration_refresh_boundary'),
+    path('platform-configuration/upload-boundary/', PlatformConfigurationBoundaryUploadView.as_view(), name='platform_configuration_upload_boundary'),
+    path('system-health/', SystemHealthView.as_view(), name='system_health'),
 ]
 urlpatterns += router.urls

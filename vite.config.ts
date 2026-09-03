@@ -3,10 +3,13 @@ import react from '@vitejs/plugin-react';
 import path from 'path';
 import {defineConfig, loadEnv} from 'vite';
 
-const apiProxyTarget = 'http://127.0.0.1:8000';
+function stripApiSuffix(value: string): string {
+  return value.replace(/\/$/, '').replace(/\/api$/i, '');
+}
 
 export default defineConfig(({mode}) => {
   const env = loadEnv(mode, '.', '');
+  const apiProxyTarget = stripApiSuffix(env.VITE_API_PROXY_TARGET || env.VITE_API_URL || 'http://127.0.0.1:8000');
   return {
     plugins: [react(), tailwindcss()],
     define: {
@@ -26,11 +29,31 @@ export default defineConfig(({mode}) => {
           changeOrigin: true,
           secure: false,
         },
+        '/media': {
+          target: apiProxyTarget,
+          changeOrigin: true,
+          secure: false,
+        },
+        '/public': {
+          target: apiProxyTarget,
+          changeOrigin: true,
+          secure: false,
+        },
       },
     },
     preview: {
       proxy: {
         '/api': {
+          target: apiProxyTarget,
+          changeOrigin: true,
+          secure: false,
+        },
+        '/media': {
+          target: apiProxyTarget,
+          changeOrigin: true,
+          secure: false,
+        },
+        '/public': {
           target: apiProxyTarget,
           changeOrigin: true,
           secure: false,

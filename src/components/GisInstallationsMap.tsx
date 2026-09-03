@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-
-import { fetchMapInstallations } from "../api";
+import { Circle } from "lucide-react";
+import { fetchMapBoundaryGeoJson, fetchMapInstallations } from "../api";
 import { MapInstallationsResponse } from "../types";
 
 declare global {
@@ -80,20 +80,39 @@ function formatUptime(value?: number): string {
   return `${Number(value).toFixed(1)}%`;
 }
 
+function statusLabelFromGisStatus(value?: string): string {
+  if (value === "green") return "Verified";
+  if (value === "red") return "Flagged";
+  return "Pending";
+}
+
 export function GisInstallationsMap({
   projectId,
   showFilters = true,
   height = "500px",
+  emptyStateMessage,
+  onFlagInstallation,
+  refreshKey,
+  defaultDistrict,
+  focusInstallationId,
+  focusRequestKey,
 }: {
   projectId?: string;
   showFilters?: boolean;
   height?: string;
+  emptyStateMessage?: string;
+  onFlagInstallation?: (installation: any) => void;
+  refreshKey?: string | number;
+  defaultDistrict?: string;
+  focusInstallationId?: string;
+  focusRequestKey?: string | number;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<any>(null);
   const boundaryLayerRef = useRef<any>(null);
   const layerControlRef = useRef<any>(null);
   const markerLayersRef = useRef<Record<string, { remove: () => void }> | null>(null);
+  const markerByInstallationIdRef = useRef<Record<string, any>>({});
 
   const [leafletReady, setLeafletReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -103,20 +122,14 @@ export function GisInstallationsMap({
     summary: { total: 0, verified: 0, pending: 0, flagged: 0 },
     truncated: false,
   });
-  const [draftFilters, setDraftFilters] = useState<DraftFilters>({
+  const [appliedFilters, setAppliedFilters] = useState<DraftFilters>(() => ({
     technology: "",
-    district: "",
+    district: defaultDistrict || "",
     household_type: "",
     date_from: "",
     date_to: "",
-  });
-  const [appliedFilters, setAppliedFilters] = useState<DraftFilters>({
-    technology: "",
-    district: "",
-    household_type: "",
-    date_from: "",
-    date_to: "",
-  });
+  }));
+  const [draftFilters, setDraftFilters] = useState<DraftFilters>(appliedFilters);
 
   useEffect(() => {
     let active = true;
@@ -149,14 +162,17 @@ export function GisInstallationsMap({
     };
   }, [leafletReady]);
 
+  // Initial load of installations
+  useEffect(() => {
+    if (!leafletReady) return;
+    console.log("GisInstallationsMap: Loading installations on mount...");
+    loadInstallations(appliedFilters);
+  }, [leafletReady]);
+
   useEffect(() => {
     if (!leafletReady || !mapRef.current || boundaryLayerRef.current) return;
     let cancelled = false;
-    fetch("/public/geojson/lesotho.geojson")
-      .then((response) => {
-        if (!response.ok) throw new Error("Boundary file not found.");
-        return response.json();
-      })
+    fetchMapBoundaryGeoJson()
       .then((feature) => {
         if (cancelled || !mapRef.current) return;
         boundaryLayerRef.current = window.L.geoJSON(feature, {
@@ -180,6 +196,7 @@ export function GisInstallationsMap({
     setLoading(true);
     setError(null);
     try {
+      console.log("GisInstallationsMap: Fetching with filters:", filters, "projectId:", projectId);
       const response = await fetchMapInstallations({
         project_id: projectId,
         technology: filters.technology || undefined,
@@ -188,6 +205,8 @@ export function GisInstallationsMap({
         date_from: filters.date_from || undefined,
         date_to: filters.date_to || undefined,
       });
+      console.log("GisInstallationsMap: Got response:", response);
+      console.log("GisInstallationsMap: Installations count:", response.installations?.length);
       setMapData(response);
     } catch (err: any) {
       setError(String(err?.message || "Could not load map data."));
@@ -198,7 +217,7 @@ export function GisInstallationsMap({
 
   useEffect(() => {
     void loadInstallations(appliedFilters);
-  }, [projectId, appliedFilters]);
+  }, [projectId, appliedFilters, refreshKey]);
 
   useEffect(() => {
     if (!leafletReady || !mapRef.current) return;
@@ -216,6 +235,7 @@ export function GisInstallationsMap({
     const verifiedLayer = L.layerGroup().addTo(mapRef.current);
     const pendingLayer = L.layerGroup().addTo(mapRef.current);
     const flaggedLayer = L.layerGroup().addTo(mapRef.current);
+    markerByInstallationIdRef.current = {};
     markerLayersRef.current = {
       verified: verifiedLayer,
       pending: pendingLayer,
@@ -239,37 +259,57 @@ export function GisInstallationsMap({
         color: "white",
         fillColor,
       });
-      marker.bindPopup(`
-        <div style="min-width:220px;font-family:inherit;">
-          <div style="font-weight:700;margin-bottom:8px;">Installation ID: ${escapeHtml(String(installation.id))}</div>
-          <div style="font-size:12px;line-height:1.5;">
-            <div><strong>Project ID:</strong> ${escapeHtml(installation.projectId || "N/A")}</div>
-            <div><strong>Project Vendor:</strong> ${escapeHtml(installation.vendorName || "N/A")}</div>
-            <div><strong>Technology:</strong> ${escapeHtml(formatTitleCase(installation.technologyType))}</div>
-            <div><strong>Serial Number:</strong> ${escapeHtml(installation.serialNumber || "N/A")}</div>
-            <div><strong>Beneficiary:</strong> ${escapeHtml(installation.beneficiaryName || "N/A")}</div>
-            <div><strong>Household:</strong> ${escapeHtml(formatTitleCase(installation.householdType))}</div>
-            <div><strong>Verification:</strong> ${escapeHtml(formatTitleCase(installation.verificationStatus))}</div>
-            <div><strong>GIS Status:</strong> ${escapeHtml(formatTitleCase(installation.gisStatus))}</div>
-            <div><strong>District:</strong> ${escapeHtml(installation.district || "N/A")}</div>
-            <div><strong>Installed:</strong> ${escapeHtml(formatInstalledDate(installation.installationDate))}</div>
-            <div><strong>Uptime:</strong> ${escapeHtml(formatUptime(installation.uptimePct))}</div>
-          </div>
-          <div style="margin-top:10px;">
-            <a href="/api/projects/installations/${encodeURIComponent(installation.id)}/" target="_blank" rel="noreferrer">[View Full Record &rarr;]</a>
-          </div>
+
+      const popupContent = document.createElement("div");
+      popupContent.style.minWidth = "220px";
+      popupContent.style.fontFamily = "inherit";
+      popupContent.innerHTML = `
+        <div style="font-weight:700;margin-bottom:8px;">${escapeHtml(installation.serialNumber || `INS-${String(installation.id).padStart(3, "0")}`)}</div>
+        <div style="font-size:12px;line-height:1.5;">
+          <div><strong>Beneficiary:</strong> ${escapeHtml(installation.beneficiaryName || "N/A")}</div>
+          <div><strong>Household:</strong> ${escapeHtml(formatTitleCase(installation.householdType))}</div>
+          <div><strong>Technology:</strong> ${escapeHtml(formatTitleCase(installation.technologyType))}</div>
+          <div><strong>Status:</strong> ${escapeHtml(statusLabelFromGisStatus(installation.gisStatus))}</div>
+          <div><strong>Verification:</strong> ${escapeHtml(formatTitleCase(installation.verificationStatus))}</div>
+          <div><strong>Vendor:</strong> ${escapeHtml(installation.vendorName || "N/A")}</div>
+          <div><strong>District:</strong> ${escapeHtml(installation.district || "N/A")}</div>
+          <div><strong>Installed:</strong> ${escapeHtml(formatInstalledDate(installation.installationDate))}</div>
+          <div><strong>Uptime:</strong> ${escapeHtml(formatUptime(installation.uptimePct))}</div>
         </div>
-      `);
+        <div style="margin-top:10px;">
+          <a href="/api/projects/installations/${encodeURIComponent(installation.id)}/" target="_blank" rel="noreferrer">View Details</a>
+        </div>
+      `;
+
+      if (onFlagInstallation) {
+        console.log("Adding flag button for installation:", installation.id, "onFlagInstallation exists:", typeof onFlagInstallation);
+        const flagButton = document.createElement("button");
+        flagButton.textContent = "Flag This Installation";
+        flagButton.style.marginTop = "10px";
+        flagButton.style.padding = "6px 12px";
+        flagButton.style.backgroundColor = "#F59E0B";
+        flagButton.style.color = "white";
+        flagButton.style.border = "none";
+        flagButton.style.borderRadius = "6px";
+        flagButton.style.cursor = "pointer";
+        flagButton.style.fontSize = "12px";
+        flagButton.style.fontWeight = "600";
+        flagButton.onclick = () => onFlagInstallation(installation);
+        popupContent.appendChild(flagButton);
+      }
+
+      marker.bindPopup(popupContent);
       marker.addTo(targetLayer);
+      markerByInstallationIdRef.current[String(installation.id)] = marker;
       bounds.push([installation.latitude, installation.longitude]);
     });
 
     layerControlRef.current = L.control.layers(
       {},
       {
-        [`✅ Verified (${mapData.summary.verified})`]: verifiedLayer,
-        [`✅ Pending (${mapData.summary.pending})`]: pendingLayer,
-        [`✅ Flagged (${mapData.summary.flagged})`]: flaggedLayer,
+        [`✓ Verified (${mapData.summary.verified})`]: verifiedLayer,
+        [`◉ Pending (${mapData.summary.pending})`]: pendingLayer,
+        [`✗ Flagged (${mapData.summary.flagged})`]: flaggedLayer,
       },
       { collapsed: false, position: "topright" },
     ).addTo(mapRef.current);
@@ -280,6 +320,17 @@ export function GisInstallationsMap({
       mapRef.current.setView([-29.6, 28.2], 8);
     }
   }, [leafletReady, mapData]);
+
+  useEffect(() => {
+    if (!leafletReady || !mapRef.current || !focusInstallationId) return;
+    const marker = markerByInstallationIdRef.current[String(focusInstallationId)];
+    if (!marker) return;
+    const latLng = marker.getLatLng();
+    if (latLng) {
+      mapRef.current.setView(latLng, Math.max(mapRef.current.getZoom(), 14), { animate: true });
+    }
+    marker.openPopup();
+  }, [leafletReady, mapData.installations, focusInstallationId, focusRequestKey]);
 
   const technologyOptions = useMemo(
     () => Array.from(new Set(mapData.installations.map((item) => item.technologyType).filter(Boolean))).sort(),
@@ -362,11 +413,11 @@ export function GisInstallationsMap({
         <div>
           <p className="font-semibold text-slate-900">Showing {mapData.summary.total} installations</p>
           <p className="text-slate-500">
-            <span className="font-semibold text-[#1D9E75]">🟢 {mapData.summary.verified} Verified</span>
+            <span className="font-semibold text-[#1D9E75] flex items-center gap-1"><Circle size={10} fill="#1D9E75" stroke="#1D9E75" /> {mapData.summary.verified} Verified</span>
             {"  "}
-            <span className="font-semibold text-[#BA7517]">🟡 {mapData.summary.pending} Pending</span>
+            <span className="font-semibold text-[#BA7517] flex items-center gap-1"><Circle size={10} fill="#BA7517" stroke="#BA7517" /> {mapData.summary.pending} Pending</span>
             {"  "}
-            <span className="font-semibold text-[#A32D2D]">🔴 {mapData.summary.flagged} Flagged</span>
+            <span className="font-semibold text-[#A32D2D] flex items-center gap-1"><Circle size={10} fill="#A32D2D" stroke="#A32D2D" /> {mapData.summary.flagged} Flagged</span>
           </p>
         </div>
         {mapData.truncated && (
@@ -401,7 +452,11 @@ export function GisInstallationsMap({
           <div className="absolute inset-0 z-[400] flex items-center justify-center bg-white/55">
             <div className="rounded-2xl bg-white px-6 py-4 text-center shadow-lg">
               <p className="text-base font-semibold text-slate-900">No installations found</p>
-              <p className="text-sm text-slate-500">No installations found for the selected filters</p>
+              <p className="text-sm text-slate-500">
+                {emptyStateMessage || (projectId
+                  ? "No installations submitted yet for this project. Submit your first installation to see it on the map."
+                  : "No installations found for the selected filters.")}
+              </p>
             </div>
           </div>
         )}

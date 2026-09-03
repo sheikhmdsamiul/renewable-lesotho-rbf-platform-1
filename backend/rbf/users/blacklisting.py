@@ -122,7 +122,15 @@ def audit_related_vendor_activity(vendor: User, actor: User | None = None) -> di
     related_claim_ids = list(
         PaymentClaim.objects.filter(
             project_id__in=related_project_ids,
-            status__in=[PaymentClaimStatus.PENDING, PaymentClaimStatus.VERIFIED, PaymentClaimStatus.APPROVED],
+            status__in=[
+                PaymentClaimStatus.SUBMITTED,
+                PaymentClaimStatus.RMT_APPROVED,
+                PaymentClaimStatus.TAC_ENDORSED,
+                PaymentClaimStatus.PSC_APPROVED,
+                PaymentClaimStatus.LEGACY_PENDING,
+                PaymentClaimStatus.LEGACY_VERIFIED,
+                PaymentClaimStatus.LEGACY_APPROVED,
+            ],
         ).values_list('id', flat=True)
     )
     related_task_ids = list(
@@ -230,7 +238,15 @@ def apply_blacklist_confirmation(case: VendorBlacklistCase, actor: User | None =
     held_claim_ids = list(
         PaymentClaim.objects.filter(
             vendor=vendor,
-            status__in=[PaymentClaimStatus.PENDING, PaymentClaimStatus.VERIFIED, PaymentClaimStatus.APPROVED],
+            status__in=[
+                PaymentClaimStatus.SUBMITTED,
+                PaymentClaimStatus.RMT_APPROVED,
+                PaymentClaimStatus.TAC_ENDORSED,
+                PaymentClaimStatus.PSC_APPROVED,
+                PaymentClaimStatus.LEGACY_PENDING,
+                PaymentClaimStatus.LEGACY_VERIFIED,
+                PaymentClaimStatus.LEGACY_APPROVED,
+            ],
         ).values_list('id', flat=True)
     )
     if held_claim_ids:

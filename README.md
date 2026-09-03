@@ -4,6 +4,12 @@ This repository contains:
 - Frontend: React + Vite (`src/`)
 - Backend: Django + DRF (`backend/`)
 
+## Test Guides
+
+- Project implementation flow: [`PROJECT_E2E_TEST_RUNBOOK.md`](./PROJECT_E2E_TEST_RUNBOOK.md)
+- Tender flow quick reference: [`QUICK_TEST_REFERENCE.md`](./QUICK_TEST_REFERENCE.md)
+- Tender flow detailed guide: [`MANUAL_TESTING_GUIDE.md`](./MANUAL_TESTING_GUIDE.md)
+
 ## Local Run
 
 Backend (Docker):

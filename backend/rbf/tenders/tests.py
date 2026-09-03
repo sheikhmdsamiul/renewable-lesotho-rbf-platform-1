@@ -17,6 +17,7 @@ from rbf.projects.models import AuditLog, Milestone, Project, ProjectStatus
 from rbf.users.models import PrequalificationStatus, User, UserRole, VendorPrequalification
 
 from .models import (
+    BidStage,
     BidStatus,
     ContractSignatureStatus,
     ContractStatus,
@@ -30,6 +31,12 @@ from .models import (
 )
 from .pba_pdf import _annex_section_html, _main_agreement_html, _pdfa_merge, generate_contract_pdf
 from .serializers import TenderBidSiteSerializer, TenderContractSerializer
+
+
+def _close_tender_for_evaluation(tender):
+    """Simulate the submission deadline passing so evaluation may begin."""
+    tender.status = TenderStatus.CLOSED
+    tender.save(update_fields=['status'])
 
 
 class TenderApiTests(APITestCase):
@@ -68,26 +75,40 @@ class TenderApiTests(APITestCase):
             "department": "RBF",
             "category": "Mini-Grid",
             "status": "Draft",
-            "deadline": timezone.now().isoformat(),
-            "application_type": None,
-            "bidding_currency": None,
-            "last_date_security": "",
+            "procurement_method": "National",
+            "address_for_document": "Addr",
+            "address_for_security": "Addr",
+            "place_for_opening": "Maseru",
+            "bidders_eligibility": "All",
+            "time_for_completion": "12 months",
+            "invited_by": "RBF",
+            "bidding_currency": "LSL",
+            "instruction": "Read carefully. " * 10,
+            "contact_details": "123",
+            "target_site_type": "Community",
+            "application_type": "Application Window",
             "bidders_schedule_purchase": None,
             "tender_security_required": None,
             "is_verified": None,
-            "technology_types": None,
+            "technology_types": ["SHS"],
+            "target_districts": ["Maseru"],
+            "procurement_workflow": "sequential",
+            "eoi_deadline": (timezone.now() + timedelta(days=3)).isoformat(),
+            "technical_deadline": (timezone.now() + timedelta(days=6)).isoformat(),
+            "financial_deadline": (timezone.now() + timedelta(days=9)).isoformat(),
         }
 
         response = self.client.post("/api/tenders/", payload, format="json")
 
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(response.data["application_type"], "")
-        self.assertEqual(response.data["bidding_currency"], "")
-        self.assertIsNone(response.data["last_date_security"])
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        self.assertEqual(response.data["application_type"], "Application Window")
+        self.assertEqual(response.data["bidding_currency"], "LSL")
         self.assertFalse(response.data["bidders_schedule_purchase"])
         self.assertFalse(response.data["tender_security_required"])
         self.assertFalse(response.data["is_verified"])
-        self.assertEqual(response.data["technology_types"], [])
+        self.assertEqual(response.data["technology_types"], ["SHS"])
+        self.assertIsNotNone(response.data["eoi_deadline"])
+        self.assertIsNotNone(response.data["deadline"])
 
     @override_settings(API_REQUIRE_AUTH=True)
     def test_create_tender_requires_auth_when_production_auth_enabled(self):
@@ -153,7 +174,16 @@ class TenderApiTests(APITestCase):
         self.assertEqual(verify_response.status_code, status.HTTP_200_OK)
         self.assertTrue(verify_response.data["is_verified"])
 
+        request_response = self.client.post(f"/api/tenders/{tender.id}/request_publish_approval/", {}, format="json")
+        self.assertEqual(request_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(request_response.data["publish_approval_status"], "pending")
+
+        approve_response = self.client.post(f"/api/tenders/{tender.id}/approve_publish/", {}, format="json")
+        self.assertEqual(approve_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(approve_response.data["publish_approval_status"], "approved")
+
         publish_response = self.client.post(f"/api/tenders/{tender.id}/publish/", {}, format="json")
+
         self.assertEqual(publish_response.status_code, status.HTTP_200_OK)
         self.assertEqual(publish_response.data["status"], TenderStatus.PUBLISHED)
 
@@ -168,9 +198,10 @@ class TenderApiTests(APITestCase):
         )
 
         self.assertEqual(award_response.status_code, status.HTTP_200_OK)
-        self.assertEqual(award_response.data["status"], TenderStatus.PUBLISHED)
+        self.assertEqual(award_response.data["status"], TenderStatus.STANDSTILL)
 
         tender.refresh_from_db()
+        self.assertEqual(tender.status, TenderStatus.STANDSTILL)
         self.assertEqual(str(tender.intent_to_award_bid_id), str(bid.id))
         self.assertIsNotNone(tender.cooling_off_until)
         mock_generate_contract_pdf.assert_not_called()
@@ -193,7 +224,190 @@ class TenderApiTests(APITestCase):
         contract = TenderContract.objects.get(tender=tender, vendor_id=str(vendor.id))
         self.assertEqual(contract.status, ContractStatus.GENERATED)
         self.assertEqual(contract.bid_id, bid.id)
+        self.assertIsNone(tender.cooling_off_until)
         mock_generate_contract_pdf.assert_called_once()
+
+    def test_award_changes_status_to_standstill(self):
+        self.client.force_authenticate(self.admin_user)
+        vendor = User.objects.create_user(
+            username="standstill_test_vendor",
+            password="securePass123",
+            role=UserRole.VENDOR,
+            status="Active",
+            full_name="Standstill Test Vendor",
+        )
+        tender = Tender.objects.create(
+            reference_number="STNDST-001",
+            name="Standstill Test",
+            department="DoE",
+            category="SHS",
+            status=TenderStatus.EVALUATION,
+            deadline=timezone.now(),
+            technology_types=["Solar Home System"],
+        )
+        bid = TenderBid.objects.create(
+            tender=tender,
+            vendor_id=str(vendor.id),
+            vendor_name=vendor.full_name,
+            bid_amount=100000,
+            status=BidStatus.SUBMITTED,
+        )
+        TenderBidEvaluation.objects.create(
+            bid=bid,
+            evaluator=self.admin_user,
+            status=EvaluationStatus.SCORED,
+            technical_score=18,
+            feasibility_score=14,
+            kpi_score=9,
+            gender_score=8,
+            environmental_score=4,
+            om_score=9,
+            financial_score=74,
+            total_score=62,
+        )
+
+        response = self.client.post(
+            f"/api/tenders/{tender.id}/award/",
+            {"bid_id": str(bid.id), "awarded_vendor_id": str(vendor.id), "awarded_vendor_name": vendor.full_name},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], TenderStatus.STANDSTILL)
+        tender.refresh_from_db()
+        self.assertEqual(tender.status, TenderStatus.STANDSTILL)
+        self.assertIsNotNone(tender.cooling_off_until)
+
+    def test_confirm_award_rejects_disputed_status(self):
+        self.client.force_authenticate(self.admin_user)
+        vendor = User.objects.create_user(
+            username="disputed_confirm_vendor",
+            password="securePass123",
+            role=UserRole.VENDOR,
+            status="Active",
+            full_name="Disputed Confirm Vendor",
+        )
+        tender = Tender.objects.create(
+            reference_number="DSP-CNF-001",
+            name="Disputed Confirm",
+            department="DoE",
+            category="SHS",
+            status=TenderStatus.DISPUTED,
+            deadline=timezone.now(),
+            technology_types=["Solar Home System"],
+            intent_to_award_bid=None,
+            cooling_off_until=timezone.now() - timedelta(days=1),
+        )
+
+        response = self.client.post(
+            f"/api/tenders/{tender.id}/confirm_award/",
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("dispute", response.data["detail"].lower())
+
+    def test_confirm_award_rejects_cooling_off_not_expired(self):
+        self.client.force_authenticate(self.admin_user)
+        vendor = User.objects.create_user(
+            username="cooling_not_expired",
+            password="securePass123",
+            role=UserRole.VENDOR,
+            status="Active",
+            full_name="Cooling Not Expired",
+        )
+        tender = Tender.objects.create(
+            reference_number="COOL-001",
+            name="Cooling Not Expired",
+            department="DoE",
+            category="SHS",
+            status=TenderStatus.STANDSTILL,
+            deadline=timezone.now(),
+            technology_types=["Solar Home System"],
+        )
+        bid = TenderBid.objects.create(
+            tender=tender,
+            vendor_id=str(vendor.id),
+            vendor_name=vendor.full_name,
+            bid_amount=100000,
+            status=BidStatus.SUBMITTED,
+        )
+        tender.intent_to_award_bid = bid
+        tender.cooling_off_until = timezone.now() + timedelta(days=7)
+        tender.save()
+
+        response = self.client.post(
+            f"/api/tenders/{tender.id}/confirm_award/",
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("cooling-off", response.data["detail"].lower())
+
+    def test_confirm_award_rejects_already_awarded(self):
+        self.client.force_authenticate(self.admin_user)
+        tender = Tender.objects.create(
+            reference_number="ALR-AWD-001",
+            name="Already Awarded",
+            department="DoE",
+            category="SHS",
+            status=TenderStatus.AWARDED,
+            deadline=timezone.now(),
+            technology_types=["Solar Home System"],
+        )
+
+        response = self.client.post(
+            f"/api/tenders/{tender.id}/confirm_award/",
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("already been awarded", response.data["detail"].lower())
+
+    def test_confirm_award_rejects_no_intent(self):
+        self.client.force_authenticate(self.admin_user)
+        tender = Tender.objects.create(
+            reference_number="NO-INT-001",
+            name="No Intent",
+            department="DoE",
+            category="SHS",
+            status=TenderStatus.STANDSTILL,
+            deadline=timezone.now(),
+            technology_types=["Solar Home System"],
+        )
+
+        response = self.client.post(
+            f"/api/tenders/{tender.id}/confirm_award/",
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("intent to award must be issued", response.data["detail"].lower())
+
+    def test_confirm_award_rejects_closed_tender(self):
+        self.client.force_authenticate(self.admin_user)
+        tender = Tender.objects.create(
+            reference_number="CLS-CNF-001",
+            name="Closed Tender",
+            department="DoE",
+            category="SHS",
+            status=TenderStatus.CLOSED,
+            deadline=timezone.now(),
+            technology_types=["Solar Home System"],
+        )
+
+        response = self.client.post(
+            f"/api/tenders/{tender.id}/confirm_award/",
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("closed tender", response.data["detail"].lower())
 
     def test_award_ranking_recommends_best_value_not_lowest_price(self):
         self.client.force_authenticate(self.admin_user)
@@ -390,7 +604,7 @@ class TenderBidSubmissionTests(APITestCase):
             category="SHS",
             status=TenderStatus.PUBLISHED,
             deadline=timezone.now() + timedelta(days=7),
-            last_date_submission=timezone.now() + timedelta(days=7),
+            eoi_deadline=timezone.now() + timedelta(days=7),
             stage_type="pre_qualification",
             technology_types=["SHS"],
         )
@@ -401,7 +615,7 @@ class TenderBidSubmissionTests(APITestCase):
             category="SHS",
             status=TenderStatus.PUBLISHED,
             deadline=timezone.now() + timedelta(days=7),
-            last_date_submission=timezone.now() + timedelta(days=7),
+            eoi_deadline=timezone.now() + timedelta(days=7),
             stage_type="site_specific",
             technology_types=["SHS"],
         )
@@ -416,15 +630,114 @@ class TenderBidSubmissionTests(APITestCase):
             "warranty_period": "24",
         }
 
+    def _eoi_upload(self, name):
+        return SimpleUploadedFile(name, b"%PDF-1.4 fake", content_type="application/pdf")
+
+    def _eoi_fields(self):
+        return {
+            "eoi_narrative": "Expression of interest for community clean energy installations. " * 16,
+            "company_credentials_file": self._eoi_upload("credentials.pdf"),
+            "financial_standing_file": self._eoi_upload("standing.pdf"),
+            "technical_experience_file": self._eoi_upload("experience.pdf"),
+            "track_record_file": self._eoi_upload("track.pdf"),
+        }
+
+    def _valid_eoi_payload(self, **overrides):
+        payload = {
+            "tender": str(self.prequal_tender.id),
+            "bid_stage": "eoi",
+            "status": BidStatus.SUBMITTED,
+            **self._eoi_fields(),
+        }
+        payload.update(overrides)
+        return payload
+
+    def _valid_technical_payload(self, **overrides):
+        payload = {
+            "tender": str(self.site_specific_tender.id),
+            "bid_stage": "technical",
+            "bid_amount": "180000.00",
+            **self._submission_basics(),
+            "technical_proposal": "Technical approach narrative. " * 20,
+            "financial_proposal": "Financial approach narrative. " * 20,
+            "system_configuration": json.dumps({
+                "technology_type": "SHS",
+                "rated_power_w": 250,
+                "battery_capacity_wh": 1200,
+                "pv_panel_size_w": 300,
+                "inverter_type": "Hybrid",
+            }),
+            "boq_items": json.dumps([
+                {"item_number": 1, "description": "Solar kit", "qty": 100, "unit": "set", "unit_price": 1800, "total": 180000},
+            ]),
+            "om_strategy_summary": "O&M strategy covering preventative maintenance and local technicians. " * 6,
+            "female_target_pct": 55,
+            "vulnerable_target_pct": 35,
+            "low_income_target_pct": 60,
+            "inclusion_commitment_confirmed": "true",
+            "sites": json.dumps([
+                {
+                    "site_name": "Roma Cluster",
+                    "district": "Maseru",
+                    "village_sub_district": "Roma",
+                    "latitude": -29.45,
+                    "longitude": 27.71,
+                    "number_of_households": 40,
+                    "target_beneficiary_type": "female_headed",
+                    "estimated_energy_demand_kwh_month": 450,
+                    "road_access_available": True,
+                    "notes": "Good road access.",
+                }
+            ]),
+            "technical_proposal_file": self._eoi_upload("technical.pdf"),
+            "financial_proposal_file": self._eoi_upload("financial.pdf"),
+            "boq_file": self._eoi_upload("boq.xlsx"),
+            "gender_action_plan_file": self._eoi_upload("gap.pdf"),
+            "implementation_plan_file": self._eoi_upload("implementation.pdf"),
+            "om_plan_file": self._eoi_upload("om.pdf"),
+            "status": BidStatus.SUBMITTED,
+        }
+        payload.update(overrides)
+        return payload
+
+    def _create_technical_draft(self, tender=None):
+        """Create a valid EOI bid, accept it as RMT, return the unlocked technical draft."""
+        tender = tender or self.site_specific_tender
+        self.client.force_authenticate(self.vendor)
+        resp = self.client.post(
+            "/api/tender-bids/",
+            {
+                "tender": str(tender.id),
+                "bid_stage": "eoi",
+                "eoi_narrative": "Expression of interest for community clean energy installations. " * 16,
+                "company_credentials_file": self._eoi_upload("credentials.pdf"),
+                "financial_standing_file": self._eoi_upload("standing.pdf"),
+                "technical_experience_file": self._eoi_upload("experience.pdf"),
+                "track_record_file": self._eoi_upload("track.pdf"),
+                "status": BidStatus.SUBMITTED,
+            },
+            format="multipart",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.client.force_authenticate(self.rmt_user)
+        accept = self.client.post(f"/api/tender-bids/{resp.data['id']}/accept/", {}, format="json")
+        self.assertEqual(accept.status_code, status.HTTP_200_OK, accept.data)
+        self.client.force_authenticate(self.vendor)
+        draft = TenderBid.objects.filter(
+            tender=tender,
+            vendor_id=str(self.vendor.id),
+            bid_stage="technical",
+            status=BidStatus.DRAFT,
+        ).first()
+        self.assertIsNotNone(draft)
+        return draft
+
     def test_prequalification_submission_uses_tender_stage_and_records_audit(self):
         response = self.client.post(
             "/api/tender-bids/",
             {
-                "tender": str(self.prequal_tender.id),
+                **self._valid_eoi_payload(),
                 "bid_amount": "150000.00",
-                **self._submission_basics(),
-                "stage": "Site-Specific",
-                "concept_note": "Community-focused clean energy rollout for underserved households. " * 12,
                 "system_configuration": json.dumps({
                     "technology_type": "SHS",
                     "rated_power_w": 250,
@@ -432,41 +745,17 @@ class TenderBidSubmissionTests(APITestCase):
                     "pv_panel_size_w": 300,
                     "inverter_type": "Hybrid",
                 }),
-                "boq_items": json.dumps([
-                    {"item_number": 1, "description": "Solar kit", "qty": 100, "unit": "set", "unit_price": 1200, "total": 120000},
-                ]),
-                "female_target_pct": 55,
-                "vulnerable_target_pct": 35,
-                "low_income_target_pct": 60,
-                "inclusion_commitment_confirmed": "true",
-                "sites": json.dumps([
-                    {
-                        "site_name": "Ha Thetsane Cluster",
-                        "district": "Maseru",
-                        "village_sub_district": "Ha Thetsane",
-                        "latitude": -29.3611,
-                        "longitude": 27.5144,
-                        "number_of_households": 85,
-                        "target_beneficiary_type": "female_headed",
-                        "estimated_energy_demand_kwh_month": 450,
-                        "road_access_available": True,
-                        "notes": "Good road access.",
-                    }
-                ]),
-                "status": BidStatus.SUBMITTED,
             },
             format="multipart",
         )
 
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
         bid = TenderBid.objects.get(id=response.data["id"])
-        self.assertEqual(bid.stage, "Stage 1: Concept")
-        self.assertEqual(response.data["stage"], "Stage 1: Concept")
-        self.assertEqual(response.data["stage_badge"], "Stage 1: Concept")
+        self.assertEqual(bid.bid_stage, BidStage.EOI)
+        self.assertEqual(response.data["stage"], "EOI")
+        self.assertEqual(response.data["stage_key"], "eoi")
         self.assertEqual(response.data["technology_type"], "SHS")
         self.assertEqual(bid.system_configuration["rated_power_w"], 250)
-        self.assertEqual(len(bid.boq_items), 1)
-        self.assertEqual(bid.sites.count(), 1)
         self.assertTrue(
             AuditLog.objects.filter(
                 action="bid_submitted",
@@ -475,30 +764,13 @@ class TenderBidSubmissionTests(APITestCase):
         )
 
     def test_site_specific_submission_requires_all_documents_and_summaries(self):
-        response = self.client.post(
-            "/api/tender-bids/",
-            {
-                "tender": str(self.site_specific_tender.id),
-                "bid_amount": "180000.00",
-                **self._submission_basics(),
-                "concept_note": "",
-                "technical_proposal": "",
-                "financial_proposal": "",
-                "female_target_pct": 50,
-                "vulnerable_target_pct": 30,
-                "low_income_target_pct": 60,
-                "inclusion_commitment_confirmed": "true",
-                "sites": json.dumps([
-                    {
-                        "site_name": "Roma Cluster",
-                        "district": "Maseru",
-                        "latitude": -29.45,
-                        "longitude": 27.71,
-                        "number_of_households": 40,
-                    }
-                ]),
-                "status": BidStatus.SUBMITTED,
-            },
+        draft = self._create_technical_draft()
+        payload = self._valid_technical_payload()
+        for key in ("technical_proposal_file", "financial_proposal_file", "boq_file"):
+            payload.pop(key, None)
+        response = self.client.patch(
+            f"/api/tender-bids/{draft.id}/",
+            payload,
             format="multipart",
         )
 
@@ -506,79 +778,69 @@ class TenderBidSubmissionTests(APITestCase):
         self.assertIn("technical_proposal_file", response.data)
         self.assertIn("financial_proposal_file", response.data)
         self.assertIn("boq_file", response.data)
-        self.assertIn("gender_action_plan_file", response.data)
-        self.assertIn("implementation_plan_file", response.data)
 
-    def test_stage_one_submission_requires_inclusion_confirmation_only(self):
+    def test_stage_one_submission_does_not_require_inclusion_confirmation_or_sites(self):
+        payload = self._valid_eoi_payload(
+            inclusion_commitment_confirmed="false",
+            sites=json.dumps([]),
+        )
         response = self.client.post(
             "/api/tender-bids/",
-            {
-                "tender": str(self.prequal_tender.id),
-                "bid_amount": "125000.00",
-                **self._submission_basics(),
-                "concept_note": "Implementation strategy " * 30,
-                "female_target_pct": 50,
-                "vulnerable_target_pct": 30,
-                "low_income_target_pct": 60,
-                "inclusion_commitment_confirmed": "false",
-                "sites": json.dumps([
-                    {
-                        "site_name": "Pilot Village",
-                        "district": "Maseru",
-                        "number_of_households": 25,
-                    }
-                ]),
-                "status": BidStatus.SUBMITTED,
-            },
+            payload,
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        self.assertEqual(response.data["stage_key"], BidStage.EOI)
+        self.assertEqual(response.data["inclusion_commitment_confirmed"], False)
+        self.assertEqual(response.data["sites"], [])
+
+    def test_stage_one_submission_requires_minimum_concept_note_characters(self):
+        response = self.client.post(
+            "/api/tender-bids/",
+            self._valid_eoi_payload(eoi_narrative="Too short"),
             format="multipart",
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("inclusion_commitment_confirmed", response.data)
-        self.assertNotIn("sites", response.data)
+        self.assertIn("eoi_narrative", response.data)
 
-    def test_stage_one_submission_requires_minimum_concept_note_words(self):
+    def test_stage_one_submission_rejects_concept_note_under_200_characters(self):
         response = self.client.post(
             "/api/tender-bids/",
-            {
-                "tender": str(self.prequal_tender.id),
-                "bid_amount": "125000.00",
-                **self._submission_basics(),
-                "concept_note": "Too short",
-                "female_target_pct": 50,
-                "vulnerable_target_pct": 30,
-                "low_income_target_pct": 60,
-                "inclusion_commitment_confirmed": "true",
-                "status": BidStatus.SUBMITTED,
-            },
+            self._valid_eoi_payload(eoi_narrative="A" * 199),
             format="multipart",
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("concept_note", response.data)
+        self.assertIn("eoi_narrative", response.data)
+
+    def test_stage_one_submission_accepts_concept_note_at_200_characters(self):
+        response = self.client.post(
+            "/api/tender-bids/",
+            self._valid_eoi_payload(eoi_narrative="A" * 200),
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
 
     def test_site_specific_submission_rejects_coordinates_outside_lesotho(self):
-        response = self.client.post(
-            "/api/tender-bids/",
-            {
-                "tender": str(self.site_specific_tender.id),
-                "bid_amount": "125000.00",
-                **self._submission_basics(),
-                "female_target_pct": 50,
-                "vulnerable_target_pct": 30,
-                "low_income_target_pct": 60,
-                "inclusion_commitment_confirmed": "true",
-                "sites": json.dumps([
-                    {
-                        "site_name": "Outside Lesotho",
-                        "district": "Maseru",
-                        "latitude": -26.2041,
-                        "longitude": 28.0473,
-                        "number_of_households": 15,
-                    }
-                ]),
-                "status": BidStatus.SUBMITTED,
-            },
+        draft = self._create_technical_draft()
+        payload = self._valid_technical_payload(
+            sites=json.dumps([
+                {
+                    "site_name": "Outside Lesotho",
+                    "district": "Maseru",
+                    "latitude": -26.2041,
+                    "longitude": 28.0473,
+                    "target_beneficiary_type": "female_headed",
+                    "number_of_households": 15,
+                }
+            ]),
+        )
+        response = self.client.patch(
+            f"/api/tender-bids/{draft.id}/",
+            payload,
             format="multipart",
         )
 
@@ -586,32 +848,10 @@ class TenderBidSubmissionTests(APITestCase):
         self.assertIn("sites", response.data)
 
     def test_site_specific_submission_rejects_tier_above_prequalification(self):
-        response = self.client.post(
-            "/api/tender-bids/",
-            {
-                "tender": str(self.site_specific_tender.id),
-                "bid_amount": "180000.00",
-                "subsidy_requested": "100000.00",
-                "device_brand_model": "SunPower SPX-200",
-                "tech_tier": "Tier 4",
-                "energy_target": "450.00",
-                "warranty_period": "24",
-                "female_target_pct": 55,
-                "vulnerable_target_pct": 35,
-                "low_income_target_pct": 60,
-                "inclusion_commitment_confirmed": "true",
-                "sites": json.dumps([
-                    {
-                        "site_name": "Roma Cluster",
-                        "district": "Maseru",
-                        "latitude": -29.45,
-                        "longitude": 27.71,
-                        "number_of_households": 40,
-                        "target_technology": "SHS",
-                    }
-                ]),
-                "status": BidStatus.SUBMITTED,
-            },
+        draft = self._create_technical_draft()
+        response = self.client.patch(
+            f"/api/tender-bids/{draft.id}/",
+            self._valid_technical_payload(tech_tier="Tier 4"),
             format="multipart",
         )
 
@@ -649,6 +889,7 @@ class TenderBidSubmissionTests(APITestCase):
             total_score=60,
         )
 
+        _close_tender_for_evaluation(self.site_specific_tender)
         self.client.force_authenticate(self.rmt_user)
         response = self.client.post(
             "/api/tender-bid-evaluations/",
@@ -660,6 +901,8 @@ class TenderBidSubmissionTests(APITestCase):
         self.assertIn("financial_score", response.data)
 
     def test_rmt_financial_evaluation_is_allowed_after_technical_threshold_pass(self):
+        self.site_specific_tender.technical_threshold = 70
+        self.site_specific_tender.save(update_fields=["technical_threshold"])
         bid = TenderBid.objects.create(
             tender=self.site_specific_tender,
             vendor_id=str(self.vendor.id),
@@ -667,6 +910,7 @@ class TenderBidSubmissionTests(APITestCase):
             vendor_email=self.vendor.email,
             bid_amount=180000,
             subsidy_requested=100000,
+            bid_stage="technical",
             status=BidStatus.SUBMITTED,
         )
         tac_user = self.vendor.__class__.objects.create_user(
@@ -681,25 +925,34 @@ class TenderBidSubmissionTests(APITestCase):
             bid=bid,
             evaluator=tac_user,
             status=EvaluationStatus.SCORED,
-            technical_score=80,
-            feasibility_score=80,
-            kpi_score=80,
-            gender_score=80,
-            environmental_score=80,
-            om_score=80,
-            inclusivity_score=80,
-            total_score=80,
+            technical_score=20,
+            feasibility_score=15,
+            kpi_score=10,
+            gender_score=10,
+            environmental_score=5,
+            om_score=10,
+            inclusivity_score=0,
+            total_score=70,
         )
 
+        _close_tender_for_evaluation(self.site_specific_tender)
         self.client.force_authenticate(self.rmt_user)
         response = self.client.post(
             "/api/tender-bid-evaluations/",
-            {"bid": str(bid.id), "financial_score": 85, "comments": "Financial review complete."},
+            {
+                "bid": str(bid.id),
+                "technical_score": 10,
+                "feasibility_score": 10,
+                "kpi_score": 5,
+                "gender_score": 5,
+                "financial_score": 30,
+                "comments": "Financial review complete.",
+            },
             format="json",
         )
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(response.data["financial_score"], 85)
+        self.assertEqual(response.data["financial_score"], 30)
 
     def test_rmt_can_issue_intent_to_award_for_stage_two_recommended_winner_after_both_evaluations(self):
         competitor = User.objects.create_user(
@@ -828,7 +1081,6 @@ class TenderBidSubmissionTests(APITestCase):
         self.client.force_authenticate(self.rmt_user)
 
         response = self.client.post(f"/api/tender-bids/{bid.id}/accept/", {}, format="json")
-
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         bid.refresh_from_db()
         self.assertEqual(bid.status, BidStatus.ACCEPTED)
@@ -889,6 +1141,308 @@ class TenderBidSubmissionTests(APITestCase):
         self.assertEqual(bid.status, BidStatus.REJECTED)
         self.assertEqual(bid.rejection_reason, "The submission does not meet the Stage 1 threshold.")
 
+    def test_stage_one_shortlist_is_allowed_while_tender_is_published(self):
+        bid = TenderBid.objects.create(
+            tender=self.prequal_tender,
+            vendor_id=str(self.vendor.id),
+            vendor_name=self.vendor.full_name,
+            vendor_email=self.vendor.email,
+            bid_amount=150000,
+            subsidy_requested=100000,
+            concept_note="Implementation strategy " * 30,
+            status=BidStatus.SUBMITTED,
+        )
+        self.client.force_authenticate(self.rmt_user)
+
+        response = self.client.post(f"/api/tender-bids/{bid.id}/accept/", {}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        bid.refresh_from_db()
+        self.assertEqual(bid.status, BidStatus.ACCEPTED)
+        self.prequal_tender.refresh_from_db()
+        self.assertEqual(self.prequal_tender.status, TenderStatus.PUBLISHED)
+        self.assertTrue(
+            TenderBid.objects.filter(
+                tender=self.prequal_tender,
+                vendor_id=str(self.vendor.id),
+                stage_two_unlocked=True,
+                status=BidStatus.DRAFT,
+            ).exclude(id=bid.id).exists()
+        )
+
+    def test_technical_and_financial_evaluation_is_blocked_until_tender_is_closed(self):
+        bid = TenderBid.objects.create(
+            tender=self.site_specific_tender,
+            vendor_id=str(self.vendor.id),
+            vendor_name=self.vendor.full_name,
+            vendor_email=self.vendor.email,
+            bid_amount=180000,
+            subsidy_requested=100000,
+            bid_stage="technical",
+            status=BidStatus.SUBMITTED,
+            financial_sealed=False,
+        )
+        tac_user = User.objects.create_user(
+            username="tac_blocked",
+            password="securePass123",
+            role=UserRole.TAC,
+            status="Active",
+            full_name="TAC Blocked",
+            email="tac-blocked@example.com",
+        )
+
+        self.client.force_authenticate(tac_user)
+        technical_response = self.client.post(
+            "/api/tender-bid-evaluations/",
+            {
+                "bid": str(bid.id),
+                "technical_score": 16,
+                "feasibility_score": 12,
+                "kpi_score": 8,
+                "gender_score": 7,
+                "environmental_score": 4,
+                "om_score": 8,
+                "inclusivity_score": 0,
+                "comments": "Technical score while published.",
+            },
+            format="json",
+        )
+        self.assertEqual(technical_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("detail", technical_response.data)
+        self.assertIn("Closed", str(technical_response.data.get("detail", "")))
+        self.assertIn("Close the tender", str(technical_response.data.get("detail", "")))
+
+        self.client.force_authenticate(self.rmt_user)
+        financial_response = self.client.post(
+            "/api/tender-bid-evaluations/",
+            {"bid": str(bid.id), "financial_score": 20, "comments": "Ready for finance review."},
+            format="json",
+        )
+        self.assertEqual(financial_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("detail", financial_response.data)
+
+        self.site_specific_tender.refresh_from_db()
+        self.assertEqual(self.site_specific_tender.status, TenderStatus.PUBLISHED)
+
+    def test_stage_one_evaluation_is_allowed_while_tender_is_published(self):
+        bid = TenderBid.objects.create(
+            tender=self.prequal_tender,
+            vendor_id=str(self.vendor.id),
+            vendor_name=self.vendor.full_name,
+            vendor_email=self.vendor.email,
+            bid_amount=150000,
+            subsidy_requested=100000,
+            concept_note="Implementation strategy " * 30,
+            status=BidStatus.SUBMITTED,
+        )
+        tac_user = User.objects.create_user(
+            username="tac_stage_one",
+            password="securePass123",
+            role=UserRole.TAC,
+            status="Active",
+            full_name="TAC Stage One",
+            email="tac-stage-one@example.com",
+        )
+
+        self.client.force_authenticate(tac_user)
+        technical_response = self.client.post(
+            "/api/tender-bid-evaluations/",
+            {
+                "bid": str(bid.id),
+                "technical_score": 16,
+                "feasibility_score": 12,
+                "kpi_score": 8,
+                "gender_score": 7,
+                "environmental_score": 4,
+                "om_score": 8,
+                "inclusivity_score": 0,
+                "comments": "Stage 1 technical score while published.",
+            },
+            format="json",
+        )
+        self.assertEqual(technical_response.status_code, status.HTTP_201_CREATED)
+
+        self.client.force_authenticate(self.rmt_user)
+        financial_response = self.client.post(
+            "/api/tender-bid-evaluations/",
+            {"bid": str(bid.id), "financial_score": 20, "comments": "Stage 1 finance review while published."},
+            format="json",
+        )
+        self.assertEqual(financial_response.status_code, status.HTTP_201_CREATED)
+
+        self.prequal_tender.refresh_from_db()
+        self.assertEqual(self.prequal_tender.status, TenderStatus.PUBLISHED)
+
+    def test_stage_two_evaluation_is_still_blocked_while_tender_is_published(self):
+        bid = TenderBid.objects.create(
+            tender=self.prequal_tender,
+            vendor_id=str(self.vendor.id),
+            vendor_name=self.vendor.full_name,
+            vendor_email=self.vendor.email,
+            bid_amount=180000,
+            subsidy_requested=120000,
+            bid_stage="technical",
+            status=BidStatus.SUBMITTED,
+            stage_two_unlocked=True,
+            financial_sealed=False,
+        )
+        tac_user = User.objects.create_user(
+            username="tac_stage_two",
+            password="securePass123",
+            role=UserRole.TAC,
+            status="Active",
+            full_name="TAC Stage Two",
+            email="tac-stage-two@example.com",
+        )
+
+        self.client.force_authenticate(tac_user)
+        technical_response = self.client.post(
+            "/api/tender-bid-evaluations/",
+            {
+                "bid": str(bid.id),
+                "technical_score": 16,
+                "feasibility_score": 12,
+                "kpi_score": 8,
+                "gender_score": 7,
+                "environmental_score": 4,
+                "om_score": 8,
+                "inclusivity_score": 0,
+                "comments": "Stage 2 technical score while published.",
+            },
+            format="json",
+        )
+        self.assertEqual(technical_response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("detail", technical_response.data)
+        self.assertIn("Closed", str(technical_response.data.get("detail", "")))
+
+    def test_evaluation_auto_closes_application_window_tender_when_deadline_has_passed(self):
+        self.prequal_tender.application_type = "Application Window"
+        self.prequal_tender.eoi_deadline = timezone.now() - timedelta(days=1)
+        self.prequal_tender.save(update_fields=["application_type", "eoi_deadline"])
+        bid = TenderBid.objects.create(
+            tender=self.prequal_tender,
+            vendor_id=str(self.vendor.id),
+            vendor_name=self.vendor.full_name,
+            vendor_email=self.vendor.email,
+            bid_amount=150000,
+            subsidy_requested=100000,
+            concept_note="Implementation strategy " * 30,
+            status=BidStatus.SUBMITTED,
+        )
+        tac_user = User.objects.create_user(
+            username="tac_auto_close",
+            password="securePass123",
+            role=UserRole.TAC,
+            status="Active",
+            full_name="TAC Auto Close",
+            email="tac-auto-close@example.com",
+        )
+        self.client.force_authenticate(tac_user)
+
+        response = self.client.post(
+            "/api/tender-bid-evaluations/",
+            {
+                "bid": str(bid.id),
+                "technical_score": 16,
+                "feasibility_score": 12,
+                "kpi_score": 8,
+                "gender_score": 7,
+                "environmental_score": 4,
+                "om_score": 8,
+                "inclusivity_score": 0,
+                "comments": "Scored after deadline.",
+            },
+            format="json",
+        )
+
+        self.assertIn(response.status_code, {status.HTTP_200_OK, status.HTTP_201_CREATED})
+        self.prequal_tender.refresh_from_db()
+        self.assertIn(self.prequal_tender.status, {TenderStatus.CLOSED, TenderStatus.EVALUATION})
+
+    def test_application_window_tender_with_passed_deadline_is_closed_on_bid_submission_attempt(self):
+        self.site_specific_tender.application_type = "Application Window"
+        self.site_specific_tender.eoi_deadline = timezone.now() - timedelta(days=1)
+        self.site_specific_tender.save(update_fields=["application_type", "eoi_deadline"])
+        self.client.force_authenticate(self.vendor)
+
+        response = self.client.post(
+            "/api/tender-bids/",
+            {"tender": str(self.site_specific_tender.id)},
+            format="json",
+        )
+
+        self.site_specific_tender.refresh_from_db()
+        self.assertEqual(self.site_specific_tender.status, TenderStatus.CLOSED)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_access_window_tender_is_not_auto_closed_when_deadline_passes(self):
+        self.prequal_tender.eoi_deadline = timezone.now() - timedelta(days=1)
+        self.prequal_tender.save(update_fields=["eoi_deadline"])
+        bid = TenderBid.objects.create(
+            tender=self.prequal_tender,
+            vendor_id=str(self.vendor.id),
+            vendor_name=self.vendor.full_name,
+            vendor_email=self.vendor.email,
+            bid_amount=150000,
+            subsidy_requested=100000,
+            concept_note="Implementation strategy " * 30,
+            status=BidStatus.SUBMITTED,
+        )
+        self.client.force_authenticate(self.rmt_user)
+
+        response = self.client.post(
+            "/api/tender-bid-evaluations/",
+            {"bid": str(bid.id), "financial_score": 20, "comments": "Attempt before manual close."},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.prequal_tender.refresh_from_db()
+        self.assertEqual(self.prequal_tender.status, TenderStatus.PUBLISHED)
+
+    def test_technical_evaluation_is_allowed_once_tender_is_closed(self):
+        _close_tender_for_evaluation(self.site_specific_tender)
+        bid = TenderBid.objects.create(
+            tender=self.site_specific_tender,
+            vendor_id=str(self.vendor.id),
+            vendor_name=self.vendor.full_name,
+            vendor_email=self.vendor.email,
+            bid_amount=180000,
+            subsidy_requested=100000,
+            bid_stage="technical",
+            status=BidStatus.SUBMITTED,
+            financial_sealed=False,
+        )
+        tac_user = User.objects.create_user(
+            username="tac_closed_ok",
+            password="securePass123",
+            role=UserRole.TAC,
+            status="Active",
+            full_name="TAC Closed OK",
+            email="tac-closed-ok@example.com",
+        )
+        self.client.force_authenticate(tac_user)
+
+        response = self.client.post(
+            "/api/tender-bid-evaluations/",
+            {
+                "bid": str(bid.id),
+                "technical_score": 16,
+                "feasibility_score": 12,
+                "kpi_score": 8,
+                "gender_score": 7,
+                "environmental_score": 4,
+                "om_score": 8,
+                "inclusivity_score": 0,
+                "comments": "Scored after closure.",
+            },
+            format="json",
+        )
+
+        self.assertIn(response.status_code, {status.HTTP_200_OK, status.HTTP_201_CREATED})
+        self.site_specific_tender.refresh_from_db()
+        self.assertEqual(self.site_specific_tender.status, TenderStatus.EVALUATION)
+
     def test_tac_resubmission_updates_existing_technical_evaluation(self):
         bid = TenderBid.objects.create(
             tender=self.site_specific_tender,
@@ -908,6 +1462,7 @@ class TenderBidSubmissionTests(APITestCase):
             email="tac-editable@example.com",
         )
         self.client.force_authenticate(tac_user)
+        _close_tender_for_evaluation(self.site_specific_tender)
 
         first_response = self.client.post(
             "/api/tender-bid-evaluations/",
@@ -949,49 +1504,20 @@ class TenderBidSubmissionTests(APITestCase):
         self.assertEqual(saved.comments, "Updated TAC score.")
 
     def test_stage_one_technical_pass_creates_stage_two_draft_for_vendor(self):
-        bid = TenderBid.objects.create(
-            tender=self.prequal_tender,
-            vendor_id=str(self.vendor.id),
-            vendor_name=self.vendor.full_name,
-            vendor_email=self.vendor.email,
-            bid_amount=150000,
-            subsidy_requested=100000,
-            concept_note="Implementation strategy " * 30,
-            status=BidStatus.SUBMITTED,
-        )
+        self.client.force_authenticate(self.vendor)
+        resp = self.client.post("/api/tender-bids/", self._valid_eoi_payload(), format="multipart")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        bid = TenderBid.objects.get(id=resp.data["id"])
         TenderBidSite.objects.create(
             bid=bid,
             site_name="Pilot Village",
             district="Maseru",
             number_of_households=20,
         )
-        tac_user = self.vendor.__class__.objects.create_user(
-            username="tac_unlock",
-            password="securePass123",
-            role=UserRole.TAC,
-            status="Active",
-            full_name="TAC Unlock",
-            email="tac-unlock@example.com",
-        )
-        self.client.force_authenticate(tac_user)
+        self.client.force_authenticate(self.rmt_user)
+        accept = self.client.post(f"/api/tender-bids/{bid.id}/accept/", {}, format="json")
+        self.assertEqual(accept.status_code, status.HTTP_200_OK, accept.data)
 
-        response = self.client.post(
-            "/api/tender-bid-evaluations/",
-            {
-                "bid": str(bid.id),
-                "technical_score": 80,
-                "feasibility_score": 80,
-                "kpi_score": 80,
-                "gender_score": 80,
-                "environmental_score": 80,
-                "om_score": 80,
-                "inclusivity_score": 80,
-                "comments": "Stage 1 passed.",
-            },
-            format="json",
-        )
-
-        self.assertIn(response.status_code, {status.HTTP_200_OK, status.HTTP_201_CREATED})
         draft = TenderBid.objects.filter(
             tender=self.prequal_tender,
             vendor_id=str(self.vendor.id),
@@ -999,7 +1525,7 @@ class TenderBidSubmissionTests(APITestCase):
             status=BidStatus.DRAFT,
         ).exclude(id=bid.id).first()
         self.assertIsNotNone(draft)
-        self.assertEqual(draft.stage, "Stage 2: Detailed")
+        self.assertEqual(draft.bid_stage, "technical")
         self.assertEqual(draft.stage_two_source_bid_id, bid.id)
         self.assertEqual(draft.sites.count(), 1)
 
@@ -1063,6 +1589,7 @@ class TenderBidSubmissionTests(APITestCase):
             total_score=62,
         )
         self.client.force_authenticate(self.rmt_user)
+        _close_tender_for_evaluation(self.prequal_tender)
 
         response = self.client.post(
             "/api/tender-bid-evaluations/",
@@ -1167,111 +1694,42 @@ class TenderBidSubmissionTests(APITestCase):
         stage_two_bid.refresh_from_db()
         self.assertEqual(stage_two_bid.status, BidStatus.SUBMITTED)
 
-    @patch("rbf.tenders.views.send_mail")
-    def test_stage_one_pass_notifies_vendor_in_app_and_email(self, mock_send_mail):
-        bid = TenderBid.objects.create(
-            tender=self.prequal_tender,
-            vendor_id=str(self.vendor.id),
-            vendor_name=self.vendor.full_name,
-            vendor_email=self.vendor.email,
-            bid_amount=150000,
-            subsidy_requested=100000,
-            concept_note="Implementation strategy " * 30,
-            status=BidStatus.SUBMITTED,
-        )
-        TenderBidSite.objects.create(
-            bid=bid,
-            site_name="Pilot Village",
-            district="Maseru",
-            number_of_households=20,
-        )
-        tac_user = User.objects.create_user(
-            username="tac_notify_pass",
-            password="securePass123",
-            role=UserRole.TAC,
-            status="Active",
-            full_name="TAC Notify Pass",
-            email="tac-notify-pass@example.com",
-        )
-        self.client.force_authenticate(tac_user)
-
-        response = self.client.post(
-            "/api/tender-bid-evaluations/",
-            {
-                "bid": str(bid.id),
-                "technical_score": 80,
-                "feasibility_score": 80,
-                "kpi_score": 80,
-                "gender_score": 80,
-                "environmental_score": 80,
-                "om_score": 80,
-                "inclusivity_score": 80,
-            },
-            format="json",
-        )
-
-        self.assertIn(response.status_code, {status.HTTP_200_OK, status.HTTP_201_CREATED})
+    def test_stage_one_pass_notifies_vendor_in_app_and_email(self):
+        self.client.force_authenticate(self.vendor)
+        resp = self.client.post("/api/tender-bids/", self._valid_eoi_payload(), format="multipart")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        bid = TenderBid.objects.get(id=resp.data["id"])
+        self.client.force_authenticate(self.rmt_user)
+        accept = self.client.post(f"/api/tender-bids/{bid.id}/accept/", {}, format="json")
+        self.assertEqual(accept.status_code, status.HTTP_200_OK, accept.data)
         self.assertTrue(
             Notification.objects.filter(
                 recipient_id=str(self.vendor.id),
-                event="stage_one_passed",
-                linked_entity_id=str(bid.id),
+                event="stage_one_shortlisted",
+                linked_entity_id=str(bid.tender.id),
             ).exists()
         )
         bid.refresh_from_db()
         self.assertEqual(bid.status, BidStatus.ACCEPTED)
         self.assertIsNotNone(bid.reviewed_at)
-        mock_send_mail.assert_called()
 
-    @patch("rbf.tenders.views.send_mail")
-    def test_stage_one_fail_notifies_vendor_in_app_and_email(self, mock_send_mail):
-        bid = TenderBid.objects.create(
-            tender=self.prequal_tender,
-            vendor_id=str(self.vendor.id),
-            vendor_name=self.vendor.full_name,
-            vendor_email=self.vendor.email,
-            bid_amount=150000,
-            subsidy_requested=100000,
-            concept_note="Implementation strategy " * 30,
-            status=BidStatus.SUBMITTED,
-        )
-        TenderBidSite.objects.create(
-            bid=bid,
-            site_name="Pilot Village",
-            district="Maseru",
-            number_of_households=20,
-        )
-        tac_user = User.objects.create_user(
-            username="tac_notify_fail",
-            password="securePass123",
-            role=UserRole.TAC,
-            status="Active",
-            full_name="TAC Notify Fail",
-            email="tac-notify-fail@example.com",
-        )
-        self.client.force_authenticate(tac_user)
-
-        response = self.client.post(
-            "/api/tender-bid-evaluations/",
-            {
-                "bid": str(bid.id),
-                "technical_score": 40,
-                "feasibility_score": 40,
-                "kpi_score": 40,
-                "gender_score": 40,
-                "environmental_score": 40,
-                "om_score": 40,
-                "inclusivity_score": 40,
-            },
+    def test_stage_one_fail_notifies_vendor_in_app_and_email(self):
+        self.client.force_authenticate(self.vendor)
+        resp = self.client.post("/api/tender-bids/", self._valid_eoi_payload(), format="multipart")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        bid = TenderBid.objects.get(id=resp.data["id"])
+        self.client.force_authenticate(self.rmt_user)
+        reject = self.client.post(
+            f"/api/tender-bids/{bid.id}/reject/",
+            {"rejection_reason": "The EOI submission did not meet the Stage 1 technical threshold."},
             format="json",
         )
-
-        self.assertIn(response.status_code, {status.HTTP_200_OK, status.HTTP_201_CREATED})
+        self.assertEqual(reject.status_code, status.HTTP_200_OK, reject.data)
         self.assertTrue(
             Notification.objects.filter(
                 recipient_id=str(self.vendor.id),
-                event="stage_one_failed",
-                linked_entity_id=str(bid.id),
+                event="bid_rejected",
+                linked_entity_id=str(bid.tender.id),
             ).exists()
         )
         bid.refresh_from_db()
@@ -1285,7 +1743,6 @@ class TenderBidSubmissionTests(APITestCase):
                 status=BidStatus.DRAFT,
             ).exclude(id=bid.id).exists()
         )
-        mock_send_mail.assert_called()
 
     def test_vendor_bid_list_includes_stage_two_draft_for_same_vendor_only(self):
         other_vendor = User.objects.create_user(
@@ -1351,7 +1808,7 @@ class TenderBidSubmissionTests(APITestCase):
             bid_amount=Decimal("150000.00"),
             stage="Stage 1: Concept",
             version_number=1,
-            status=BidStatus.SUBMITTED,
+            status=BidStatus.ACCEPTED,
             submitted_at=timezone.now() - timedelta(days=1),
         )
         tac_user = User.objects.create_user(
@@ -1401,7 +1858,7 @@ class TenderBidSubmissionTests(APITestCase):
             bid_amount=Decimal("150000.00"),
             stage="Stage 1: Concept",
             version_number=1,
-            status=BidStatus.SUBMITTED,
+            status=BidStatus.ACCEPTED,
             submitted_at=timezone.now() - timedelta(days=1),
         )
         tac_user = User.objects.create_user(
@@ -1448,6 +1905,7 @@ class TenderBidSubmissionTests(APITestCase):
             vendor_email=self.vendor.email,
             bid_amount=Decimal("150000.00"),
             subsidy_requested=Decimal("100000.00"),
+            bid_stage="eoi",
             concept_note="Implementation strategy " * 30,
             technical_proposal_file=SimpleUploadedFile("technical.pdf", b"technical", content_type="application/pdf"),
             financial_proposal_file=SimpleUploadedFile("financial.pdf", b"financial", content_type="application/pdf"),
@@ -1461,32 +1919,10 @@ class TenderBidSubmissionTests(APITestCase):
             district="Maseru",
             number_of_households=20,
         )
-        tac_user = User.objects.create_user(
-            username="tac_doc_clone",
-            password="securePass123",
-            role=UserRole.TAC,
-            status="Active",
-            full_name="TAC Doc Clone",
-            email="tac-doc-clone@example.com",
-        )
-        self.client.force_authenticate(tac_user)
+        self.client.force_authenticate(self.rmt_user)
+        accept = self.client.post(f"/api/tender-bids/{bid.id}/accept/", {}, format="json")
+        self.assertEqual(accept.status_code, status.HTTP_200_OK, accept.data)
 
-        response = self.client.post(
-            "/api/tender-bid-evaluations/",
-            {
-                "bid": str(bid.id),
-                "technical_score": 80,
-                "feasibility_score": 80,
-                "kpi_score": 80,
-                "gender_score": 80,
-                "environmental_score": 80,
-                "om_score": 80,
-                "inclusivity_score": 80,
-            },
-            format="json",
-        )
-
-        self.assertIn(response.status_code, {status.HTTP_200_OK, status.HTTP_201_CREATED})
         draft = TenderBid.objects.filter(
             tender=self.prequal_tender,
             vendor_id=str(self.vendor.id),
@@ -1507,6 +1943,7 @@ class TenderBidSubmissionTests(APITestCase):
             vendor_email=self.vendor.email,
             bid_amount=150000,
             subsidy_requested=100000,
+            bid_stage="eoi",
             concept_note="Implementation strategy " * 30,
             status=BidStatus.SUBMITTED,
         )
@@ -1523,39 +1960,17 @@ class TenderBidSubmissionTests(APITestCase):
             vendor_email=self.vendor.email,
             bid_amount=150000,
             subsidy_requested=100000,
-            stage="Stage 2: Detailed",
+            bid_stage="technical",
             status=BidStatus.DRAFT,
             version_number=2,
             stage_two_unlocked=True,
             stage_two_unlocked_at=timezone.now(),
             stage_two_source_bid=bid,
         )
-        tac_user = self.vendor.__class__.objects.create_user(
-            username="tac_existing_stage_two",
-            password="securePass123",
-            role=UserRole.TAC,
-            status="Active",
-            full_name="TAC Existing Stage Two",
-            email="tac-existing-stage-two@example.com",
-        )
-        self.client.force_authenticate(tac_user)
+        self.client.force_authenticate(self.rmt_user)
+        accept = self.client.post(f"/api/tender-bids/{bid.id}/accept/", {}, format="json")
+        self.assertEqual(accept.status_code, status.HTTP_200_OK, accept.data)
 
-        response = self.client.post(
-            "/api/tender-bid-evaluations/",
-            {
-                "bid": str(bid.id),
-                "technical_score": 80,
-                "feasibility_score": 80,
-                "kpi_score": 80,
-                "gender_score": 80,
-                "environmental_score": 80,
-                "om_score": 80,
-                "inclusivity_score": 80,
-            },
-            format="json",
-        )
-
-        self.assertIn(response.status_code, {status.HTTP_200_OK, status.HTTP_201_CREATED})
         existing_draft.refresh_from_db()
         self.assertEqual(existing_draft.sites.count(), 1)
         copied_site = existing_draft.sites.first()
@@ -1671,6 +2086,40 @@ class TenderBidSubmissionTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.data["tender"], "You have already submitted a bid for this tender.")
 
+    def test_resubmitting_bid_does_not_500_on_duplicate_notification(self):
+        bid = TenderBid.objects.create(
+            tender=self.prequal_tender,
+            vendor_id=str(self.vendor.id),
+            vendor_name=self.vendor.full_name,
+            vendor_email=self.vendor.email,
+            bid_amount=Decimal("150000.00"),
+            subsidy_requested=Decimal("100000.00"),
+            concept_note="Implementation strategy " * 30,
+            stage="Stage 1: Concept",
+            version_number=1,
+            status=BidStatus.DRAFT,
+        )
+
+        first = self.client.post(f"/api/tender-bids/{bid.id}/submit/")
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        bid.refresh_from_db()
+        self.assertEqual(bid.status, BidStatus.SUBMITTED)
+
+        bid.status = BidStatus.REVISION_REQUIRED
+        bid.save(update_fields=["status"])
+        second = self.client.post(f"/api/tender-bids/{bid.id}/submit/")
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+
+        self.assertEqual(
+            Notification.objects.filter(
+                recipient_id=str(self.vendor.id),
+                event="bid_submitted",
+                linked_entity_id=str(self.prequal_tender.id),
+            ).count(),
+            1,
+            "Resubmitting must not create a duplicate vendor notification or raise.",
+        )
+
     def test_submitted_bid_is_locked_from_updates(self):
         bid = TenderBid.objects.create(
             tender=self.prequal_tender,
@@ -1684,7 +2133,7 @@ class TenderBidSubmissionTests(APITestCase):
             energy_target_kwh_month=Decimal("300.00"),
             warranty_period_months=24,
             concept_note="Submitted note",
-            status=BidStatus.SUBMITTED,
+            status=BidStatus.ACCEPTED,
         )
 
         response = self.client.patch(
@@ -1695,6 +2144,83 @@ class TenderBidSubmissionTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("locked", str(response.data["detail"]).lower())
+
+    def test_non_owner_cannot_delete_bid(self):
+        other_vendor = User.objects.create_user(
+            username="other_bid_vendor",
+            password="securePass123",
+            role=UserRole.VENDOR,
+            status="Active",
+            full_name="Other Vendor",
+            email="other-vendor@example.com",
+        )
+        VendorPrequalification.objects.create(
+            vendor=other_vendor,
+            company_name="Other Vendor Ltd",
+            status=PrequalificationStatus.APPROVED,
+            tech_tier="Tier 2",
+        )
+        bid = TenderBid.objects.create(
+            tender=self.prequal_tender,
+            vendor_id=str(self.vendor.id),
+            vendor_name=self.vendor.full_name,
+            vendor_email=self.vendor.email,
+            bid_amount=100000,
+            subsidy_requested=50000,
+            status=BidStatus.DRAFT,
+        )
+
+        self.client.force_authenticate(other_vendor)
+        response = self.client.delete(f"/api/tender-bids/{bid.id}/")
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_vendor_cannot_delete_submitted_bid(self):
+        bid = TenderBid.objects.create(
+            tender=self.prequal_tender,
+            vendor_id=str(self.vendor.id),
+            vendor_name=self.vendor.full_name,
+            vendor_email=self.vendor.email,
+            bid_amount=100000,
+            subsidy_requested=50000,
+            status=BidStatus.SUBMITTED,
+        )
+
+        response = self.client.delete(f"/api/tender-bids/{bid.id}/")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("detail", response.data)
+
+    def test_vendor_can_delete_own_draft_bid(self):
+        bid = TenderBid.objects.create(
+            tender=self.prequal_tender,
+            vendor_id=str(self.vendor.id),
+            vendor_name=self.vendor.full_name,
+            vendor_email=self.vendor.email,
+            bid_amount=100000,
+            subsidy_requested=50000,
+            status=BidStatus.DRAFT,
+        )
+
+        response = self.client.delete(f"/api/tender-bids/{bid.id}/")
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(TenderBid.objects.filter(id=bid.id).exists())
+
+    def test_stage_two_final_submit_requires_required_files(self):
+        draft = self._create_technical_draft()
+        payload = self._valid_technical_payload()
+        payload.pop("technical_proposal_file")
+        payload.pop("financial_proposal_file")
+        payload.pop("boq_file")
+
+        response = self.client.patch(
+            f"/api/tender-bids/{draft.id}/",
+            payload,
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("technical_proposal_file", response.data)
+        self.assertIn("financial_proposal_file", response.data)
+        self.assertIn("boq_file", response.data)
 
 
 class TenderContractPdfTests(APITestCase):
@@ -2096,8 +2622,31 @@ class TenderContractAssignmentTests(APITestCase):
         self.assertEqual(response.data["assignment_fields"]["technology_type_read_only"], True)
         self.assertEqual(response.data["disbursement_preview"]["milestone_1_amount_lsl"], "24000.00")
 
-    @patch("rbf.tenders.views.SyncToProspectJob.dispatch_async")
-    def test_assign_post_creates_project_milestones_audit_and_notification(self, dispatch_async):
+    def test_assign_get_prefills_districts_from_tender_target_districts(self):
+        self.tender.target_districts = ["Maseru", "Thaba-Tseka"]
+        self.tender.save(update_fields=["target_districts", "updated_at"])
+        self.client.force_authenticate(self.rmt_user)
+
+        response = self.client.get(f"/api/tender-contracts/{self.contract.id}/assign/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["assignment_defaults"]["district_zones"], ["Maseru", "Thaba-Tseka"])
+        self.assertEqual(response.data["assignment_defaults"]["district_zone"], "Maseru, Thaba-Tseka")
+
+    def test_assign_get_fetches_multi_selected_tender_technology_types(self):
+        self.tender.technology_types = ["SHS", "GMG"]
+        self.tender.save(update_fields=["technology_types", "updated_at"])
+        self.client.force_authenticate(self.rmt_user)
+
+        response = self.client.get(f"/api/tender-contracts/{self.contract.id}/assign/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["assignment_fields"]["technology_type"], ["SHS", "GMG"])
+        self.assertEqual(response.data["assignment_defaults"]["technology_type"], "SHS")
+        self.assertEqual(response.data["assignment_fields"]["technology_type_read_only"], False)
+
+    @patch("rbf.tenders.views.queue_project_targets_sync")
+    def test_assign_post_creates_project_milestones_audit_and_notification(self, queue_targets):
         self.client.force_authenticate(self.rmt_user)
 
         response = self.client.post(
@@ -2107,7 +2656,7 @@ class TenderContractAssignmentTests(APITestCase):
                 "installation_target": 250,
                 "technology_type": "SHS",
                 "energy_output_target_kwh": "20000.00",
-                "district_zone": "Maseru Urban",
+                "district_zones": ["Maseru Urban", "Leribe"],
                 "verification_method": "iot",
                 "female_target_pct": 50,
                 "vulnerable_target_pct": 30,
@@ -2126,7 +2675,8 @@ class TenderContractAssignmentTests(APITestCase):
         self.assertEqual(project.installation_target, 250)
         self.assertEqual(project.technology_type, "SHS")
         self.assertEqual(str(project.energy_output_target_kwh), "20000.00")
-        self.assertEqual(project.district_zone, "Maseru Urban")
+        self.assertEqual(project.district, "Maseru Urban")
+        self.assertEqual(project.district_zone, "Maseru Urban, Leribe")
         self.assertEqual(project.verification_method, "iot")
         self.assertEqual(project.female_target_pct, 50)
         self.assertEqual(project.vulnerable_target_pct, 30)
@@ -2157,9 +2707,434 @@ class TenderContractAssignmentTests(APITestCase):
                 linked_entity_id=str(project.id),
             ).exists()
         )
-        dispatch_async.assert_called_once()
-        method_name, payload = dispatch_async.call_args[0]
-        self.assertEqual(method_name, "pushTarget")
-        self.assertEqual(payload[0]["metric"], "installation_target")
-        self.assertEqual(dispatch_async.call_args.kwargs["record_id"], project.id)
-        self.assertEqual(dispatch_async.call_args.kwargs["record_type"], "project")
+        queue_targets.assert_called_once_with(str(project.id), run_immediately=True, record_type="project")
+
+    @patch("rbf.tenders.views.queue_project_targets_sync")
+    def test_assign_post_normalizes_legacy_mini_grid_label(self, queue_targets):
+        self.tender.category = "Mini-Grid"
+        self.tender.technology_types = ["Solar Mini-Grid"]
+        self.tender.save(update_fields=["category", "technology_types", "updated_at"])
+        self.client.force_authenticate(self.rmt_user)
+
+        response = self.client.post(
+            f"/api/tender-contracts/{self.contract.id}/assign/",
+            {
+                "project_duration_months": 12,
+                "installation_target": 250,
+                "technology_type": "Mini-grid",
+                "energy_output_target_kwh": "20000.00",
+                "district_zones": ["Maseru"],
+                "verification_method": "manual",
+                "female_target_pct": 50,
+                "vulnerable_target_pct": 30,
+                "low_income_target_pct": 60,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        project = Project.objects.get(contract=self.contract)
+        self.assertEqual(project.technology_type, "GMG")
+        self.assertEqual(project.tech_type, "GMG")
+        queue_targets.assert_called_once_with(str(project.id), run_immediately=True, record_type="project")
+
+
+class StandstillTransitionTests(APITestCase):
+    def setUp(self):
+        self.admin_user = User.objects.create_user(
+            username="ststill_admin",
+            password="securePass123",
+            role=UserRole.ADMIN,
+            status="Active",
+            full_name="Standstill Admin",
+        )
+        self.vendor = User.objects.create_user(
+            username="ststill_vendor",
+            password="securePass123",
+            role=UserRole.VENDOR,
+            status="Active",
+            full_name="Standstill Vendor",
+        )
+        self.tender = Tender.objects.create(
+            reference_number="STTRANS-001",
+            name="Standstill Transitions",
+            department="DoE",
+            category="SHS",
+            status=TenderStatus.EVALUATION,
+            deadline=timezone.now(),
+            technology_types=["Solar Home System"],
+            cooling_off_days=14,
+        )
+        self.bid = TenderBid.objects.create(
+            tender=self.tender,
+            vendor_id=str(self.vendor.id),
+            vendor_name=self.vendor.full_name,
+            bid_amount=100000,
+            status=BidStatus.SUBMITTED,
+        )
+        TenderBidEvaluation.objects.create(
+            bid=self.bid,
+            evaluator=self.admin_user,
+            status=EvaluationStatus.SCORED,
+            technical_score=18,
+            feasibility_score=14,
+            kpi_score=9,
+            gender_score=8,
+            environmental_score=4,
+            om_score=9,
+            financial_score=74,
+            total_score=62,
+        )
+
+    def test_resolve_challenge_dismissed_returns_to_standstill(self):
+        self.client.force_authenticate(self.admin_user)
+
+        award_response = self.client.post(
+            f"/api/tenders/{self.tender.id}/award/",
+            {"bid_id": str(self.bid.id), "awarded_vendor_id": str(self.vendor.id), "awarded_vendor_name": self.vendor.full_name},
+            format="json",
+        )
+        self.assertEqual(award_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(award_response.data["status"], TenderStatus.STANDSTILL)
+
+        challenge_response = self.client.post(
+            f"/api/tenders/{self.tender.id}/create_challenge/",
+            {
+                "filed_by_vendor_id": str(self.vendor.id),
+                "filed_by_vendor_name": "Other Vendor",
+                "grounds": "Evaluation scoring error in financial criteria.",
+            },
+            format="json",
+        )
+        self.assertEqual(challenge_response.status_code, status.HTTP_201_CREATED)
+        self.tender.refresh_from_db()
+        self.assertEqual(self.tender.status, TenderStatus.DISPUTED)
+
+        challenge_id = challenge_response.data["id"]
+
+        resolve_response = self.client.post(
+            f"/api/tenders/{self.tender.id}/resolve_challenge/",
+            {"challenge_id": challenge_id, "outcome": "dismissed", "resolution_notes": "No evidence of scoring error."},
+            format="json",
+        )
+        self.assertEqual(resolve_response.status_code, status.HTTP_200_OK)
+        self.tender.refresh_from_db()
+        self.assertEqual(self.tender.status, TenderStatus.STANDSTILL)
+        self.assertIsNotNone(self.tender.cooling_off_until)
+        self.assertIsNone(self.tender.dispute_started_at)
+
+    def test_resolve_challenge_upheld_returns_to_standstill_with_new_intent(self):
+        self.client.force_authenticate(self.admin_user)
+
+        award_response = self.client.post(
+            f"/api/tenders/{self.tender.id}/award/",
+            {"bid_id": str(self.bid.id), "awarded_vendor_id": str(self.vendor.id), "awarded_vendor_name": self.vendor.full_name},
+            format="json",
+        )
+        self.assertEqual(award_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(award_response.data["status"], TenderStatus.STANDSTILL)
+
+        challenger = User.objects.create_user(
+            username="challenger_vendor",
+            password="securePass123",
+            role=UserRole.VENDOR,
+            status="Active",
+            full_name="Challenger Vendor",
+        )
+        challenger_bid = TenderBid.objects.create(
+            tender=self.tender,
+            vendor_id=str(challenger.id),
+            vendor_name=challenger.full_name,
+            bid_amount=95000,
+            status=BidStatus.SUBMITTED,
+        )
+
+        challenge_response = self.client.post(
+            f"/api/tenders/{self.tender.id}/create_challenge/",
+            {
+                "filed_by_vendor_id": str(challenger.id),
+                "filed_by_vendor_name": challenger.full_name,
+                "grounds": "Evaluation scoring error",
+                "challenger_bid_id": str(challenger_bid.id),
+            },
+            format="json",
+        )
+        self.assertEqual(challenge_response.status_code, status.HTTP_201_CREATED)
+        self.tender.refresh_from_db()
+        self.assertEqual(self.tender.status, TenderStatus.DISPUTED)
+        challenge_id = challenge_response.data["id"]
+
+        resolve_response = self.client.post(
+            f"/api/tenders/{self.tender.id}/resolve_challenge/",
+            {"challenge_id": challenge_id, "outcome": "upheld", "resolution_notes": "Scoring error confirmed."},
+            format="json",
+        )
+        self.assertEqual(resolve_response.status_code, status.HTTP_200_OK)
+        self.tender.refresh_from_db()
+        self.assertEqual(self.tender.status, TenderStatus.STANDSTILL)
+        self.assertEqual(str(self.tender.intent_to_award_bid_id), str(challenger_bid.id))
+        self.assertEqual(self.tender.awarded_vendor_id, str(challenger.id))
+        self.assertEqual(self.tender.awarded_vendor_name, challenger.full_name)
+        self.assertIsNotNone(self.tender.cooling_off_until)
+        self.assertIsNone(self.tender.dispute_started_at)
+
+    def test_award_standstill_confirm_full_cycle(self):
+        self.client.force_authenticate(self.admin_user)
+
+        award_response = self.client.post(
+            f"/api/tenders/{self.tender.id}/award/",
+            {"bid_id": str(self.bid.id), "awarded_vendor_id": str(self.vendor.id), "awarded_vendor_name": self.vendor.full_name},
+            format="json",
+        )
+        self.assertEqual(award_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(award_response.data["status"], TenderStatus.STANDSTILL)
+
+        self.tender.refresh_from_db()
+        self.tender.cooling_off_until = timezone.now() - timedelta(minutes=1)
+        self.tender.save(update_fields=["cooling_off_until"])
+
+        confirm_response = self.client.post(
+            f"/api/tenders/{self.tender.id}/confirm_award/",
+            {},
+            format="json",
+        )
+        self.assertEqual(confirm_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(confirm_response.data["status"], TenderStatus.AWARDED)
+
+        self.tender.refresh_from_db()
+        self.assertEqual(self.tender.status, TenderStatus.AWARDED)
+        self.assertIsNone(self.tender.cooling_off_until)
+        self.assertIsNone(self.tender.dispute_started_at)
+
+    def test_standstill_tender_pause_and_resume_cycle(self):
+        """Verify: EVALUATION -> award() -> STANDSTILL -> pause_award() -> DISPUTED -> resolve_challenge(dismissed) -> STANDSTILL -> confirm_award() -> AWARDED"""
+        self.client.force_authenticate(self.admin_user)
+
+        award_response = self.client.post(
+            f"/api/tenders/{self.tender.id}/award/",
+            {"bid_id": str(self.bid.id), "awarded_vendor_id": str(self.vendor.id), "awarded_vendor_name": self.vendor.full_name},
+            format="json",
+        )
+        self.assertEqual(award_response.status_code, status.HTTP_200_OK)
+        self.tender.refresh_from_db()
+        self.assertEqual(self.tender.status, TenderStatus.STANDSTILL)
+
+        pause_response = self.client.post(
+            f"/api/tenders/{self.tender.id}/pause_award/",
+            {},
+            format="json",
+        )
+        self.assertEqual(pause_response.status_code, status.HTTP_200_OK)
+        self.tender.refresh_from_db()
+        self.assertEqual(self.tender.status, TenderStatus.DISPUTED)
+
+        challenge_response = self.client.post(
+            f"/api/tenders/{self.tender.id}/create_challenge/",
+            {
+                "filed_by_vendor_id": str(self.vendor.id),
+                "filed_by_vendor_name": "Other Vendor",
+                "grounds": "Scoring error",
+            },
+            format="json",
+        )
+        self.assertEqual(challenge_response.status_code, status.HTTP_201_CREATED)
+        challenge_id = challenge_response.data["id"]
+
+        resolve_response = self.client.post(
+            f"/api/tenders/{self.tender.id}/resolve_challenge/",
+            {"challenge_id": challenge_id, "outcome": "dismissed", "resolution_notes": "No merit."},
+            format="json",
+        )
+        self.assertEqual(resolve_response.status_code, status.HTTP_200_OK)
+        self.tender.refresh_from_db()
+        self.assertEqual(self.tender.status, TenderStatus.STANDSTILL)
+
+        self.tender.cooling_off_until = timezone.now() - timedelta(minutes=1)
+        self.tender.save(update_fields=["cooling_off_until"])
+
+        confirm_response = self.client.post(
+            f"/api/tenders/{self.tender.id}/confirm_award/",
+            {},
+            format="json",
+        )
+        self.assertEqual(confirm_response.status_code, status.HTTP_200_OK)
+        self.tender.refresh_from_db()
+        self.assertEqual(self.tender.status, TenderStatus.AWARDED)
+        self.assertIsNone(self.tender.cooling_off_until)
+        self.assertIsNone(self.tender.dispute_started_at)
+
+
+class ProcurementWorkflowTests(APITestCase):
+    """Focused smoke tests for the new 3-stage procurement workflow."""
+
+    def setUp(self):
+        self.vendor = User.objects.create_user(
+            username="wf_vendor",
+            password="securePass123",
+            role=UserRole.VENDOR,
+            status="Active",
+            full_name="WF Vendor",
+            organization_name="WF Vendor Ltd",
+            email="wf-vendor@example.com",
+        )
+        self.rmt_user = User.objects.create_user(
+            username="wf_rmt",
+            password="securePass123",
+            role=UserRole.RBF_OFFICIAL,
+            status="Active",
+            full_name="WF RMT",
+            email="wf-rmt@example.com",
+        )
+        VendorPrequalification.objects.create(
+            vendor=self.vendor,
+            company_name="WF Vendor Ltd",
+            status=PrequalificationStatus.APPROVED,
+            tech_tier="Level 3",
+            female_beneficiary_target=55,
+            vulnerable_group_target=35,
+        )
+
+    def _upload(self):
+        return SimpleUploadedFile("doc.pdf", b"%PDF-1.4 fake", content_type="application/pdf")
+
+    def test_sequential_eoi_submission_serializes_workflow_and_deadlines(self):
+        tender = Tender.objects.create(
+            reference_number="WF-SEQ-001",
+            name="Sequential Three Stage",
+            department="Department of Energy",
+            category="SHS",
+            status=TenderStatus.PUBLISHED,
+            deadline=timezone.now() + timedelta(days=30),
+            stage_type="pre_qualification",
+            technology_types=["SHS"],
+            procurement_workflow="sequential",
+            eoi_deadline=timezone.now() + timedelta(days=10),
+            technical_deadline=timezone.now() + timedelta(days=20),
+            financial_deadline=timezone.now() + timedelta(days=30),
+        )
+        self.client.force_authenticate(self.vendor)
+        response = self.client.post(
+            "/api/tender-bids/",
+            {
+                "tender": str(tender.id),
+                "bid_stage": "eoi",
+                "eoi_narrative": "Community clean energy rollout narrative. " * 14,
+                "company_credentials_file": self._upload(),
+                "financial_standing_file": self._upload(),
+                "technical_experience_file": self._upload(),
+                "track_record_file": self._upload(),
+                "status": "Submitted",
+            },
+            format="multipart",
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        self.assertEqual(response.data["stage_key"], "eoi")
+        self.assertEqual(response.data["tender_procurement_workflow"], "sequential")
+        self.assertIsNotNone(response.data["deadline"])
+
+        # RMT shortlists -> technical draft unlocked
+        self.client.force_authenticate(self.rmt_user)
+        accept = self.client.post(f"/api/tender-bids/{response.data['id']}/accept/", {}, format="json")
+        self.assertEqual(accept.status_code, status.HTTP_200_OK, accept.data)
+        technical_draft = TenderBid.objects.filter(
+            tender=tender, vendor_id=str(self.vendor.id), bid_stage="technical",
+            status=BidStatus.DRAFT,
+        ).first()
+        self.assertIsNotNone(technical_draft)
+        self.assertTrue(technical_draft.technical_stage_unlocked)
+
+    def test_tender_workflow_validation_requires_staged_deadlines(self):
+        self.client.force_authenticate(self.rmt_user)
+        response = self.client.post(
+            "/api/tenders/",
+            {
+                "name": "Missing Deadlines",
+                "department": "DoE",
+                "category": "SHS",
+                "status": "Draft",
+                "application_type": "Application Window",
+                "procurement_method": "National",
+                "address_for_document": "Addr",
+                "address_for_security": "Addr",
+                "place_for_opening": "Maseru",
+                "bidders_eligibility": "All",
+                "time_for_completion": "12 months",
+                "invited_by": "RBF",
+                "bidding_currency": "LSL",
+                "instruction": "Read carefully. " * 10,
+                "contact_details": "123",
+                "target_site_type": "Community",
+                "deadline": timezone.now().isoformat(),
+                "technology_types": ["SHS"],
+                "target_districts": ["Maseru"],
+                "procurement_workflow": "sequential",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("technical_deadline", response.data)
+        self.assertIn("financial_deadline", response.data)
+
+    def test_open_financial_stage_unlocks_technical_passing_bidders(self):
+        tender = Tender.objects.create(
+            reference_number="WF-SEQ-002",
+            name="Open Financial Stage",
+            department="Department of Energy",
+            category="SHS",
+            status=TenderStatus.CLOSED,
+            deadline=timezone.now() - timedelta(days=1),
+            stage_type="pre_qualification",
+            technology_types=["SHS"],
+            procurement_workflow="sequential",
+            technical_threshold=70,
+            eoi_deadline=timezone.now() - timedelta(days=10),
+            technical_deadline=timezone.now() - timedelta(days=5),
+            financial_deadline=timezone.now() + timedelta(days=5),
+        )
+        eoi = TenderBid.objects.create(
+            tender=tender,
+            vendor_id=str(self.vendor.id),
+            vendor_name=self.vendor.full_name,
+            vendor_email=self.vendor.email,
+            bid_stage="eoi",
+            status=BidStatus.ACCEPTED,
+            version_number=1,
+        )
+        tech = TenderBid.objects.create(
+            tender=tender,
+            vendor_id=str(self.vendor.id),
+            vendor_name=self.vendor.full_name,
+            vendor_email=self.vendor.email,
+            bid_stage="technical",
+            status=BidStatus.ACCEPTED,
+            version_number=2,
+            technical_stage_unlocked=True,
+            technical_stage_source_bid=eoi,
+        )
+        tac_user = User.objects.create_user(
+            username="wf_tac",
+            password="securePass123",
+            role=UserRole.TAC,
+            status="Active",
+            full_name="WF TAC",
+            email="wf-tac@example.com",
+        )
+        TenderBidEvaluation.objects.create(
+            bid=tech,
+            evaluator=tac_user,
+            status=EvaluationStatus.SCORED,
+            technical_score=80,
+            total_score=80,
+        )
+        self.client.force_authenticate(self.rmt_user)
+        response = self.client.post(f"/api/tenders/{tender.id}/open_financial_stage/", {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertEqual(response.data["opened_bids"], [str(tech.id)])
+        financial_draft = TenderBid.objects.filter(
+            tender=tender, vendor_id=str(self.vendor.id), bid_stage="financial",
+            status=BidStatus.DRAFT,
+        ).first()
+        self.assertIsNotNone(financial_draft)
+        self.assertTrue(financial_draft.financial_stage_unlocked)
+        tech.refresh_from_db()
+        self.assertTrue(tech.financial_stage_unlocked)
