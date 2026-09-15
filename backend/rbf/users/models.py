@@ -11,6 +11,7 @@ class UserRole(models.TextChoices):
     ADMIN = 'Platform Administrator (Super Admin)', 'Platform Administrator (Super Admin)'
     UNDP_DONOR = 'Project Steering Committee', 'Project Steering Committee'
     AUDITOR = 'Auditor', 'Auditor'
+    EVALUATION_COMMITTEE = 'Evaluation Committee', 'Evaluation Committee'
 
 
 class UserStatus(models.TextChoices):
@@ -346,6 +347,65 @@ class Organization(models.Model):
         return self.name
 
 
+def default_technical_scoring_criteria():
+    """The Evaluation Committee's technical rubric — 6 fixed model columns
+    (TenderBidEvaluation.technical_score/feasibility_score/om_score/kpi_score/
+    gender_score/environmental_score) whose label and max_score are Super-Admin
+    configurable. These are the values the platform shipped with."""
+    return [
+        {'key': 'technical_score', 'label': 'Technical design quality', 'max_score': 20},
+        {'key': 'feasibility_score', 'label': 'Technology tier', 'max_score': 15},
+        {'key': 'om_score', 'label': 'O&M strategy', 'max_score': 10},
+        {'key': 'kpi_score', 'label': 'Implementation plan', 'max_score': 10},
+        {'key': 'gender_score', 'label': 'Gender/inclusion approach', 'max_score': 10},
+        {'key': 'environmental_score', 'label': 'Local capacity', 'max_score': 5},
+    ]
+
+
+class FinancialScoringFormula(models.TextChoices):
+    LOWEST_PRICE_100 = 'lowest_price_100', 'Lowest price scores 100 (proportional)'
+    LINEAR_DEVIATION_100 = 'linear_deviation_100', 'Linear deviation from lowest price'
+
+
+# The vendor-visibility behavior a procurement method can have, matching standard
+# e-tendering/e-GP categories:
+#   open       - visible to every pre-qualified vendor.
+#   restricted - visible only to specifically invited vendors (TenderInvitedVendor).
+#   limited    - same invited-vendor gate as restricted, capped at exactly 1 vendor
+#                (Limited Tendering / Single-Source / Direct Contracting).
+#   rfq        - same invited-vendor gate as restricted; distinguished only by
+#                convention (RBF Officials typically attach fewer/simpler required
+#                documents for a Request for Quotation) - no extra gating code needed.
+#   framework  - no invite list at all; visible to any vendor whose own approved
+#                pre-qualification tier/technology types meet the tender's
+#                minimum_service_tier / technology_types (Framework Agreement /
+#                Pre-Qualified Pool).
+PROCUREMENT_VISIBILITY_MODES = ('open', 'restricted', 'limited', 'rfq', 'framework')
+INVITE_GATED_VISIBILITY_MODES = ('restricted', 'limited', 'rfq')
+
+# The two procurement methods the platform has always shipped with. Their `value`
+# strings are already stored verbatim on live Tender records and hardcoded in a few
+# places (the EOI Invite flow, restricted-vendor gating) — they are permanent and
+# non-renamable. A Super Admin may only add further custom methods alongside them.
+PROCUREMENT_METHOD_BUILTINS = [
+    {'value': 'Open Tendering', 'visibilityMode': 'open'},
+    {'value': 'Restricted Tendering', 'visibilityMode': 'restricted'},
+]
+
+# The currencies a tender's "Base Currency" / "Additional Currencies Accepted"
+# pickers offer, fully Super-Admin-owned (unlike PROCUREMENT_METHOD_BUILTINS,
+# nothing in the codebase string-compares against a currency value for behavior —
+# it's a free-text label everywhere — so none of these are locked/permanent; the
+# Super Admin may rename, remove, or add to this list freely). This is just the
+# shipped starting point.
+def default_currencies():
+    return [
+        {'value': 'LSL (Maloti)', 'isDefault': True},
+        {'value': 'USD', 'isDefault': False},
+        {'value': 'ZAR', 'isDefault': False},
+    ]
+
+
 class PlatformConfiguration(models.Model):
     national_main_program_budget = models.DecimalField(max_digits=16, decimal_places=2, default=0)
     female_target_minimum = models.PositiveIntegerField(default=50)
@@ -372,6 +432,21 @@ class PlatformConfiguration(models.Model):
     contact_address = models.TextField(blank=True, default='Corner Constitution & Parliament Road, Maseru 100, Lesotho')
     contact_office_hours = models.CharField(max_length=128, blank=True, default='Mon-Fri, 08:00-17:00 SAST')
     contact_organisation_name = models.CharField(max_length=255, blank=True, default='RBF Management Team, Ministry of Energy')
+    technical_scoring_criteria = models.JSONField(default=default_technical_scoring_criteria, blank=True)
+    # Custom procurement methods ADDED beyond the two permanent built-ins (see
+    # PROCUREMENT_METHOD_BUILTINS) — [{'value': str, 'isRestricted': bool}, ...].
+    # Empty by default; procurement_methods_normalized() always prepends the builtins.
+    procurement_methods = models.JSONField(default=list, blank=True)
+    # The full list of currencies offered by a tender's "Base Currency" /
+    # "Additional Currencies Accepted" pickers — [{'value': str, 'isDefault': bool}, ...].
+    # Fully Super-Admin-owned (see default_currencies()); currencies_normalized()
+    # repairs/falls back to the shipped defaults if the stored value is malformed.
+    currencies = models.JSONField(default=default_currencies, blank=True)
+    financial_scoring_formula = models.CharField(
+        max_length=32,
+        choices=FinancialScoringFormula.choices,
+        default=FinancialScoringFormula.LOWEST_PRICE_100,
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -381,6 +456,120 @@ class PlatformConfiguration(models.Model):
 
     def __str__(self):
         return f"Platform Configuration #{self.id}"
+
+    def technical_score_limits(self) -> dict:
+        """{model_field_name: max_score} for the Evaluation Committee's technical
+        rubric, falling back to the shipped defaults if the stored JSON is empty
+        or malformed (e.g. before this config row has ever been saved)."""
+        criteria = self.technical_scoring_criteria
+        if not isinstance(criteria, list) or not criteria:
+            criteria = default_technical_scoring_criteria()
+        limits = {}
+        for entry in criteria:
+            if not isinstance(entry, dict):
+                continue
+            key = entry.get('key')
+            if not key:
+                continue
+            try:
+                limits[key] = int(entry.get('max_score') or 0)
+            except (TypeError, ValueError):
+                limits[key] = 0
+        return limits or {c['key']: c['max_score'] for c in default_technical_scoring_criteria()}
+
+    def technical_score_total(self) -> int:
+        return sum(self.technical_score_limits().values())
+
+    def technical_scoring_criteria_normalized(self) -> list:
+        """The rubric as a [{key, label, max_score}] list, falling back to the
+        shipped defaults if the stored JSON is empty or malformed."""
+        criteria = self.technical_scoring_criteria
+        if not isinstance(criteria, list) or not criteria:
+            return default_technical_scoring_criteria()
+        return criteria
+
+    def procurement_methods_normalized(self) -> list:
+        """The two permanent built-ins, followed by any Super-Admin-added custom
+        procurement methods (skipping any stored entry that collides with a
+        built-in's value, and any malformed entry). Each entry is normalized to
+        {'value', 'visibilityMode'} - a stored entry with a legacy 'isRestricted'
+        boolean (from before the 5-mode model) is mapped to 'restricted'/'open'."""
+        builtin_values = {b['value'] for b in PROCUREMENT_METHOD_BUILTINS}
+        custom = self.procurement_methods
+        result = [dict(b) for b in PROCUREMENT_METHOD_BUILTINS]
+        if isinstance(custom, list):
+            for entry in custom:
+                if not isinstance(entry, dict):
+                    continue
+                value = str(entry.get('value') or '').strip()
+                if not value or value in builtin_values:
+                    continue
+                mode = entry.get('visibilityMode')
+                if mode not in PROCUREMENT_VISIBILITY_MODES:
+                    mode = 'restricted' if entry.get('isRestricted') else 'open'
+                result.append({'value': value, 'visibilityMode': mode})
+                builtin_values.add(value)
+        return result
+
+    def procurement_method_visibility_mode(self, value: str) -> str:
+        """The visibility mode for a given stored procurement_method value —
+        falls back to 'restricted' for the literal legacy string 'Restricted
+        Tendering' and 'open' for anything else unrecognized (e.g. stray legacy
+        free-text values that predate this config, such as 'National')."""
+        for entry in self.procurement_methods_normalized():
+            if entry['value'] == value:
+                return entry['visibilityMode']
+        return 'restricted' if value == 'Restricted Tendering' else 'open'
+
+    def procurement_method_values_by_mode(self, mode: str) -> set:
+        return {e['value'] for e in self.procurement_methods_normalized() if e['visibilityMode'] == mode}
+
+    def invite_gated_procurement_method_values(self) -> set:
+        """Every procurement method value (built-in or custom) whose vendor pool
+        is a hand-picked invite list — Restricted, Limited/Single-Source, and RFQ
+        all share the same TenderInvitedVendor gate."""
+        return {
+            e['value'] for e in self.procurement_methods_normalized()
+            if e['visibilityMode'] in INVITE_GATED_VISIBILITY_MODES
+        }
+
+    def framework_procurement_method_values(self) -> set:
+        return self.procurement_method_values_by_mode('framework')
+
+    def limited_procurement_method_values(self) -> set:
+        return self.procurement_method_values_by_mode('limited')
+
+    def currencies_normalized(self) -> list:
+        """The Super-Admin-managed currency list as [{value, isDefault}], repaired
+        to always have exactly one isDefault=True entry, falling back to the
+        shipped defaults if the stored value is empty or malformed."""
+        currencies = self.currencies
+        if not isinstance(currencies, list) or not currencies:
+            return default_currencies()
+        cleaned = []
+        seen = set()
+        for entry in currencies:
+            if not isinstance(entry, dict):
+                continue
+            value = str(entry.get('value') or '').strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            cleaned.append({'value': value, 'isDefault': bool(entry.get('isDefault'))})
+        if not cleaned:
+            return default_currencies()
+        default_entries = [c for c in cleaned if c['isDefault']]
+        if len(default_entries) != 1:
+            for c in cleaned:
+                c['isDefault'] = False
+            cleaned[0]['isDefault'] = True
+        return cleaned
+
+    def default_currency_value(self) -> str:
+        for entry in self.currencies_normalized():
+            if entry['isDefault']:
+                return entry['value']
+        return default_currencies()[0]['value']
 
 
 class PasswordResetRequestStatus(models.TextChoices):

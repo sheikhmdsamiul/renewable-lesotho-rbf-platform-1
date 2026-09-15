@@ -111,9 +111,10 @@ ROLE_DEFAULT_MODULES = {
     UserRole.TAC: {'dashboard', 'vendors', 'projects', 'payments', 'evaluations', 'blacklisting', 'reports', 'notifications'},
     UserRole.DOE_OFFICER: {'dashboard', 'vendors', 'projects', 'blacklisting', 'reports', 'notifications'},
     UserRole.FIELD_VERIFIER: {'dashboard', 'projects', 'notifications', 'reports'},
-    UserRole.UNDP_DONOR: {'dashboard', 'vendors', 'projects', 'payments', 'reports', 'notifications'},
+    UserRole.UNDP_DONOR: {'dashboard', 'vendors', 'projects', 'payments', 'issues', 'reports', 'notifications'},
     UserRole.AUDITOR: {'dashboard', 'vendors', 'projects', 'payments', 'reports', 'audit_logs', 'prospect_sync', 'notifications'},
     UserRole.VENDOR: {'dashboard', 'vendors', 'tenders', 'prequalification', 'bids', 'projects', 'payments', 'notifications'},
+    UserRole.EVALUATION_COMMITTEE: {'dashboard', 'evaluations', 'notifications'},
 }
 
 ROLE_DEFAULT_ACTIONS = {
@@ -125,6 +126,7 @@ ROLE_DEFAULT_ACTIONS = {
     UserRole.UNDP_DONOR: {'view', 'review', 'approve', 'reject', 'export', 'respond', 'flag_issue'},
     UserRole.AUDITOR: {'view', 'create', 'edit', 'review', 'download', 'export', 'generate_report', 'respond', 'flag_issue'},
     UserRole.VENDOR: {'view', 'create', 'edit', 'submit', 'upload', 'download', 'sign', 'appeal'},
+    UserRole.EVALUATION_COMMITTEE: {'view', 'review', 'approve', 'export', 'respond'},
 }
 
 
@@ -300,6 +302,7 @@ class UserViewSet(viewsets.ModelViewSet):
         UserRole.FIELD_VERIFIER,
         UserRole.UNDP_DONOR,
         UserRole.AUDITOR,
+        UserRole.EVALUATION_COMMITTEE,
     }
 
     def get_serializer_context(self):
@@ -669,6 +672,7 @@ class UserViewSet(viewsets.ModelViewSet):
                 {'label': 'PSC', 'value': UserRole.UNDP_DONOR},
                 {'label': 'UNDP', 'value': UserRole.UNDP_DONOR},
                 {'label': 'Auditor', 'value': UserRole.AUDITOR},
+                {'label': 'Evaluation Committee', 'value': UserRole.EVALUATION_COMMITTEE},
             ],
         })
 
@@ -841,6 +845,56 @@ class PlatformConfigurationView(APIView):
         cache.set('email_config_version', str(serializer.instance.updated_at.timestamp()), timeout=None)
         AuditLogger.log('platform_configuration_updated', 'configuration', serializer.instance.id, 'platform_configuration', notes='Platform configuration updated by Super Admin.')
         return Response(self._build_payload(serializer), status=status.HTTP_200_OK)
+
+
+class EvaluationScoringConfigView(APIView):
+    """Read-only view of the Evaluation Committee's technical rubric and financial
+    formula — any authenticated user (committee members included) can read this,
+    unlike the rest of PlatformConfiguration which is Super-Admin-only."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        config = PlatformConfiguration.objects.order_by('id').first()
+        if config is None:
+            config = PlatformConfiguration()
+        return Response({
+            'technical_scoring_criteria': config.technical_scoring_criteria_normalized(),
+            'financial_scoring_formula': config.financial_scoring_formula,
+            'technical_score_total': config.technical_score_total(),
+        }, status=status.HTTP_200_OK)
+
+
+class ProcurementMethodsConfigView(APIView):
+    """Read-only view of the configured procurement methods (the two permanent
+    built-ins plus any Super-Admin-added custom methods) — any authenticated user
+    can read this so the tender-creation form can populate its dropdown, unlike
+    the rest of PlatformConfiguration which is Super-Admin-only to write."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        config = PlatformConfiguration.objects.order_by('id').first()
+        if config is None:
+            config = PlatformConfiguration()
+        return Response({
+            'procurement_methods': config.procurement_methods_normalized(),
+        }, status=status.HTTP_200_OK)
+
+
+class CurrenciesConfigView(APIView):
+    """Read-only view of the Super-Admin-managed currency list (Base Currency /
+    Additional Currencies Accepted options for tender creation) — any authenticated
+    user can read this, unlike the rest of PlatformConfiguration which is
+    Super-Admin-only to write."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        config = PlatformConfiguration.objects.order_by('id').first()
+        if config is None:
+            config = PlatformConfiguration()
+        return Response({
+            'currencies': config.currencies_normalized(),
+            'default_currency': config.default_currency_value(),
+        }, status=status.HTTP_200_OK)
 
 
 class PlatformConfigurationBoundaryRefreshView(APIView):

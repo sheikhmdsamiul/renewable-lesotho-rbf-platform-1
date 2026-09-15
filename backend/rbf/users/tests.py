@@ -33,6 +33,190 @@ from rbf.users.models import (
 )
 
 
+class ProcurementMethodsConfigTests(APITestCase):
+    def setUp(self):
+        User = get_user_model()
+        self.admin = User.objects.create_user(
+            username="procurement_admin",
+            password="securePass123",
+            role="Platform Administrator (Super Admin)",
+            status="Active",
+            email="procurement-admin@example.com",
+        )
+        self.other_user = User.objects.create_user(
+            username="procurement_official",
+            password="securePass123",
+            role="RBF Official",
+            status="Active",
+            email="procurement-official@example.com",
+        )
+
+    def test_default_config_yields_only_the_two_builtins(self):
+        self.client.force_authenticate(self.admin)
+        response = self.client.get("/api/users/platform-configuration/procurement-methods/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        values = {m["value"]: m["visibilityMode"] for m in response.data["procurement_methods"]}
+        self.assertEqual(values, {"Open Tendering": "open", "Restricted Tendering": "restricted"})
+
+    def test_any_authenticated_user_can_read_but_only_super_admin_can_write(self):
+        self.client.force_authenticate(self.other_user)
+        get_response = self.client.get("/api/users/platform-configuration/procurement-methods/")
+        self.assertEqual(get_response.status_code, status.HTTP_200_OK)
+
+        patch_response = self.client.patch(
+            "/api/users/platform-configuration/",
+            {"procurement_methods": [{"value": "Sole Source", "visibilityMode": "limited"}]},
+            format="json",
+        )
+        self.assertEqual(patch_response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_super_admin_can_add_a_custom_method_and_it_round_trips(self):
+        self.client.force_authenticate(self.admin)
+        patch_response = self.client.patch(
+            "/api/users/platform-configuration/",
+            {"procurement_methods": [{"value": "Sole Source", "visibilityMode": "limited"}]},
+            format="json",
+        )
+        self.assertEqual(patch_response.status_code, status.HTTP_200_OK, patch_response.data)
+
+        get_response = self.client.get("/api/users/platform-configuration/procurement-methods/")
+        values = {m["value"]: m["visibilityMode"] for m in get_response.data["procurement_methods"]}
+        self.assertEqual(values, {
+            "Open Tendering": "open",
+            "Restricted Tendering": "restricted",
+            "Sole Source": "limited",
+        })
+
+    def test_all_five_visibility_modes_round_trip(self):
+        self.client.force_authenticate(self.admin)
+        patch_response = self.client.patch(
+            "/api/users/platform-configuration/",
+            {"procurement_methods": [
+                {"value": "A Open", "visibilityMode": "open"},
+                {"value": "B Restricted", "visibilityMode": "restricted"},
+                {"value": "C Limited", "visibilityMode": "limited"},
+                {"value": "D Framework", "visibilityMode": "framework"},
+                {"value": "E RFQ", "visibilityMode": "rfq"},
+            ]},
+            format="json",
+        )
+        self.assertEqual(patch_response.status_code, status.HTTP_200_OK, patch_response.data)
+        values = {m["value"]: m["visibilityMode"] for m in patch_response.data["procurement_methods"]}
+        self.assertEqual(values["A Open"], "open")
+        self.assertEqual(values["B Restricted"], "restricted")
+        self.assertEqual(values["C Limited"], "limited")
+        self.assertEqual(values["D Framework"], "framework")
+        self.assertEqual(values["E RFQ"], "rfq")
+
+    def test_rejects_invalid_visibility_mode(self):
+        self.client.force_authenticate(self.admin)
+        response = self.client.patch(
+            "/api/users/platform-configuration/",
+            {"procurement_methods": [{"value": "Sole Source", "visibilityMode": "not-a-real-mode"}]},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_cannot_duplicate_or_reuse_a_builtin_value(self):
+        self.client.force_authenticate(self.admin)
+        duplicate_response = self.client.patch(
+            "/api/users/platform-configuration/",
+            {"procurement_methods": [
+                {"value": "Sole Source", "visibilityMode": "limited"},
+                {"value": "Sole Source", "visibilityMode": "open"},
+            ]},
+            format="json",
+        )
+        self.assertEqual(duplicate_response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        reuse_response = self.client.patch(
+            "/api/users/platform-configuration/",
+            {"procurement_methods": [{"value": "Open Tendering", "visibilityMode": "restricted"}]},
+            format="json",
+        )
+        self.assertEqual(reuse_response.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class CurrenciesConfigTests(APITestCase):
+    def setUp(self):
+        User = get_user_model()
+        self.admin = User.objects.create_user(
+            username="currency_admin",
+            password="securePass123",
+            role="Platform Administrator (Super Admin)",
+            status="Active",
+            email="currency-admin@example.com",
+        )
+        self.other_user = User.objects.create_user(
+            username="currency_official",
+            password="securePass123",
+            role="RBF Official",
+            status="Active",
+            email="currency-official@example.com",
+        )
+
+    def test_default_config_yields_the_three_seeded_currencies_with_lsl_default(self):
+        self.client.force_authenticate(self.admin)
+        response = self.client.get("/api/users/platform-configuration/currencies/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        values = {c["value"]: c["isDefault"] for c in response.data["currencies"]}
+        self.assertEqual(values, {"LSL (Maloti)": True, "USD": False, "ZAR": False})
+        self.assertEqual(response.data["default_currency"], "LSL (Maloti)")
+
+    def test_any_authenticated_user_can_read_but_only_super_admin_can_write(self):
+        self.client.force_authenticate(self.other_user)
+        get_response = self.client.get("/api/users/platform-configuration/currencies/")
+        self.assertEqual(get_response.status_code, status.HTTP_200_OK)
+
+        patch_response = self.client.patch(
+            "/api/users/platform-configuration/",
+            {"currencies": [{"value": "EUR", "isDefault": True}]},
+            format="json",
+        )
+        self.assertEqual(patch_response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_super_admin_can_replace_the_whole_list(self):
+        self.client.force_authenticate(self.admin)
+        patch_response = self.client.patch(
+            "/api/users/platform-configuration/",
+            {"currencies": [{"value": "EUR", "isDefault": True}, {"value": "GBP", "isDefault": False}]},
+            format="json",
+        )
+        self.assertEqual(patch_response.status_code, status.HTTP_200_OK, patch_response.data)
+
+        get_response = self.client.get("/api/users/platform-configuration/currencies/")
+        values = {c["value"]: c["isDefault"] for c in get_response.data["currencies"]}
+        self.assertEqual(values, {"EUR": True, "GBP": False})
+        self.assertEqual(get_response.data["default_currency"], "EUR")
+
+    def test_zero_default_flags_auto_normalizes_to_first_entry(self):
+        self.client.force_authenticate(self.admin)
+        patch_response = self.client.patch(
+            "/api/users/platform-configuration/",
+            {"currencies": [{"value": "EUR", "isDefault": False}, {"value": "GBP", "isDefault": False}]},
+            format="json",
+        )
+        self.assertEqual(patch_response.status_code, status.HTTP_200_OK, patch_response.data)
+        values = {c["value"]: c["isDefault"] for c in patch_response.data["currencies"]}
+        self.assertEqual(values, {"EUR": True, "GBP": False})
+
+    def test_rejects_empty_list_and_duplicate_values(self):
+        self.client.force_authenticate(self.admin)
+        empty_response = self.client.patch(
+            "/api/users/platform-configuration/",
+            {"currencies": []},
+            format="json",
+        )
+        self.assertEqual(empty_response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        duplicate_response = self.client.patch(
+            "/api/users/platform-configuration/",
+            {"currencies": [{"value": "EUR", "isDefault": True}, {"value": "EUR", "isDefault": False}]},
+            format="json",
+        )
+        self.assertEqual(duplicate_response.status_code, status.HTTP_400_BAD_REQUEST)
+
+
 class UserApiTests(APITestCase):
     @patch("rbf.users.views.SyncToProspectJob.dispatch_async")
     def test_super_admin_can_create_non_vendor_user_and_queue_prospect_agent(self, dispatch_async):

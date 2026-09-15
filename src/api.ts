@@ -32,8 +32,19 @@ import {
   TenderBidSite,
   BidStatus,
   TenderBidEvaluation,
+  TenderEvaluationCommitteeMember,
+  EvaluationCommitteeScores,
+  EvaluationCommitteeScoresMemberEvaluation,
+  EvaluationCommitteeCoIStatus,
+  TenderEvaluationComment,
+  TenderInvitedVendor,
+  FinancialEvaluationLot,
+  FinancialEvaluationRow,
   TenderContract,
   TenderAwardRankingRow,
+  TenderAwardRankingResponse,
+  TenderLot,
+  TenderBidLotOffer,
   VendorBlacklistCase,
   BlacklistAppeal,
   ProjectKpiSummary,
@@ -41,6 +52,10 @@ import {
   ProspectSyncLog,
   Organization,
   PlatformConfiguration,
+  EvaluationScoringConfig,
+  ProcurementMethodOption,
+  CurrencyOption,
+  ProcurementVisibilityMode,
   SystemHealthPayload,
   SuperAdminDashboardSummary,
   RolePermissionMatrix,
@@ -355,14 +370,26 @@ function mapTenderFromApi(api: any): Tender {
     category: api.category ?? "",
     status: api.status ?? "Draft",
     deadline: api.deadline ?? "",
-    procurementWorkflow: api.procurement_workflow ?? "sequential",
-    eoiDeadline: api.eoi_deadline ?? undefined,
+    procurementWorkflow: api.procurement_workflow ?? "sequential",    eoiDeadline: api.eoi_deadline ?? undefined,
     technicalDeadline: api.technical_deadline ?? undefined,
     financialDeadline: api.financial_deadline ?? undefined,
     budget: api.budget != null ? Number(api.budget) : undefined,
     applicationType: api.application_type ?? undefined,
     stageType: api.stage_type ?? undefined,
     procurementMethod: api.procurement_method ?? undefined,
+    isEoiInviteOnly: api.is_eoi_invite_only ?? undefined,
+    linkedEoiTenderId: api.linked_eoi_tender != null ? String(api.linked_eoi_tender) : undefined,
+    linkedEoiTenderName: api.linked_eoi_tender_name ?? undefined,
+    skipsEoiStage: api.skips_eoi_stage ?? undefined,
+    linkedTendersSummary: Array.isArray(api.linked_tenders_summary)
+      ? api.linked_tenders_summary.map((t: any) => ({
+          id: String(t.id ?? ""),
+          name: t.name ?? "",
+          referenceNumber: t.reference_number ?? "",
+          status: t.status ?? "",
+        }))
+      : undefined,
+    linkedTenderCount: api.linked_tender_count != null ? Number(api.linked_tender_count) : undefined,
     addressForDocument: api.address_for_document ?? undefined,
     addressForSecurity: api.address_for_security ?? undefined,
     placeForOpening: api.place_for_opening ?? undefined,
@@ -370,10 +397,24 @@ function mapTenderFromApi(api: any): Tender {
     timeForCompletion: api.time_for_completion ?? undefined,
     invitedBy: api.invited_by ?? undefined,
     biddingCurrency: api.bidding_currency ?? undefined,
+    currencyRates: api.currency_rates && typeof api.currency_rates === "object" ? api.currency_rates : undefined,
     instruction: api.instruction ?? undefined,
     preTenderMeetingInfo: api.pre_tender_meeting_info ?? undefined,
     biddersSchedulePurchase: api.bidders_schedule_purchase ?? undefined,
+    documentFeeAmount: api.document_fee_amount != null ? Number(api.document_fee_amount) : undefined,
+    documentFeeType: api.document_fee_type ?? undefined,
+    documentFeeRefundable: api.document_fee_refundable ?? undefined,
     tenderSecurityRequired: api.tender_security_required ?? undefined,
+    languageOfBidSubmission: api.language_of_bid_submission ?? undefined,
+    budgetDisclosure: api.budget_disclosure ?? undefined,
+    clarificationDeadline: api.clarification_deadline ?? undefined,
+    siteVisitDate: api.site_visit_date ?? undefined,
+    bidValidityPeriodDays: api.bid_validity_period_days != null ? Number(api.bid_validity_period_days) : undefined,
+    minimumWarrantyPeriodMonths: api.minimum_warranty_period_months != null ? Number(api.minimum_warranty_period_months) : undefined,
+    submissionMethod: api.submission_method ?? undefined,
+    digitalSignatureRequired: api.digital_signature_required ?? undefined,
+    maxVendorsToShortlist: api.max_vendors_to_shortlist != null ? Number(api.max_vendors_to_shortlist) : undefined,
+    advertisementChannels: Array.isArray(api.advertisement_channels) ? api.advertisement_channels : undefined,
     contactDetails: api.contact_details ?? undefined,
     technologyTypes: api.technology_types ?? undefined,
     targetDistricts: Array.isArray(api.target_districts) ? api.target_districts : undefined,
@@ -407,6 +448,7 @@ function mapTenderFromApi(api: any): Tender {
     awardedVendorName: api.awarded_vendor_name ?? undefined,
     awardedVendorId: api.awarded_vendor_id ?? undefined,
     bidCount: api.bid_count ?? undefined,
+    invitedVendorCount: api.invited_vendor_count ?? undefined,
     requiredDocuments: Array.isArray(api.required_documents)
       ? api.required_documents.map((d: any) => ({
           id: d.id != null ? String(d.id) : undefined,
@@ -414,8 +456,67 @@ function mapTenderFromApi(api: any): Tender {
           expected_type: d.expected_type ?? "",
           bid_stage: d.bid_stage ?? "eoi",
           bid_stage_label: d.bid_stage_label ?? undefined,
+          field_key: d.field_key || undefined,
           position: d.position != null ? d.position : undefined,
         }))
+      : undefined,
+    governingDocuments: Array.isArray(api.governing_documents)
+      ? api.governing_documents.map((d: any) => ({
+          label: (d && (d.label ?? d.name)) ?? "",
+          expected_type: (d && d.expected_type) || "",
+          file_name: (d && d.file_name) || undefined,
+          file_url: (d && d.file_url) || undefined,
+        }))
+      : undefined,
+    lots: Array.isArray(api.lots)
+      ? api.lots.map((l: any) => ({
+          id: l.id != null ? String(l.id) : undefined,
+          name: l.name ?? "",
+          description: l.description || "",
+          technologyTypes: Array.isArray(l.technology_types) ? l.technology_types : [],
+          targetDistricts: Array.isArray(l.target_districts) ? l.target_districts : [],
+          estimatedInstallationTarget: l.estimated_installation_target ?? undefined,
+          budget: l.budget != null ? Number(l.budget) : undefined,
+          position: l.position ?? undefined,
+          boqItems: Array.isArray(l.boq_items)
+            ? l.boq_items.map((b: any) => ({
+                id: b.id != null ? String(b.id) : undefined,
+                description: b.description ?? "",
+                unit: b.unit || "",
+                quantity: b.quantity != null ? Number(b.quantity) : 0,
+                position: b.position ?? undefined,
+              }))
+            : [],
+          awardedVendorId: l.awarded_vendor_id || undefined,
+          awardedVendorName: l.awarded_vendor_name || undefined,
+          intentToAwardBidId: l.intent_to_award_bid_id || undefined,
+          intentToAwardAt: l.intent_to_award_at || undefined,
+          awardedAt: l.awarded_at || undefined,
+        }))
+      : undefined,
+    maxLotsPerBidder: api.max_lots_per_bidder != null ? Number(api.max_lots_per_bidder) : undefined,
+    boqItems: Array.isArray(api.boq_items)
+      ? api.boq_items.map((b: any) => ({
+          id: b.id != null ? String(b.id) : undefined,
+          description: b.description ?? "",
+          unit: b.unit || "",
+          quantity: b.quantity != null ? Number(b.quantity) : 0,
+          position: b.position ?? undefined,
+        }))
+      : [],
+    evaluationCommitteeMembers: Array.isArray(api.evaluation_committee_members)
+      ? api.evaluation_committee_members.map((m: any) => ({
+          id: String(m.id ?? ""),
+          member: String(m.member ?? ""),
+          memberName: m.member_name ?? "",
+          memberEmail: m.member_email ?? "",
+          assignedBy: m.assigned_by != null ? String(m.assigned_by) : undefined,
+          assignedByName: m.assigned_by_name ?? "",
+          assignedAt: m.assigned_at ?? undefined,
+        }))
+      : undefined,
+    invitedVendors: Array.isArray(api.invited_vendors)
+      ? api.invited_vendors.map(mapTenderInvitedVendorFromApi)
       : undefined,
   };
 }
@@ -688,6 +789,13 @@ function mapOrganizationFromApi(api: any): Organization {
   };
 }
 
+function normalizeProcurementVisibilityMode(value: any): ProcurementVisibilityMode {
+  if (value === "open" || value === "restricted" || value === "limited" || value === "framework" || value === "rfq") {
+    return value;
+  }
+  return "open";
+}
+
 function mapPlatformConfigurationFromApi(api: any): PlatformConfiguration {
   return {
     id: api.id != null ? String(api.id) : undefined,
@@ -717,6 +825,26 @@ function mapPlatformConfigurationFromApi(api: any): PlatformConfiguration {
     contactAddress: api.contact_address ?? "",
     contactOfficeHours: api.contact_office_hours ?? "",
     contactOrganisationName: api.contact_organisation_name ?? "",
+    technicalScoringCriteria: Array.isArray(api.technical_scoring_criteria)
+      ? api.technical_scoring_criteria.map((c: any) => ({
+          key: String(c.key ?? ""),
+          label: String(c.label ?? ""),
+          maxScore: Number(c.max_score ?? 0),
+        }))
+      : [],
+    financialScoringFormula: api.financial_scoring_formula === "linear_deviation_100" ? "linear_deviation_100" : "lowest_price_100",
+    procurementMethods: Array.isArray(api.procurement_methods)
+      ? api.procurement_methods.map((m: any) => ({
+          value: String(m.value ?? ""),
+          visibilityMode: normalizeProcurementVisibilityMode(m.visibilityMode),
+        }))
+      : [],
+    currencies: Array.isArray(api.currencies)
+      ? api.currencies.map((c: any) => ({
+          value: String(c.value ?? ""),
+          isDefault: Boolean(c.isDefault),
+        }))
+      : [],
     lesothoBoundary: api.lesotho_boundary
       ? {
           path: api.lesotho_boundary.path ?? "",
@@ -816,6 +944,8 @@ function mapTenderToApi(ui: Partial<Tender>): any {
     application_type: ui.applicationType ?? null,
     stage_type: ui.stageType ?? null,
     procurement_method: ui.procurementMethod ?? null,
+    is_eoi_invite_only: ui.isEoiInviteOnly ?? false,
+    linked_eoi_tender: ui.linkedEoiTenderId || null,
     address_for_document: ui.addressForDocument ?? "",
     address_for_security: ui.addressForSecurity ?? "",
     place_for_opening: ui.placeForOpening ?? "",
@@ -823,10 +953,24 @@ function mapTenderToApi(ui: Partial<Tender>): any {
     time_for_completion: ui.timeForCompletion ?? "",
     invited_by: ui.invitedBy ?? "",
     bidding_currency: ui.biddingCurrency ?? null,
+    currency_rates: ui.currencyRates ?? {},
     instruction: ui.instruction ?? "",
     pre_tender_meeting_info: ui.preTenderMeetingInfo ?? "",
     bidders_schedule_purchase: ui.biddersSchedulePurchase ?? false,
+    document_fee_amount: ui.documentFeeAmount ?? null,
+    document_fee_type: ui.documentFeeType ?? "",
+    document_fee_refundable: ui.documentFeeRefundable ?? false,
     tender_security_required: ui.tenderSecurityRequired ?? false,
+    language_of_bid_submission: ui.languageOfBidSubmission ?? "",
+    budget_disclosure: ui.budgetDisclosure ?? "",
+    clarification_deadline: ui.clarificationDeadline && ui.clarificationDeadline !== "" ? ui.clarificationDeadline : null,
+    site_visit_date: ui.siteVisitDate && ui.siteVisitDate !== "" ? ui.siteVisitDate : null,
+    bid_validity_period_days: ui.bidValidityPeriodDays ?? null,
+    minimum_warranty_period_months: ui.minimumWarrantyPeriodMonths ?? null,
+    submission_method: ui.submissionMethod ?? "online_only",
+    digital_signature_required: ui.digitalSignatureRequired ?? true,
+    max_vendors_to_shortlist: ui.maxVendorsToShortlist ?? null,
+    advertisement_channels: ui.advertisementChannels ?? [],
     contact_details: ui.contactDetails ?? "",
     technology_types: ui.technologyTypes ?? [],
     target_districts: ui.targetDistricts ?? [],
@@ -840,10 +984,30 @@ function mapTenderToApi(ui: Partial<Tender>): any {
     technical_threshold: ui.technicalThreshold ?? 70,
     cooling_off_days: ui.coolingOffDays ?? 7,
     required_documents: Array.isArray(ui.requiredDocuments) ? ui.requiredDocuments : undefined,
+    governing_documents: Array.isArray(ui.governingDocuments) ? ui.governingDocuments : undefined,
+    lots: Array.isArray(ui.lots)
+      ? ui.lots.map((l) => ({
+          id: l.id,
+          name: l.name,
+          description: l.description ?? "",
+          technology_types: l.technologyTypes ?? [],
+          target_districts: l.targetDistricts ?? [],
+          estimated_installation_target: l.estimatedInstallationTarget ?? null,
+          budget: l.budget ?? null,
+          position: l.position,
+          boq_items: Array.isArray(l.boqItems)
+            ? l.boqItems.map((b) => ({ id: b.id, description: b.description, unit: b.unit ?? "", quantity: b.quantity, position: b.position }))
+            : [],
+        }))
+      : undefined,
+    max_lots_per_bidder: ui.maxLotsPerBidder ?? null,
+    boq_items: Array.isArray(ui.boqItems)
+      ? ui.boqItems.map((b) => ({ id: b.id, description: b.description, unit: b.unit ?? "", quantity: b.quantity, position: b.position }))
+      : undefined,
   };
 }
 
-function buildTenderForm(payload: Partial<Tender> & { scheduleFile?: File | null }): FormData {
+function buildTenderForm(payload: Partial<Tender> & { scheduleFile?: File | null; governingDocumentsFiles?: (File | null)[] }): FormData {
   const apiPayload = mapTenderToApi(payload);
   const form = new FormData();
   Object.entries(apiPayload).forEach(([k, v]) => {
@@ -852,8 +1016,24 @@ function buildTenderForm(payload: Partial<Tender> & { scheduleFile?: File | null
       form.append(k, JSON.stringify(v));
       return;
     }
-    if ((k === 'technology_types' || k === 'target_districts') && Array.isArray(v)) {
+    if (k === 'governing_documents' && Array.isArray(v)) {
+      form.append(k, JSON.stringify(v));
+      return;
+    }
+    if (k === 'lots' && Array.isArray(v)) {
+      form.append(k, JSON.stringify(v));
+      return;
+    }
+    if (k === 'boq_items' && Array.isArray(v)) {
+      form.append(k, JSON.stringify(v));
+      return;
+    }
+    if ((k === 'technology_types' || k === 'target_districts' || k === 'advertisement_channels') && Array.isArray(v)) {
       // JSONField expects JSON-encoded string
+      form.append(k, JSON.stringify(v));
+      return;
+    }
+    if (k === 'currency_rates' && typeof v === 'object') {
       form.append(k, JSON.stringify(v));
       return;
     }
@@ -874,6 +1054,12 @@ function buildTenderForm(payload: Partial<Tender> & { scheduleFile?: File | null
   const milestonePaymentScheduleFile = (payload as any).milestonePaymentScheduleFile;
   if (milestonePaymentScheduleFile instanceof File) {
     form.set('milestone_payment_schedule_file', milestonePaymentScheduleFile);
+  }
+  const governingDocsFiles = (payload as any).governingDocumentsFiles;
+  if (Array.isArray(governingDocsFiles) && governingDocsFiles.length) {
+    governingDocsFiles.forEach((f: File | null) => {
+      if (f instanceof File) form.append('governing_documents_files', f);
+    });
   }
   return form;
 }
@@ -908,6 +1094,7 @@ function mapProjectFromApi(api: any): Project {
     endDate: api.end_date ?? undefined,
     budget: api.budget != null ? Number(api.budget) : undefined,
     targetInstallations: api.target_installations != null ? Number(api.target_installations) : undefined,
+    installationTarget: api.installation_target != null ? Number(api.installation_target) : undefined,
     targetFemalePct: api.target_female_pct != null ? Number(api.target_female_pct) : undefined,
     targetVulnerablePct: api.target_vulnerable_pct != null ? Number(api.target_vulnerable_pct) : undefined,
     targetLowIncomePct: api.target_low_income_pct != null ? Number(api.target_low_income_pct) : undefined,
@@ -1110,12 +1297,18 @@ function mapBidEvaluationFromApi(api: any): TenderBidEvaluation {
   return {
     id: String(api.id ?? ""),
     bid: String(api.bid ?? ""),
+    lot: api.lot != null ? String(api.lot) : undefined,
+    stage: api.stage === "financial" ? "financial" : "technical",
     evaluator: api.evaluator != null ? String(api.evaluator) : undefined,
     evaluatorUsername: api.evaluator_username ?? undefined,
     evaluatorRole: api.evaluator_role ?? undefined,
     status: api.status ?? "Pending",
+    submissionStatus: api.submission_status === "submitted" ? "submitted" : api.submission_status === "draft" ? "draft" : undefined,
+    submittedAt: api.submitted_at ?? undefined,
+    justifications: api.justifications && typeof api.justifications === "object" ? api.justifications : undefined,
     technicalScore: Number(api.technical_score ?? 0),
     financialScore: Number(api.financial_score ?? 0),
+    financialScoreAutoCalculated: Boolean(api.financial_score_auto_calculated),
     feasibilityScore: Number(api.feasibility_score ?? 0),
     kpiScore: Number(api.kpi_score ?? 0),
     genderScore: Number(api.gender_score ?? 0),
@@ -1134,6 +1327,8 @@ function mapTenderContractFromApi(api: any): TenderContract {
     id: String(api.id ?? ""),
     tender: String(api.tender ?? ""),
     bid: api.bid != null ? String(api.bid) : undefined,
+    lot: api.lot != null ? String(api.lot) : undefined,
+    lotName: api.lot_name ?? undefined,
     vendorId: String(api.vendor_id ?? ""),
     vendorName: api.vendor_name ?? "",
     vendorEmail: api.vendor_email ?? undefined,
@@ -1224,12 +1419,12 @@ function mapBlacklistAppealFromApi(api: any): BlacklistAppeal {
 function mapTenderBidSiteFromApi(api: any): TenderBidSite {
   return {
     id: api.id != null ? String(api.id) : undefined,
+    lot: api.lot != null ? String(api.lot) : undefined,
     siteName: api.site_name ?? "",
     district: api.district ?? undefined,
     villageSubDistrict: api.village_sub_district ?? undefined,
     latitude: api.latitude != null ? Number(api.latitude) : undefined,
     longitude: api.longitude != null ? Number(api.longitude) : undefined,
-    estimatedHouseholds: api.estimated_households != null ? Number(api.estimated_households) : (api.number_of_households != null ? Number(api.number_of_households) : undefined),
     numberOfHouseholds: api.number_of_households != null ? Number(api.number_of_households) : undefined,
     targetTechnology: api.target_technology ?? undefined,
     targetBeneficiaryType: api.target_beneficiary_type ?? undefined,
@@ -1241,15 +1436,15 @@ function mapTenderBidSiteFromApi(api: any): TenderBidSite {
 
 function mapTenderBidSiteToApi(site: Partial<TenderBidSite> | Record<string, any>): Record<string, any> {
   const rawSite = site as any;
-  const estimatedHouseholds = rawSite.estimatedHouseholds ?? rawSite.estimated_households ?? rawSite.numberOfHouseholds ?? rawSite.number_of_households;
+  const numberOfHouseholds = rawSite.numberOfHouseholds ?? rawSite.number_of_households;
   return {
+    lot: rawSite.lot || null,
     site_name: rawSite.siteName ?? rawSite.site_name ?? "",
     district: rawSite.district ?? "",
     village_sub_district: rawSite.villageSubDistrict ?? rawSite.village_sub_district ?? "",
     latitude: rawSite.latitude ?? undefined,
     longitude: rawSite.longitude ?? undefined,
-    estimated_households: estimatedHouseholds ?? undefined,
-    number_of_households: estimatedHouseholds ?? undefined,
+    number_of_households: numberOfHouseholds ?? undefined,
     target_technology: rawSite.targetTechnology ?? rawSite.target_technology ?? undefined,
     target_beneficiary_type: rawSite.targetBeneficiaryType ?? rawSite.target_beneficiary_type ?? undefined,
     estimated_energy_demand_kwh_month:
@@ -1275,7 +1470,19 @@ function mapTenderBidFromApi(api: any): TenderBid {
     vendor_name: api.vendor_name ?? "",
     vendor_email: api.vendor_email ?? undefined,
     bid_amount: api.bid_amount != null ? Number(api.bid_amount) : undefined,
+    bid_currency: api.bid_currency ?? undefined,
+    bid_amount_base_currency: api.bid_amount_base_currency != null ? Number(api.bid_amount_base_currency) : undefined,
     subsidy_requested: api.subsidy_requested != null ? Number(api.subsidy_requested) : undefined,
+    lot_offers: Array.isArray(api.lot_offers)
+      ? api.lot_offers.map((o: any) => ({
+          lot: String(o.lot ?? ""),
+          lot_name: o.lot_name ?? undefined,
+          bid_amount: o.bid_amount != null ? Number(o.bid_amount) : "",
+          bid_amount_base_currency: o.bid_amount_base_currency != null ? Number(o.bid_amount_base_currency) : undefined,
+          subsidy_requested: o.subsidy_requested != null ? Number(o.subsidy_requested) : null,
+        }))
+      : undefined,
+    declared_lots: Array.isArray(api.declared_lots) ? api.declared_lots.map((id: any) => String(id)) : undefined,
     stage: api.stage ?? undefined,
     stage_key: api.stage_key ?? undefined,
     stage_badge: api.stage_badge ?? undefined,
@@ -1346,6 +1553,7 @@ function mapTenderBidFromApi(api: any): TenderBid {
     financial_sealed: api.financial_sealed != null ? Boolean(api.financial_sealed) : undefined,
     financial_unsealed_at: api.financial_unsealed_at ?? undefined,
     tender_procurement_workflow: api.tender_procurement_workflow ?? undefined,
+    tender_skips_eoi_stage: api.tender_skips_eoi_stage ?? undefined,
     financial_stage_open: api.financial_stage_open != null ? Boolean(api.financial_stage_open) : undefined,
     document_requirements: Array.isArray(api.document_requirements) ? api.document_requirements : [],
     document_counts: api.document_counts ?? undefined,
@@ -1819,6 +2027,27 @@ export async function fetchTenders(pageSize?: number): Promise<Tender[]> {
   return unwrapListResponse<any>(data).map(mapTenderFromApi);
 }
 
+export interface EoiInviteCandidate {
+  id: string;
+  referenceNumber: string;
+  name: string;
+  status: string;
+  eoiDeadline?: string;
+  invitedVendorCount: number;
+}
+
+export async function fetchEoiInviteCandidates(): Promise<EoiInviteCandidate[]> {
+  const data = await http<any[]>(`/api/tenders/eoi_invite_candidates/`);
+  return (data || []).map((c) => ({
+    id: String(c.id ?? ""),
+    referenceNumber: c.reference_number ?? "",
+    name: c.name ?? "",
+    status: c.status ?? "",
+    eoiDeadline: c.eoi_deadline ?? undefined,
+    invitedVendorCount: Number(c.invited_vendor_count ?? 0),
+  }));
+}
+
 export async function createTender(payload: Partial<Tender>): Promise<Tender> {
   const form = buildTenderForm(payload as any);
   const data = await http<any>(`/api/tenders/`, { method: "POST", body: form });
@@ -1910,6 +2139,17 @@ export async function rejectPublish(
   return mapTenderFromApi(data);
 }
 
+export async function requestPublishChanges(
+  tenderId: string,
+  notes?: string,
+): Promise<Tender> {
+  const data = await http<any>(`/api/tenders/${tenderId}/request_publish_changes/`, {
+    method: "POST",
+    body: JSON.stringify({ notes: notes ?? "" }),
+  });
+  return mapTenderFromApi(data);
+}
+
 export async function fetchPendingPublishApprovals(): Promise<Tender[]> {
   const data = await http<any>(`/api/tenders/pending_publish_approvals/`, {
     method: "GET",
@@ -1942,15 +2182,22 @@ export async function awardTender(
 
 export async function fetchTenderAwardRanking(
   tenderId: string
-): Promise<{
-  technical_weight: number;
-  financial_weight: number;
-  technical_threshold: number;
-  cooling_off_days: number;
-  rows: TenderAwardRankingRow[];
-  recommended?: TenderAwardRankingRow | null;
-}> {
+): Promise<TenderAwardRankingResponse> {
   return await http<any>(`/api/tenders/${tenderId}/award_ranking/`);
+}
+
+export async function awardTenderLot(
+  tenderId: string,
+  payload: { lotId: string; bidId: string }
+): Promise<Tender> {
+  const data = await http<any>(`/api/tenders/${tenderId}/award_lot/`, {
+    method: "POST",
+    body: JSON.stringify({
+      lot_id: payload.lotId,
+      bid_id: payload.bidId,
+    }),
+  });
+  return mapTenderFromApi(data);
 }
 
 export async function confirmTenderAward(
@@ -2068,6 +2315,7 @@ export async function submitTenderBid(payload: Partial<TenderBid>): Promise<Tend
   const form = new FormData();
   form.append('tender', String(payload.tender ?? ""));
   if (payload.bid_amount != null) form.append('bid_amount', String(payload.bid_amount));
+  if (payload.bid_currency != null) form.append('bid_currency', payload.bid_currency);
   if (payload.subsidy_requested != null) form.append('subsidy_requested', String(payload.subsidy_requested));
   if (payload.stage != null) form.append('stage', payload.stage);
   form.append('concept_note', payload.concept_note ?? "");
@@ -2093,6 +2341,8 @@ export async function submitTenderBid(payload: Partial<TenderBid>): Promise<Tend
   if (payload.daily_payment_amount_lsl != null) form.append('daily_payment_amount_lsl', String(payload.daily_payment_amount_lsl));
   form.append('collection_method', payload.collection_method ?? "");
   if (payload.sites) form.append('sites', JSON.stringify(payload.sites.map(mapTenderBidSiteToApi)));
+  if (payload.lot_offers) form.append('lot_offers', JSON.stringify(payload.lot_offers));
+  if (payload.declared_lots) form.append('declared_lots', JSON.stringify(payload.declared_lots));
   form.append('status', payload.status ?? BidStatus.DRAFT);
   if (payload.preferred_district) form.append('preferred_district', payload.preferred_district);
   if (payload.bid_stage != null) form.append('bid_stage', payload.bid_stage);
@@ -2138,10 +2388,6 @@ export async function submitTenderBid(payload: Partial<TenderBid>): Promise<Tend
   if (implementationPlanFile instanceof File) {
     form.append('implementation_plan_file', implementationPlanFile);
   }
-  const omPlanDocument = (payload as any).om_plan_document;
-  if (omPlanDocument instanceof File) {
-    form.append('om_plan_document', omPlanDocument);
-  }
   const omPlanFile = (payload as any).om_plan_file;
   if (omPlanFile instanceof File) {
     form.append('om_plan_file', omPlanFile);
@@ -2178,6 +2424,7 @@ export async function submitTenderBid(payload: Partial<TenderBid>): Promise<Tend
 export async function updateTenderBid(bidId: string, payload: Partial<TenderBid>): Promise<TenderBid> {
   const form = new FormData();
   if (payload.bid_amount != null) form.append('bid_amount', String(payload.bid_amount));
+  if (payload.bid_currency != null) form.append('bid_currency', payload.bid_currency);
   if (payload.subsidy_requested != null) form.append('subsidy_requested', String(payload.subsidy_requested));
   if (payload.stage != null) form.append('stage', payload.stage);
   if (payload.concept_note != null) form.append('concept_note', payload.concept_note);
@@ -2203,6 +2450,8 @@ export async function updateTenderBid(bidId: string, payload: Partial<TenderBid>
   if (payload.daily_payment_amount_lsl != null) form.append('daily_payment_amount_lsl', String(payload.daily_payment_amount_lsl));
   if (payload.collection_method != null) form.append('collection_method', payload.collection_method);
   if (payload.sites != null) form.append('sites', JSON.stringify(payload.sites.map(mapTenderBidSiteToApi)));
+  if (payload.lot_offers != null) form.append('lot_offers', JSON.stringify(payload.lot_offers));
+  if (payload.declared_lots != null) form.append('declared_lots', JSON.stringify(payload.declared_lots));
   if (payload.status != null) form.append('status', payload.status);
   if (payload.preferred_district != null) form.append('preferred_district', payload.preferred_district);
   if (payload.bid_stage != null) form.append('bid_stage', payload.bid_stage);
@@ -2248,10 +2497,6 @@ export async function updateTenderBid(bidId: string, payload: Partial<TenderBid>
   if (implementationPlanFile instanceof File) {
     form.append('implementation_plan_file', implementationPlanFile);
   }
-  const omPlanDocument = (payload as any).om_plan_document;
-  if (omPlanDocument instanceof File) {
-    form.append('om_plan_document', omPlanDocument);
-  }
   const omPlanFile = (payload as any).om_plan_file;
   if (omPlanFile instanceof File) {
     form.append('om_plan_file', omPlanFile);
@@ -2293,10 +2538,11 @@ export async function submitTenderBidFinal(bidId: string): Promise<TenderBid> {
   return mapTenderBidFromApi(data);
 }
 
-export async function fetchTenderBids(tenderId?: string, pageSize?: number): Promise<TenderBid[]> {
+export async function fetchTenderBids(tenderId?: string, pageSize?: number, vendorId?: string): Promise<TenderBid[]> {
   const query = new URLSearchParams();
   if (tenderId) query.set("tender", tenderId);
   if (pageSize) query.set("page_size", String(pageSize));
+  if (vendorId) query.set("vendor_id", vendorId);
   const url = `/api/tender-bids/${query.toString() ? `?${query.toString()}` : ""}`;
   const data = await http<any>(url);
   return unwrapListResponse<any>(data).map(mapTenderBidFromApi);
@@ -2369,7 +2615,11 @@ export async function createBidEvaluation(payload: Partial<TenderBidEvaluation> 
     method: "POST",
     body: JSON.stringify({
       bid: payload.bid,
+      stage: payload.stage ?? "technical",
+      lot: payload.lot ?? undefined,
       technical_score: payload.technicalScore ?? 0,
+      // financial_score is always recomputed server-side from the price formula for
+      // stage="financial" — sending it is harmless but never authoritative.
       financial_score: payload.financialScore ?? 0,
       feasibility_score: payload.feasibilityScore ?? 0,
       kpi_score: payload.kpiScore ?? 0,
@@ -2378,6 +2628,8 @@ export async function createBidEvaluation(payload: Partial<TenderBidEvaluation> 
       om_score: payload.omScore ?? 0,
       inclusivity_score: payload.inclusivityScore ?? 0,
       comments: payload.comments ?? "",
+      justifications: payload.justifications ?? undefined,
+      submission_status: payload.submissionStatus ?? undefined,
     }),
   });
   return mapBidEvaluationFromApi(data);
@@ -2387,6 +2639,8 @@ export async function updateBidEvaluation(id: string, payload: Partial<TenderBid
   const data = await http<any>(`/api/tender-bid-evaluations/${id}/`, {
     method: "PATCH",
     body: JSON.stringify({
+      stage: payload.stage,
+      lot: payload.lot,
       technical_score: payload.technicalScore,
       financial_score: payload.financialScore,
       feasibility_score: payload.feasibilityScore,
@@ -2396,9 +2650,294 @@ export async function updateBidEvaluation(id: string, payload: Partial<TenderBid
       om_score: payload.omScore,
       inclusivity_score: payload.inclusivityScore,
       comments: payload.comments,
+      justifications: payload.justifications,
     }),
   });
   return mapBidEvaluationFromApi(data);
+}
+
+export async function submitBidEvaluation(id: string, payload: { comments?: string; justifications?: Record<string, string> }): Promise<TenderBidEvaluation> {
+  const data = await http<any>(`/api/tender-bid-evaluations/${id}/submit/`, {
+    method: "POST",
+    body: JSON.stringify({
+      comments: payload.comments,
+      justifications: payload.justifications,
+    }),
+  });
+  return mapBidEvaluationFromApi(data);
+}
+
+export async function unlockBidEvaluation(id: string, reason?: string): Promise<TenderBidEvaluation> {
+  const data = await http<any>(`/api/tender-bid-evaluations/${id}/unlock/`, {
+    method: "POST",
+    body: JSON.stringify({ reason: reason ?? "" }),
+  });
+  return mapBidEvaluationFromApi(data);
+}
+
+export async function fetchEvaluationCoIStatus(tenderId: string): Promise<EvaluationCommitteeCoIStatus> {
+  const data = await http<any>(`/api/tenders/${tenderId}/coi_status/`);
+  return {
+    committee: (data.committee || []).map((m: any) => ({
+      memberId: String(m.member_id ?? ""),
+      name: m.name ?? "",
+      coiAttested: Boolean(m.coi_attested),
+      coiAttestedAt: m.coi_attested_at ?? null,
+    })),
+    declarations: (data.declarations || []).map((c: any) => ({
+      id: c.id != null ? String(c.id) : undefined,
+      evaluatorId: c.evaluator_id != null ? String(c.evaluator_id) : undefined,
+      evaluatorName: c.evaluator_name ?? undefined,
+      vendorId: c.vendor_id ?? undefined,
+      vendorName: c.vendor_name ?? undefined,
+      relationship: c.relationship ?? undefined,
+      details: c.details ?? undefined,
+      resolved: Boolean(c.resolved),
+      resolvedAt: c.resolved_at ?? undefined,
+      resolutionNotes: c.resolution_notes ?? undefined,
+      declaredAt: c.declared_at ?? undefined,
+    })),
+  };
+}
+
+export async function attestEvaluationCoI(tenderId: string): Promise<{ detail: string; coiAttested: boolean }> {
+  const data = await http<any>(`/api/tenders/${tenderId}/attest_coi/`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  return { detail: data.detail ?? "", coiAttested: Boolean(data.coi_attested) };
+}
+
+export async function declareEvaluationCoI(tenderId: string, payload: { vendorId: string; relationship: string; details?: string }): Promise<{ id: string; detail: string }> {
+  const data = await http<any>(`/api/tenders/${tenderId}/declare_coi/`, {
+    method: "POST",
+    body: JSON.stringify({
+      vendor_id: payload.vendorId,
+      relationship: payload.relationship,
+      details: payload.details ?? "",
+    }),
+  });
+  return { id: data.id != null ? String(data.id) : "", detail: data.detail ?? "" };
+}
+
+export async function fetchEvaluationCommittee(tenderId: string): Promise<{
+  roster: TenderEvaluationCommitteeMember[];
+  availableMembers: { id: string; fullName: string; email: string }[];
+}> {
+  const data = await http<any>(`/api/tenders/${tenderId}/evaluation_committee/`);
+  return {
+    roster: (data.roster || []).map(mapEvaluationCommitteeMemberFromApi),
+    availableMembers: (data.available_members || []).map((m: any) => ({
+      id: String(m.id),
+      fullName: m.full_name ?? "",
+      email: m.email ?? "",
+    })),
+  };
+}
+
+export async function assignEvaluationCommittee(tenderId: string, memberIds: string[]): Promise<TenderEvaluationCommitteeMember[]> {
+  const data = await http<any>(`/api/tenders/${tenderId}/evaluation_committee/`, {
+    method: "POST",
+    body: JSON.stringify({ member_ids: memberIds }),
+  });
+  return (data.roster || []).map(mapEvaluationCommitteeMemberFromApi);
+}
+
+export async function fetchEvaluationCommitteeScores(tenderId: string): Promise<EvaluationCommitteeScores> {
+  const data = await http<any>(`/api/tenders/${tenderId}/evaluation_scores/`);
+  const mapEval = (e: any): EvaluationCommitteeScoresMemberEvaluation => ({
+    evaluationId: String(e.evaluation_id ?? ""),
+    evaluator: e.evaluator != null ? String(e.evaluator) : null,
+    evaluatorName: e.evaluator_name ?? "",
+    stage: e.stage ?? "technical",
+    lot: e.lot != null ? String(e.lot) : null,
+    lotName: e.lot_name != null ? e.lot_name : undefined,
+    status: e.status ?? "Pending",
+    submissionStatus: e.submission_status === "submitted" ? "submitted" : e.submission_status === "draft" ? "draft" : undefined,
+    submittedAt: e.submitted_at ?? undefined,
+    justifications: e.justifications && typeof e.justifications === "object" ? e.justifications : undefined,
+    revisions: Array.isArray(e.revisions)
+      ? e.revisions.map((r: any) => ({
+          action: r.action ?? "",
+          reason: r.reason ?? "",
+          changedBy: r.changed_by ?? "",
+          changedAt: r.changed_at ?? undefined,
+          changes: Array.isArray(r.changes)
+            ? r.changes.map((c: any) => ({
+                field: c.field ?? "",
+                before: c.before ?? null,
+                after: c.after ?? null,
+              }))
+            : [],
+        }))
+      : undefined,
+    technicalScore: Number(e.technical_score ?? 0),
+    feasibilityScore: Number(e.feasibility_score ?? 0),
+    kpiScore: Number(e.kpi_score ?? 0),
+    genderScore: Number(e.gender_score ?? 0),
+    environmentalScore: Number(e.environmental_score ?? 0),
+    omScore: Number(e.om_score ?? 0),
+    inclusivityScore: Number(e.inclusivity_score ?? 0),
+    financialScore: Number(e.financial_score ?? 0),
+    financialScoreAutoCalculated: Boolean(e.financial_score_auto_calculated),
+    totalScore: Number(e.total_score ?? 0),
+    comments: e.comments ?? "",
+    createdAt: e.created_at ?? undefined,
+    updatedAt: e.updated_at ?? undefined,
+  });
+  return {
+    committeeMembers: (data.committee_members || []).map((m: any) => ({ id: String(m.id ?? ""), name: m.name ?? "" })),
+    scoreLimits: data.score_limits || {},
+    technicalScoreTotal: Number(data.technical_score_total ?? 70),
+    technicalThreshold: Number(data.technical_threshold ?? 70),
+    isLotWise: Boolean(data.is_lot_wise),
+    committeeSize: Number(data.committee_size ?? 0),
+    quorum: Number(data.quorum ?? 0),
+    bids: (data.bids || []).map((b: any) => ({
+      bidId: String(b.bid_id ?? ""),
+      vendorId: String(b.vendor_id ?? ""),
+      vendorName: b.vendor_name ?? "",
+      bidStage: b.bid_stage ?? "",
+      status: b.status ?? "",
+      technicalQuorumMet: Boolean(b.technical_quorum_met),
+      technicalAverageScore: b.technical_average_score != null ? b.technical_average_score : null,
+      technicalRawAverage: b.technical_raw_average != null ? b.technical_raw_average : null,
+      passedTechnicalThreshold: Boolean(b.passed_technical_threshold),
+      financialFinalized: Boolean(b.financial_finalized),
+      lotFinancialFinalized: b.lot_financial_finalized || {},
+      evaluations: (b.evaluations || []).map(mapEval),
+    })),
+    lots: Array.isArray(data.lots)
+      ? data.lots.map((l: any) => ({ lotId: String(l.lot_id ?? ""), lotName: l.lot_name ?? "" }))
+      : undefined,
+  };
+}
+
+export async function fetchTenderEvaluationComment(tenderId: string): Promise<TenderEvaluationComment> {
+  const data = await http<any>(`/api/tenders/${tenderId}/evaluation_comment/`);
+  return {
+    comment: data.comment ?? "",
+    author: data.author ?? "",
+    updatedAt: data.updated_at ?? null,
+    evaluationComplete: Boolean(data.evaluation_complete),
+    incompleteReasons: Array.isArray(data.incomplete_reasons) ? data.incomplete_reasons : [],
+    committeeSize: Number(data.committee_size ?? 0),
+  };
+}
+
+export async function saveTenderEvaluationComment(tenderId: string, comment: string): Promise<TenderEvaluationComment> {
+  const data = await http<any>(`/api/tenders/${tenderId}/evaluation_comment/`, {
+    method: "POST",
+    body: JSON.stringify({ comment }),
+  });
+  return {
+    comment: data.comment ?? "",
+    author: data.author ?? "",
+    updatedAt: data.updated_at ?? null,
+    evaluationComplete: Boolean(data.evaluation_complete),
+    incompleteReasons: Array.isArray(data.incomplete_reasons) ? data.incomplete_reasons : [],
+    committeeSize: Number(data.committee_size ?? 0),
+  };
+}
+
+export async function fetchFinancialEvaluation(tenderId: string): Promise<
+  | { isLotWise: true; lots: FinancialEvaluationLot[] }
+  | { isLotWise: false; rows: FinancialEvaluationRow[] }
+> {
+  const data = await http<any>(`/api/tenders/${tenderId}/financial_evaluation/`);
+  const mapRow = (r: any): FinancialEvaluationRow => ({
+    bidId: String(r.bid_id ?? ""),
+    vendorId: String(r.vendor_id ?? ""),
+    vendorName: r.vendor_name ?? "",
+    bidAmount: Number(r.bid_amount ?? 0),
+    bidCurrency: r.bid_currency ?? undefined,
+    bidAmountBaseCurrency: r.bid_amount_base_currency != null ? Number(r.bid_amount_base_currency) : undefined,
+    subsidyRequested: r.subsidy_requested != null ? Number(r.subsidy_requested) : null,
+    computedFinancialScore: Number(r.computed_financial_score ?? 0),
+    finalized: Boolean(r.finalized),
+    finalizedByMe: Boolean(r.finalized_by_me),
+    submissionStatus: r.submission_status === "submitted" ? "submitted" : r.submission_status === "draft" ? "draft" : undefined,
+    submittedAt: r.submitted_at ?? undefined,
+  });
+  if (data.is_lot_wise) {
+    return {
+      isLotWise: true,
+      lots: (data.lots || []).map((lot: any) => ({
+        lotId: String(lot.lot_id ?? ""),
+        lotName: lot.lot_name ?? "",
+        rows: (lot.rows || []).map(mapRow),
+      })),
+    };
+  }
+  return { isLotWise: false, rows: (data.rows || []).map(mapRow) };
+}
+
+function mapEvaluationCommitteeMemberFromApi(api: any): TenderEvaluationCommitteeMember {
+  return {
+    id: String(api.id ?? ""),
+    member: String(api.member ?? ""),
+    memberName: api.member_name ?? "",
+    memberEmail: api.member_email ?? "",
+    assignedBy: api.assigned_by != null ? String(api.assigned_by) : undefined,
+    assignedByName: api.assigned_by_name ?? "",
+    assignedAt: api.assigned_at ?? undefined,
+  };
+}
+
+export async function fetchTenderInvitedVendors(tenderId: string): Promise<{
+  invited: TenderInvitedVendor[];
+  availableVendors: {
+    id: string;
+    fullName: string;
+    email: string;
+    organizationName: string;
+    accountStatus: string;
+    prequalificationStatus: string;
+    technologyTypes: string[];
+    techTier: string;
+    yearsExperience: number | null;
+    priorProjects: number | null;
+    matchesTenderTechnology: boolean;
+  }[];
+}> {
+  const data = await http<any>(`/api/tenders/${tenderId}/invited_vendors/`);
+  return {
+    invited: (data.invited || []).map(mapTenderInvitedVendorFromApi),
+    availableVendors: (data.available_vendors || []).map((v: any) => ({
+      id: String(v.id),
+      fullName: v.full_name ?? "",
+      email: v.email ?? "",
+      organizationName: v.organization_name ?? "",
+      accountStatus: v.account_status ?? "",
+      prequalificationStatus: v.prequalification_status ?? "",
+      technologyTypes: Array.isArray(v.technology_types) ? v.technology_types : [],
+      techTier: v.tech_tier ?? "",
+      yearsExperience: v.years_experience ?? null,
+      priorProjects: v.prior_projects ?? null,
+      matchesTenderTechnology: Boolean(v.matches_tender_technology),
+    })),
+  };
+}
+
+export async function assignTenderInvitedVendors(tenderId: string, vendorIds: string[]): Promise<TenderInvitedVendor[]> {
+  const data = await http<any>(`/api/tenders/${tenderId}/invited_vendors/`, {
+    method: "POST",
+    body: JSON.stringify({ vendor_ids: vendorIds }),
+  });
+  return (data.invited || []).map(mapTenderInvitedVendorFromApi);
+}
+
+function mapTenderInvitedVendorFromApi(api: any): TenderInvitedVendor {
+  return {
+    id: String(api.id ?? ""),
+    vendor: String(api.vendor ?? ""),
+    vendorName: api.vendor_name ?? "",
+    vendorEmail: api.vendor_email ?? "",
+    vendorOrganizationName: api.vendor_organization_name ?? "",
+    invitedBy: api.invited_by != null ? String(api.invited_by) : undefined,
+    invitedByName: api.invited_by_name ?? "",
+    invitedAt: api.invited_at ?? undefined,
+  };
 }
 
 export async function fetchTenderContracts(params?: { tenderId?: string; vendorId?: string; status?: string; pageSize?: number }): Promise<TenderContract[]> {
@@ -3971,9 +4510,67 @@ export async function updatePlatformConfiguration(payload: Partial<PlatformConfi
       contact_address: payload.contactAddress,
       contact_office_hours: payload.contactOfficeHours,
       contact_organisation_name: payload.contactOrganisationName,
+      ...(payload.technicalScoringCriteria ? {
+        technical_scoring_criteria: payload.technicalScoringCriteria.map((c) => ({
+          key: c.key,
+          label: c.label,
+          max_score: c.maxScore,
+        })),
+      } : {}),
+      ...(payload.financialScoringFormula ? { financial_scoring_formula: payload.financialScoringFormula } : {}),
+      ...(payload.procurementMethods ? {
+        procurement_methods: payload.procurementMethods.map((m) => ({
+          value: m.value,
+          visibilityMode: m.visibilityMode,
+        })),
+      } : {}),
+      ...(payload.currencies ? {
+        currencies: payload.currencies.map((c) => ({
+          value: c.value,
+          isDefault: c.isDefault,
+        })),
+      } : {}),
     }),
   });
   return mapPlatformConfigurationFromApi(data);
+}
+
+export async function fetchProcurementMethodsConfig(): Promise<ProcurementMethodOption[]> {
+  const data = await http<any>(`/api/users/platform-configuration/procurement-methods/`);
+  return Array.isArray(data.procurement_methods)
+    ? data.procurement_methods.map((m: any) => ({
+        value: String(m.value ?? ""),
+        visibilityMode: normalizeProcurementVisibilityMode(m.visibilityMode),
+      }))
+    : [];
+}
+
+export async function fetchCurrenciesConfig(): Promise<{ currencies: CurrencyOption[]; defaultCurrency: string }> {
+  const data = await http<any>(`/api/users/platform-configuration/currencies/`);
+  return {
+    currencies: Array.isArray(data.currencies)
+      ? data.currencies.map((c: any) => ({
+          value: String(c.value ?? ""),
+          isDefault: Boolean(c.isDefault),
+        }))
+      : [],
+    defaultCurrency: String(data.default_currency ?? "LSL (Maloti)"),
+  };
+}
+
+export async function fetchEvaluationScoringConfig(): Promise<EvaluationScoringConfig> {
+  const data = await http<any>(`/api/users/platform-configuration/evaluation-scoring/`);
+  return {
+    technicalScoringCriteria: Array.isArray(data.technical_scoring_criteria)
+      ? data.technical_scoring_criteria.map((c: any) => ({
+          key: String(c.key ?? ""),
+          label: String(c.label ?? ""),
+          maxScore: Number(c.max_score ?? 0),
+        }))
+      : [],
+    financialScoringFormula: data.financial_scoring_formula === "linear_deviation_100" ? "linear_deviation_100" : "lowest_price_100",
+    technicalScoreTotal: Number(data.technical_score_total ?? 70),
+  };
 }
 
 export async function refreshBoundaryFile(): Promise<void> {

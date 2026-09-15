@@ -28,6 +28,7 @@ import {
   ExternalLink,
   Check,
   CheckCircle2,
+  CircleDashed,
   AlertCircle,
   AlertTriangle,
   Clock,
@@ -61,13 +62,17 @@ import {
   Gavel,
   FolderKanban,
   FolderOpen,
+  LayoutGrid,
+  List,
   Briefcase,
   RefreshCw,
   Printer,
   Paperclip,
   Pause,
+  PenLine,
   WifiOff,
   ArrowUpRight,
+  ArrowRight,
 } from "lucide-react";
 import {
   LineChart,
@@ -104,9 +109,18 @@ import {
   User,
   BidStatus,
   TenderBid,
+  TenderBidLotOffer,
   TenderBidEvaluation,
+  EvaluationScoringConfig,
+  ProcurementMethodOption,
+  ProcurementVisibilityMode,
+  CurrencyOption,
+  EvaluationCommitteeCoIStatus,
   TenderContract,
   TenderAwardRankingRow,
+  TenderLotAwardRanking,
+  TenderEvaluationStatusInfo,
+  TenderLot,
   VendorBlacklistCase,
   BlacklistAppeal,
   ProjectKpiSummary,
@@ -124,6 +138,8 @@ import {
 import { MOCK_TENDERS } from "./constants";
 import {
   fetchTenders,
+  fetchEoiInviteCandidates,
+  type EoiInviteCandidate,
   fetchTender,
   fetchTenderViewers,
   fetchTenderActivity,
@@ -134,8 +150,14 @@ import {
   requestPublishApproval,
   approvePublish,
   rejectPublish,
+  requestPublishChanges,
   fetchPendingPublishApprovals,
   awardTender,
+  awardTenderLot,
+  fetchEvaluationCommittee,
+  assignEvaluationCommittee,
+  fetchTenderInvitedVendors,
+  assignTenderInvitedVendors,
   closeTender,
   openFinancialStage,
   fetchNotifications,
@@ -203,9 +225,18 @@ import {
   reviewTenderBid,
   acceptTenderBid,
   rejectTenderBid,
+  markTenderBidPartialConformity,
   fetchBidEvaluations,
   createBidEvaluation,
+  fetchEvaluationScoringConfig,
+  fetchProcurementMethodsConfig,
+  fetchCurrenciesConfig,
   updateBidEvaluation,
+  submitBidEvaluation,
+  unlockBidEvaluation,
+  fetchEvaluationCoIStatus,
+  attestEvaluationCoI,
+  declareEvaluationCoI,
   fetchTenderContracts,
   fetchTenderContractAssignment,
   signTenderContract,
@@ -261,7 +292,34 @@ import RmtIssuesFindings from "./components/RmtIssuesFindings";
 import RmtNoticeManagement from "./components/RmtNoticeManagement";
 import { PscReports, PscDashboard, default as PscIssuesView } from "./components/PscPortal";
 import { TacDashboard, TacReports } from "./components/TacPortal";
+import { EvaluationCommitteeDashboard, FinancialEvaluationView } from "./components/EvaluationCommitteePortal";
+import { CommitteeScoresView } from "./components/CommitteeScoresView";
+import { SubmittedBidModal } from "./components/SubmittedBidModal";
 import { ReportsHub } from "./components/ReportsHub";
+import { EoiInvites } from "./components/EoiInvites";
+import {
+  FormKitShell,
+  Field,
+  TextInput,
+  Select as FormKitSelect,
+  TextArea as FormKitTextArea,
+  Chips as FormKitChips,
+  ToggleRow,
+  Badge as FormKitBadge,
+  InfoBanner,
+  Crumb,
+  StatusChip,
+  TEAL,
+  TEAL_SOFT,
+  AMBER,
+  AMBER_SOFT,
+  INK,
+  INK_SUB,
+  INK_FAINT,
+  LINE,
+  SURFACE,
+  LOCK_BG,
+} from "./components/EoiTenderFormKit";
 import {
   AuditorDashboard,
   AuditorGisMap,
@@ -278,6 +336,13 @@ const getTenderDeadlineDefault = () => {
   deadline.setDate(deadline.getDate() + 14);
   const pad = (value: number) => String(value).padStart(2, "0");
   return `${deadline.getFullYear()}-${pad(deadline.getMonth() + 1)}-${pad(deadline.getDate())}`;
+};
+
+const summarizeLotOffers = (bid?: { lot_offers?: TenderBidLotOffer[] } | null): string | null => {
+  const offers = bid?.lot_offers;
+  if (!Array.isArray(offers) || offers.length === 0) return null;
+  const total = offers.reduce((sum, o) => sum + Number(o.bid_amount || 0), 0);
+  return `${offers.length} lot${offers.length === 1 ? "" : "s"} • M ${total.toLocaleString()}`;
 };
 
 // --- Components ---
@@ -495,9 +560,11 @@ const buildTenderPdfHtml = (tender: Tender) => {
   const chip = (label: string, value: string | number | undefined | null) =>
     `<div class="stat"><div class="stat-label">${escHtml(label)}</div><div class="stat-value">${escHtml(value == null ? "N/A" : String(value))}</div></div>`;
 
+  const isSingleStageCombined = tender.procurementWorkflow === "combined" && !tender.eoiDeadline;
   const stages = [
-    { label: "EOI (Stage 1)", value: tender.eoiDeadline, show: true },
-    { label: "Technical (Stage 2)", value: tender.technicalDeadline, show: true },
+    { label: "EOI (Stage 1)", value: tender.eoiDeadline, show: !isSingleStageCombined },
+    { label: "Combined Submission (Stage 2)", value: tender.technicalDeadline, show: tender.procurementWorkflow !== "sequential" },
+    { label: "Technical (Stage 2)", value: tender.technicalDeadline, show: tender.procurementWorkflow === "sequential" },
     { label: "Financial (Stage 3)", value: tender.financialDeadline, show: tender.procurementWorkflow === "sequential" },
   ].filter(s => s.show).map(s => row(s.label, s.value)).join("");
 
@@ -568,7 +635,7 @@ const buildTenderPdfHtml = (tender: Tender) => {
     <div class="section-title">Tender Information</div>
     <div class="section">
       ${row("Status", `<span class="badge">${escHtml(tender.status)}</span>`)}
-      ${row("Procurement Workflow", tender.procurementWorkflow === "sequential" ? "Sequential (EOI → Technical → Financial)" : "Combined (EOI + Technical/Financial)")}
+      ${row("Procurement Workflow", tender.procurementWorkflow === "sequential" ? "Sequential (EOI → Technical → Financial)" : tender.procurementWorkflow === "eoi_combined" ? "EOI → Combined" : isSingleStageCombined ? "Combined" : "Combined (EOI + Technical/Financial)")}
       ${row("Application Type", tender.applicationType)}
       ${row("Department", tender.department)}
       ${row("Category", tender.category)}
@@ -1725,7 +1792,7 @@ const PublishApprovals = ({ onOpenTender }: { onOpenTender?: (tenderId: string) 
   const [notesMap, setNotesMap] = useState<Record<string, string>>({});
   const [reasonOpen, setReasonOpen] = useState(false);
   const [activeTender, setActiveTender] = useState<Tender | null>(null);
-  const [deciding, setDeciding] = useState<"approve" | "reject">("approve");
+  const [deciding, setDeciding] = useState<"approve" | "reject" | "changes_requested">("approve");
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
@@ -1760,6 +1827,10 @@ const PublishApprovals = ({ onOpenTender }: { onOpenTender?: (tenderId: string) 
         const updated = await approvePublish(activeTender.id, notesMap[activeTender.id]);
         setPending((prev) => prev.filter((t) => t.id !== updated.id));
         setToast("Publish approval granted. The RBF can now publish this tender.");
+      } else if (deciding === "changes_requested") {
+        const updated = await requestPublishChanges(activeTender.id, notesMap[activeTender.id]);
+        setPending((prev) => prev.filter((t) => t.id !== updated.id));
+        setToast("Changes requested. The RBF has been sent back to Draft to revise and resubmit.");
       } else {
         const updated = await rejectPublish(activeTender.id, notesMap[activeTender.id]);
         setPending((prev) => prev.filter((t) => t.id !== updated.id));
@@ -1774,7 +1845,7 @@ const PublishApprovals = ({ onOpenTender }: { onOpenTender?: (tenderId: string) 
     }
   };
 
-  const openDecision = (tender: Tender, decision: "approve" | "reject") => {
+  const openDecision = (tender: Tender, decision: "approve" | "reject" | "changes_requested") => {
     setActiveTender(tender);
     setDeciding(decision);
     setNotesMap((m) => ({ ...m, [tender.id]: m[tender.id] ?? "" }));
@@ -1838,6 +1909,13 @@ const PublishApprovals = ({ onOpenTender }: { onOpenTender?: (tenderId: string) 
                     Approve
                   </button>
                   <button
+                    onClick={() => openDecision(tender, "changes_requested")}
+                    disabled={actionTenderId === tender.id}
+                    className="btn-secondary text-sm py-1.5 border-orange-200 text-orange-700 hover:bg-orange-50 disabled:opacity-60"
+                  >
+                    Request Changes
+                  </button>
+                  <button
                     onClick={() => openDecision(tender, "reject")}
                     disabled={actionTenderId === tender.id}
                     className="btn-secondary text-sm py-1.5 border-rose-200 text-rose-700 hover:bg-rose-50 disabled:opacity-60"
@@ -1878,22 +1956,31 @@ const PublishApprovals = ({ onOpenTender }: { onOpenTender?: (tenderId: string) 
           <div className="bg-white rounded-2xl p-6 w-full max-w-md shadow-2xl">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-bold text-slate-900">
-                {deciding === "approve" ? "Approve Publish" : "Reject Publish"}
+                {deciding === "approve" ? "Approve Publish" : deciding === "changes_requested" ? "Request Changes" : "Reject Publish"}
               </h3>
               <button onClick={() => { setReasonOpen(false); setActiveTender(null); }} className="p-1 hover:bg-slate-100 rounded-lg">
                 <X size={20} className="text-slate-500" />
               </button>
             </div>
             <p className="text-sm text-slate-600 mb-4 font-medium">{activeTender.name}</p>
+            {deciding === "changes_requested" && (
+              <p className="text-xs text-orange-700 bg-orange-50 border border-orange-100 rounded-lg px-3 py-2 mb-4">
+                The tender goes back to the RBF as a Draft with a "Changes Requested" status (instead of a flat rejection) so they know to revise and resubmit it for approval.
+              </p>
+            )}
             <div>
               <label className="text-sm font-bold text-slate-700 mb-2 block">
-                {deciding === "approve" ? "Approval Notes (optional)" : "Reason for Rejection (optional)"}
+                {deciding === "approve" ? "Approval Notes (optional)" : deciding === "changes_requested" ? "What needs to change? (recommended)" : "Reason for Rejection (optional)"}
               </label>
               <textarea
                 className="input-field min-h-[90px]"
                 value={notesMap[activeTender.id] ?? ""}
                 onChange={(e) => setNotesMap((m) => ({ ...m, [activeTender.id]: e.target.value }))}
-                placeholder={deciding === "approve" ? "Add any notes for the RBF..." : "Explain why the tender should not be published..."}
+                placeholder={
+                  deciding === "approve" ? "Add any notes for the RBF..." :
+                  deciding === "changes_requested" ? "Describe what the RBF needs to fix before resubmitting..." :
+                  "Explain why the tender should not be published..."
+                }
               />
             </div>
             <div className="flex gap-3 pt-4">
@@ -1901,11 +1988,15 @@ const PublishApprovals = ({ onOpenTender }: { onOpenTender?: (tenderId: string) 
               <button
                 onClick={() => void confirmDecision()}
                 disabled={actionTenderId === activeTender.id}
-                className={`flex-1 btn-primary disabled:opacity-60 ${deciding === "approve" ? "bg-emerald-600 hover:bg-emerald-700" : "bg-rose-600 hover:bg-rose-700"}`}
+                className={`flex-1 btn-primary disabled:opacity-60 ${
+                  deciding === "approve" ? "bg-emerald-600 hover:bg-emerald-700" :
+                  deciding === "changes_requested" ? "bg-orange-600 hover:bg-orange-700" :
+                  "bg-rose-600 hover:bg-rose-700"
+                }`}
               >
                 {actionTenderId === activeTender.id
-                  ? deciding === "approve" ? "Approving..." : "Rejecting..."
-                  : deciding === "approve" ? "Approve" : "Reject"}
+                  ? deciding === "approve" ? "Approving..." : deciding === "changes_requested" ? "Sending back..." : "Rejecting..."
+                  : deciding === "approve" ? "Approve" : deciding === "changes_requested" ? "Request Changes" : "Reject"}
               </button>
             </div>
           </div>
@@ -1915,21 +2006,82 @@ const PublishApprovals = ({ onOpenTender }: { onOpenTender?: (tenderId: string) 
   );
 };
 
+const SUGGESTED_REQUIRED_DOCUMENTS: Record<string, { name: string; expected_type: string; field_key: string }[]> = {
+  eoi: [
+    { name: "Company Credentials", expected_type: "PDF/DOCX", field_key: "company_credentials_file" },
+    { name: "Financial Standing", expected_type: "PDF/DOCX/XLSX", field_key: "financial_standing_file" },
+    { name: "Technical Experience", expected_type: "PDF/DOCX", field_key: "technical_experience_file" },
+    { name: "Track Record", expected_type: "PDF/DOCX", field_key: "track_record_file" },
+  ],
+  combined: [
+    { name: "Technical Proposal", expected_type: "PDF/DOCX", field_key: "technical_proposal_file" },
+    { name: "Bill of Quantities", expected_type: "PDF/DOCX/XLSX", field_key: "boq_file" },
+    { name: "Gender Action Plan", expected_type: "PDF/DOCX/XLSX", field_key: "gender_action_plan_file" },
+    { name: "Implementation Plan", expected_type: "PDF/DOCX/XLSX", field_key: "implementation_plan_file" },
+    { name: "O&M Plan", expected_type: "PDF/DOCX/XLSX", field_key: "om_plan_file" },
+    { name: "Financial Proposal", expected_type: "PDF/DOCX/XLSX", field_key: "financial_proposal_file" },
+  ],
+};
+const REQUIRED_DOCUMENT_STAGE_LABELS: Record<string, string> = {
+  eoi: "Stage 1: EOI",
+  combined: "Stage 2: Combined",
+};
+
+// Plain-language "why this is needed" explanations for the fixed set of structured
+// required-document field keys — shown to vendors wherever a required-documents
+// checklist is rendered (admin config UI intentionally excluded; that's for RBF staff).
+const REQUIRED_DOCUMENT_HELP: Record<string, string> = {
+  company_credentials_file: "Proves your company is legally registered and licensed to operate (e.g. trading license, registration certificate).",
+  financial_standing_file: "Shows you have the financial capacity to deliver this project without running out of funds mid-way.",
+  technical_experience_file: "Demonstrates you've successfully done similar renewable energy work before.",
+  track_record_file: "A record of past project outcomes so the RMT can verify your delivery history.",
+  technical_proposal_file: "Your detailed plan for how you'll design, install, and support the system.",
+  boq_file: "An itemized cost breakdown (Bill of Quantities) showing exactly what your price covers.",
+  gender_action_plan_file: "How you'll reach and verify your female-headed household and inclusion targets.",
+  implementation_plan_file: "Your timeline and logistics for rolling out the installations.",
+  om_plan_file: "How you'll maintain and support the systems after installation.",
+  reporting_templates_file: "The templates you'll use to report progress and milestones to the RMT.",
+  distribution_map_file: "A map showing where you plan to install systems.",
+  financial_proposal_file: "Your final, binding priced proposal.",
+  tender_security_file: "A financial guarantee that protects the RMT if you withdraw your bid after submission.",
+};
+
+export const TARGET_SITE_TYPE_HELP: Record<string, string> = {
+  Household: "Systems installed at individual homes — the most common target for SHS and mini-grid connections.",
+  Business: "Commercial premises such as shops or small enterprises.",
+  School: "Educational institutions — typically lighting, ICT, or refrigeration loads.",
+  Clinic: "Healthcare facilities — often prioritized for vaccine refrigeration and medical equipment.",
+};
+
+const SUGGESTED_GOVERNING_DOCUMENTS: { label: string; expected_type: string; field_key: string; hint: string }[] = [
+  { label: "Tender Schedule", expected_type: "PDF/DOCX", field_key: "schedule_file", hint: "Key dates and procurement timeline" },
+  { label: "RFP / Subsidy Framework", expected_type: "PDF/DOCX", field_key: "rfp_documents_file", hint: "Eligibility, evaluation criteria, technical standards" },
+  { label: "Milestone Payment Schedule", expected_type: "PDF/DOCX", field_key: "milestone_payment_schedule_file", hint: "Payment terms for this window" },
+];
+
+export const lesothoDistrictOptions = ["Berea", "Butha-Buthe", "Leribe", "Mafeteng", "Maseru", "Mohale's Hoek", "Mokhotlong", "Qacha's Nek", "Quthing", "Thaba-Tseka"];
+export const tenderTechnologyTypeOptions = ["SHS", "ICS", "GMG", "SWP", "PUE"];
+export const advertisementChannelOptions = ["Platform Notice Board", "National Gazette", "Local Newspaper", "UNGM"];
+
 const Tenders = ({
   initialView = "list",
   initialTenderId,
   onTenderOpened,
   onNavigate,
+  onOpenEoiInvite,
 }: {
-  initialView?: "list" | "create" | "details" | "verify" | "publish" | "award" | "edit";
+  initialView?: "list" | "start" | "create" | "details" | "verify" | "publish" | "award" | "edit";
   initialTenderId?: string | null;
   onTenderOpened?: () => void;
   onNavigate?: (action: string, id?: string) => void;
+  // A tender's "linked EOI Invite" badge navigates to a different section
+  // (EOI Invites, not Tender Management) — this callback is how it gets there.
+  onOpenEoiInvite?: (eoiTenderId: string) => void;
 }) => {
-  const [view, setView] = useState<"list" | "create" | "details" | "verify" | "publish" | "award" | "edit">(initialView);
+  const [view, setView] = useState<"list" | "start" | "create" | "details" | "verify" | "publish" | "award" | "edit">(initialView);
   const navigateView = (newView: typeof view, id?: string | null) => { setView(newView); onNavigate?.(newView, id ?? undefined); };
   const [selectedTender, setSelectedTender] = useState<Tender | null>(null);
-  const [detailTab, setDetailTab] = useState<"overview" | "documents" | "logistics" | "activity">("overview");
+  const [detailTab, setDetailTab] = useState<"overview" | "requiredDocs" | "documents" | "lots" | "logistics" | "activity" | "scores">("overview");
   const [detailLoading, setDetailLoading] = useState(false);
   const [tenders, setTenders] = useState<Tender[]>([]);
   const [tenderViewers, setTenderViewers] = useState<TenderViewersResponse | null>(null);
@@ -1939,6 +2091,10 @@ const Tenders = ({
   const effectiveStatusLabel = (t: Tender) =>
     t.publishApprovalStatus === "approved" && t.status === TenderStatus.DRAFT
       ? "Approved to Publish"
+      : t.publishApprovalStatus === "changes_requested" && t.status === TenderStatus.DRAFT
+      ? "Changes Requested"
+      : t.publishApprovalStatus === "rejected" && t.status === TenderStatus.DRAFT
+      ? "Publish Rejected"
       : t.status;
   const [notification, setNotification] = useState<string | null>(null);
   const [tenderError, setTenderError] = useState<string | null>(null);
@@ -1956,7 +2112,14 @@ const Tenders = ({
   const [awardConfirmOpen, setAwardConfirmOpen] = useState(false);
   const [finalAwardConfirmOpen, setFinalAwardConfirmOpen] = useState(false);
   const [awardRankingRows, setAwardRankingRows] = useState<TenderAwardRankingRow[]>([]);
+  const [awardRankingWeights, setAwardRankingWeights] = useState<{ technical: number; financial: number } | null>(null);
+  const [awardEvaluationStatus, setAwardEvaluationStatus] = useState<TenderEvaluationStatusInfo | null>(null);
+  const [manageContractId, setManageContractId] = useState<string | null>(null);
+  const [awardLotRankings, setAwardLotRankings] = useState<TenderLotAwardRanking[]>([]);
+  const [lotAwardPending, setLotAwardPending] = useState<{ lotId: string; lotName: string; bidId: string; vendorName: string } | null>(null);
+  const [lotAwardSubmitting, setLotAwardSubmitting] = useState<string | null>(null);
   const [tenderChallenges, setTenderChallenges] = useState<any[]>([]);
+  const [publishConfirmOpen, setPublishConfirmOpen] = useState(false);
   const [pauseConfirmOpen, setPauseConfirmOpen] = useState(false);
   const [revokeConfirmOpen, setRevokeConfirmOpen] = useState(false);
   const [resolveChallengeOpen, setResolveChallengeOpen] = useState(false);
@@ -1977,6 +2140,92 @@ const Tenders = ({
   const [newDeadline, setNewDeadline] = useState("");
   const [isExtending, setIsExtending] = useState(false);
   const [formStep, setFormStep] = useState(1);
+  const currentUser = getStoredUser();
+  const canViewCommitteeScores = currentUser?.role === UserRole.ADMIN || currentUser?.role === UserRole.RBF_OFFICIAL;
+  const [ecModalOpen, setEcModalOpen] = useState(false);
+  const [ecLoading, setEcLoading] = useState(false);
+  const [ecSaving, setEcSaving] = useState(false);
+  const [ecError, setEcError] = useState<string | null>(null);
+  const [ecAvailableMembers, setEcAvailableMembers] = useState<{ id: string; fullName: string; email: string }[]>([]);
+  const [ecSelectedIds, setEcSelectedIds] = useState<string[]>([]);
+
+  const openEvaluationCommitteeModal = async () => {
+    if (!selectedTender?.id) return;
+    setEcModalOpen(true);
+    setEcLoading(true);
+    setEcError(null);
+    try {
+      const { roster, availableMembers } = await fetchEvaluationCommittee(selectedTender.id);
+      setEcAvailableMembers(availableMembers);
+      setEcSelectedIds(roster.map(m => m.member));
+    } catch (err: any) {
+      setEcError(err?.message || "Failed to load Evaluation Committee.");
+    } finally {
+      setEcLoading(false);
+    }
+  };
+
+  const saveEvaluationCommittee = async () => {
+    if (!selectedTender?.id) return;
+    if (ecSelectedIds.length < 3 || ecSelectedIds.length > 5) {
+      setEcError("Select between 3 and 5 committee members.");
+      return;
+    }
+    setEcSaving(true);
+    setEcError(null);
+    try {
+      const roster = await assignEvaluationCommittee(selectedTender.id, ecSelectedIds);
+      setSelectedTender(prev => prev ? { ...prev, evaluationCommitteeMembers: roster } : prev);
+      setEcModalOpen(false);
+      setNotification("Evaluation Committee updated.");
+      setTimeout(() => setNotification(null), 3000);
+    } catch (err: any) {
+      setEcError(err?.message || "Failed to save Evaluation Committee.");
+    } finally {
+      setEcSaving(false);
+    }
+  };
+
+  const [ivModalOpen, setIvModalOpen] = useState(false);
+  const [ivLoading, setIvLoading] = useState(false);
+  const [ivSaving, setIvSaving] = useState(false);
+  const [ivError, setIvError] = useState<string | null>(null);
+  const [ivAvailableVendors, setIvAvailableVendors] = useState<{ id: string; fullName: string; email: string; organizationName: string; accountStatus: string; prequalificationStatus: string; technologyTypes: string[]; techTier: string; yearsExperience: number | null; priorProjects: number | null; matchesTenderTechnology: boolean }[]>([]);
+  const [ivSelectedIds, setIvSelectedIds] = useState<string[]>([]);
+  const [ivViewingProfileId, setIvViewingProfileId] = useState<string | null>(null);
+
+  const openInvitedVendorsModal = async () => {
+    if (!selectedTender?.id) return;
+    setIvModalOpen(true);
+    setIvLoading(true);
+    setIvError(null);
+    try {
+      const { invited, availableVendors } = await fetchTenderInvitedVendors(selectedTender.id);
+      setIvAvailableVendors(availableVendors);
+      setIvSelectedIds(invited.map(v => v.vendor));
+    } catch (err: any) {
+      setIvError(err?.message || "Failed to load invited vendors.");
+    } finally {
+      setIvLoading(false);
+    }
+  };
+
+  const saveInvitedVendors = async () => {
+    if (!selectedTender?.id) return;
+    setIvSaving(true);
+    setIvError(null);
+    try {
+      const invited = await assignTenderInvitedVendors(selectedTender.id, ivSelectedIds);
+      setSelectedTender(prev => prev ? { ...prev, invitedVendors: invited } : prev);
+      setIvModalOpen(false);
+      setNotification("Invited vendors updated.");
+      setTimeout(() => setNotification(null), 3000);
+    } catch (err: any) {
+      setIvError(err?.message || "Failed to save invited vendors.");
+    } finally {
+      setIvSaving(false);
+    }
+  };
 
   useEffect(() => {
     if (view === "details" && selectedTender?.id) {
@@ -2010,8 +2259,11 @@ const Tenders = ({
   const [districtDropdownOpen, setDistrictDropdownOpen] = useState(false);
   const [page, setPage] = useState(1);
   const perPage = 10;
-  const lesothoDistrictOptions = ["Berea", "Butha-Buthe", "Leribe", "Mafeteng", "Maseru", "Mohale's Hoek", "Mokhotlong", "Qacha's Nek", "Quthing", "Thaba-Tseka"];
-  const tenderTechnologyTypeOptions = ["SHS", "ICS", "GMG", "SWP", "PUE"];
+  const LockedBadge = ({ text }: { text: string }) => (
+    <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-400">
+      <Lock size={11} /> {text}
+    </span>
+  );
   const [tenderContracts, setTenderContracts] = useState<TenderContract[]>([]);
   const [contractMessage, setContractMessage] = useState<string | null>(null);
   const [contractRejectionReason, setContractRejectionReason] = useState("");
@@ -2027,16 +2279,34 @@ const Tenders = ({
     targetVulnerablePct: 30,
     targetLowIncomePct: 60,
   });
+  const resetContractAssignmentDraft = () =>
+    setContractAssignmentDraft({
+      projectDurationMonths: 12,
+      targetInstallations: 500,
+      techType: "SHS",
+      energyOutput: 20000,
+      districts: ["Maseru"],
+      verificationMethod: "manual",
+      targetFemalePct: 50,
+      targetVulnerablePct: 30,
+      targetLowIncomePct: 60,
+    });
+
+  const isLotWiseTender = Boolean(selectedTender?.lots && selectedTender.lots.length > 0);
 
   const activeContract = useMemo(() => {
     if (!tenderContracts.length) return null;
+    if (manageContractId) {
+      const match = tenderContracts.find(item => item.id === manageContractId);
+      if (match) return match;
+    }
     const awardedId = selectedTender?.awardedVendorId;
     if (awardedId) {
       const match = tenderContracts.find(item => String(item.vendorId) === String(awardedId));
       if (match) return match;
     }
     return tenderContracts[0];
-  }, [tenderContracts, selectedTender]);
+  }, [tenderContracts, selectedTender, manageContractId]);
 
   React.useEffect(() => {
     if (!activeContract || String(activeContract.status).toLowerCase() !== "approved") {
@@ -2092,18 +2362,34 @@ const Tenders = ({
     };
   }, [activeContract?.id, activeContract?.status]);
 
+  // Super-Admin-configurable currency list (Base Currency / Additional Currencies
+  // Accepted) — falls back to the platform's historical 3 options while loading /
+  // on failure so the pickers are never empty.
+  const [currencyOptions, setCurrencyOptions] = useState<CurrencyOption[]>([
+    { value: "LSL (Maloti)", isDefault: true },
+    { value: "USD", isDefault: false },
+    { value: "ZAR", isDefault: false },
+  ]);
+  const [defaultCurrency, setDefaultCurrency] = useState("LSL (Maloti)");
+  React.useEffect(() => {
+    fetchCurrenciesConfig()
+      .then(({ currencies, defaultCurrency: def }) => {
+        if (currencies.length) setCurrencyOptions(currencies);
+        if (def) setDefaultCurrency(def);
+      })
+      .catch(() => {});
+  }, []);
+
   // Form State
   const defaultFormData: Partial<Tender> = {
     name: "",
     department: "",
     applicationType: "Access Window",
-    procurementMethod: "Open Competitive",
-    biddingCurrency: "LSL (Maloti)",
-    category: "SHS",
+    procurementMethod: "Open Tendering",
+    biddingCurrency: defaultCurrency,
+    currencyRates: {},
     budget: 0,
-    deadline: getTenderDeadlineDefault(),
-    openingDateOptional: false,
-    procurementWorkflow: "sequential",
+    procurementWorkflow: "eoi_combined",
     eoiDeadline: getTenderDeadlineDefault(),
     technicalDeadline: "",
     financialDeadline: "",
@@ -2121,16 +2407,74 @@ const Tenders = ({
     addressForSecurity: "",
     placeForOpening: "",
     invitedBy: "",
-    timeForCompletion: ""
+    timeForCompletion: "",
+    technicalWeight: 70,
+    financialWeight: 30,
+    technicalThreshold: 70,
+    preTenderMeetingInfo: "",
+    biddersSchedulePurchase: false,
+    documentFeeAmount: undefined,
+    documentFeeType: "",
+    documentFeeRefundable: false,
+    tenderSecurityRequired: false,
+    languageOfBidSubmission: "",
+    budgetDisclosure: "",
+    clarificationDeadline: "",
+    siteVisitDate: "",
+    bidValidityPeriodDays: undefined,
+    minimumWarrantyPeriodMonths: undefined,
+    submissionMethod: "online_only",
+    digitalSignatureRequired: true,
+    maxVendorsToShortlist: undefined,
+    advertisementChannels: [],
+    isEoiInviteOnly: false,
+    linkedEoiTenderId: undefined,
   };
   const [formData, setFormData] = useState<Partial<Tender>>(defaultFormData);
-  const [scheduleFile, setScheduleFile] = useState<File | null>(null);
-  const [rfpDocumentsFile, setRfpDocumentsFile] = useState<File | null>(null);
-  const [milestonePaymentScheduleFile, setMilestonePaymentScheduleFile] = useState<File | null>(null);
-  const scheduleFileRef = useRef<File | null>(null);
-  const rfpDocumentsFileRef = useRef<File | null>(null);
-  const milestonePaymentScheduleFileRef = useRef<File | null>(null);
-  const [requiredDocs, setRequiredDocs] = useState<{ id?: string; name: string; expected_type?: string; bid_stage?: string; position?: number }[]>([]);
+  const [eoiInviteCandidates, setEoiInviteCandidates] = useState<EoiInviteCandidate[]>([]);
+  // The Start screen sets this just before navigating to "create" when the user picks
+  // "From an EOI Invite" — the initialView sync effect below (which resets formData
+  // whenever the URL-driven view becomes "create") reads it once and clears it, so it
+  // wins the race against that reset instead of being clobbered by it.
+  const pendingCreateSeedRef = React.useRef<{ linkedEoiTenderId: string; name: string } | null>(null);
+
+  React.useEffect(() => {
+    if (view !== "create" && view !== "edit" && view !== "start") return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const candidates = await fetchEoiInviteCandidates();
+        if (!cancelled) setEoiInviteCandidates(candidates);
+      } catch {
+        if (!cancelled) setEoiInviteCandidates([]);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [view]);
+  const [requiredDocs, setRequiredDocs] = useState<{ id?: string; name: string; expected_type?: string; bid_stage?: string; field_key?: string; position?: number }[]>([]);
+  const [governingDocs, setGoverningDocs] = useState<{ label: string; expected_type?: string; file_name?: string; file_url?: string; field_key?: string }[]>([]);
+  const [governingDocsFiles, setGoverningDocsFiles] = useState<Record<number, File | null>>({});
+  const [governingDocsErrors, setGoverningDocsErrors] = useState<Record<string, string>>({});
+
+  const handleGoverningDocFileChange = (idx: number, file: File | null) => {
+    if (!file) {
+      setGoverningDocsFiles(prev => ({ ...prev, [idx]: null }));
+      return;
+    }
+    const ext = "." + file.name.split(".").pop()?.toLowerCase();
+    const allowed = [".pdf", ".doc", ".docx", ".xls", ".xlsx"];
+    if (!allowed.includes(ext)) {
+      setGoverningDocsErrors(prev => ({ ...prev, [idx]: `Invalid file type (${ext || "unknown"}). Accepted formats: PDF, DOC, DOCX, XLS, XLSX.` }));
+      return;
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      setGoverningDocsErrors(prev => ({ ...prev, [idx]: `File is too large (${(file.size / 1024 / 1024).toFixed(1)}MB). Maximum size is 10MB.` }));
+      return;
+    }
+    setGoverningDocsFiles(prev => ({ ...prev, [idx]: file }));
+    setGoverningDocs(prev => prev.map((d, i) => i === idx ? { ...d, file_name: file.name } : d));
+    setGoverningDocsErrors(prev => { const next = { ...prev }; delete next[idx]; return next; });
+  };
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
     const { name, value } = e.target;
@@ -2157,6 +2501,24 @@ const Tenders = ({
     });
   };
 
+  const distributeLotTotals = (lots: TenderLot[], totalBudget?: number, totalInstallationTarget?: number): TenderLot[] => {
+    const n = lots.length;
+    if (n === 0) return lots;
+    const splitEvenly = (total: number | undefined): (number | undefined)[] => {
+      const value = Number(total || 0);
+      if (!(value > 0)) return lots.map(() => undefined);
+      const base = Math.floor(value / n);
+      const remainder = value - base * n;
+      return Array.from({ length: n }, (_, i) => base + (i < remainder ? 1 : 0));
+    };
+    const budgets = splitEvenly(totalBudget);
+    const installs = splitEvenly(totalInstallationTarget);
+    return lots.map((lot, i) => ({ ...lot, budget: budgets[i], estimatedInstallationTarget: installs[i] }));
+  };
+
+  const lotBudgetSum = (formData.lots || []).reduce((sum, l) => sum + Number(l.budget || 0), 0);
+  const lotInstallSum = (formData.lots || []).reduce((sum, l) => sum + Number(l.estimatedInstallationTarget || 0), 0);
+
   const toFormDataFromTender = (tender: Tender): Partial<Tender> => ({
     ...defaultFormData,
     id: tender.id,
@@ -2167,10 +2529,9 @@ const Tenders = ({
     stageType: tender.stageType ?? defaultFormData.stageType,
     procurementMethod: tender.procurementMethod ?? defaultFormData.procurementMethod,
     biddingCurrency: tender.biddingCurrency ?? defaultFormData.biddingCurrency,
-    category: tender.category ?? defaultFormData.category,
+    currencyRates: tender.currencyRates ?? {},
     budget: tender.budget ?? 0,
-    deadline: tender.deadline ?? "",
-    procurementWorkflow: tender.procurementWorkflow ?? "sequential",
+    procurementWorkflow: tender.procurementWorkflow ?? "eoi_combined",
     eoiDeadline: tender.eoiDeadline ?? tender.deadline ?? getTenderDeadlineDefault(),
     technicalDeadline: tender.technicalDeadline ?? "",
     financialDeadline: tender.financialDeadline ?? "",
@@ -2188,7 +2549,30 @@ const Tenders = ({
     invitedBy: tender.invitedBy ?? "",
     timeForCompletion: tender.timeForCompletion ?? "",
     biddersSchedulePurchase: tender.biddersSchedulePurchase ?? false,
+    documentFeeAmount: tender.documentFeeAmount ?? undefined,
+    documentFeeType: tender.documentFeeType ?? "",
+    documentFeeRefundable: tender.documentFeeRefundable ?? false,
     tenderSecurityRequired: tender.tenderSecurityRequired ?? false,
+    languageOfBidSubmission: tender.languageOfBidSubmission ?? "",
+    budgetDisclosure: tender.budgetDisclosure ?? "",
+    clarificationDeadline: tender.clarificationDeadline ?? "",
+    siteVisitDate: tender.siteVisitDate ?? "",
+    bidValidityPeriodDays: tender.bidValidityPeriodDays ?? undefined,
+    minimumWarrantyPeriodMonths: tender.minimumWarrantyPeriodMonths ?? undefined,
+    submissionMethod: tender.submissionMethod ?? "online_only",
+    digitalSignatureRequired: tender.digitalSignatureRequired ?? true,
+    maxVendorsToShortlist: tender.maxVendorsToShortlist ?? undefined,
+    advertisementChannels: tender.advertisementChannels ?? [],
+    minimumServiceTier: tender.minimumServiceTier ?? "",
+    approximateInstallationTarget: tender.approximateInstallationTarget ?? 0,
+    technicalWeight: tender.technicalWeight ?? 70,
+    financialWeight: tender.financialWeight ?? 30,
+    technicalThreshold: tender.technicalThreshold ?? 70,
+    preTenderMeetingInfo: tender.preTenderMeetingInfo ?? "",
+    lots: tender.lots ?? [],
+    maxLotsPerBidder: tender.maxLotsPerBidder,
+    isEoiInviteOnly: tender.isEoiInviteOnly ?? false,
+    linkedEoiTenderId: tender.linkedEoiTenderId ?? undefined,
   });
 
   const loadTenders = React.useCallback(async () => {
@@ -2205,6 +2589,34 @@ const Tenders = ({
     void loadTenders();
   }, [loadTenders]);
 
+  // Super-Admin-configurable list of procurement methods (built-ins + custom) —
+  // falls back to just the two built-ins while loading / on failure so the form
+  // and filter dropdowns are never empty.
+  const [procurementMethodOptions, setProcurementMethodOptions] = useState<ProcurementMethodOption[]>([
+    { value: "Open Tendering", visibilityMode: "open" },
+    { value: "Restricted Tendering", visibilityMode: "restricted" },
+  ]);
+  React.useEffect(() => {
+    fetchProcurementMethodsConfig()
+      .then((options) => { if (options.length) setProcurementMethodOptions(options); })
+      .catch(() => {});
+  }, []);
+  const restrictedProcurementValue = procurementMethodOptions.find(m => m.visibilityMode === "restricted")?.value ?? "Restricted Tendering";
+  const getProcurementVisibilityMode = (value?: string | null): ProcurementVisibilityMode => {
+    if (!value) return "open";
+    const match = procurementMethodOptions.find(m => m.value === value);
+    if (match) return match.visibilityMode;
+    return value === "Restricted Tendering" ? "restricted" : "open";
+  };
+  // Restricted / Limited-Single-Source / RFQ all share the same hand-picked
+  // invited-vendor gate, so the "Invited Vendors" management UI applies to all three.
+  const isInviteGatedProcurementMethod = (value?: string | null) => {
+    const mode = getProcurementVisibilityMode(value);
+    return mode === "restricted" || mode === "limited" || mode === "rfq";
+  };
+  const isFrameworkProcurementMethod = (value?: string | null) => getProcurementVisibilityMode(value) === "framework";
+  const isLimitedProcurementMethod = (value?: string | null) => getProcurementVisibilityMode(value) === "limited";
+
   React.useEffect(() => {
     const id = setInterval(() => {
       void loadTenders();
@@ -2219,7 +2631,8 @@ const Tenders = ({
       const matchesCategory = selectedCategory === "All Categories" || tender.category === selectedCategory;
       const matchesDept = selectedDepartment === "All Departments" || tender.department === selectedDepartment;
       const matchesProc = selectedProcurement === "All Methods" || tender.procurementMethod === selectedProcurement;
-      return matchesSearch && matchesCategory && matchesDept && matchesProc;
+      // EOI Invites live in their own tab now, never in Tender Management.
+      return matchesSearch && matchesCategory && matchesDept && matchesProc && !tender.isEoiInviteOnly;
     });
     return list.sort((a, b) => {
       if (sortBy === "deadline") return new Date(a.deadline).getTime() - new Date(b.deadline).getTime();
@@ -2236,13 +2649,19 @@ const Tenders = ({
     setView(initialView);
     if (initialView === "create") {
       setSelectedTender(null);
-      setFormData(defaultFormData);
-      setScheduleFile(null);
-      scheduleFileRef.current = null;
-      setRfpDocumentsFile(null);
-      rfpDocumentsFileRef.current = null;
-      setMilestonePaymentScheduleFile(null);
-      milestonePaymentScheduleFileRef.current = null;
+      if (pendingCreateSeedRef.current) {
+        setFormData({
+          ...defaultFormData,
+          linkedEoiTenderId: pendingCreateSeedRef.current.linkedEoiTenderId,
+          name: pendingCreateSeedRef.current.name,
+          procurementWorkflow: "eoi_combined",
+        });
+        pendingCreateSeedRef.current = null;
+      } else {
+        setFormData(defaultFormData);
+      }
+      setGoverningDocs([]);
+      setGoverningDocsFiles({});
       setTenderError(null);
     }
   }, [initialView]);
@@ -2291,15 +2710,12 @@ const Tenders = ({
   const startCreateTender = () => {
     setSelectedTender(null);
     setFormData(defaultFormData);
-    setScheduleFile(null);
-    scheduleFileRef.current = null;
-    setRfpDocumentsFile(null);
-    rfpDocumentsFileRef.current = null;
-    setMilestonePaymentScheduleFile(null);
-    milestonePaymentScheduleFileRef.current = null;
     setRequiredDocs([]);
+    setGoverningDocs([]);
+    setGoverningDocsFiles({});
+    setGoverningDocsErrors({});
     setTenderError(null);
-    navigateView("create");
+    navigateView("start");
   };
 
   const openTenderView = async (tenderId: string, nextView: typeof view, syncUrl = true) => {
@@ -2308,6 +2724,11 @@ const Tenders = ({
       setTenderViewers(null);
       const full = await fetchTender(tenderId);
       setSelectedTender(full);
+      if (nextView === "create") {
+        // Arrived via "Convert to Tender" from an EOI Invite's detail page — link it
+        // and skip the Start decision screen entirely (origin is already unambiguous).
+        setFormData({ ...defaultFormData, linkedEoiTenderId: full.id, name: full.name, procurementWorkflow: "eoi_combined" });
+      }
       if (nextView === "details") {
         setTenderAuditLoading(true);
         try {
@@ -2330,25 +2751,54 @@ const Tenders = ({
       }
       if (nextView === "edit") {
         setFormData(toFormDataFromTender(full));
-        setScheduleFile(null);
-        scheduleFileRef.current = null;
-        setRfpDocumentsFile(null);
-        rfpDocumentsFileRef.current = null;
-        setMilestonePaymentScheduleFile(null);
-        milestonePaymentScheduleFileRef.current = null;
+        setGoverningDocsFiles({});
         setRequiredDocs(
           (full.requiredDocuments || []).map((d) => ({
             id: d.id,
             name: d.name,
             expected_type: d.expected_type || "",
             bid_stage: d.bid_stage || "eoi",
+            field_key: d.field_key || "",
             position: d.position,
           }))
         );
+        // Bridge legacy structured file fields (schedule/RFP/milestone) into the same
+        // unified, dynamic list the admin edits — the fields themselves stay untouched
+        // on the backend unless the admin uploads a replacement for one of these rows.
+        const structuredGoverningDocs = [
+          { field: "scheduleFile" as const, suggestion: SUGGESTED_GOVERNING_DOCUMENTS[0] },
+          { field: "rfpDocumentsFile" as const, suggestion: SUGGESTED_GOVERNING_DOCUMENTS[1] },
+          { field: "milestonePaymentScheduleFile" as const, suggestion: SUGGESTED_GOVERNING_DOCUMENTS[2] },
+        ]
+          .filter(({ field }) => Boolean(full[field]))
+          .map(({ field, suggestion }) => {
+            const url = full[field] as string;
+            const fileName = url ? decodeURIComponent(url.split('/').pop() || '') : '';
+            return {
+              label: suggestion.label,
+              expected_type: suggestion.expected_type,
+              field_key: suggestion.field_key,
+              file_name: fileName || suggestion.label,
+              file_url: url,
+            };
+          });
+        setGoverningDocs([
+          ...structuredGoverningDocs,
+          ...(full.governingDocuments || []).map((d) => ({
+            label: d.label,
+            expected_type: d.expected_type || "",
+            file_name: (d as any).file_name || "",
+            file_url: (d as any).file_url || "",
+            field_key: (d as any).field_key || undefined,
+          })),
+        ]);
+        setGoverningDocsFiles({});
+        setGoverningDocsErrors({});
       }
       if (nextView === "award") {
         const contracts = await fetchTenderContracts({ tenderId });
         setTenderContracts(contracts);
+        setManageContractId(null);
         setContractMessage(null);
         setContractRejectionReason("");
         setAwardBidLoading(true);
@@ -2358,6 +2808,9 @@ const Tenders = ({
             fetchTenderAwardRanking(tenderId),
           ]);
           setAwardRankingRows(ranking.rows || []);
+          setAwardRankingWeights(ranking.technical_weight != null && ranking.financial_weight != null ? { technical: ranking.technical_weight, financial: ranking.financial_weight } : null);
+          setAwardEvaluationStatus(ranking.evaluation_status || null);
+          setAwardLotRankings(ranking.lots || []);
           const bidsById = new Map(bids.map((bid) => [bid.id, bid]));
           const eligible = (ranking.rows || [])
             .filter((row) => row.combined_score != null)
@@ -2387,6 +2840,9 @@ const Tenders = ({
           setAwardWinnerId(selected?.vendor_id || recommended?.vendor_id || full.awardedVendorId || "");
         } catch {
           setAwardRankingRows([]);
+          setAwardRankingWeights(null);
+          setAwardLotRankings([]);
+          setAwardEvaluationStatus(null);
           setAwardBids([]);
           setAwardBidId("");
           setAwardWinner(full.awardedVendorName || "");
@@ -2528,13 +2984,12 @@ const Tenders = ({
   const handleSaveTender = async (tenderData: any) => {
     const payload = { ...tenderData };
     const isEditing = view === "edit" && Boolean(selectedTender);
-    const hasExistingSchedule = Boolean(selectedTender?.scheduleFile);
 
     const requiredFields = [
       'name','department','applicationType','procurementMethod',
-      'addressForDocument','addressForSecurity','placeForOpening',
+      'addressForDocument', ...(payload.isEoiInviteOnly ? [] : ['placeForOpening']),
       'biddersEligibility','invitedBy','biddingCurrency','timeForCompletion',
-      'instruction','contactDetails','category','targetSiteType'
+      'instruction','contactDetails','targetSiteType','budget'
     ];
      const missing = requiredFields.filter(f => !payload[f] || payload[f]?.length === 0);
      if (missing.length) {
@@ -2549,31 +3004,33 @@ const Tenders = ({
       setTenderError("Select at least one Target District.");
       return;
     }
-    const currentScheduleFile = scheduleFileRef.current;
-    const currentRfpFile = rfpDocumentsFileRef.current;
-    const currentMilestoneFile = milestonePaymentScheduleFileRef.current;
-    if (!currentScheduleFile && !(isEditing && hasExistingSchedule)) {
-      setTenderError("Upload the tender schedule (PDF/DOC/DOCX).");
+    if (payload.tenderSecurityRequired && !payload.addressForSecurity) {
+      setTenderError("Provide the Name & Address for Tender Security, or turn off Tender Security Required.");
       return;
     }
-    if (!((currentRfpFile || selectedTender?.rfpDocumentsFile) && (currentMilestoneFile || selectedTender?.milestonePaymentScheduleFile))) {
-      setTenderError("Upload the RFP/Subsidy Framework and the Milestone Payment Schedule.");
+    const currencyRateEntries = Object.entries(payload.currencyRates || {});
+    const invalidRateCurrency = currencyRateEntries.find(([, rate]) => !(Number(rate) > 0))?.[0];
+    if (invalidRateCurrency) {
+      setTenderError(`Set a positive exchange rate for ${invalidRateCurrency}, or disable it as an accepted currency.`);
       return;
     }
-    const workflow = payload.procurementWorkflow ?? "sequential";
-    if (!payload.eoiDeadline) {
+    const techWeight = Number(payload.technicalWeight ?? 70);
+    const finWeight = Number(payload.financialWeight ?? 30);
+    if (techWeight + finWeight !== 100) {
+      setTenderError("Technical and Financial evaluation weights must add up to 100%.");
+      return;
+    }
+    const workflow = payload.procurementWorkflow ?? "eoi_combined";
+    const isEoiWorkflow = workflow === "eoi_combined" || workflow === "sequential";
+    if (isEoiWorkflow && !payload.linkedEoiTenderId && !payload.eoiDeadline) {
       setTenderError("Provide the EOI (Stage 1) submission deadline.");
       return;
     }
-    if (!payload.technicalDeadline) {
-      setTenderError("Provide the Technical (Stage 2) submission deadline.");
+    if (!payload.isEoiInviteOnly && !payload.technicalDeadline) {
+      setTenderError("Provide the Combined (Stage 2) submission deadline.");
       return;
     }
-    if (workflow === "sequential" && !payload.financialDeadline) {
-      setTenderError("Provide the Financial (Stage 3) submission deadline for the sequential workflow.");
-      return;
-    }
-    if (workflow === "combined") {
+    if (workflow === "combined" || workflow === "eoi_combined") {
       payload.financialDeadline = "";
     }
     try {
@@ -2583,18 +3040,12 @@ const Tenders = ({
         const updated = await updateTender(selectedTender.id, {
           ...payload,
           status: selectedTender.status,
-          scheduleFile: currentScheduleFile,
-          rfpDocumentsFile: currentRfpFile,
-          milestonePaymentScheduleFile: currentMilestoneFile,
         });
         upsertTender(updated);
       } else {
         const created = await createTender({
           ...payload,
           status: TenderStatus.DRAFT,
-          scheduleFile: currentScheduleFile,
-          rfpDocumentsFile: currentRfpFile,
-          milestonePaymentScheduleFile: currentMilestoneFile,
         });
         setTenders([created, ...tenders]);
       }
@@ -2721,6 +3172,8 @@ const Tenders = ({
       await loadTenders();
       const ranking = await fetchTenderAwardRanking(tenderId);
       setAwardRankingRows(ranking.rows || []);
+      setAwardRankingWeights(ranking.technical_weight != null && ranking.financial_weight != null ? { technical: ranking.technical_weight, financial: ranking.financial_weight } : null);
+      setAwardEvaluationStatus(ranking.evaluation_status || null);
       const channels = [notifyEmail ? "Email" : null].filter(Boolean).join(" & ");
       const coolingDate = updated.coolingOffUntil ? new Date(updated.coolingOffUntil).toLocaleString() : "the configured cooling-off deadline";
       showNotification(`Intent to Award issued for ${tenderLabel}. Notifications sent via ${channels || "System"}.`);
@@ -2736,6 +3189,29 @@ const Tenders = ({
 
   const closeAwardConfirm = () => {
     setAwardConfirmOpen(false);
+  };
+
+  const submitLotAward = async () => {
+    const tenderId = selectedTender?.id;
+    const pending = lotAwardPending;
+    if (!tenderId || !pending) return;
+    setLotAwardPending(null);
+    try {
+      setLotAwardSubmitting(pending.lotId);
+      const updated = await awardTenderLot(tenderId, { lotId: pending.lotId, bidId: pending.bidId });
+      if (selectedTender?.id === tenderId) setSelectedTender(updated);
+      upsertTender(updated);
+      await loadTenders();
+      const ranking = await fetchTenderAwardRanking(tenderId);
+      setAwardRankingRows(ranking.rows || []);
+      setAwardLotRankings(ranking.lots || []);
+      setAwardEvaluationStatus(ranking.evaluation_status || null);
+      showNotification(`Intent to Award issued for ${pending.lotName} to ${pending.vendorName}.`);
+    } catch (err: any) {
+      showNotification(toActionError(err, "Failed to issue intent to award for this lot."));
+    } finally {
+      setLotAwardSubmitting(null);
+    }
   };
 
   const handleConfirmFinalAward = async (tenderId: string) => {
@@ -2937,385 +3413,1049 @@ const Tenders = ({
     }
   };
 
+  if (view === "start") {
+    return (
+      <FormKitShell>
+        <Crumb onBack={() => navigateView("list")} trail="Tender Management" />
+        <h1 className="text-2xl font-bold text-slate-900 mb-1">New Tender</h1>
+        <p className="text-sm text-slate-500 mb-6">How should this tender start?</p>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <button
+            onClick={() => {
+              setFormData(defaultFormData);
+              navigateView("create");
+            }}
+            className="card text-left p-5 hover:bg-slate-50 transition-colors"
+          >
+            <p className="font-bold text-slate-900 mb-1.5">Start blank</p>
+            <p className="text-sm text-slate-500">Open bidding, or an EOI → Combined tender with its own fresh EOI stage. No prior shortlisting.</p>
+          </button>
+          <button
+            onClick={() => {
+              if (!eoiInviteCandidates.length) return;
+              const candidate = eoiInviteCandidates[0];
+              pendingCreateSeedRef.current = { linkedEoiTenderId: candidate.id, name: candidate.name };
+              navigateView("create");
+            }}
+            disabled={!eoiInviteCandidates.length}
+            className={`card text-left p-5 disabled:opacity-50 transition-colors ${eoiInviteCandidates.length ? "hover:bg-emerald-50/40 border-emerald-200" : ""}`}
+          >
+            <div className="flex items-center justify-between mb-1.5">
+              <p className="font-bold text-slate-900">From an EOI Invite</p>
+              {eoiInviteCandidates.length > 0 && (
+                <StatusChip color={TEAL} bg={TEAL_SOFT}>{eoiInviteCandidates.length} available</StatusChip>
+              )}
+            </div>
+            <p className="text-sm text-slate-500 mb-2">Restrict bidding to an already-shortlisted vendor pool.</p>
+            {eoiInviteCandidates.length === 0 ? (
+              <p className="text-xs text-slate-400">No shortlisted EOI Invites available yet.</p>
+            ) : (
+              <div className="space-y-1.5">
+                {eoiInviteCandidates.map((c) => (
+                  <div
+                    key={c.id}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      pendingCreateSeedRef.current = { linkedEoiTenderId: c.id, name: c.name };
+                      navigateView("create");
+                    }}
+                    className="text-xs text-slate-600 bg-slate-50 rounded-lg px-2.5 py-1.5 hover:bg-slate-100"
+                  >
+                    {c.name} ({c.referenceNumber}) &middot; {c.invitedVendorCount} shortlisted
+                  </div>
+                ))}
+              </div>
+            )}
+          </button>
+        </div>
+      </FormKitShell>
+    );
+  }
+
   if (view === "create" || view === "edit") {
     const isEditing = view === "edit";
+    const wizardSteps = [
+      { n: 1, label: "General Info", sub: "& Evaluation" },
+      { n: 2, label: "Timeline", sub: "& Governance" },
+      { n: 3, label: "Scope", sub: "& Submission" },
+    ];
     return (
-      <div className="space-y-6 max-w-5xl mx-auto">
+      <FormKitShell>
         <NotificationToast />
         <div className="flex items-center gap-4 mb-8">
           <button onClick={() => navigateView("list")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
             <X size={20} />
           </button>
           <h1 className="text-2xl font-bold text-slate-900">
-            {isEditing ? `Edit Tender: ${selectedTender?.name ?? ""}` : "Add New Tender"}
+            {isEditing ? `Edit Tender: ${selectedTender?.name ?? ""}` : "New Tender"}
           </h1>
         </div>
 
+        {formData.linkedEoiTenderId && (
+          <InfoBanner color={TEAL} bg={TEAL_SOFT}>
+            Linked to an EOI Invite — its shortlisted vendors will be invited automatically once this tender is published. Name and Procurement Method are locked to that pool.
+          </InfoBanner>
+        )}
 
         <div className="card p-8 space-y-8">
           {/* Step Progress Bar */}
           <div className="flex items-center gap-2 mb-2">
-            {["General Info", "Timeline & Address", "Technical Details", "Documents & Save"].map((label, idx) => {
-              const stepNum = idx + 1;
-              const isActive = formStep === stepNum;
-              const isDone = formStep > stepNum;
+            {wizardSteps.map((s, idx) => {
+              const active = formStep === s.n;
+              const done = formStep > s.n;
               return (
-                <div key={label} className="flex items-center gap-2 flex-1 min-w-0">
-                  <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold shrink-0 ${isActive ? "bg-emerald-600 text-white shadow-lg shadow-emerald-600/20" : isDone ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-400"}`}>
-                    {isDone ? <Check size={16} /> : stepNum}
-                  </div>
-                  <span className={`text-[11px] font-semibold leading-tight ${isActive ? "text-emerald-700" : isDone ? "text-emerald-600" : "text-slate-400"}`}>{label}</span>
-                  {idx < 3 && <div className={`flex-1 h-0.5 ${isDone ? "bg-emerald-400" : "bg-slate-200"}`} />}
+                <div key={s.n} className="flex items-center gap-2 flex-1 min-w-0">
+                  <button
+                    onClick={() => setFormStep(s.n)}
+                    className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold shrink-0 ${active ? "bg-emerald-600 text-white shadow-lg shadow-emerald-600/20" : done ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-400"}`}
+                  >
+                    {done ? <Check size={16} /> : s.n}
+                  </button>
+                  <span className={`text-xs font-semibold leading-tight ${active ? "text-emerald-700" : done ? "text-emerald-600" : "text-slate-400"}`}>{s.label} {s.sub}</span>
+                  {idx < wizardSteps.length - 1 && <div className={`flex-1 h-0.5 ${done ? "bg-emerald-400" : "bg-slate-200"}`} />}
                 </div>
               );
             })}
           </div>
 
-          {/* Step 1: General Info */}
+          <div className="flex items-center justify-between">
+            <h2 className="text-lg font-bold text-slate-900">{wizardSteps[formStep - 1].label} {wizardSteps[formStep - 1].sub}</h2>
+            <span className="text-xs text-slate-400"><span className="text-emerald-600">*</span> Required</span>
+          </div>
+
+          {/* Step 1: General Info & Evaluation */}
           {formStep === 1 && (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              <div className="space-y-2">
-                <label className="text-sm font-bold text-slate-700">Name of the Tender *</label>
-                <input type="text" name="name" value={formData.name} onChange={handleInputChange} placeholder="Tender Name" className="input-field" />
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm font-bold text-slate-700">Department Entity *</label>
-                <select name="department" value={formData.department} onChange={handleInputChange} className="input-field">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6">
+              <Field label="Name of the Tender" required accent={TEAL} badge={formData.linkedEoiTenderId ? <FormKitBadge>Locked — inherited from EOI Invite</FormKitBadge> : null}>
+                <TextInput
+                  name="name"
+                  value={formData.name}
+                  onChange={handleInputChange}
+                  placeholder="Tender Name"
+                  disabled={Boolean(formData.linkedEoiTenderId)}
+                />
+              </Field>
+              <Field label="Department Entity" required accent={TEAL}>
+                <FormKitSelect name="department" value={formData.department} onChange={handleInputChange}>
                   <option value="">Select Department</option>
                   <option>Department of Energy</option>
                   <option>UNDP Lesotho</option>
-                </select>
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm font-bold text-slate-700">Application Type *</label>
-                <select name="applicationType" value={formData.applicationType} onChange={handleInputChange} className="input-field">
+                </FormKitSelect>
+              </Field>
+              <Field label="Application Type" required accent={TEAL} help={{ text: formData.applicationType === "Access Window" ? "Rolling/ongoing eligibility — vendors can apply any time it's open." : "A fixed submission period with a hard deadline." }}>
+                <FormKitSelect name="applicationType" value={formData.applicationType} onChange={handleInputChange}>
                   <option>Access Window</option>
                   <option>Application Window</option>
-                </select>
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm font-bold text-slate-700">Procurement Method *</label>
-                <select name="procurementMethod" value={formData.procurementMethod} onChange={handleInputChange} className="input-field">
+                </FormKitSelect>
+              </Field>
+              <Field label="Language of Bid Submission" accent={TEAL}>
+                <TextInput name="languageOfBidSubmission" value={formData.languageOfBidSubmission ?? ""} onChange={handleInputChange} placeholder="e.g. English" />
+              </Field>
+              <Field
+                label="Procurement Method"
+                required
+                accent={TEAL}
+                badge={formData.procurementWorkflow === "eoi_combined" ? <FormKitBadge>Locked to {restrictedProcurementValue}</FormKitBadge> : null}
+                help={{
+                  text: formData.procurementWorkflow === "eoi_combined"
+                    ? "Only vendors shortlisted at the EOI stage are invited to bid on the actual tender."
+                    : (() => {
+                        const mode = getProcurementVisibilityMode(formData.procurementMethod);
+                        if (mode === "limited") return "Directed to exactly one nominated vendor — no competitive bidding. You'll select that single vendor after saving.";
+                        if (mode === "rfq") return "A small set of invited vendors submit a quotation — you choose who's invited, typically with lighter documentation requirements.";
+                        if (mode === "framework") return "No invite list — visible to any pre-qualified vendor whose tier and technology types meet this tender's Minimum Service Tier and Technology Types below.";
+                        if (mode === "restricted") return "Only specifically invited vendors can bid — vendors you haven't invited won't even see this tender.";
+                        if (formData.procurementMethod) return "Any pre-qualified vendor can bid — visible and open to the whole vendor pool.";
+                        return "Choose a procurement method — Super Admin can add more under Platform Configuration.";
+                      })(),
+                }}
+              >
+                <FormKitSelect
+                  name="procurementMethod"
+                  value={formData.procurementWorkflow === "eoi_combined" ? restrictedProcurementValue : formData.procurementMethod}
+                  onChange={handleInputChange}
+                  disabled={formData.procurementWorkflow === "eoi_combined"}
+                >
                   <option value="">Select Method</option>
-                  <option>Open Tendering</option>
-                  <option>Restricted Tendering</option>
-                </select>
+                  {procurementMethodOptions.map((m) => (
+                    <option key={m.value} value={m.value}>{m.value}</option>
+                  ))}
+                </FormKitSelect>
+              </Field>
+              <Field
+                label="Procurement Workflow"
+                required
+                accent={TEAL}
+                badge={formData.linkedEoiTenderId ? <FormKitBadge>Locked — linked to an EOI Invite</FormKitBadge> : null}
+                help={{
+                  text: formData.linkedEoiTenderId
+                    ? "This tender is linked to an existing EOI Invite, so it can only run as EOI → Combined. Unlink it below (\"Link an existing EOI Invite\") if you want to change this."
+                    : formData.procurementWorkflow === "eoi_combined"
+                      ? `Run an open Expression of Interest first; shortlisted vendors are then invited to submit a Combined (Technical & Financial) proposal. Procurement Method is auto-locked to ${restrictedProcurementValue}.`
+                      : "Vendors bid directly with a single Combined (Technical & Financial) submission — no EOI stage, no shortlisting. You may choose either procurement method.",
+                }}
+              >
+                <FormKitSelect
+                  name="procurementWorkflow"
+                  value={formData.procurementWorkflow ?? "eoi_combined"}
+                  disabled={Boolean(formData.linkedEoiTenderId)}
+                  onChange={(e) => {
+                    setFormData(prev => {
+                      const next = { ...prev, procurementWorkflow: e.target.value as any };
+                      if (e.target.value === "eoi_combined") {
+                        next.procurementMethod = restrictedProcurementValue;
+                      } else {
+                        next.linkedEoiTenderId = undefined;
+                        // "Combined" is always a single Technical & Financial stage —
+                        // no EOI step — so it must never carry an EOI deadline forward.
+                        next.eoiDeadline = "";
+                      }
+                      return next;
+                    });
+                  }}
+                >
+                  <option value="eoi_combined">EOI → Combined</option>
+                  <option value="combined">Combined</option>
+                </FormKitSelect>
+              </Field>
+              <Field label="Evaluation Method" accent={TEAL} badge={<FormKitBadge>Locked</FormKitBadge>} help={{ text: "Quality & Cost Based Selection is the only method this platform currently scores and ranks bids with." }}>
+                <FormKitSelect value="qcbs" disabled>
+                  <option value="qcbs">Quality &amp; Cost Based (QCBS)</option>
+                </FormKitSelect>
+              </Field>
+              {formData.procurementWorkflow === "eoi_combined" && (
+                <Field label="Link an existing EOI Invite" accent={TEAL} help={{ text: "Linking skips this tender's own EOI stage — shortlisted vendors from the linked EOI Invite are copied over and can bid directly at the Combined stage. The tender Name will be locked to match." }}>
+                  <FormKitSelect
+                    value={formData.linkedEoiTenderId ?? ""}
+                    onChange={(e) => {
+                      const candidate = eoiInviteCandidates.find(c => c.id === e.target.value);
+                      setFormData(prev => ({
+                        ...prev,
+                        linkedEoiTenderId: e.target.value || undefined,
+                        name: candidate ? candidate.name : prev.name,
+                      }));
+                    }}
+                  >
+                    <option value="">None — run a fresh EOI on this tender</option>
+                    {eoiInviteCandidates.map(c => (
+                      <option key={c.id} value={c.id}>{c.name} ({c.referenceNumber}) — {c.invitedVendorCount} shortlisted</option>
+                    ))}
+                  </FormKitSelect>
+                </Field>
+              )}
+              <Field label="Base Currency" required accent={TEAL} help={{ text: "The tender's primary currency — scoring, ranking, and the award value are all expressed in this currency." }}>
+                <FormKitSelect
+                  name="biddingCurrency"
+                  value={formData.biddingCurrency}
+                  onChange={(e) => {
+                    const nextBase = e.target.value;
+                    setFormData(prev => {
+                      const nextRates = { ...(prev.currencyRates || {}) };
+                      delete nextRates[nextBase];
+                      return { ...prev, biddingCurrency: nextBase, currencyRates: nextRates };
+                    });
+                  }}
+                >
+                  {currencyOptions.map((c) => (
+                    <option key={c.value} value={c.value}>{c.value}</option>
+                  ))}
+                </FormKitSelect>
+              </Field>
+              <div className="md:col-span-2 mb-6">
+                <label className="text-sm font-medium mb-1.5 block" style={{ color: INK }}>Additional Currencies Accepted</label>
+                <p className="text-xs mb-2" style={{ color: INK_FAINT }}>Bidders may price their bid in the base currency above, or in any additional currency you enable here — bids are compared fairly using the exchange rate you set.</p>
+                <div className="flex flex-col gap-3">
+                  {currencyOptions.map((c) => c.value).filter((c) => c !== formData.biddingCurrency).map((currency) => {
+                    const enabled = Object.prototype.hasOwnProperty.call(formData.currencyRates || {}, currency);
+                    return (
+                      <div key={currency} className="flex flex-wrap items-center gap-3 rounded-md p-3" style={{ border: `1px solid ${LINE}` }}>
+                        <label className="flex items-center gap-2 text-sm font-medium" style={{ color: INK }}>
+                          <input
+                            type="checkbox"
+                            checked={enabled}
+                            onChange={(e) => {
+                              setFormData(prev => {
+                                const nextRates = { ...(prev.currencyRates || {}) };
+                                if (e.target.checked) {
+                                  nextRates[currency] = nextRates[currency] ?? ("" as any);
+                                } else {
+                                  delete nextRates[currency];
+                                }
+                                return { ...prev, currencyRates: nextRates };
+                              });
+                            }}
+                          />
+                          {currency}
+                        </label>
+                        {enabled && (
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs" style={{ color: INK_FAINT }}>1 {currency} =</span>
+                            <input
+                              type="number"
+                              min="0"
+                              step="any"
+                              style={{ width: 128, fontSize: "13.5px", padding: "9px 11px", borderRadius: 6, border: `1px solid ${LINE}` }}
+                              placeholder="Rate"
+                              value={(formData.currencyRates || {})[currency] ?? ""}
+                              onChange={(e) => {
+                                const value = e.target.value;
+                                setFormData(prev => ({
+                                  ...prev,
+                                  currencyRates: { ...(prev.currencyRates || {}), [currency]: value as any },
+                                }));
+                              }}
+                            />
+                            <span className="text-xs" style={{ color: INK_FAINT }}>{formData.biddingCurrency}</span>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
-              <div className="space-y-2">
-                <label className="text-sm font-bold text-slate-700">Procurement Workflow *</label>
-                <select name="procurementWorkflow" value={formData.procurementWorkflow ?? "sequential"} onChange={handleInputChange} className="input-field">
-                  <option value="sequential">Sequential (EOI → Technical → Financial)</option>
-                  <option value="combined">Combined (Technical + Financial together)</option>
-                </select>
-                <p className="text-[10px] text-slate-400">
-                  {formData.procurementWorkflow === "combined"
-                    ? "Bidders submit Technical and Financial together; Financial pricing is sealed until technical evaluation passes."
-                    : "Bidders progress through EOI, then Technical, then a separate Financial stage."}
-                </p>
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm font-bold text-slate-700">Bidding Currency *</label>
-                <select name="biddingCurrency" value={formData.biddingCurrency} onChange={handleInputChange} className="input-field">
-                  <option>LSL (Maloti)</option>
-                  <option>USD</option>
-                  <option>ZAR</option>
-                </select>
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm font-bold text-slate-700">Budget Estimate *</label>
-                <input type="number" name="budget" value={formData.budget ?? 0} onChange={handleInputChange} className="input-field" placeholder="Enter budget estimate" />
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm font-bold text-slate-700">Funding Source (Optional)</label>
-                <select name="fundingSource" value={formData.fundingSource} onChange={handleInputChange} className="input-field">
+              <Field label="Budget Estimate" required accent={TEAL} help={{ text: "A reference figure shown to vendors and used for lot budget planning — it's not a hard cap on what bidders can request." }}>
+                <TextInput type="number" name="budget" value={formData.budget ?? 0} onChange={handleInputChange} placeholder="Enter budget estimate" />
+              </Field>
+              <Field
+                label="Budget Disclosure"
+                accent={TEAL}
+                help={{
+                  text: formData.budgetDisclosure === "published"
+                    ? "Vendors can see the Budget Estimate alongside the tender listing."
+                    : formData.budgetDisclosure === "confidential"
+                      ? "Budget is withheld from vendors to help prevent price anchoring."
+                      : "Not yet decided — treated the same as Confidential (hidden from vendors) until you choose.",
+                }}
+              >
+                <FormKitSelect name="budgetDisclosure" value={formData.budgetDisclosure ?? ""} onChange={handleInputChange}>
+                  <option value="">Not specified</option>
+                  <option value="confidential">Confidential — internal use only</option>
+                  <option value="published">Published with tender notice</option>
+                </FormKitSelect>
+              </Field>
+              <Field label="Funding Source" accent={TEAL}>
+                <FormKitSelect name="fundingSource" value={formData.fundingSource} onChange={handleInputChange}>
                   <option value="">Select Funding Source</option>
                   <option>Government Budget</option>
                   <option>UNDP Grant</option>
                   <option>World Bank Loan</option>
                   <option>Private Investment</option>
                   <option>Other</option>
-                </select>
+                </FormKitSelect>
+              </Field>
+              <Field label="Standstill Period (Days)" accent={TEAL} help={{ text: "Pause between award decision and contract signing during which unsuccessful bidders may protest (0-14 days)." }}>
+                <TextInput type="number" name="coolingOffDays" min={0} max={14} value={formData.coolingOffDays ?? 7} onChange={handleInputChange} />
+              </Field>
+              <div className="md:col-span-2 mb-2 mt-2" style={{ borderTop: `1px solid ${LINE}`, paddingTop: 16 }}>
+                <label className="text-sm font-medium block mb-1" style={{ color: INK }}>Evaluation Weighting</label>
+                <p className="text-xs" style={{ color: INK_FAINT }}>How the Evaluation Committee's scores are split between the Technical and Financial proposals when ranking bidders, and the minimum Technical score a bid needs to clear before it can be awarded.</p>
               </div>
-              <div className="space-y-2">
-                <label className="text-sm font-bold text-slate-700">Cooling-Off Period (Days)</label>
-                <input type="number" name="coolingOffDays" min={0} max={14} value={formData.coolingOffDays ?? 7} onChange={handleInputChange} className="input-field" />
-                <p className="text-[10px] text-slate-400">Set between 0 and 14 days. Use 0 for instant testing.</p>
-              </div>
+              <Field label="Technical Weight (%)" accent={TEAL} help={{ text: "How much a bidder's technical merit counts toward their final ranking score. Higher = technical quality matters more than price when deciding the winner." }}>
+                <TextInput type="number" min={0} max={100} value={formData.technicalWeight ?? 70} onChange={(e) => {
+                  const tech = Math.max(0, Math.min(100, Number(e.target.value) || 0));
+                  setFormData(prev => ({ ...prev, technicalWeight: tech, financialWeight: 100 - tech }));
+                }} />
+              </Field>
+              <Field label="Financial Weight (%)" accent={TEAL} help={{ text: "Auto-calculated: 100 − Technical Weight. How much price counts toward the final ranking score — higher means the cheapest qualifying bid is more likely to win." }}>
+                <TextInput type="number" value={formData.financialWeight ?? 30} readOnly disabled />
+              </Field>
+              <Field label="Technical Threshold (%)" accent={TEAL} help={{ text: "A pass/fail gate: any bid scoring below this on the Technical proposal is disqualified outright — regardless of price — and never reaches the Financial stage." }}>
+                <TextInput type="number" name="technicalThreshold" min={0} max={100} value={formData.technicalThreshold ?? 70} onChange={handleInputChange} />
+              </Field>
             </div>
           )}
 
-          {/* Step 2: Timeline & Address */}
+          {/* Step 2: Timeline & Governance */}
           {formStep === 2 && (
-            <div className="space-y-6">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div className="space-y-2">
-                  <label className="text-sm font-bold text-slate-700">Name & Address for Tender Document *</label>
-                  <input type="text" name="addressForDocument" value={formData.addressForDocument} onChange={handleInputChange} placeholder="Address" className="input-field" />
-                </div>
-                <div className="space-y-2">
-                  <label className="text-sm font-bold text-slate-700">Name & Address for Tender Security *</label>
-                  <input type="text" name="addressForSecurity" value={formData.addressForSecurity} onChange={handleInputChange} placeholder="Address" className="input-field" />
-                </div>
-                <div className="space-y-2">
-                  <label className="text-sm font-bold text-slate-700">Place for Tender Opening *</label>
-                  <input type="text" name="placeForOpening" value={formData.placeForOpening} onChange={handleInputChange} placeholder="Opening Location" className="input-field" />
-                </div>
-                <div className="space-y-2">
-                  <label className="text-sm font-bold text-slate-700">Tender Invited By *</label>
-                  <input type="text" name="invitedBy" value={formData.invitedBy} onChange={handleInputChange} placeholder="Official Name" className="input-field" />
-                </div>
+            <div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6">
+                <Field label="Name & Address for Tender Document" required accent={TEAL}>
+                  <TextInput name="addressForDocument" value={formData.addressForDocument} onChange={handleInputChange} placeholder="Address" />
+                </Field>
+                <Field label="Place for Tender Opening" required accent={TEAL}>
+                  <TextInput name="placeForOpening" value={formData.placeForOpening} onChange={handleInputChange} placeholder="Opening Location" />
+                </Field>
+                <Field label="Tender Invited By" required accent={TEAL}>
+                  <TextInput name="invitedBy" value={formData.invitedBy} onChange={handleInputChange} placeholder="Official Name" />
+                </Field>
               </div>
 
-              {/* Procurement Workflow Deadlines */}
-              <div className="border-t border-slate-200 pt-4">
-                <label className="text-sm font-bold text-slate-700 mb-2 block">Procurement Workflow Deadlines</label>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                  <div className="relative">
-                    <label className="text-xs font-bold text-slate-600 block mb-1">EOI / Stage 1 Deadline *</label>
-                    <Calendar className="absolute left-3 top-9 -translate-y-1/2 text-slate-400" size={16} />
-                    <input type="date" placeholder="Date" required
-                      value={formData.eoiDeadline ? formData.eoiDeadline.split('T')[0] : ""}
-                      onChange={(e) => setFormData(prev => ({ ...prev, eoiDeadline: e.target.value }))}
-                      className="input-field pl-10" />
+              <div className="mb-6" style={{ borderTop: `1px solid ${LINE}`, paddingTop: 16 }}>
+                <ToggleRow
+                  id="tenderSecurityRequired"
+                  checked={Boolean(formData.tenderSecurityRequired)}
+                  onChange={(checked) => setFormData(prev => ({ ...prev, tenderSecurityRequired: checked, addressForSecurity: checked ? prev.addressForSecurity : "" }))}
+                  label="Tender Security (Bid Bond) Required"
+                />
+                <p className="mt-1.5 mb-3 text-xs" style={{ color: INK_FAINT }}>A bid bond is a financial guarantee vendors submit upfront — it protects the RMT if a winning bidder withdraws after being awarded. Only enable this if you require one; most tenders don't.</p>
+                {formData.tenderSecurityRequired && (
+                  <div className="max-w-md mb-4">
+                    <Field label="Name & Address for Tender Security" required accent={TEAL}>
+                      <TextInput name="addressForSecurity" value={formData.addressForSecurity} onChange={handleInputChange} placeholder="Address" />
+                    </Field>
                   </div>
-                  <div className="relative">
-                    <label className="text-xs font-bold text-slate-600 block mb-1">Technical / Stage 2 Deadline *</label>
-                    <Calendar className="absolute left-3 top-9 -translate-y-1/2 text-slate-400" size={16} />
-                    <input type="date" placeholder="Date" required
+                )}
+                <ToggleRow
+                  id="biddersSchedulePurchase"
+                  checked={Boolean(formData.biddersSchedulePurchase)}
+                  onChange={(checked) => setFormData(prev => ({ ...prev, biddersSchedulePurchase: checked }))}
+                  label="Bidders Must Purchase the Tender Schedule"
+                />
+                <p className="mt-1.5 text-xs" style={{ color: INK_FAINT }}>Enable only if vendors must pay a fee to obtain the tender schedule document before they can bid. Most tenders provide it free — leave this off unless your procurement rules require a purchase.</p>
+                {formData.biddersSchedulePurchase && (
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 max-w-2xl mt-3">
+                    <Field label="Fee Amount" accent={TEAL}>
+                      <TextInput type="number" min={0} step="any" value={formData.documentFeeAmount ?? ""} onChange={(e) => setFormData(prev => ({ ...prev, documentFeeAmount: e.target.value === "" ? undefined : Number(e.target.value) }))} placeholder="e.g. 500" />
+                    </Field>
+                    <Field label="Fee Type" accent={TEAL}>
+                      <TextInput value={formData.documentFeeType ?? ""} onChange={(e) => setFormData(prev => ({ ...prev, documentFeeType: e.target.value }))} placeholder="e.g. Fixed" />
+                    </Field>
+                    <div className="pt-7">
+                      <ToggleRow id="documentFeeRefundable" checked={Boolean(formData.documentFeeRefundable)} onChange={(checked) => setFormData(prev => ({ ...prev, documentFeeRefundable: checked }))} label="Refundable" />
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="mb-6" style={{ borderTop: `1px solid ${LINE}`, paddingTop: 16 }}>
+                <label className="text-sm font-medium block mb-1" style={{ color: INK }}>Procurement Workflow Deadlines</label>
+                <p className="text-xs mb-3" style={{ color: INK_FAINT }}>Each deadline closes that stage's submission window for every vendor — after it passes, no further submissions are accepted at that stage.</p>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  {formData.procurementWorkflow !== "combined" && !formData.linkedEoiTenderId && (
+                    <Field label="Stage 1: EOI Deadline" required accent={TEAL}>
+                      <TextInput
+                        type="date"
+                        value={formData.eoiDeadline ? formData.eoiDeadline.split('T')[0] : ""}
+                        onChange={(e) => setFormData(prev => ({ ...prev, eoiDeadline: e.target.value }))}
+                      />
+                    </Field>
+                  )}
+                  {formData.linkedEoiTenderId && (
+                    <div className="rounded-md px-3 py-2" style={{ border: `1px dashed ${LINE}`, background: LOCK_BG }}>
+                      <p className="text-xs font-medium" style={{ color: INK_SUB }}>EOI Deadline</p>
+                      <p className="text-xs" style={{ color: INK_FAINT }}>Not applicable — EOI already ran on the linked EOI Invite tender.</p>
+                    </div>
+                  )}
+                  <Field label={formData.procurementWorkflow === "sequential" ? "Stage 2: Technical Deadline" : "Combined Submission Deadline"} required accent={TEAL}>
+                    <TextInput
+                      type="date"
                       value={formData.technicalDeadline ? formData.technicalDeadline.split('T')[0] : ""}
                       onChange={(e) => setFormData(prev => ({ ...prev, technicalDeadline: e.target.value }))}
-                      className="input-field pl-10" />
-                  </div>
-                  <div className="relative">
-                    <label className="text-xs font-bold text-slate-600 block mb-1">
-                      Financial / Stage 3 Deadline {formData.procurementWorkflow === "sequential" ? "*" : "(Combined)"}
-                    </label>
-                    <Calendar className="absolute left-3 top-9 -translate-y-1/2 text-slate-400" size={16} />
-                    <input type="date" placeholder="Date" required={formData.procurementWorkflow === "sequential"}
-                      disabled={formData.procurementWorkflow === "combined"}
-                      value={formData.financialDeadline ? formData.financialDeadline.split('T')[0] : ""}
-                      onChange={(e) => setFormData(prev => ({ ...prev, financialDeadline: e.target.value }))}
-                      className="input-field pl-10 disabled:opacity-50" />
-                  </div>
+                    />
+                  </Field>
+                </div>
+              </div>
+
+              <div style={{ borderTop: `1px solid ${LINE}`, paddingTop: 16 }}>
+                <label className="text-sm font-medium block mb-1" style={{ color: INK }}>Other Dates</label>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-2">
+                  <Field label="Clarification / Query Deadline" accent={TEAL} help={{ text: "Last date bidders may submit written questions." }}>
+                    <TextInput
+                      type="date"
+                      value={formData.clarificationDeadline ? formData.clarificationDeadline.split('T')[0] : ""}
+                      onChange={(e) => setFormData(prev => ({ ...prev, clarificationDeadline: e.target.value }))}
+                    />
+                  </Field>
+                  <Field label="Site Visit Date" accent={TEAL}>
+                    <TextInput
+                      type="date"
+                      value={formData.siteVisitDate ? formData.siteVisitDate.split('T')[0] : ""}
+                      onChange={(e) => setFormData(prev => ({ ...prev, siteVisitDate: e.target.value }))}
+                    />
+                  </Field>
+                  <Field label="Bid Validity Period (Days)" accent={TEAL} help={{ text: "How long bidders' prices stay binding, counted from the submission deadline." }}>
+                    <TextInput
+                      type="number"
+                      min={0}
+                      value={formData.bidValidityPeriodDays ?? ""}
+                      onChange={(e) => setFormData(prev => ({ ...prev, bidValidityPeriodDays: e.target.value === "" ? undefined : Number(e.target.value) }))}
+                      placeholder="e.g. 90"
+                    />
+                  </Field>
                 </div>
               </div>
             </div>
           )}
 
-          {/* Step 3: Technical Details & Eligibility */}
+          {/* Step 3: Scope & Submission */}
           {formStep === 3 && (
-            <div className="space-y-6">
-          <div className="space-y-4">
-            <h3 className="font-bold text-slate-900 border-b pb-2">Technical Mapping</h3>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <div className="space-y-2">
-                <label className="text-sm font-bold text-slate-700">Technology Type * (Multi-select)</label>
-                <div className="flex flex-wrap gap-2 pt-1">
-                  {tenderTechnologyTypeOptions.map(tech => (
-                    <label key={tech} className="flex items-center gap-2 px-3 py-1.5 bg-slate-50 rounded-lg border border-slate-200 cursor-pointer hover:bg-slate-100">
-                      <input 
-                        type="checkbox" 
-                        className="w-4 h-4 rounded text-emerald-600" 
-                        checked={formData.technologyTypes?.includes(tech)}
-                        onChange={() => handleTechToggle(tech)}
-                      />
-                      <span className="text-sm font-medium">{tech}</span>
-                    </label>
-                  ))}
-                </div>
-              </div>
-              <div className="space-y-2 md:col-span-2">
-                <label className="text-sm font-bold text-slate-700">Target District / Lot Area * (Multi-select)</label>
-                <p className="text-xs text-slate-500">This defines the tender legal boundary and pre-fills the milestone assignment districts.</p>
-                <div className="flex flex-wrap gap-2 pt-1">
-                  {lesothoDistrictOptions.map(district => (
-                    <label key={district} className="flex items-center gap-2 px-3 py-1.5 bg-slate-50 rounded-lg border border-slate-200 cursor-pointer hover:bg-slate-100">
-                      <input
-                        type="checkbox"
-                        className="w-4 h-4 rounded text-emerald-600"
-                        checked={formData.targetDistricts?.includes(district)}
-                        onChange={() => handleTargetDistrictToggle(district)}
-                      />
-                      <span className="text-sm font-medium">{district}</span>
-                    </label>
-                  ))}
-                </div>
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm font-bold text-slate-700">Target Site Type *</label>
-                <select 
-                  name="targetSiteType"
-                  value={formData.targetSiteType}
-                  onChange={handleInputChange}
-                  className="input-field"
-                >
+            <div>
+          <div className="mb-2">
+            <Field label="Technology Type(s)" required accent={TEAL} help={{ text: "Which renewable energy technologies this tender accepts bids for — vendors can only apply if their pre-qualified technology matches one of your selections here." }}>
+              <FormKitChips items={tenderTechnologyTypeOptions} selected={formData.technologyTypes || []} onToggle={handleTechToggle} accent={TEAL} />
+            </Field>
+            <Field label="Target District(s) / Lot Area" required accent={TEAL} help={{ text: "This defines the tender legal boundary and pre-fills the milestone assignment districts." }}>
+              <FormKitChips items={lesothoDistrictOptions} selected={formData.targetDistricts || []} onToggle={handleTargetDistrictToggle} accent={TEAL} />
+            </Field>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6">
+              <Field label="Target Site Type" required accent={TEAL} help={{ text: TARGET_SITE_TYPE_HELP[formData.targetSiteType || "Household"] || TARGET_SITE_TYPE_HELP.Household }}>
+                <FormKitSelect name="targetSiteType" value={formData.targetSiteType} onChange={handleInputChange}>
                   <option>Household</option>
                   <option>Business</option>
                   <option>School</option>
                   <option>Clinic</option>
-                </select>
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm font-bold text-slate-700">Minimum Service Tier</label>
-                <select 
-                  name="minimumServiceTier"
-                  value={formData.minimumServiceTier}
-                  onChange={handleInputChange}
-                  className="input-field"
-                >
+                </FormKitSelect>
+              </Field>
+              <Field
+                label="Minimum Service Tier"
+                accent={TEAL}
+                help={{
+                  text: isFrameworkProcurementMethod(formData.procurementMethod)
+                    ? "This tender's Procurement Method is Framework/Pre-Qualified Pool — only vendors whose own approved pre-qualification tier is at least this, and whose technology types (above) match, will even see this tender. Leave blank for no tier requirement."
+                    : "The minimum system size/capability vendors must propose (higher tiers = bigger, more capable systems). Bids proposing a lower tier than this can be rejected as non-compliant.",
+                }}
+              >
+                <FormKitSelect name="minimumServiceTier" value={formData.minimumServiceTier} onChange={handleInputChange}>
                   <option value="">Select Service Tier</option>
                   <option>Tier 1</option>
                   <option>Tier 2</option>
                   <option>Tier 3</option>
                   <option>Tier 4</option>
                   <option>Tier 5</option>
-                </select>
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm font-bold text-slate-700">Approximate Installation Target</label>
-                <input
+                </FormKitSelect>
+              </Field>
+              <Field label="Approximate Installation Target" accent={TEAL} help={{ text: "Expected number of installations (e.g. households) this tender should deliver overall — used as the reference total when you distribute installation targets across lots below." }}>
+                <TextInput
                   type="number"
                   name="approximateInstallationTarget"
                   value={formData.approximateInstallationTarget ?? 0}
                   onChange={handleInputChange}
-                  className="input-field"
                   placeholder="Enter target number"
                 />
+              </Field>
+            </div>
+          </div>
+
+          <div className="space-y-3 mb-6" style={{ borderTop: `1px solid ${LINE}`, paddingTop: 16 }}>
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <div>
+                <label className="text-sm font-bold text-slate-700">Lots (Optional)</label>
+                <p className="text-xs text-slate-500">Split this tender into separately awardable lots — e.g. by district or package — so different vendors can win different lots. Leave empty for a single-award tender.</p>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                {formData.lots && formData.lots.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setFormData(prev => ({ ...prev, lots: distributeLotTotals(prev.lots || [], prev.budget, prev.approximateInstallationTarget) }))}
+                    className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600 text-xs font-semibold hover:bg-slate-50"
+                    title="Splits the tender's total Budget Estimate and Approximate Installation Target evenly across all lots"
+                  >
+                    Distribute Evenly
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setFormData(prev => {
+                    const nextLots = [...(prev.lots || []), { name: `Lot ${(prev.lots?.length || 0) + 1}`, description: "", targetDistricts: [] as string[], technologyTypes: [] as string[] }];
+                    return { ...prev, lots: distributeLotTotals(nextLots, prev.budget, prev.approximateInstallationTarget) };
+                  })}
+                  className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-emerald-200 text-emerald-700 text-xs font-semibold hover:bg-emerald-50"
+                >
+                  <Plus size={14} /> Add Lot
+                </button>
               </div>
             </div>
-          </div>
-
-          <div className="space-y-2">
-            <label className="text-sm font-bold text-slate-700">Bidders Eligibility *</label>
-            <textarea 
-              name="biddersEligibility"
-              value={formData.biddersEligibility}
-              onChange={handleInputChange}
-              rows={3} 
-              placeholder="Describe eligibility criteria..." 
-              className="input-field"
-            ></textarea>
-          </div>
-
-          <div className="space-y-2">
-            <label className="text-sm font-bold text-slate-700">Instructions *</label>
-            <textarea 
-              name="instruction"
-              value={formData.instruction}
-              onChange={handleInputChange}
-              rows={3} 
-              placeholder="Special instructions for bidders..." 
-              className="input-field"
-            ></textarea>
-          </div>
-
-          <div className="space-y-2">
-            <label className="text-sm font-bold text-slate-700">Time for Completion *</label>
-            <input
-              type="text"
-              name="timeForCompletion"
-              value={formData.timeForCompletion}
-              onChange={handleInputChange}
-              placeholder="e.g., 60 days"
-              className="input-field"
-            />
-          </div>
-            </div>) /* end Step 3 */}
-          {formStep === 4 && (
-            <div className="space-y-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div className="space-y-4">
-                <label className="flex items-center gap-3 cursor-pointer">
-                  <input 
-                    type="checkbox" 
-                    className="w-5 h-5 rounded border-slate-300 text-emerald-600" 
-                    checked={formData.tenderSecurityRequired}
-                    onChange={(e) => setFormData(prev => ({
-                      ...prev,
-                      tenderSecurityRequired: e.target.checked,
-                    }))}
-                  />
-                  <span className="text-sm font-medium text-slate-700">Tender Security Required</span>
-                </label>
-            </div>
+            {(!formData.lots || formData.lots.length === 0) && (
+              <p className="text-xs text-slate-400 italic">No lots defined — this tender will be awarded as a single package.</p>
+            )}
+            {formData.lots && formData.lots.length > 0 && (
+              <div className="hidden gap-2 px-3 text-[10px] font-bold uppercase tracking-widest text-slate-400 sm:flex">
+                <span className="flex-1">Lot Name</span>
+                <span className="w-40">Budget (LSL)</span>
+                <span className="w-40">Installation Target</span>
+                <span className="w-8" />
+              </div>
+            )}
             <div className="space-y-2">
-              <label className="text-sm font-bold text-slate-700">Contact Details *</label>
-              <input 
-                type="text" 
-                name="contactDetails"
-                value={formData.contactDetails}
-                onChange={handleInputChange}
-                placeholder="Email or Phone" 
-                className="input-field" 
-              />
-            </div>
-            </div>
-            <div className="space-y-4">
-              <label className="text-sm font-bold text-slate-700">Governing Documents *</label>
-              <p className="text-xs text-slate-500">Upload the core tender documents that define rules, eligibility, and payment terms.</p>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                {[
-                  {
-                    label: "Tender Schedule",
-                    hint: "Key dates and procurement timeline",
-                    file: scheduleFile,
-                    existing: selectedTender?.scheduleFile,
-                    setter: setScheduleFile,
-                    ref: scheduleFileRef,
-                  },
-                  {
-                    label: "RFP / Subsidy Framework",
-                    hint: "Eligibility, evaluation criteria, technical standards",
-                    file: rfpDocumentsFile,
-                    existing: selectedTender?.rfpDocumentsFile,
-                    setter: setRfpDocumentsFile,
-                    ref: rfpDocumentsFileRef,
-                  },
-                  {
-                    label: "Milestone Payment Schedule",
-                    hint: "Payment terms for this window",
-                    file: milestonePaymentScheduleFile,
-                    existing: selectedTender?.milestonePaymentScheduleFile,
-                    setter: setMilestonePaymentScheduleFile,
-                    ref: milestonePaymentScheduleFileRef,
-                  },
-              ].map((doc, idx) => (
-                <div key={doc.label} className={`relative p-4 border-2 rounded-xl text-center cursor-pointer ${doc.file || doc.existing ? 'border-emerald-400 bg-emerald-50 ring-2 ring-emerald-200/50' : 'border-dashed border-slate-200 bg-slate-50'}`}>
+              {(formData.lots || []).map((lot, idx) => (
+                <div key={lot.id ?? idx} className="p-3 rounded-xl border border-slate-200 bg-slate-50 space-y-2">
+                  <div className="flex flex-col sm:flex-row gap-2 items-stretch sm:items-center">
                     <input
-                      id={`docUpload-${idx}`}
-                      type="file"
-                      accept=".pdf,.doc,.docx,.xls,.xlsx"
-                      className="hidden"
-                      onChange={(e) => {
-                        const file = e.target.files?.[0];
-                        doc.setter(file || null);
-                        doc.ref.current = file || null;
-                        e.target.value = "";
-                      }}
+                      type="text"
+                      value={lot.name}
+                      onChange={(e) => setFormData(prev => ({
+                        ...prev,
+                        lots: (prev.lots || []).map((l, i) => i === idx ? { ...l, name: e.target.value } : l),
+                      }))}
+                      placeholder="E.g. Lot 1 - Maseru District"
+                      className="input-field flex-1"
                     />
-                    {(doc.file || doc.existing) && (
-                      <div className="absolute -top-2 -right-2 w-6 h-6 bg-emerald-500 rounded-full flex items-center justify-center shadow">
-                        <Check size={14} className="text-white" />
-                      </div>
-                    )}
-                    <div onClick={() => document.getElementById(`docUpload-${idx}`)?.click()} className="block cursor-pointer">
-                      {doc.file || doc.existing ? (
-                        <CheckCircle2 size={22} className="mx-auto text-emerald-500 mb-2" />
-                      ) : (
-                        <FileText size={22} className="mx-auto text-slate-400 mb-2" />
-                      )}
-                      <p className="text-xs font-bold text-slate-700">{doc.label}</p>
-                      <p className="text-[10px] text-slate-400 mt-1">{doc.hint}</p>
-                      <p className={`text-[10px] mt-1 font-medium ${doc.file || doc.existing ? 'text-emerald-600' : 'text-slate-400'}`}>
-                        {doc.file
-                          ? doc.file.name
-                          : doc.existing
-                            ? "Existing file attached (upload to replace)"
-                            : "Click to upload"}
-                      </p>
+                    <input
+                      type="number"
+                      value={lot.budget ?? ""}
+                      onChange={(e) => setFormData(prev => ({
+                        ...prev,
+                        lots: (prev.lots || []).map((l, i) => i === idx ? { ...l, budget: e.target.value === "" ? undefined : Number(e.target.value) } : l),
+                      }))}
+                      placeholder="E.g. 250000"
+                      className="input-field sm:w-40"
+                    />
+                    <input
+                      type="number"
+                      value={lot.estimatedInstallationTarget ?? ""}
+                      onChange={(e) => setFormData(prev => ({
+                        ...prev,
+                        lots: (prev.lots || []).map((l, i) => i === idx ? { ...l, estimatedInstallationTarget: e.target.value === "" ? undefined : Number(e.target.value) } : l),
+                      }))}
+                      placeholder="E.g. 50"
+                      className="input-field sm:w-40"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setFormData(prev => ({ ...prev, lots: distributeLotTotals((prev.lots || []).filter((_, i) => i !== idx), prev.budget, prev.approximateInstallationTarget) }))}
+                      className="shrink-0 p-2 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50"
+                      aria-label="Remove lot"
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold uppercase tracking-wide text-slate-500">Districts Covered (Optional)</label>
+                    <p className="text-xs text-slate-400">Narrows which of the tender's overall districts this specific lot applies to — leave unselected to allow any of the tender's districts.</p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {(formData.targetDistricts && formData.targetDistricts.length > 0 ? formData.targetDistricts : lesothoDistrictOptions).map(district => {
+                        const selected = (lot.targetDistricts || []).includes(district);
+                        return (
+                          <button
+                            type="button"
+                            key={district}
+                            onClick={() => setFormData(prev => ({
+                              ...prev,
+                              lots: (prev.lots || []).map((l, i) => i === idx ? {
+                                ...l,
+                                targetDistricts: selected
+                                  ? (l.targetDistricts || []).filter(d => d !== district)
+                                  : [...(l.targetDistricts || []), district],
+                              } : l),
+                            }))}
+                            className={`px-2 py-1 rounded-full text-xs font-semibold border transition ${
+                              selected
+                                ? "bg-emerald-600 text-white border-emerald-600"
+                                : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"
+                            }`}
+                          >
+                            {district}
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
-                ))}
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold uppercase tracking-wide text-slate-500">Technology Types Covered (Optional)</label>
+                    <div className="flex flex-wrap gap-1.5">
+                      {(formData.technologyTypes && formData.technologyTypes.length > 0 ? formData.technologyTypes : tenderTechnologyTypeOptions).map(tech => {
+                        const selected = (lot.technologyTypes || []).includes(tech);
+                        return (
+                          <button
+                            type="button"
+                            key={tech}
+                            onClick={() => setFormData(prev => ({
+                              ...prev,
+                              lots: (prev.lots || []).map((l, i) => i === idx ? {
+                                ...l,
+                                technologyTypes: selected
+                                  ? (l.technologyTypes || []).filter(t => t !== tech)
+                                  : [...(l.technologyTypes || []), tech],
+                              } : l),
+                            }))}
+                            className={`px-2 py-1 rounded-full text-xs font-semibold border transition ${
+                              selected
+                                ? "bg-emerald-600 text-white border-emerald-600"
+                                : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"
+                            }`}
+                          >
+                            {tech}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  <textarea
+                    value={lot.description ?? ""}
+                    onChange={(e) => setFormData(prev => ({
+                      ...prev,
+                      lots: (prev.lots || []).map((l, i) => i === idx ? { ...l, description: e.target.value } : l),
+                    }))}
+                    rows={2}
+                    placeholder="Lot description (scope, etc.) — optional"
+                    className="input-field w-full text-sm"
+                  ></textarea>
+
+                  <div className="space-y-1.5 rounded-lg border border-dashed border-slate-300 bg-white p-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <div>
+                        <label className="text-xs font-bold uppercase tracking-wide text-slate-500">Bill of Quantities for This Lot (Optional)</label>
+                        <p className="text-xs text-slate-400">Design the exact line items a bidder must price for this lot — description, unit, and quantity are fixed; the bidder only supplies a unit price. Leave empty to let bidders freely author their own BOQ for this lot instead.</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setFormData(prev => ({
+                          ...prev,
+                          lots: (prev.lots || []).map((l, i) => i === idx ? { ...l, boqItems: [...(l.boqItems || []), { description: "", unit: "", quantity: 0 }] } : l),
+                        }))}
+                        className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-emerald-200 px-2.5 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-50"
+                      >
+                        <Plus size={13} /> Add Item
+                      </button>
+                    </div>
+                    {(lot.boqItems || []).length > 0 && (
+                      <div className="space-y-1.5">
+                        {(lot.boqItems || []).map((item, itemIdx) => (
+                          <div key={itemIdx} className="flex flex-col gap-1.5 sm:flex-row sm:items-center">
+                            <input
+                              type="text"
+                              value={item.description}
+                              onChange={(e) => setFormData(prev => ({
+                                ...prev,
+                                lots: (prev.lots || []).map((l, i) => i === idx ? {
+                                  ...l,
+                                  boqItems: (l.boqItems || []).map((b, bi) => bi === itemIdx ? { ...b, description: e.target.value } : b),
+                                } : l),
+                              }))}
+                              placeholder="E.g. Supply and install 80W solar panel"
+                              className="input-field flex-1 text-sm"
+                            />
+                            <input
+                              type="text"
+                              value={item.unit}
+                              onChange={(e) => setFormData(prev => ({
+                                ...prev,
+                                lots: (prev.lots || []).map((l, i) => i === idx ? {
+                                  ...l,
+                                  boqItems: (l.boqItems || []).map((b, bi) => bi === itemIdx ? { ...b, unit: e.target.value } : b),
+                                } : l),
+                              }))}
+                              placeholder="Unit (e.g. pcs)"
+                              className="input-field text-sm sm:w-28"
+                            />
+                            <input
+                              type="number"
+                              value={item.quantity ?? ""}
+                              onChange={(e) => setFormData(prev => ({
+                                ...prev,
+                                lots: (prev.lots || []).map((l, i) => i === idx ? {
+                                  ...l,
+                                  boqItems: (l.boqItems || []).map((b, bi) => bi === itemIdx ? { ...b, quantity: e.target.value === "" ? 0 : Number(e.target.value) } : b),
+                                } : l),
+                              }))}
+                              placeholder="Qty"
+                              className="input-field text-sm sm:w-24"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setFormData(prev => ({
+                                ...prev,
+                                lots: (prev.lots || []).map((l, i) => i === idx ? { ...l, boqItems: (l.boqItems || []).filter((_, bi) => bi !== itemIdx) } : l),
+                              }))}
+                              className="shrink-0 self-start rounded-lg p-2 text-slate-400 hover:bg-rose-50 hover:text-rose-600 sm:self-center"
+                              aria-label="Remove BOQ item"
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+            {formData.lots && formData.lots.length > 0 && (
+              <div className="rounded-lg border border-slate-200 bg-white px-3 py-2 space-y-1 text-xs">
+                <div className="flex flex-wrap gap-x-6 gap-y-1">
+                  <span className="text-slate-600">
+                    Budget allocated:{" "}
+                    <strong className={lotBudgetSum === Number(formData.budget || 0) ? "text-emerald-700" : "text-amber-600"}>
+                      {lotBudgetSum.toLocaleString()}
+                    </strong>
+                    {" "}of {Number(formData.budget || 0).toLocaleString()}
+                  </span>
+                  <span className="text-slate-600">
+                    Installations allocated:{" "}
+                    <strong className={lotInstallSum === Number(formData.approximateInstallationTarget || 0) ? "text-emerald-700" : "text-amber-600"}>
+                      {lotInstallSum.toLocaleString()}
+                    </strong>
+                    {" "}of {Number(formData.approximateInstallationTarget || 0).toLocaleString()}
+                  </span>
+                </div>
+                <p className="text-slate-400">These are a sanity check, not enforced — ideally your lots' budgets and installation targets should add up to the tender-wide totals above.</p>
+              </div>
+            )}
+            {formData.lots && formData.lots.length > 0 && (
+              <div className="space-y-2 max-w-xs">
+                <label className="text-sm font-bold text-slate-700">Max Lots per Bidder</label>
+                <input
+                  type="number"
+                  min={1}
+                  value={formData.maxLotsPerBidder ?? ""}
+                  onChange={(e) => setFormData(prev => ({ ...prev, maxLotsPerBidder: e.target.value === "" ? undefined : Number(e.target.value) }))}
+                  placeholder="No limit"
+                  className="input-field"
+                />
+                <p className="text-xs text-slate-500">Leave blank to let a bidder bid for and win any number of lots, including all of them.</p>
+              </div>
+            )}
+          </div>
+
+          {(!formData.lots || formData.lots.length === 0) && (
+            <div className="space-y-3 mb-6" style={{ borderTop: `1px solid ${LINE}`, paddingTop: 16 }}>
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <div>
+                  <label className="text-sm font-bold text-slate-700">Bill of Quantities (Optional)</label>
+                  <p className="text-xs text-slate-500">Design the exact line items a bidder must price — description, unit, and quantity are fixed; the bidder only supplies a unit price at bid submission. Leave empty to let bidders freely author their own BOQ instead.</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setFormData(prev => ({ ...prev, boqItems: [...(prev.boqItems || []), { description: "", unit: "", quantity: 0 }] }))}
+                  className="inline-flex items-center gap-1 shrink-0 px-3 py-1.5 rounded-lg border border-emerald-200 text-emerald-700 text-xs font-semibold hover:bg-emerald-50"
+                >
+                  <Plus size={14} /> Add Item
+                </button>
+              </div>
+              {(!formData.boqItems || formData.boqItems.length === 0) && (
+                <p className="text-xs text-slate-400 italic">No BOQ designed — bidders will author their own Bill of Quantities at submission.</p>
+              )}
+              {formData.boqItems && formData.boqItems.length > 0 && (
+                <div className="space-y-2">
+                  {formData.boqItems.map((item, itemIdx) => (
+                    <div key={itemIdx} className="flex flex-col gap-2 rounded-xl border border-slate-200 bg-slate-50 p-3 sm:flex-row sm:items-center">
+                      <input
+                        type="text"
+                        value={item.description}
+                        onChange={(e) => setFormData(prev => ({
+                          ...prev,
+                          boqItems: (prev.boqItems || []).map((b, bi) => bi === itemIdx ? { ...b, description: e.target.value } : b),
+                        }))}
+                        placeholder="E.g. Supply and install 80W solar panel"
+                        className="input-field flex-1"
+                      />
+                      <input
+                        type="text"
+                        value={item.unit}
+                        onChange={(e) => setFormData(prev => ({
+                          ...prev,
+                          boqItems: (prev.boqItems || []).map((b, bi) => bi === itemIdx ? { ...b, unit: e.target.value } : b),
+                        }))}
+                        placeholder="Unit (e.g. pcs)"
+                        className="input-field sm:w-32"
+                      />
+                      <input
+                        type="number"
+                        value={item.quantity ?? ""}
+                        onChange={(e) => setFormData(prev => ({
+                          ...prev,
+                          boqItems: (prev.boqItems || []).map((b, bi) => bi === itemIdx ? { ...b, quantity: e.target.value === "" ? 0 : Number(e.target.value) } : b),
+                        }))}
+                        placeholder="Qty"
+                        className="input-field sm:w-28"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setFormData(prev => ({ ...prev, boqItems: (prev.boqItems || []).filter((_, bi) => bi !== itemIdx) }))}
+                        className="shrink-0 self-start rounded-lg p-2 text-slate-400 hover:bg-rose-50 hover:text-rose-600 sm:self-center"
+                        aria-label="Remove BOQ item"
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          <Field label="Bidders Eligibility" required accent={TEAL}>
+            <FormKitTextArea name="biddersEligibility" value={formData.biddersEligibility} onChange={handleInputChange} placeholder="Describe eligibility criteria..." />
+          </Field>
+
+          <Field label="Instructions" required accent={TEAL}>
+            <FormKitTextArea name="instruction" value={formData.instruction} onChange={handleInputChange} placeholder="Special instructions for bidders..." />
+          </Field>
+
+          <Field label="Time for Completion" required accent={TEAL} help={{ text: "How long the winning vendor has to complete installation after contract signing — shown to vendors on the tender listing." }}>
+            <TextInput name="timeForCompletion" value={formData.timeForCompletion} onChange={handleInputChange} placeholder="e.g., 60 days" />
+          </Field>
+
+          <Field label="Defects Liability / Warranty Period (Months)" accent={TEAL} help={{ text: "The minimum defects-liability/warranty period the RFP requires — a vendor's bid may offer more, never less." }}>
+            <TextInput
+              type="number"
+              min={0}
+              value={formData.minimumWarrantyPeriodMonths ?? ""}
+              onChange={(e) => setFormData(prev => ({ ...prev, minimumWarrantyPeriodMonths: e.target.value === "" ? undefined : Number(e.target.value) }))}
+              placeholder="e.g. 24"
+            />
+          </Field>
+
+          <Field label="Pre-Tender Meeting Info" accent={TEAL}>
+            <FormKitTextArea
+              name="preTenderMeetingInfo"
+              value={formData.preTenderMeetingInfo}
+              onChange={handleInputChange}
+              rows={2}
+              placeholder="Date, venue, and dial-in details for the pre-tender briefing, if any."
+            />
+          </Field>
+
+          <div className="my-6" style={{ borderTop: `1px solid ${LINE}` }} />
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6">
+            <Field label="Contact Details" required accent={TEAL} help={{ text: "Shown to vendors on the tender listing as who to contact with questions about this tender." }}>
+              <TextInput name="contactDetails" value={formData.contactDetails} onChange={handleInputChange} placeholder="Email or Phone" />
+            </Field>
+            <Field
+              label="Submission Method"
+              accent={TEAL}
+              help={{
+                text: (formData.submissionMethod ?? "online_only") === "hybrid"
+                  ? "Vendors submit through the platform, but may also deliver physical/paper copies per your procurement rules."
+                  : "Vendors submit everything through the platform — no physical/paper submissions accepted.",
+              }}
+            >
+              <FormKitSelect
+                value={formData.submissionMethod ?? "online_only"}
+                onChange={(e) => setFormData(prev => ({ ...prev, submissionMethod: e.target.value as any }))}
+              >
+                <option value="online_only">Online portal only</option>
+                <option value="hybrid">Hybrid (+ physical submissions)</option>
+              </FormKitSelect>
+              <div className="mt-2">
+                <ToggleRow
+                  id="digitalSignatureRequired"
+                  checked={formData.digitalSignatureRequired ?? true}
+                  onChange={(checked) => setFormData(prev => ({ ...prev, digitalSignatureRequired: checked }))}
+                  label="Digital signature required for contract signing"
+                />
+              </div>
+            </Field>
+          </div>
+
+          <div className="space-y-4">
+              <div className="border-t border-slate-100 pt-4 mt-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <label className="text-sm font-bold text-slate-700">Governing Documents</label>
+                    <p className="text-xs text-slate-500">List the tender documents bidders should be aware of — rules, eligibility, payment terms, and any other reference material. These are informational only.</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setGoverningDocs(prev => [...prev, { label: "", expected_type: "PDF" }])}
+                    className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-emerald-200 text-emerald-700 text-xs font-semibold hover:bg-emerald-50"
+                  >
+                    <Plus size={14} /> Add Document
+                  </button>
+                </div>
+                <div className="mt-4 rounded-xl border border-emerald-100 bg-emerald-50/60 p-3">
+                  <p className="text-xs font-bold text-emerald-800">Suggested documents</p>
+                  <p className="text-xs text-emerald-700 mb-2">Click a suggestion to add it — you can still edit, replace, or remove it afterward.</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {SUGGESTED_GOVERNING_DOCUMENTS.map((suggestion) => {
+                      const alreadyAdded = governingDocs.some((d) => d.field_key === suggestion.field_key);
+                      return (
+                        <button
+                          key={suggestion.field_key}
+                          type="button"
+                          disabled={alreadyAdded}
+                          title={suggestion.hint}
+                          onClick={() => setGoverningDocs(prev => [...prev, {
+                            label: suggestion.label,
+                            expected_type: suggestion.expected_type,
+                            field_key: suggestion.field_key,
+                          }])}
+                          className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold border transition ${
+                            alreadyAdded
+                              ? "border-emerald-200 bg-emerald-100 text-emerald-500 cursor-default"
+                              : "border-emerald-300 bg-white text-emerald-700 hover:bg-emerald-100"
+                          }`}
+                        >
+                          {alreadyAdded ? <CheckCircle2 size={12} /> : <Plus size={12} />} {suggestion.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+                {governingDocs.length === 0 && (
+                  <p className="text-xs text-slate-400 mt-3 italic">No governing documents defined yet.</p>
+                )}
+                <div className="space-y-2 mt-3">
+                  {governingDocs.map((doc, idx) => {
+                    const uploaded = Boolean(governingDocsFiles[idx]) || Boolean(doc.file_url);
+                    const displayName = governingDocsFiles[idx]?.name || doc.file_name || doc.file_url || "";
+                    return (
+                      <div key={idx} className="p-3 rounded-xl border border-slate-200 bg-slate-50">
+                        <div className="flex flex-col sm:flex-row gap-2 items-stretch sm:items-center">
+                          <input
+                            type="text"
+                            value={doc.label}
+                            readOnly={Boolean(doc.field_key)}
+                            onChange={(e) => setGoverningDocs(prev => prev.map((d, i) => i === idx ? { ...d, label: e.target.value } : d))}
+                            placeholder="Document name (e.g. Environmental Requirements)"
+                            className={`input-field flex-1 ${doc.field_key ? "bg-slate-100" : ""}`}
+                          />
+                          {doc.field_key && (
+                            <span
+                              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-blue-200 bg-blue-50 text-blue-700 text-xs font-semibold shrink-0"
+                              title="A built-in reference document — its name and type are fixed. Regular custom documents can be freely renamed."
+                            >
+                              Core document
+                            </span>
+                          )}
+                          <select
+                            value={doc.expected_type || "PDF"}
+                            onChange={(e) => setGoverningDocs(prev => prev.map((d, i) => i === idx ? { ...d, expected_type: e.target.value } : d))}
+                            className="input-field sm:w-36"
+                          >
+                            <option value="PDF">PDF</option>
+                            <option value="PDF/DOCX">PDF/DOCX</option>
+                            <option value="DOCX">DOCX</option>
+                            <option value="XLSX">XLSX</option>
+                            <option value="Image">Image</option>
+                            <option value="Other">Other</option>
+                          </select>
+                          <button
+                            type="button"
+                            onClick={() => { setGoverningDocs(prev => prev.filter((_, i) => i !== idx)); setGoverningDocsFiles(prev => { const n = { ...prev }; delete n[idx]; return n; }); }}
+                            className="shrink-0 p-2 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50"
+                            aria-label="Remove document"
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        </div>
+                        <div className="mt-2 flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => document.getElementById(`governing-doc-file-${idx}`)?.click()}
+                            className={`inline-flex items-center gap-2 px-3 py-2 rounded-lg border text-xs font-semibold ${uploaded ? "border-emerald-300 text-emerald-700 bg-emerald-50" : "border-dashed border-slate-300 text-slate-500 hover:text-slate-700 hover:bg-white"}`}
+                          >
+                            <Upload size={14} />
+                            {uploaded ? (doc.file_url && !governingDocsFiles[idx] ? "Replace file" : "Change file") : "Upload file"}
+                          </button>
+                          {uploaded && (
+                            doc.file_url && !governingDocsFiles[idx] ? (
+                              <a href={doc.file_url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-xs font-medium text-emerald-700 hover:underline">
+                                <FileText size={13} /> {displayName || "View file"}
+                              </a>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 text-xs font-medium text-emerald-700">
+                                <CheckCircle2 size={13} /> {governingDocsFiles[idx]?.name || displayName}
+                              </span>
+                            )
+                          )}
+                          <input
+                            id={`governing-doc-file-${idx}`}
+                            type="file"
+                            accept=".pdf,.doc,.docx,.xls,.xlsx"
+                            className="hidden"
+                            onChange={(e) => { handleGoverningDocFileChange(idx, e.target.files?.[0] || null); e.target.value = ""; }}
+                          />
+                        </div>
+                        {governingDocsErrors[idx] && (
+                          <p className="mt-1 text-xs font-semibold text-rose-600">{governingDocsErrors[idx]}</p>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
               <div className="border-t border-slate-100 pt-4 mt-4">
                 <div className="flex items-center justify-between">
@@ -3325,175 +4465,217 @@ const Tenders = ({
                   </div>
                   <button
                     type="button"
-                    onClick={() => setRequiredDocs(prev => [...prev, { name: "", expected_type: "PDF", bid_stage: "eoi" }])}
+                    onClick={() => setRequiredDocs(prev => [...prev, { name: "", expected_type: "PDF", bid_stage: formData.linkedEoiTenderId ? "combined" : "eoi" }])}
                     className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-emerald-200 text-emerald-700 text-xs font-semibold hover:bg-emerald-50"
                   >
                     <Plus size={14} /> Add Document
                   </button>
+                </div>
+                <div className="mt-4 rounded-xl border border-emerald-100 bg-emerald-50/60 p-3">
+                  <p className="text-xs font-bold text-emerald-800">Suggested documents</p>
+                  <p className="text-xs text-emerald-700 mb-2">Click a suggestion to add it — you can still edit or remove it afterward. Nothing is required unless it's added here. Hover a suggestion to see why vendors are typically asked for it.</p>
+                  <div className="space-y-2">
+                    {Object.entries(SUGGESTED_REQUIRED_DOCUMENTS).filter(([stage]) => {
+                      // A tender linked to an EOI Invite never collects its own EOI —
+                      // that already happened on the linked EOI Invite tender.
+                      if (formData.linkedEoiTenderId) return stage !== "eoi";
+                      return true;
+                    }).map(([stage, suggestions]) => (
+                      <div key={stage} className="flex flex-wrap items-center gap-1.5">
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-700 w-28 shrink-0">{REQUIRED_DOCUMENT_STAGE_LABELS[stage] || stage}</span>
+                        {suggestions.map((suggestion) => {
+                          const alreadyAdded = requiredDocs.some(
+                            (d) => d.bid_stage === stage && d.field_key === suggestion.field_key
+                          );
+                          return (
+                            <button
+                              key={suggestion.field_key}
+                              type="button"
+                              disabled={alreadyAdded}
+                              title={REQUIRED_DOCUMENT_HELP[suggestion.field_key]}
+                              onClick={() => setRequiredDocs(prev => [...prev, {
+                                name: suggestion.name,
+                                expected_type: suggestion.expected_type,
+                                bid_stage: stage,
+                                field_key: suggestion.field_key,
+                              }])}
+                              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold border transition ${
+                                alreadyAdded
+                                  ? "border-emerald-200 bg-emerald-100 text-emerald-500 cursor-default"
+                                  : "border-emerald-300 bg-white text-emerald-700 hover:bg-emerald-100"
+                              }`}
+                            >
+                              {alreadyAdded ? <CheckCircle2 size={12} /> : <Plus size={12} />} {suggestion.name}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ))}
+                  </div>
                 </div>
                 {requiredDocs.length === 0 && (
                   <p className="text-xs text-slate-400 mt-3 italic">No required bid documents defined yet.</p>
                 )}
                 <div className="space-y-2 mt-3">
                   {requiredDocs.map((doc, idx) => (
-                    <div key={idx} className="flex flex-col sm:flex-row gap-2 items-stretch sm:items-center p-3 rounded-xl border border-slate-200 bg-slate-50">
-                      <input
-                        type="text"
-                        value={doc.name}
-                        onChange={(e) => setRequiredDocs(prev => prev.map((d, i) => i === idx ? { ...d, name: e.target.value } : d))}
-                        placeholder="Document name (e.g. Valid Trading License)"
-                        className="input-field flex-1"
-                      />
-                      <select
-                        value={doc.expected_type || "PDF"}
-                        onChange={(e) => setRequiredDocs(prev => prev.map((d, i) => i === idx ? { ...d, expected_type: e.target.value } : d))}
-                        className="input-field sm:w-36"
-                      >
-                        <option value="PDF">PDF</option>
-                        <option value="PDF/DOCX">PDF/DOCX</option>
-                        <option value="DOCX">DOCX</option>
-                        <option value="XLSX">XLSX</option>
-                        <option value="Image">Image</option>
-                        <option value="Other">Other</option>
-                      </select>
-                      <select
-                        value={doc.bid_stage || "eoi"}
-                        onChange={(e) => setRequiredDocs(prev => prev.map((d, i) => i === idx ? { ...d, bid_stage: e.target.value } : d))}
-                        className="input-field sm:w-40"
-                      >
-                        <option value="eoi">EOI</option>
-                        <option value="technical">Technical</option>
-                        <option value="financial">Financial</option>
-                        <option value="combined">Combined</option>
-                      </select>
-                      <button
-                        type="button"
-                        onClick={() => setRequiredDocs(prev => prev.filter((_, i) => i !== idx))}
-                        className="shrink-0 p-2 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50"
-                        aria-label="Remove document"
-                      >
-                        <Trash2 size={16} />
-                      </button>
+                    <div key={idx} className="p-3 rounded-xl border border-slate-200 bg-slate-50 space-y-1.5">
+                      <div className="flex flex-col sm:flex-row gap-2 items-stretch sm:items-center">
+                        <input
+                          type="text"
+                          value={doc.name}
+                          onChange={(e) => setRequiredDocs(prev => prev.map((d, i) => i === idx ? { ...d, name: e.target.value } : d))}
+                          placeholder="Document name (e.g. Valid Trading License)"
+                          className="input-field flex-1"
+                        />
+                        <select
+                          value={doc.expected_type || "PDF"}
+                          onChange={(e) => setRequiredDocs(prev => prev.map((d, i) => i === idx ? { ...d, expected_type: e.target.value } : d))}
+                          className="input-field sm:w-36"
+                        >
+                          <option value="PDF">PDF</option>
+                          <option value="PDF/DOCX">PDF/DOCX</option>
+                          <option value="DOCX">DOCX</option>
+                          <option value="XLSX">XLSX</option>
+                          <option value="Image">Image</option>
+                          <option value="Other">Other</option>
+                        </select>
+                        <select
+                          value={doc.bid_stage || (formData.procurementWorkflow === "combined" || formData.linkedEoiTenderId ? "combined" : "eoi")}
+                          onChange={(e) => setRequiredDocs(prev => prev.map((d, i) => i === idx ? { ...d, bid_stage: e.target.value } : d))}
+                          className="input-field sm:w-48"
+                          title="Which bid stage a vendor must upload this document at"
+                        >
+                          {formData.procurementWorkflow !== "combined" && !formData.linkedEoiTenderId && <option value="eoi">Stage 1: EOI</option>}
+                          {formData.procurementWorkflow === "sequential" && <option value="technical">Stage 2: Technical</option>}
+                          {formData.procurementWorkflow === "sequential" && <option value="financial">Stage 3: Financial</option>}
+                          <option value="combined">{formData.procurementWorkflow === "combined" ? "Combined Submission" : "Stage 2: Combined"}</option>
+                        </select>
+                        {doc.field_key ? (
+                          <button
+                            type="button"
+                            title="Linked to the vendor wizard's native upload slot for this document. Click to make it a fully custom document instead."
+                            onClick={() => setRequiredDocs(prev => prev.map((d, i) => i === idx ? { ...d, field_key: "" } : d))}
+                            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-blue-200 bg-blue-50 text-blue-700 text-xs font-semibold shrink-0 hover:bg-blue-100"
+                          >
+                            Linked field ×
+                          </button>
+                        ) : null}
+                        <button
+                          type="button"
+                          onClick={() => setRequiredDocs(prev => prev.filter((_, i) => i !== idx))}
+                          className="shrink-0 p-2 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50"
+                          aria-label="Remove document"
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      </div>
+                      {doc.field_key && REQUIRED_DOCUMENT_HELP[doc.field_key] && (
+                        <p className="text-xs text-slate-500">Why vendors are asked for this: {REQUIRED_DOCUMENT_HELP[doc.field_key]} This is a core document — its name and upload slot in the vendor wizard are fixed, but you can still remove the requirement entirely with the trash icon.</p>
+                      )}
                     </div>
                   ))}
                 </div>
               </div>
             </div>
-            {formStep === 4 && (
-              <div className="flex justify-end gap-3 pt-6 border-t border-slate-100">
-                <button onClick={() => setFormStep(prev => prev - 1)} className="btn-secondary">Previous</button>
-                <button onClick={() => navigateView("list")} className="btn-secondary">Cancel</button>
-                {isEditing ? (
-                  <button
-                    onClick={() =>
-                      handleSaveTender({
-                        ...formData,
-                        scheduleFile,
-                        rfpDocumentsFile,
-                        milestonePaymentScheduleFile,
-                        requiredDocuments: requiredDocs,
-                      })
-                    }
-                    className="btn-primary disabled:opacity-60"
-                    disabled={isSaving}
-                  >
-                    {isSaving ? "Saving..." : "Save Changes"}
-                  </button>
-                ) : (
-                  <>
-                    <button
-                      onClick={() =>
-                      handleSaveTender({
-                        ...formData,
-                        scheduleFile,
-                        rfpDocumentsFile,
-                        milestonePaymentScheduleFile,
-                        requiredDocuments: requiredDocs,
-                      })
-                    }
-                    className="btn-secondary border-emerald-200 text-emerald-700 hover:bg-emerald-50 disabled:opacity-60"
-                    disabled={isSaving}
-                  >
-                    {isSaving ? "Saving..." : "Save as Draft"}
-                    </button>
-                    <button
-                      onClick={() =>
-                        handleSaveTender({
-                          ...formData,
-                          scheduleFile,
-                          rfpDocumentsFile,
-                          milestonePaymentScheduleFile,
-                          requiredDocuments: requiredDocs,
-                        })
-                      }
-                      className="btn-primary disabled:opacity-60"
-                      disabled={isSaving}
-                    >
-                      {isSaving ? "Saving..." : "Save Tender"}
-                    </button>
-                  </>
-                )}
-              </div>
-            )}
-          </div>) /* end Step 4 */}
-
-          {/* Step navigation (steps 1-3) - outside step conditionals */}
-          {formStep < 4 && (
-            <div className="flex justify-end gap-3 pt-6 border-t border-slate-100">
-              {formStep > 1 && (
-                <button onClick={() => setFormStep(prev => prev - 1)} className="btn-secondary">
-                  Previous
-                </button>
-              )}
-              <button onClick={() => {
-                setTenderError("");
-                let isValid = true;
-                if (formStep === 1) {
-                  const labels: Record<string, string> = { name: "Name of the Tender", department: "Department Entity", applicationType: "Application Type", procurementMethod: "Procurement Method", biddingCurrency: "Bidding Currency", budget: "Budget Estimate" };
-                  const fields = ["name", "department", "applicationType", "procurementMethod", "biddingCurrency", "budget"];
-                  const missing = fields.filter(f => !formData[f as keyof typeof formData] || String(formData[f as keyof typeof formData]).trim() === "" || (f === "budget" && !formData.budget));
-                  if (missing.length) {
-                    setTenderError(`Missing required fields: ${missing.map(f => labels[f]).join(", ")}`);
-                    isValid = false;
-                  }
-                }
-                if (formStep === 2) {
-                  const labels: Record<string, string> = { addressForDocument: "Name & Address for Tender Document", addressForSecurity: "Name & Address for Tender Security", placeForOpening: "Place for Tender Opening", invitedBy: "Tender Invited By" };
-                  const fields = ["addressForDocument", "addressForSecurity", "placeForOpening", "invitedBy"];
-                  const missing = fields.filter(f => !formData[f as keyof typeof formData] || String(formData[f as keyof typeof formData]).trim() === "");
-                  if (missing.length) {
-                    setTenderError(`Missing required fields: ${missing.map(f => labels[f]).join(", ")}`);
-                    isValid = false;
-                  }
-                }
-                if (formStep === 3) {
-                  const labels: Record<string, string> = { technologyTypes: "Technology Type", targetDistricts: "Target Districts", biddersEligibility: "Bidders Eligibility", instruction: "Instructions", timeForCompletion: "Time for Completion" };
-                  const missing: string[] = [];
-                  if (!formData.technologyTypes?.length) missing.push("technologyTypes");
-                  if (!formData.targetDistricts?.length) missing.push("targetDistricts");
-                  if (!formData.biddersEligibility) missing.push("biddersEligibility");
-                  if (!formData.instruction) missing.push("instruction");
-                  if (!formData.timeForCompletion) missing.push("timeForCompletion");
-                  if (missing.length) {
-                    setTenderError(`Missing required fields: ${missing.map(f => labels[f]).join(", ")}`);
-                    isValid = false;
-                  }
-                }
-                if (isValid) setFormStep(prev => prev + 1);
-              }} className="btn-primary">
-                Next
-              </button>
             </div>
           )}
 
-          {/* Error display below buttons */}
+          <div className="flex justify-between items-center pt-6 border-t border-slate-100">
+            <button
+              onClick={() => (formStep === 1 ? navigateView("list") : setFormStep(prev => prev - 1))}
+              className="btn-secondary flex items-center gap-1"
+            >
+              <ChevronLeft size={15} /> {formStep === 1 ? "Cancel" : "Previous"}
+            </button>
+            {formStep < 3 ? (
+              <button
+                onClick={() => {
+                  setTenderError("");
+                  let isValid = true;
+                  if (formStep === 1) {
+                    const labels: Record<string, string> = { name: "Name of the Tender", department: "Department Entity", applicationType: "Application Type", procurementMethod: "Procurement Method", biddingCurrency: "Bidding Currency", budget: "Budget Estimate" };
+                    const fields = ["name", "department", "applicationType", "procurementMethod", "biddingCurrency", "budget"];
+                    const missing = fields.filter(f => !formData[f as keyof typeof formData] || String(formData[f as keyof typeof formData]).trim() === "" || (f === "budget" && !formData.budget));
+                    if (missing.length) {
+                      setTenderError(`Missing required fields: ${missing.map(f => labels[f]).join(", ")}`);
+                      isValid = false;
+                    }
+                  }
+                  if (formStep === 2) {
+                    const labels: Record<string, string> = { addressForDocument: "Name & Address for Tender Document", placeForOpening: "Place for Tender Opening", invitedBy: "Tender Invited By" };
+                    const fields = ["addressForDocument", "placeForOpening", "invitedBy"];
+                    const missing = fields.filter(f => !formData[f as keyof typeof formData] || String(formData[f as keyof typeof formData]).trim() === "");
+                    if (formData.tenderSecurityRequired && !String(formData.addressForSecurity || "").trim()) {
+                      missing.push("addressForSecurity");
+                      labels.addressForSecurity = "Name & Address for Tender Security";
+                    }
+                    if (missing.length) {
+                      setTenderError(`Missing required fields: ${missing.map(f => labels[f]).join(", ")}`);
+                      isValid = false;
+                    }
+                  }
+                  if (isValid) setFormStep(prev => prev + 1);
+                }}
+                className="btn-primary flex items-center gap-1"
+              >
+                Next <ChevronRight size={15} />
+              </button>
+            ) : isEditing ? (
+              <button
+                onClick={() =>
+                  handleSaveTender({
+                    ...formData,
+                    requiredDocuments: requiredDocs,
+                    governingDocuments: governingDocs,
+                    governingDocumentsFiles: Object.values(governingDocsFiles).filter(Boolean) as File[],
+                  })
+                }
+                disabled={isSaving}
+                className="btn-primary disabled:opacity-50"
+              >
+                {isSaving ? "Saving..." : "Save Changes"}
+              </button>
+            ) : (
+              <div className="flex gap-3">
+                <button
+                  onClick={() =>
+                    handleSaveTender({
+                      ...formData,
+                      requiredDocuments: requiredDocs,
+                      governingDocuments: governingDocs,
+                      governingDocumentsFiles: Object.values(governingDocsFiles).filter(Boolean) as File[],
+                    })
+                  }
+                  disabled={isSaving}
+                  className="btn-secondary border-emerald-200 text-emerald-700 hover:bg-emerald-50 disabled:opacity-50"
+                >
+                  {isSaving ? "Saving..." : "Save as Draft"}
+                </button>
+                <button
+                  onClick={() =>
+                    handleSaveTender({
+                      ...formData,
+                      requiredDocuments: requiredDocs,
+                      governingDocuments: governingDocs,
+                      governingDocumentsFiles: Object.values(governingDocsFiles).filter(Boolean) as File[],
+                    })
+                  }
+                  disabled={isSaving}
+                  className="btn-primary flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  {isSaving ? "Saving..." : <><FileText size={14} /> Publish Tender</>}
+                </button>
+              </div>
+            )}
+          </div>
+
           {tenderError && (
             <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 font-medium">
               {tenderError}
             </div>
           )}
         </div>
-      </div>
+      </FormKitShell>
     );
   }
 
@@ -3515,28 +4697,68 @@ const Tenders = ({
         tender_publish_approval_requested: "Publish Approval Requested",
         tender_publish_approved: "Publish Approval Granted",
         tender_publish_rejected: "Publish Approval Rejected",
+        tender_publish_changes_requested: "Publish Changes Requested",
         tender_closed: "Bidding Closed",
         tender_financial_opened: "Financial Stage Opened",
       };
       return labels[action] || action.replace(/_/g, " ");
     };
-    const stageTwoBids = tenderBids.filter(bid => bid.stage_key === "site_specific" && bid.status !== BidStatus.DRAFT);
+    const stageTwoBids = tenderBids.filter(bid => (bid.stage_key === "technical" || bid.stage_key === "combined" || bid.stage_key === "financial") && bid.status !== BidStatus.DRAFT);
     const evaluatedStageTwoCount = stageTwoBids.filter(bid => bid.evaluation_status === "evaluated").length;
 
+    const statusBadgeClass =
+      selectedTender.publishApprovalStatus === "approved" && selectedTender.status === TenderStatus.DRAFT ? 'bg-emerald-100 text-emerald-700' :
+      selectedTender.publishApprovalStatus === "changes_requested" && selectedTender.status === TenderStatus.DRAFT ? 'bg-orange-100 text-orange-700' :
+      selectedTender.status === TenderStatus.PUBLISHED ? 'bg-emerald-100 text-emerald-700' :
+      selectedTender.status === TenderStatus.EVALUATION ? 'bg-blue-100 text-blue-700' :
+      selectedTender.status === TenderStatus.STANDSTILL ? 'bg-amber-100 text-amber-700' :
+      selectedTender.status === TenderStatus.AWARDED ? 'bg-purple-100 text-purple-700' :
+      selectedTender.status === TenderStatus.PENDING_PUBLISH_APPROVAL ? 'bg-sky-100 text-sky-700' :
+      'bg-amber-100 text-amber-700';
+
     return (
-      <div className="space-y-6 max-w-5xl mx-auto pb-12">
+      <div className="max-w-[90rem] mx-auto pb-12 space-y-6">
         <NotificationToast />
-        <div className="flex items-center justify-between mb-8">
-          <div className="flex items-center gap-4">
-            <button onClick={() => navigateView("list")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
+
+        {/* Header */}
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="flex min-w-0 items-start gap-3">
+            <button onClick={() => navigateView("list")} className="mt-1 shrink-0 rounded-lg p-2 text-slate-500 hover:bg-slate-100">
               <ChevronRight className="rotate-180" size={20} />
             </button>
-            <div>
-              <h1 className="text-2xl font-bold text-slate-900">{selectedTender.name}</h1>
-              <p className="text-sm text-slate-500 font-mono">{selectedTender.referenceNumber}</p>
+            <div className="min-w-0">
+              <div className="mb-1.5 flex flex-wrap items-center gap-2">
+                <span className={`badge ${statusBadgeClass}`}>{effectiveStatusLabel(selectedTender)}</span>
+                <span className="font-mono text-xs text-slate-400">{selectedTender.referenceNumber}</span>
+                {selectedTender.linkedEoiTenderId && (
+                  <button
+                    type="button"
+                    onClick={() => selectedTender.linkedEoiTenderId && onOpenEoiInvite?.(selectedTender.linkedEoiTenderId)}
+                    className="inline-flex items-center rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-bold text-slate-600 hover:bg-slate-200"
+                    title="Open the linked EOI Invite"
+                  >
+                    Linked to EOI Invite: {selectedTender.linkedEoiTenderName || "view"}
+                  </button>
+                )}
+              </div>
+              <h1 className="truncate text-2xl font-bold text-slate-900">{selectedTender.name}</h1>
+              <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-slate-500">
+                <span>{selectedTender.department}</span>
+                <span className="text-slate-300">•</span>
+                <span>{selectedTender.category}</span>
+                {selectedTender.publishApprovalStatus === "approved" && selectedTender.status !== TenderStatus.PUBLISHED && (
+                  <><span className="text-slate-300">•</span><span className="font-semibold text-emerald-600">Publish Approval Granted</span></>
+                )}
+                {selectedTender.publishApprovalStatus === "changes_requested" && (
+                  <><span className="text-slate-300">•</span><span className="font-semibold text-orange-600">Changes Requested</span></>
+                )}
+                {selectedTender.publishApprovalStatus === "rejected" && (
+                  <><span className="text-slate-300">•</span><span className="font-semibold text-rose-600">Publish Rejected</span></>
+                )}
+              </div>
             </div>
           </div>
-          <div className="flex gap-3">
+          <div className="flex shrink-0 flex-wrap items-center gap-3">
             <button onClick={() => downloadTenderPdf(selectedTender)} className="btn-secondary flex items-center gap-2">
               <Download size={18} /> Download PDF
             </button>
@@ -3546,7 +4768,7 @@ const Tenders = ({
               </button>
             )}
             {!selectedTender.isVerified && (
-              <button 
+              <button
                 onClick={() => navigateView("verify")}
                 className="btn-primary bg-blue-600 hover:bg-blue-700 flex items-center gap-2"
               >
@@ -3554,7 +4776,7 @@ const Tenders = ({
               </button>
             )}
             {selectedTender.isVerified && selectedTender.status === TenderStatus.DRAFT && selectedTender.publishApprovalStatus !== "approved" && (
-              <button 
+              <button
                 onClick={() => void handleRequestPublishApproval(selectedTender.id)}
                 disabled={isActioning}
                 className="btn-primary flex items-center gap-2 disabled:opacity-60"
@@ -3563,7 +4785,7 @@ const Tenders = ({
               </button>
             )}
             {selectedTender.isVerified && selectedTender.status === TenderStatus.DRAFT && selectedTender.publishApprovalStatus === "approved" && (
-              <button 
+              <button
                 onClick={() => navigateView("publish")}
                 className="btn-primary flex items-center gap-2"
               >
@@ -3573,63 +4795,82 @@ const Tenders = ({
           </div>
         </div>
 
+        {(selectedTender.publishApprovalStatus === "changes_requested" || selectedTender.publishApprovalStatus === "rejected") && (
+          <div className={`p-4 rounded-xl border flex items-start gap-3 ${
+            selectedTender.publishApprovalStatus === "changes_requested" ? "bg-orange-50 border-orange-200" : "bg-rose-50 border-rose-200"
+          }`}>
+            <AlertTriangle size={18} className={`mt-0.5 ${selectedTender.publishApprovalStatus === "changes_requested" ? "text-orange-600" : "text-rose-600"}`} />
+            <div>
+              <p className={`text-sm font-semibold ${selectedTender.publishApprovalStatus === "changes_requested" ? "text-orange-800" : "text-rose-800"}`}>
+                {selectedTender.publishApprovalStatus === "changes_requested" ? "Super Admin requested changes before this tender can be published" : "Super Admin rejected this tender's publish request"}
+              </p>
+              {selectedTender.publishApprovalNotes && (
+                <p className={`text-xs mt-1 ${selectedTender.publishApprovalStatus === "changes_requested" ? "text-orange-700" : "text-rose-700"}`}>
+                  {selectedTender.publishApprovalNotes}
+                </p>
+              )}
+              {(selectedTender.publishApprovalReviewedBy || selectedTender.publishApprovalReviewedAt) && (
+                <p className="text-[11px] mt-1.5 text-slate-500">
+                  {selectedTender.publishApprovalReviewedBy ? `— ${selectedTender.publishApprovalReviewedBy}` : ""}
+                  {selectedTender.publishApprovalReviewedAt ? ` · ${new Date(selectedTender.publishApprovalReviewedAt).toLocaleString()}` : ""}
+                </p>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Key facts strip */}
+        <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+          <div className="card p-5">
+            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Verification</p>
+            <p className={`mt-2 text-lg font-bold ${selectedTender.isVerified ? "text-emerald-600" : "text-amber-600"}`}>{selectedTender.isVerified ? "Verified" : "Pending"}</p>
+            <p className="mt-1 text-xs text-slate-500">By the RBF Management Team</p>
+          </div>
+          <div className="card p-5">
+            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Procurement Method</p>
+            <p className="mt-2 text-lg font-bold text-slate-900">{selectedTender.procurementMethod || "N/A"}</p>
+            <p className="mt-1 text-xs text-slate-500">{selectedTender.procurementWorkflow === "eoi_combined" ? "EOI → Combined" : selectedTender.procurementWorkflow === "combined" ? "Combined" : selectedTender.procurementWorkflow || ""}</p>
+          </div>
+          <div className="card p-5">
+            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Submission Deadline</p>
+            <p className="mt-2 text-lg font-bold text-slate-900">{selectedTender.deadline ? new Date(selectedTender.deadline).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "N/A"}</p>
+            <p className="mt-1 text-xs text-slate-500">Submission cutoff</p>
+          </div>
+          <div className="card p-5">
+            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Lots</p>
+            <p className="mt-2 text-lg font-bold text-slate-900">{selectedTender.lots && selectedTender.lots.length > 0 ? `${selectedTender.lots.length} Lots` : "Single Award"}</p>
+            <p className="mt-1 text-xs text-slate-500">{selectedTender.lots && selectedTender.lots.length > 0 ? "Separately awardable" : "Awarded as one package"}</p>
+          </div>
+        </div>
+
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2 space-y-6">
-            <div className="card p-6">
-              <div className="flex flex-wrap items-center gap-3">
-                <span className={`badge ${
-                  selectedTender.publishApprovalStatus === "approved" && selectedTender.status === TenderStatus.DRAFT ? 'bg-emerald-100 text-emerald-700' :
-                  selectedTender.status === TenderStatus.PUBLISHED ? 'bg-emerald-100 text-emerald-700' :
-                  selectedTender.status === TenderStatus.EVALUATION ? 'bg-blue-100 text-blue-700' :
-                  selectedTender.status === TenderStatus.STANDSTILL ? 'bg-amber-100 text-amber-700' :
-                  selectedTender.status === TenderStatus.AWARDED ? 'bg-purple-100 text-purple-700' :
-                  selectedTender.status === TenderStatus.PENDING_PUBLISH_APPROVAL ? 'bg-sky-100 text-sky-700' :
-                  'bg-amber-100 text-amber-700'
-                }`}>
-                  {effectiveStatusLabel(selectedTender)}
-                </span>
-                {selectedTender.publishApprovalStatus === "approved" && selectedTender.status !== TenderStatus.PUBLISHED && (
-                  <span className="text-xs font-bold text-emerald-600">Publish Approval Granted</span>
-                )}
-                {selectedTender.publishApprovalStatus === "rejected" && (
-                  <span className="text-xs font-bold text-rose-600">Publish Rejected</span>
-                )}
-                <span className={`text-xs font-bold ${selectedTender.isVerified ? 'text-emerald-600' : 'text-amber-600'}`}>
-                  {selectedTender.isVerified ? 'Verified' : 'Pending Verification'}
-                </span>
-                <span className="text-xs text-slate-400">•</span>
-                <span className="text-xs text-slate-500">Dept: {selectedTender.department}</span>
-                <span className="text-xs text-slate-400">•</span>
-                <span className="text-xs text-slate-500">Category: {selectedTender.category}</span>
-                {selectedTender.budget != null && (
-                  <>
-                    <span className="text-xs text-slate-400">•</span>
-                    <span className="text-xs text-slate-500">Budget: M {selectedTender.budget.toLocaleString()}</span>
-                  </>
-                )}
-              </div>
-            </div>
-
             <div className="card overflow-hidden">
-              <div className="flex border-b border-slate-200 bg-slate-50/50 px-2">
+              <div className="flex border-b border-slate-200 bg-slate-50/50 px-2 overflow-x-auto">
                 {([
                   { key: "overview", label: "Overview" },
-                  { key: "documents", label: "Documents" },
+                  { key: "requiredDocs", label: "Bid Documents" },
+                  { key: "documents", label: "Reference Documents" },
+                  ...(selectedTender.lots && selectedTender.lots.length > 0 ? [{ key: "lots", label: "Lots" } as const] : []),
                   { key: "logistics", label: "Logistics" },
                   { key: "activity", label: "Activity" },
+                  ...(canViewCommitteeScores ? [{ key: "scores", label: "Evaluation Scores" } as const] : []),
                 ] as const).map((tab) => (
                   <button
                     key={tab.key}
                     onClick={() => setDetailTab(tab.key)}
-                    className={`px-4 py-3 text-sm font-semibold border-b-2 -mb-px transition-colors ${
+                    className={`px-4 py-3 text-sm font-semibold border-b-2 -mb-px whitespace-nowrap transition-colors ${
                       detailTab === tab.key
-                        ? "border-blue-600 text-blue-700"
+                        ? "border-emerald-600 text-emerald-700"
                         : "border-transparent text-slate-500 hover:text-slate-800"
                     }`}
                   >
                     {tab.label}
                     {tab.key === "activity" && tenderAuditLogs.length > 0 && (
                       <span className="ml-2 text-[10px] font-bold bg-slate-200 text-slate-600 rounded-full px-1.5 py-0.5">{tenderAuditLogs.length}</span>
+                    )}
+                    {tab.key === "lots" && (
+                      <span className="ml-2 text-[10px] font-bold bg-slate-200 text-slate-600 rounded-full px-1.5 py-0.5">{selectedTender.lots?.length}</span>
                     )}
                   </button>
                 ))}
@@ -3638,12 +4879,17 @@ const Tenders = ({
               <div className="p-8">
                 {detailTab === "overview" && (
                   <div className="space-y-8">
+                    <div className="space-y-4">
+                      <h3 className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-slate-400"><Info size={13} /> General Information</h3>
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                       {[
                         { label: "Application Type", value: selectedTender.applicationType || "N/A" },
                         { label: "Procurement Method", value: selectedTender.procurementMethod || "N/A" },
+                        { label: "Procurement Workflow", value: selectedTender.procurementWorkflow === "eoi_combined" ? "EOI → Combined" : selectedTender.procurementWorkflow === "combined" ? "Combined" : selectedTender.procurementWorkflow || "N/A" },
                         { label: "Invited By", value: selectedTender.invitedBy || "N/A" },
                         { label: "Time for Completion", value: selectedTender.timeForCompletion || "N/A" },
+                        { label: "Language of Bid Submission", value: selectedTender.languageOfBidSubmission || "N/A" },
+                        { label: "Budget Disclosure", value: selectedTender.budgetDisclosure === "confidential" ? "Confidential" : selectedTender.budgetDisclosure === "published" ? "Published" : "N/A" },
                       ].map((f) => (
                         <div key={f.label} className="p-4 rounded-xl bg-slate-50 border border-slate-100">
                           <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{f.label}</p>
@@ -3654,10 +4900,21 @@ const Tenders = ({
                         <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Funding Source</p>
                         <p className="mt-1 text-sm font-semibold text-slate-800 leading-snug">{selectedTender.fundingSource || "N/A"}</p>
                       </div>
+                      {selectedTender.isEoiInviteOnly && (
+                        <div className="p-4 rounded-xl bg-slate-50 border border-slate-100">
+                          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Advertisement Channels</p>
+                          <div className="mt-1 flex flex-wrap gap-1">
+                            {(selectedTender.advertisementChannels || []).length
+                              ? (selectedTender.advertisementChannels || []).map(c => <span key={c} className="text-[10px] font-semibold text-slate-600">{c}</span>)
+                              : <span className="text-sm font-semibold text-slate-800">N/A</span>}
+                          </div>
+                        </div>
+                      )}
+                    </div>
                     </div>
 
                     <div className="space-y-4">
-                      <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Financials & Security</h3>
+                      <h3 className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-slate-400"><CreditCard size={13} /> Financials &amp; Security</h3>
                       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                         <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-100">
                           <p className="text-[10px] font-bold text-emerald-500 uppercase tracking-widest">Budget Estimate</p>
@@ -3671,11 +4928,35 @@ const Tenders = ({
                           <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Tender Security</p>
                           <p className="mt-1 text-sm font-semibold text-slate-800">{selectedTender.tenderSecurityRequired ? "Required" : "Not Required"}</p>
                         </div>
+                        {selectedTender.biddersSchedulePurchase && (
+                          <div className="p-4 rounded-xl bg-slate-50 border border-slate-100">
+                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Document Fee</p>
+                            <p className="mt-1 text-sm font-semibold text-slate-800">
+                              {selectedTender.documentFeeAmount != null ? selectedTender.documentFeeAmount.toLocaleString() : "N/A"}
+                              {selectedTender.documentFeeType ? ` · ${selectedTender.documentFeeType}` : ""}
+                              {selectedTender.documentFeeRefundable ? " · Refundable" : " · Non-refundable"}
+                            </p>
+                          </div>
+                        )}
+                        {selectedTender.minimumWarrantyPeriodMonths != null && (
+                          <div className="p-4 rounded-xl bg-slate-50 border border-slate-100">
+                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Minimum Warranty Period</p>
+                            <p className="mt-1 text-sm font-semibold text-slate-800">{selectedTender.minimumWarrantyPeriodMonths} months</p>
+                          </div>
+                        )}
+                        <div className="p-4 rounded-xl bg-slate-50 border border-slate-100">
+                          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Submission Method</p>
+                          <p className="mt-1 text-sm font-semibold text-slate-800">{selectedTender.submissionMethod === "hybrid" ? "Hybrid (Online + Physical)" : "Online Only"}</p>
+                        </div>
+                        <div className="p-4 rounded-xl bg-slate-50 border border-slate-100">
+                          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Digital Signature</p>
+                          <p className="mt-1 text-sm font-semibold text-slate-800">{selectedTender.digitalSignatureRequired ?? true ? "Required" : "Not Required"}</p>
+                        </div>
                       </div>
                     </div>
 
                     <div className="space-y-4">
-                      <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Deadlines & Schedule</h3>
+                      <h3 className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-slate-400"><Calendar size={13} /> Deadlines &amp; Schedule</h3>
                       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                         <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
                           <Clock size={16} className="text-slate-400 mb-2" />
@@ -3703,11 +4984,32 @@ const Tenders = ({
                             <p className="text-sm font-bold text-slate-900">{formatDateTime(selectedTender.financialDeadline)}</p>
                           </div>
                         )}
+                        {selectedTender.clarificationDeadline && (
+                          <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
+                            <Clock size={16} className="text-slate-400 mb-2" />
+                            <p className="text-xs font-bold text-slate-500">Clarification / Query Deadline</p>
+                            <p className="text-sm font-bold text-slate-900">{formatDateTime(selectedTender.clarificationDeadline)}</p>
+                          </div>
+                        )}
+                        {selectedTender.siteVisitDate && (
+                          <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
+                            <Clock size={16} className="text-slate-400 mb-2" />
+                            <p className="text-xs font-bold text-slate-500">Site Visit Date</p>
+                            <p className="text-sm font-bold text-slate-900">{formatDateTime(selectedTender.siteVisitDate)}</p>
+                          </div>
+                        )}
+                        {selectedTender.bidValidityPeriodDays != null && (
+                          <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
+                            <Clock size={16} className="text-slate-400 mb-2" />
+                            <p className="text-xs font-bold text-slate-500">Bid Validity Period</p>
+                            <p className="text-sm font-bold text-slate-900">{selectedTender.bidValidityPeriodDays} days</p>
+                          </div>
+                        )}
                       </div>
                     </div>
 
                     <div className="space-y-4">
-                      <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Technical Requirements</h3>
+                      <h3 className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-slate-400"><Zap size={13} /> Technical Requirements</h3>
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                         <div className="space-y-2">
                           <p className="text-xs font-bold text-slate-500">Technology Types</p>
@@ -3737,7 +5039,7 @@ const Tenders = ({
                     </div>
 
                     <div className="space-y-4">
-                      <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Eligibility & Instructions</h3>
+                      <h3 className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-slate-400"><ShieldCheck size={13} /> Eligibility &amp; Instructions</h3>
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
                         <div className="p-3 bg-slate-50 rounded-lg border border-slate-100">
                           <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Eligibility</p>
@@ -3749,6 +5051,60 @@ const Tenders = ({
                         </div>
                       </div>
                     </div>
+                  </div>
+                )}
+
+                {detailTab === "requiredDocs" && (
+                  <div className="space-y-6">
+                    {(() => {
+                      const docs = selectedTender.requiredDocuments || [];
+                      const stages: { key: string; label: string }[] = [
+                        { key: "eoi", label: "Stage 1: EOI (Expression of Interest)" },
+                        { key: "technical", label: "Stage 2: Technical" },
+                        { key: "financial", label: "Stage 3: Financial" },
+                        { key: "combined", label: "Stage 2: Combined Technical & Financial" },
+                      ];
+                      const stageDocs = (key: string) => docs.filter(d => (d.bid_stage || "eoi") === key);
+                      if (docs.length === 0) {
+                        return (
+                          <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 p-6 text-center">
+                            <FileText size={24} className="mx-auto text-slate-300 mb-2" />
+                            <p className="text-sm text-slate-500">No required bid documents have been defined for this tender.</p>
+                          </div>
+                        );
+                      }
+                      return (
+                        <div className="space-y-6">
+                          {stages.map(stage => {
+                            const items = stageDocs(stage.key);
+                            if (items.length === 0) return null;
+                            return (
+                              <div key={stage.key} className="card p-5">
+                                <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400 mb-3">{stage.label}</h3>
+                                <div className="space-y-2">
+                                  {items.map(doc => (
+                                    <div key={doc.id} className="flex items-center justify-between gap-3 rounded-lg border border-slate-100 bg-slate-50 px-3 py-2">
+                                      <div className="flex items-center gap-2 min-w-0">
+                                        <FileText size={16} className="text-slate-400 shrink-0" />
+                                        <div className="min-w-0">
+                                          <span className="text-sm font-medium text-slate-800 truncate">{doc.name}</span>
+                                          {doc.field_key && REQUIRED_DOCUMENT_HELP[doc.field_key] && (
+                                            <p className="text-xs text-slate-500">{REQUIRED_DOCUMENT_HELP[doc.field_key]}</p>
+                                          )}
+                                        </div>
+                                      </div>
+                                      {doc.expected_type && (
+                                        <span className="badge bg-slate-100 text-slate-600 shrink-0">{doc.expected_type}</span>
+                                      )}
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      );
+                    })()}
                   </div>
                 )}
 
@@ -3778,6 +5134,90 @@ const Tenders = ({
                         </div>
                       ))}
                     </div>
+
+                    <div>
+                      <div className="flex items-center gap-2 mb-3">
+                        <FileText size={16} className="text-slate-500" />
+                        <h3 className="text-sm font-bold text-slate-900">Additional Governing Documents</h3>
+                      </div>
+                      {Array.isArray(selectedTender.governingDocuments) && selectedTender.governingDocuments.length > 0 ? (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          {selectedTender.governingDocuments.map((doc, i) => (
+                            <div key={i} className="p-5 border rounded-xl bg-slate-50">
+                              <div className="flex items-start justify-between gap-2">
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <FileText size={18} className="text-slate-400 shrink-0" />
+                                  <span className="text-xs font-bold text-slate-700 truncate">{doc.label || "Untitled document"}</span>
+                                </div>
+                                {doc.expected_type && (
+                                  <span className="badge bg-slate-100 text-slate-600 shrink-0">{doc.expected_type}</span>
+                                )}
+                              </div>
+                              <div className="mt-3">
+                                <button
+                                  onClick={() => downloadTenderDocument(doc.label || "Additional document", toFileUrl(doc.file_url))}
+                                  className={`text-emerald-600 hover:text-emerald-700 text-xs font-bold ${doc.file_url ? "" : "opacity-40 cursor-not-allowed"}`}
+                                  title={doc.file_url ? `Download ${doc.label || doc.file_name || "document"}` : "No file uploaded"}
+                                  disabled={!doc.file_url}
+                                >
+                                  {doc.file_url ? "Download →" : "Not provided"}
+                                </button>
+                                {doc.file_url && doc.file_name && (
+                                  <p className="text-[10px] text-slate-400 mt-1 truncate" title={doc.file_name}>{doc.file_name}</p>
+                                )}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="text-sm text-slate-500">No additional governing documents.</p>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {detailTab === "lots" && (
+                  <div className="space-y-3">
+                    <p className="text-sm text-slate-500">This tender is split into {selectedTender.lots?.length} separately awardable lots. Different vendors can win different lots — see the Award screen to issue or review lot-by-lot awards.</p>
+                    {(selectedTender.lots || []).map((lot, i) => (
+                      <div key={lot.id ?? i} className="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-3">
+                        <div className="flex items-center justify-between gap-3 flex-wrap">
+                          <p className="font-bold text-slate-900">{lot.name}</p>
+                          {lot.awardedVendorName ? (
+                            <span className="badge bg-emerald-100 text-emerald-700">Awarded to {lot.awardedVendorName}</span>
+                          ) : lot.intentToAwardBidId ? (
+                            <span className="badge bg-amber-100 text-amber-700">Intent issued — pending confirmation</span>
+                          ) : (
+                            <span className="badge bg-slate-100 text-slate-600">Open</span>
+                          )}
+                        </div>
+                        {lot.description && <p className="text-sm text-slate-600">{lot.description}</p>}
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                          <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
+                            <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Budget</p>
+                            <p className="text-sm font-bold text-slate-900">{lot.budget != null ? `M ${Number(lot.budget).toLocaleString()}` : "Not set"}</p>
+                          </div>
+                          <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
+                            <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Installation Target</p>
+                            <p className="text-sm font-bold text-slate-900">{lot.estimatedInstallationTarget != null ? lot.estimatedInstallationTarget.toLocaleString() : "Not set"}</p>
+                          </div>
+                        </div>
+                        {Array.isArray(lot.targetDistricts) && lot.targetDistricts.length > 0 && (
+                          <div className="flex flex-wrap gap-1.5">
+                            {lot.targetDistricts.map(d => (
+                              <span key={d} className="badge bg-blue-50 text-blue-700">{d}</span>
+                            ))}
+                          </div>
+                        )}
+                        {Array.isArray(lot.technologyTypes) && lot.technologyTypes.length > 0 && (
+                          <div className="flex flex-wrap gap-1.5">
+                            {lot.technologyTypes.map(t => (
+                              <span key={t} className="badge bg-purple-50 text-purple-700">{t}</span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ))}
                   </div>
                 )}
 
@@ -3809,35 +5249,53 @@ const Tenders = ({
                       <div className="space-y-3">
                         {tenderAuditLogs.map((log) => {
                           const hasStatus = Boolean(log.oldStatus || log.newStatus);
-                          const changedFields = Array.isArray(log.details?.changed_fields)
+                          const fieldChanges: { field: string; label: string; old: any; new: any }[] = Array.isArray(log.details?.field_changes)
+                            ? log.details.field_changes
+                            : [];
+                          const legacyChangedFields: string[] = fieldChanges.length === 0 && Array.isArray(log.details?.changed_fields)
                             ? log.details.changed_fields
                             : [];
+                          const actorName = log.actorFullName || log.actorUsername || log.actor || "System";
                           return (
-                            <div key={log.id} className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-3">
-                              <div className="flex items-start justify-between gap-2">
-                                <div className="flex flex-col gap-0.5">
+                            <div key={log.id} className="rounded-xl border border-slate-200 bg-white px-4 py-3.5">
+                              <div className="flex flex-wrap items-start justify-between gap-2">
+                                <div>
                                   <p className="font-semibold text-slate-900">{tenderActivityLabel(log.action)}</p>
-                                  <p className="text-xs text-slate-400">{formatDateTime(log.createdAt)}</p>
+                                  <p className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-slate-500">
+                                    <span className="font-bold text-slate-700">{actorName}</span>
+                                    <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-500">{log.actorRole || "System"}</span>
+                                  </p>
                                 </div>
-                                <span className="shrink-0 rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-semibold capitalize text-slate-600">
-                                  {log.actorRole || "System"}
-                                </span>
+                                <p className="shrink-0 text-xs text-slate-400">{formatDateTime(log.createdAt)}</p>
                               </div>
-                              <p className="mt-1 text-xs text-slate-600">
-                                {log.actorFullName || log.actorUsername || log.actor || "System"}
-                              </p>
                               {hasStatus && (
-                                <p className="mt-1.5 text-xs text-slate-500">
+                                <p className="mt-2 text-xs text-slate-500">
+                                  <span className="font-bold text-slate-600">Status: </span>
                                   {log.oldStatus && <span className="text-slate-400">{log.oldStatus}</span>}
                                   {log.oldStatus && log.newStatus && <span className="mx-1 text-slate-400">→</span>}
                                   {log.newStatus && <span className="font-semibold text-emerald-700">{log.newStatus}</span>}
                                 </p>
                               )}
-                              {log.notes && <p className="mt-1 text-xs text-slate-500">{log.notes}</p>}
-                              {changedFields.length > 0 && (
-                                <p className="mt-1 text-xs text-slate-400">
-                                  Changed fields ({changedFields.length}): {changedFields.join(", ")}
-                                </p>
+                              {fieldChanges.length > 0 ? (
+                                <div className="mt-2.5 space-y-2 rounded-lg border border-slate-100 bg-slate-50 p-3">
+                                  {fieldChanges.map((c) => (
+                                    <div key={c.field} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-xs">
+                                      <span className="min-w-[150px] font-bold text-slate-700">{c.label}</span>
+                                      <span className="text-rose-500 line-through decoration-rose-300">{c.old ?? "Empty"}</span>
+                                      <ArrowRight size={11} className="shrink-0 text-slate-400" />
+                                      <span className="font-semibold text-emerald-700">{c.new ?? "Empty"}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : (
+                                <>
+                                  {log.notes && <p className="mt-1.5 text-xs text-slate-500">{log.notes}</p>}
+                                  {legacyChangedFields.length > 0 && (
+                                    <p className="mt-1 text-xs text-slate-400">
+                                      Changed fields ({legacyChangedFields.length}): {legacyChangedFields.join(", ")}
+                                    </p>
+                                  )}
+                                </>
                               )}
                             </div>
                           );
@@ -3846,17 +5304,21 @@ const Tenders = ({
                     )}
                   </div>
                 )}
+
+                {detailTab === "scores" && canViewCommitteeScores && (
+                  <CommitteeScoresView tenderId={selectedTender.id} />
+                )}
               </div>
             </div>
           </div>
 
           <div className="space-y-6">
            <div className="card p-6">
-             <h3 className="font-bold text-slate-900 mb-3">Contact</h3>
+             <h3 className="mb-3 flex items-center gap-2 font-bold text-slate-900"><Mail size={16} className="text-slate-400" /> Contact</h3>
              <p className="text-sm text-slate-600">{selectedTender.contactDetails || "Not provided"}</p>
            </div>
             <div className="card p-6 space-y-4">
-              <h3 className="font-bold text-slate-900">Quick Actions</h3>
+              <h3 className="flex items-center gap-2 font-bold text-slate-900"><Zap size={16} className="text-slate-400" /> Quick Actions</h3>
               <div className="space-y-2">
                 <button onClick={sendBidReminder} className="btn-secondary w-full flex items-center justify-center gap-2">
                   <Bell size={16} /> Send Reminder
@@ -3864,16 +5326,7 @@ const Tenders = ({
                 <button onClick={exportBidList} className="btn-secondary w-full flex items-center justify-center gap-2">
                   <Download size={16} /> Export Bid List
                 </button>
-                {(selectedTender.status === TenderStatus.PUBLISHED) && (
-                  <button
-                    onClick={() => void handleCloseBidding(selectedTender.id)}
-                    disabled={isActioning}
-                    className="btn-secondary w-full border-rose-200 text-rose-700 hover:bg-rose-50 disabled:opacity-60"
-                  >
-                    {isActioning ? "Closing..." : "Close Bidding"}
-                  </button>
-                )}
-                {(selectedTender.status === TenderStatus.EVALUATION || selectedTender.status === TenderStatus.CLOSED) && (
+                {!selectedTender.isEoiInviteOnly && (selectedTender.status === TenderStatus.PUBLISHED || selectedTender.status === TenderStatus.EVALUATION || selectedTender.status === TenderStatus.CLOSED) && (
                   <button
                     onClick={() => void handleOpenFinancialStage(selectedTender.id)}
                     disabled={isActioning}
@@ -3890,51 +5343,177 @@ const Tenders = ({
                     }}
                     className="btn-secondary w-full border-amber-200 text-amber-700 hover:bg-amber-50"
                   >
-                    Update Deadlines & Schedule
+                    Edit Submission Timeline
                   </button>
                 )}
-                {(selectedTender.status === TenderStatus.EVALUATION || selectedTender.status === TenderStatus.PUBLISHED || selectedTender.status === TenderStatus.STANDSTILL) && (
-                  <button onClick={() => navigateView("award")} className="btn-primary w-full bg-purple-600 hover:bg-purple-700">
-                    {selectedTender.intentToAwardAt ? "Manage Award" : "Issue Award"}
-                  </button>
-                )}
-                {selectedTender.status !== TenderStatus.AWARDED && (
+                {!selectedTender.isEoiInviteOnly && selectedTender.status !== TenderStatus.AWARDED && (
                   <button onClick={() => setCoolingOffAdjustOpen(true)} className="btn-secondary w-full border-blue-200 text-blue-700 hover:bg-blue-50 flex items-center justify-center gap-2">
                     <Clock size={16} /> Adjust Cooling-Off
                   </button>
                 )}
-                {selectedTender.status !== TenderStatus.AWARDED && selectedTender.intentToAwardAt && selectedTender.status !== TenderStatus.DISPUTED && (
-                  <button onClick={() => {
-                    setChallengeFormVendorId("");
-                    setChallengeFormVendorName("");
-                    setChallengeFormGrounds("");
-                    setChallengeFormBidId("");
-                    setCreateChallengeOpen(true);
-                  }} className="btn-secondary w-full border-rose-200 text-rose-700 hover:bg-rose-50 flex items-center justify-center gap-2">
-                    <AlertTriangle size={16} /> File Challenge
-                  </button>
-                )}
-                {selectedTender.status !== TenderStatus.AWARDED && selectedTender.status !== TenderStatus.DISPUTED && selectedTender.intentToAwardAt && (
-                  <button onClick={() => setPauseConfirmOpen(true)} className="btn-secondary w-full border-amber-200 text-amber-700 hover:bg-amber-50 flex items-center justify-center gap-2">
-                    <Pause size={16} /> Pause Award
-                  </button>
-                )}
-                {selectedTender.status !== TenderStatus.AWARDED && selectedTender.intentToAwardAt && (
-                  <button onClick={() => setRevokeConfirmOpen(true)} className="btn-secondary w-full border-rose-200 text-rose-700 hover:bg-rose-50 flex items-center justify-center gap-2">
-                    <XCircle size={16} /> Revoke Intent
-                  </button>
-                )}
-                {selectedTender.status === TenderStatus.DISPUTED && (
-                  <button onClick={() => openTenderView(selectedTender.id, "award")} className="btn-secondary w-full border-rose-300 text-rose-700 hover:bg-rose-50 flex items-center justify-center gap-2">
-                    <AlertTriangle size={16} /> Review Challenge
-                  </button>
-                )}
               </div>
             </div>
+
+            {currentUser?.role === UserRole.ADMIN && (
+              <div className="card p-6 space-y-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <h3 className="font-bold text-slate-900">Evaluation Committee</h3>
+                    <p className="text-xs text-slate-500">3-5 members who score this tender's bids.</p>
+                  </div>
+                  <ClipboardCheck size={18} className="text-slate-400 shrink-0" />
+                </div>
+                {selectedTender.evaluationCommitteeMembers && selectedTender.evaluationCommitteeMembers.length > 0 ? (
+                  <div className="space-y-1.5">
+                    {selectedTender.evaluationCommitteeMembers.map(m => (
+                      <div key={m.id} className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-sm">
+                        <span className="font-medium text-slate-800 truncate">{m.memberName || m.memberEmail}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">No committee assigned yet — evaluation cannot begin.</p>
+                )}
+                <button onClick={openEvaluationCommitteeModal} className="btn-secondary w-full">
+                  {selectedTender.evaluationCommitteeMembers?.length ? "Manage Committee" : "Assign Committee"}
+                </button>
+              </div>
+            )}
+
+            {(currentUser?.role === UserRole.ADMIN || currentUser?.role === UserRole.RBF_OFFICIAL) && isInviteGatedProcurementMethod(selectedTender.procurementMethod) && (
+              <div className="card p-6 space-y-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <h3 className="font-bold text-slate-900">{selectedTender.isEoiInviteOnly ? "Shortlisted Vendors (from EOI Review)" : isLimitedProcurementMethod(selectedTender.procurementMethod) ? "Nominated Vendor (Single-Source)" : "Invited Vendors"}</h3>
+                    <p className="text-xs text-slate-500">
+                      {selectedTender.isEoiInviteOnly
+                        ? "Vendors shortlisted here carry over automatically to any tender you link to this EOI Invite."
+                        : selectedTender.linkedEoiTenderId
+                          ? `Synced from linked EOI Invite "${selectedTender.linkedEoiTenderName}" — you can also add more vendors manually.`
+                          : isLimitedProcurementMethod(selectedTender.procurementMethod)
+                            ? "Only this vendor can bid — this tender is Limited/Single-Source and may be directed to just one vendor."
+                            : `Only these vendors can bid — this tender is set to ${selectedTender.procurementMethod || "a Restricted"} method.`}
+                    </p>
+                  </div>
+                  <Users size={18} className="text-slate-400 shrink-0" />
+                </div>
+                {selectedTender.invitedVendors && selectedTender.invitedVendors.length > 0 ? (
+                  <div className="space-y-1.5">
+                    {selectedTender.invitedVendors.map(v => (
+                      <div key={v.id} className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-sm">
+                        <span className="font-medium text-slate-800 truncate">{v.vendorOrganizationName || v.vendorName || v.vendorEmail}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">No vendors invited yet — this tender currently has no eligible bidders.</p>
+                )}
+                <button onClick={openInvitedVendorsModal} className="btn-secondary w-full">
+                  {selectedTender.invitedVendors?.length ? "Manage Invited Vendors" : "Invite Vendors"}
+                </button>
+              </div>
+            )}
+
+            {selectedTender.isEoiInviteOnly && selectedTender.linkedTendersSummary && selectedTender.linkedTendersSummary.length > 0 && (
+              <div className="card p-6 space-y-3">
+                <h3 className="flex items-center gap-2 font-bold text-slate-900"><FolderKanban size={16} className="text-slate-400" /> Linked Tenders</h3>
+                <p className="text-xs text-slate-500">Tenders created by linking to this EOI Invite — shortlisted vendors here were carried over to each.</p>
+                <div className="space-y-1.5">
+                  {selectedTender.linkedTendersSummary.map((t) => (
+                    <button
+                      key={t.id}
+                      type="button"
+                      onClick={() => openTenderView(t.id, "details")}
+                      className="flex w-full items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-sm hover:bg-slate-100"
+                    >
+                      <span className="font-medium text-slate-800 truncate">{t.name}</span>
+                      <span className="text-xs text-slate-400 shrink-0">{t.status}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {!selectedTender.isEoiInviteOnly && (selectedTender.status === TenderStatus.PUBLISHED
+              || selectedTender.status === TenderStatus.EVALUATION
+              || selectedTender.status === TenderStatus.STANDSTILL
+              || selectedTender.status === TenderStatus.DISPUTED
+              || (selectedTender.status !== TenderStatus.AWARDED && selectedTender.intentToAwardAt)) && (
+              <div className="card p-6 space-y-4 border-2 border-amber-100">
+                <div>
+                  <h3 className="flex items-center gap-2 font-bold text-slate-900"><Gavel size={16} className="text-amber-500" /> Award &amp; Risk Controls</h3>
+                  <p className="text-xs text-slate-500">State-changing actions — review carefully before using these.</p>
+                </div>
+                <div className="space-y-2">
+                  {(selectedTender.status === TenderStatus.PUBLISHED) && (
+                    <button
+                      onClick={() => void handleCloseBidding(selectedTender.id)}
+                      disabled={isActioning}
+                      className="btn-secondary w-full border-rose-200 text-rose-700 hover:bg-rose-50 disabled:opacity-60"
+                    >
+                      {isActioning ? "Closing..." : "Close Bidding"}
+                    </button>
+                  )}
+                  {(selectedTender.status === TenderStatus.EVALUATION || selectedTender.status === TenderStatus.PUBLISHED || selectedTender.status === TenderStatus.STANDSTILL) && (
+                    <button onClick={() => navigateView("award")} className="btn-primary w-full bg-purple-600 hover:bg-purple-700">
+                      {selectedTender.intentToAwardAt ? "Manage Award" : "Issue Award"}
+                    </button>
+                  )}
+                  {selectedTender.status !== TenderStatus.AWARDED && selectedTender.intentToAwardAt && selectedTender.status !== TenderStatus.DISPUTED && (
+                    <button onClick={() => {
+                      setChallengeFormVendorId("");
+                      setChallengeFormVendorName("");
+                      setChallengeFormGrounds("");
+                      setChallengeFormBidId("");
+                      setCreateChallengeOpen(true);
+                    }} className="btn-secondary w-full border-rose-200 text-rose-700 hover:bg-rose-50 flex items-center justify-center gap-2">
+                      <AlertTriangle size={16} /> File Challenge
+                    </button>
+                  )}
+                  {selectedTender.status !== TenderStatus.AWARDED && selectedTender.status !== TenderStatus.DISPUTED && selectedTender.intentToAwardAt && (
+                    <button onClick={() => setPauseConfirmOpen(true)} className="btn-secondary w-full border-amber-200 text-amber-700 hover:bg-amber-50 flex items-center justify-center gap-2">
+                      <Pause size={16} /> Pause Award
+                    </button>
+                  )}
+                  {selectedTender.status !== TenderStatus.AWARDED && selectedTender.intentToAwardAt && (
+                    <button onClick={() => setRevokeConfirmOpen(true)} className="btn-secondary w-full border-rose-200 text-rose-700 hover:bg-rose-50 flex items-center justify-center gap-2">
+                      <XCircle size={16} /> Revoke Intent
+                    </button>
+                  )}
+                  {selectedTender.status === TenderStatus.DISPUTED && (
+                    <button onClick={() => openTenderView(selectedTender.id, "award")} className="btn-secondary w-full border-rose-300 text-rose-700 hover:bg-rose-50 flex items-center justify-center gap-2">
+                      <AlertTriangle size={16} /> Review Challenge
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
             <div className="card p-6 space-y-4">
-              <h3 className="font-bold text-slate-900">Submission Stats</h3>
+              <h3 className="flex items-center gap-2 font-bold text-slate-900"><BarChart3 size={16} className="text-slate-400" /> {selectedTender.isEoiInviteOnly ? "EOI Submission Stats" : "Submission Stats"}</h3>
               {bidsLoading ? (
                 <p className="text-sm text-slate-500">Loading...</p>
+              ) : selectedTender.isEoiInviteOnly ? (
+                (() => {
+                  const eoiSubmissions = tenderBids.filter(bid => bid.status !== BidStatus.DRAFT).length;
+                  const shortlisted = selectedTender.invitedVendors?.length ?? 0;
+                  return (
+                    <div className="space-y-4">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm text-slate-500">Total EOI Submissions</span>
+                        <span className="font-bold">{eoiSubmissions}</span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm text-slate-500">
+                          Shortlisted{selectedTender.maxVendorsToShortlist != null ? ` (advisory cap: ${selectedTender.maxVendorsToShortlist})` : ""}
+                        </span>
+                        <span className="font-bold text-emerald-600">{shortlisted}</span>
+                      </div>
+                      <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
+                        <div className="bg-emerald-500 h-full" style={{ width: `${eoiSubmissions > 0 ? Math.round((shortlisted / eoiSubmissions) * 100) : 0}%` }} />
+                      </div>
+                    </div>
+                  );
+                })()
               ) : (
                 <div className="space-y-4">
                   <div className="flex items-center justify-between">
@@ -3986,11 +5565,187 @@ const Tenders = ({
           </div>
         </div>
 
+      {ecModalOpen && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-2xl p-6 w-full max-w-lg shadow-2xl">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h3 className="text-lg font-bold text-slate-900">Evaluation Committee</h3>
+                <p className="text-xs text-slate-500">Select 3-5 members to score this tender's bids.</p>
+              </div>
+              <button onClick={() => setEcModalOpen(false)} className="p-1 hover:bg-slate-100 rounded-lg">
+                <X size={20} className="text-slate-500" />
+              </button>
+            </div>
+            {ecLoading ? (
+              <p className="text-sm text-slate-500 py-6 text-center">Loading...</p>
+            ) : (
+              <div className="space-y-4">
+                {ecError && (
+                  <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 font-medium">{ecError}</div>
+                )}
+                <div className="flex items-center justify-between">
+                  <p className="text-sm font-bold text-slate-700">Eligible members</p>
+                  <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${ecSelectedIds.length >= 3 && ecSelectedIds.length <= 5 ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
+                    {ecSelectedIds.length} / 5 selected (min 3)
+                  </span>
+                </div>
+                {ecAvailableMembers.length === 0 ? (
+                  <p className="text-sm text-slate-500 bg-slate-50 rounded-xl p-4">No users hold the Evaluation Committee role yet. Create some from User Management first.</p>
+                ) : (
+                  <div className="max-h-72 overflow-y-auto space-y-2">
+                    {ecAvailableMembers.map(m => {
+                      const checked = ecSelectedIds.includes(m.id);
+                      const atCap = !checked && ecSelectedIds.length >= 5;
+                      return (
+                        <label key={m.id} className={`flex items-center gap-3 p-3 rounded-xl border cursor-pointer ${checked ? "border-emerald-200 bg-emerald-50/40" : "border-slate-200"} ${atCap ? "opacity-50 cursor-not-allowed" : ""}`}>
+                          <input
+                            type="checkbox"
+                            className="w-4 h-4 rounded text-emerald-600"
+                            checked={checked}
+                            disabled={atCap}
+                            onChange={(e) => {
+                              setEcSelectedIds(prev => e.target.checked ? [...prev, m.id] : prev.filter(id => id !== m.id));
+                              setEcError(null);
+                            }}
+                          />
+                          <div className="min-w-0">
+                            <p className="text-sm font-semibold text-slate-800 truncate">{m.fullName}</p>
+                            <p className="text-xs text-slate-500 truncate">{m.email}</p>
+                          </div>
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+                <div className="flex gap-3 pt-2">
+                  <button onClick={() => setEcModalOpen(false)} className="btn-secondary flex-1">Cancel</button>
+                  <button onClick={saveEvaluationCommittee} disabled={ecSaving} className="btn-primary flex-1 disabled:opacity-60">
+                    {ecSaving ? "Saving..." : "Save Committee"}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {ivModalOpen && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-2xl p-6 w-full max-w-lg shadow-2xl">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h3 className="text-lg font-bold text-slate-900">Invited Vendors</h3>
+                <p className="text-xs text-slate-500">Only vendors currently Approved for pre-qualification are listed here, regardless of account status — check each vendor's tier, technology, and experience below before inviting. Vendors whose technology matches this tender are shown first.</p>
+              </div>
+              <button onClick={() => setIvModalOpen(false)} className="p-1 hover:bg-slate-100 rounded-lg">
+                <X size={20} className="text-slate-500" />
+              </button>
+            </div>
+            {ivLoading ? (
+              <p className="text-sm text-slate-500 py-6 text-center">Loading...</p>
+            ) : (
+              <div className="space-y-4">
+                {ivError && (
+                  <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 font-medium">{ivError}</div>
+                )}
+                {isLimitedProcurementMethod(selectedTender?.procurementMethod) && (
+                  <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-xs font-medium text-amber-800">
+                    Limited/Single-Source — pick exactly one vendor to direct this tender to.
+                  </div>
+                )}
+                <div className="flex items-center justify-between">
+                  <p className="text-sm font-bold text-slate-700">Eligible vendors</p>
+                  <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-slate-100 text-slate-600">
+                    {ivSelectedIds.length} selected
+                  </span>
+                </div>
+                {ivAvailableVendors.length === 0 ? (
+                  <p className="text-sm text-slate-500 bg-slate-50 rounded-xl p-4">No pre-qualified vendors are available to invite yet.</p>
+                ) : (
+                  <div className="max-h-96 overflow-y-auto space-y-2">
+                    {ivAvailableVendors.map(v => {
+                      const checked = ivSelectedIds.includes(v.id);
+                      const singleSelect = isLimitedProcurementMethod(selectedTender?.procurementMethod);
+                      return (
+                        <label key={v.id} className={`flex items-start gap-3 p-3 rounded-xl border cursor-pointer ${checked ? "border-emerald-200 bg-emerald-50/40" : "border-slate-200"}`}>
+                          <input
+                            type={singleSelect ? "radio" : "checkbox"}
+                            name={singleSelect ? "invited-vendor-single" : undefined}
+                            className="w-4 h-4 rounded text-emerald-600 mt-1"
+                            checked={checked}
+                            onChange={(e) => {
+                              if (singleSelect) {
+                                setIvSelectedIds(e.target.checked ? [v.id] : []);
+                              } else {
+                                setIvSelectedIds(prev => e.target.checked ? [...prev, v.id] : prev.filter(id => id !== v.id));
+                              }
+                              setIvError(null);
+                            }}
+                          />
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <p className="text-sm font-semibold text-slate-800 truncate">{v.organizationName || v.fullName}</p>
+                              {v.matchesTenderTechnology && (
+                                <span className="inline-flex items-center rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-700 shrink-0">Matches this tender</span>
+                              )}
+                              {v.accountStatus && v.accountStatus !== "Active" && (
+                                <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-bold shrink-0 ${["Blacklisted", "Initiated", "Under Review"].includes(v.accountStatus) ? "bg-rose-100 text-rose-700" : "bg-amber-100 text-amber-700"}`}>{v.accountStatus}</span>
+                              )}
+                              <button
+                                type="button"
+                                onClick={(e) => { e.preventDefault(); e.stopPropagation(); setIvViewingProfileId(v.id); }}
+                                className="text-[10px] font-bold text-blue-600 hover:text-blue-800 underline underline-offset-2 shrink-0"
+                              >
+                                View Profile
+                              </button>
+                            </div>
+                            <p className="text-xs text-slate-500 truncate">{v.fullName} • {v.email}</p>
+                            <div className="mt-1.5 flex items-center gap-2 flex-wrap text-[11px]">
+                              {v.techTier && (
+                                <span className="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 font-semibold text-slate-600">{v.techTier}</span>
+                              )}
+                              {v.technologyTypes.map(tech => (
+                                <span key={tech} className="inline-flex items-center rounded-full bg-blue-50 px-2 py-0.5 font-semibold text-blue-700">{tech}</span>
+                              ))}
+                              {v.yearsExperience != null && (
+                                <span className="text-slate-400">{v.yearsExperience} yrs experience</span>
+                              )}
+                              {v.priorProjects != null && (
+                                <span className="text-slate-400">• {v.priorProjects} prior projects</span>
+                              )}
+                            </div>
+                          </div>
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+                <div className="flex gap-3 pt-2">
+                  <button onClick={() => setIvModalOpen(false)} className="btn-secondary flex-1">Cancel</button>
+                  <button onClick={saveInvitedVendors} disabled={ivSaving} className="btn-primary flex-1 disabled:opacity-60">
+                    {ivSaving ? "Saving..." : "Save Invited Vendors"}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {ivViewingProfileId && (
+        <VendorProfileView
+          vendorId={ivViewingProfileId}
+          viewerRole={currentUser?.role || ""}
+          onClose={() => setIvViewingProfileId(null)}
+        />
+      )}
+
       {extendDeadlineOpen && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-white rounded-2xl p-6 w-full max-w-md shadow-2xl">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-bold text-slate-900">Update Deadlines & Schedule</h3>
+              <h3 className="text-lg font-bold text-slate-900">Edit Submission Timeline</h3>
               <button onClick={() => setExtendDeadlineOpen(false)} className="p-1 hover:bg-slate-100 rounded-lg">
                 <X size={20} className="text-slate-500" />
               </button>
@@ -4135,7 +5890,7 @@ const Tenders = ({
 
   if (view === "publish" && selectedTender) {
     return (
-      <div className="space-y-6 max-w-2xl mx-auto">
+      <div className="space-y-6 max-w-4xl mx-auto">
         <NotificationToast />
           <div className="flex items-center gap-4 mb-8">
             <button onClick={() => navigateView("list")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
@@ -4163,12 +5918,36 @@ const Tenders = ({
           )}
 
           {selectedTender.publishApprovalStatus !== "approved" && (
-            <div className="p-4 bg-amber-50 rounded-xl border border-amber-200 flex items-start gap-3">
-              <AlertCircle size={18} className="text-amber-600 mt-0.5" />
+            <div className={`p-4 rounded-xl border flex items-start gap-3 ${
+              selectedTender.publishApprovalStatus === "changes_requested" ? "bg-orange-50 border-orange-200" :
+              selectedTender.publishApprovalStatus === "rejected" ? "bg-rose-50 border-rose-200" :
+              "bg-amber-50 border-amber-200"
+            }`}>
+              <AlertCircle size={18} className={`mt-0.5 ${
+                selectedTender.publishApprovalStatus === "changes_requested" ? "text-orange-600" :
+                selectedTender.publishApprovalStatus === "rejected" ? "text-rose-600" :
+                "text-amber-600"
+              }`} />
               <div>
-                <p className="text-sm font-semibold text-amber-800">Awaiting Publish Approval</p>
-                <p className="text-xs text-amber-700 mt-0.5">
-                  This tender has not yet been approved by the Super Admin. Request publish approval from the tender details page before publishing.
+                <p className={`text-sm font-semibold ${
+                  selectedTender.publishApprovalStatus === "changes_requested" ? "text-orange-800" :
+                  selectedTender.publishApprovalStatus === "rejected" ? "text-rose-800" :
+                  "text-amber-800"
+                }`}>
+                  {selectedTender.publishApprovalStatus === "changes_requested" ? "Changes Requested by Super Admin" :
+                   selectedTender.publishApprovalStatus === "rejected" ? "Publish Request Rejected" :
+                   "Awaiting Publish Approval"}
+                </p>
+                <p className={`text-xs mt-0.5 ${
+                  selectedTender.publishApprovalStatus === "changes_requested" ? "text-orange-700" :
+                  selectedTender.publishApprovalStatus === "rejected" ? "text-rose-700" :
+                  "text-amber-700"
+                }`}>
+                  {selectedTender.publishApprovalStatus === "changes_requested"
+                    ? (selectedTender.publishApprovalNotes || "The Super Admin asked for changes before this tender can be published. Edit the tender, then request publish approval again.")
+                    : selectedTender.publishApprovalStatus === "rejected"
+                    ? (selectedTender.publishApprovalNotes || "The Super Admin rejected this tender's publish request. Edit the tender, then request publish approval again.")
+                    : "This tender has not yet been approved by the Super Admin. Request publish approval from the tender details page before publishing."}
                 </p>
               </div>
             </div>
@@ -4200,7 +5979,7 @@ const Tenders = ({
           <div className="flex justify-end gap-3 pt-6 border-t border-slate-100">
             <button onClick={() => navigateView("list")} className="btn-secondary">Cancel</button>
             <button
-              onClick={() => handlePublish(selectedTender.id)}
+              onClick={() => setPublishConfirmOpen(true)}
               disabled={isActioning || selectedTender.publishApprovalStatus !== "approved"}
               className="btn-primary disabled:opacity-60"
             >
@@ -4208,13 +5987,49 @@ const Tenders = ({
             </button>
           </div>
         </div>
+
+        {publishConfirmOpen && (
+          <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/50">
+            <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl">
+              <div className="mb-4 flex items-center justify-between">
+                <h3 className="text-lg font-bold text-slate-900">Confirm Publication</h3>
+                <button onClick={() => setPublishConfirmOpen(false)} className="rounded-lg p-1 hover:bg-slate-100">
+                  <X size={20} className="text-slate-500" />
+                </button>
+              </div>
+              <div className="space-y-4">
+                <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
+                  <p className="text-sm font-medium text-amber-800">
+                    You are about to publish <span className="font-bold">{selectedTender.name}</span>.
+                  </p>
+                  <p className="mt-2 text-xs text-amber-700">
+                    This makes the tender visible to vendors and {notifyEmail ? "sends them an email notification" : "notifies them in-app"} immediately. This action cannot be undone.
+                  </p>
+                </div>
+                <div className="flex gap-3 pt-2">
+                  <button onClick={() => setPublishConfirmOpen(false)} className="btn-secondary flex-1">Cancel</button>
+                  <button
+                    onClick={() => {
+                      setPublishConfirmOpen(false);
+                      void handlePublish(selectedTender.id);
+                    }}
+                    disabled={isActioning}
+                    className="btn-primary flex-1 disabled:opacity-60"
+                  >
+                    {isActioning ? "Publishing..." : "Yes, Publish Now"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
 
   if (view === "verify" && selectedTender) {
     return (
-      <div className="space-y-6 max-w-5xl mx-auto">
+      <div className="space-y-6 max-w-[90rem] mx-auto">
         <NotificationToast />
           <div className="flex items-center gap-4 mb-8">
             <button onClick={() => navigateView("list")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
@@ -4317,6 +6132,115 @@ const Tenders = ({
   }
 
 
+  const renderTenderTable = (list: Tender[], currentPage: number, setPageFn: (updater: (p: number) => number) => void, totalPagesForSection: number) => (
+    <div className="card overflow-x-auto">
+      <table className="w-full text-left border-collapse">
+        <thead>
+          <tr className="bg-slate-50 border-bottom border-slate-200">
+            <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">ID</th>
+            <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Reference</th>
+            <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Tender Name</th>
+            <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Category</th>
+            <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Status</th>
+            <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Verification</th>
+            <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Actions</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-200">
+          {list.length === 0 && (
+            <tr><td colSpan={7} className="px-6 py-8 text-center text-sm text-slate-400">No tenders here.</td></tr>
+          )}
+          {list.map((tender) => {
+            const isDraft = tender.status === TenderStatus.DRAFT;
+            return (<tr key={tender.id} className={`transition-colors ${isDraft ? "bg-amber-50/60 border-l-4 border-amber-400 hover:bg-amber-50" : "hover:bg-slate-50"}`}>
+              <td className="px-6 py-4 font-mono text-xs text-slate-500">{tender.id}</td>
+              <td className="px-6 py-4 font-mono text-sm text-slate-600">{tender.referenceNumber}</td>
+              <td className="px-6 py-4 font-medium text-slate-900">
+                <div className="flex items-center gap-2">
+                  <span>{tender.name}</span>
+                  {tender.linkedEoiTenderId && (
+                    <span className="inline-flex shrink-0 items-center rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold text-slate-600" title={`Linked to EOI Invite: ${tender.linkedEoiTenderName || ""}`}>Linked EOI</span>
+                  )}
+                </div>
+              </td>
+              <td className="px-6 py-4 text-sm text-slate-600">{tender.category}</td>
+              <td className="px-6 py-4">
+                <span className={`badge ${
+                  tender.publishApprovalStatus === "approved" && tender.status === TenderStatus.DRAFT ? 'bg-emerald-100 text-emerald-700' :
+                  tender.publishApprovalStatus === "changes_requested" && tender.status === TenderStatus.DRAFT ? 'bg-orange-100 text-orange-700' :
+                  tender.status === TenderStatus.PUBLISHED ? 'bg-emerald-100 text-emerald-700' :
+                  tender.status === TenderStatus.EVALUATION ? 'bg-blue-100 text-blue-700' :
+                  tender.status === TenderStatus.STANDSTILL ? 'bg-amber-100 text-amber-700' :
+                  tender.status === TenderStatus.AWARDED ? 'bg-purple-100 text-purple-700' :
+                  tender.status === TenderStatus.PENDING_PUBLISH_APPROVAL ? 'bg-sky-100 text-sky-700' :
+                  'bg-amber-100 text-amber-700'
+                }`}>
+                  {effectiveStatusLabel(tender)}
+                </span>
+              </td>
+              <td className="px-6 py-4">
+                {tender.isVerified ? (
+                  <span className="flex items-center gap-1.5 text-xs font-bold text-emerald-600">
+                    <ShieldCheck size={14} /> Verified
+                  </span>
+                ) : (
+                  <span className="text-xs font-bold text-slate-400">Pending</span>
+                )}
+              </td>
+              <td className="px-6 py-4">
+                <div className="flex items-center gap-4">
+                  <button
+                    onClick={() => void openTenderView(tender.id, "details")}
+                    className="text-emerald-600 hover:text-emerald-700 font-medium text-sm"
+                  >
+                    View
+                  </button>
+                  {!tender.isVerified && (
+                    <button
+                      onClick={() => void openTenderView(tender.id, "verify")}
+                      className="text-blue-600 hover:text-blue-700 font-medium text-sm"
+                    >
+                      Verify
+                    </button>
+                  )}
+                  {tender.isVerified && tender.status === TenderStatus.DRAFT && tender.publishApprovalStatus !== "approved" && (
+                    <button
+                      onClick={() => void handleRequestPublishApproval(tender.id)}
+                      className="text-blue-600 hover:text-blue-700 font-medium text-sm"
+                    >
+                      {tender.publishApprovalStatus === "rejected" ? "Request Approval" : "Request Approval"}
+                    </button>
+                  )}
+                  {tender.isVerified && tender.status === TenderStatus.DRAFT && tender.publishApprovalStatus === "approved" && (
+                    <button
+                      onClick={() => void openTenderView(tender.id, "publish")}
+                      className="text-emerald-600 hover:text-emerald-700 font-medium text-sm"
+                    >
+                      Publish
+                    </button>
+                  )}
+                  {(tender.status === TenderStatus.EVALUATION || tender.status === TenderStatus.PUBLISHED || tender.status === TenderStatus.STANDSTILL || tender.status === TenderStatus.AWARDED) && (
+                    <button
+                      onClick={() => void openTenderView(tender.id, "award")}
+                      className="text-purple-600 hover:text-purple-700 font-medium text-sm"
+                    >
+                      {tender.status === TenderStatus.AWARDED || tender.intentToAwardAt ? "Manage Award" : "Award"}
+                    </button>
+                  )}
+                </div>
+              </td>
+            </tr>);
+          })}
+        </tbody>
+      </table>
+      {totalPagesForSection > 1 && <div className="flex items-center justify-between p-4 border-t border-slate-100">
+        <button onClick={() => setPageFn(p => Math.max(1, p - 1))} disabled={currentPage === 1} className="btn-secondary text-sm py-1.5 disabled:opacity-50">Previous</button>
+        <span className="text-sm text-slate-500">Page {currentPage} of {totalPagesForSection}</span>
+        <button onClick={() => setPageFn(p => Math.min(totalPagesForSection, p + 1))} disabled={currentPage === totalPagesForSection} className="btn-secondary text-sm py-1.5 disabled:opacity-50">Next</button>
+      </div>}
+    </div>
+  );
+
   return (
     <div className="space-y-6">
       <NotificationToast />
@@ -4383,9 +6307,9 @@ const Tenders = ({
               onChange={(e) => setSelectedProcurement(e.target.value)}
             >
               <option>All Methods</option>
-              <option>Open Competitive</option>
-              <option>Selective</option>
-              <option>Direct</option>
+              {procurementMethodOptions.map((m) => (
+                <option key={m.value} value={m.value}>{m.value}</option>
+              ))}
             </select>
           </div>
           <div className="space-y-1">
@@ -4406,101 +6330,7 @@ const Tenders = ({
         </div>
       </div>
 
-      <div className="card overflow-x-auto">
-        <table className="w-full text-left border-collapse">
-          <thead>
-            <tr className="bg-slate-50 border-bottom border-slate-200">
-              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">ID</th>
-              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Reference</th>
-              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Tender Name</th>
-              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Category</th>
-              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Status</th>
-              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Verification</th>
-              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Actions</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-200">
-            {paginatedTenders.map((tender) => {
-              const isDraft = tender.status === TenderStatus.DRAFT;
-              return (<tr key={tender.id} className={`transition-colors ${isDraft ? "bg-amber-50/60 border-l-4 border-amber-400 hover:bg-amber-50" : "hover:bg-slate-50"}`}>
-                <td className="px-6 py-4 font-mono text-xs text-slate-500">{tender.id}</td>
-                <td className="px-6 py-4 font-mono text-sm text-slate-600">{tender.referenceNumber}</td>
-                <td className="px-6 py-4 font-medium text-slate-900">{tender.name}</td>
-                <td className="px-6 py-4 text-sm text-slate-600">{tender.category}</td>
-                <td className="px-6 py-4">
-                  <span className={`badge ${
-                    tender.publishApprovalStatus === "approved" && tender.status === TenderStatus.DRAFT ? 'bg-emerald-100 text-emerald-700' :
-                    tender.status === TenderStatus.PUBLISHED ? 'bg-emerald-100 text-emerald-700' :
-                    tender.status === TenderStatus.EVALUATION ? 'bg-blue-100 text-blue-700' :
-                    tender.status === TenderStatus.STANDSTILL ? 'bg-amber-100 text-amber-700' :
-                    tender.status === TenderStatus.AWARDED ? 'bg-purple-100 text-purple-700' :
-                    tender.status === TenderStatus.PENDING_PUBLISH_APPROVAL ? 'bg-sky-100 text-sky-700' :
-                    'bg-amber-100 text-amber-700'
-                  }`}>
-                    {effectiveStatusLabel(tender)}
-                  </span>
-                </td>
-                <td className="px-6 py-4">
-                  {tender.isVerified ? (
-                    <span className="flex items-center gap-1.5 text-xs font-bold text-emerald-600">
-                      <ShieldCheck size={14} /> Verified
-                    </span>
-                  ) : (
-                    <span className="text-xs font-bold text-slate-400">Pending</span>
-                  )}
-                </td>
-                <td className="px-6 py-4">
-                  <div className="flex items-center gap-4">
-                    <button 
-                      onClick={() => void openTenderView(tender.id, "details")}
-                      className="text-emerald-600 hover:text-emerald-700 font-medium text-sm"
-                    >
-                      View
-                    </button>
-                    {!tender.isVerified && (
-                      <button 
-                        onClick={() => void openTenderView(tender.id, "verify")}
-                        className="text-blue-600 hover:text-blue-700 font-medium text-sm"
-                      >
-                        Verify
-                      </button>
-                    )}
-                    {tender.isVerified && tender.status === TenderStatus.DRAFT && tender.publishApprovalStatus !== "approved" && (
-                      <button 
-                        onClick={() => void handleRequestPublishApproval(tender.id)}
-                        className="text-blue-600 hover:text-blue-700 font-medium text-sm"
-                      >
-                        {tender.publishApprovalStatus === "rejected" ? "Request Approval" : "Request Approval"}
-                      </button>
-                    )}
-                    {tender.isVerified && tender.status === TenderStatus.DRAFT && tender.publishApprovalStatus === "approved" && (
-                      <button 
-                        onClick={() => void openTenderView(tender.id, "publish")}
-                        className="text-emerald-600 hover:text-emerald-700 font-medium text-sm"
-                      >
-                        Publish
-                      </button>
-                    )}
-                    {(tender.status === TenderStatus.EVALUATION || tender.status === TenderStatus.PUBLISHED || tender.status === TenderStatus.STANDSTILL || tender.status === TenderStatus.AWARDED) && (
-                      <button 
-                        onClick={() => void openTenderView(tender.id, "award")}
-                        className="text-purple-600 hover:text-purple-700 font-medium text-sm"
-                      >
-                        {tender.status === TenderStatus.AWARDED || tender.intentToAwardAt ? "Manage Award" : "Award"}
-                      </button>
-                    )}
-                  </div>
-                </td>
-              </tr>);
-            })}
-          </tbody>
-        </table>
-        {totalPages > 1 && <div className="flex items-center justify-between p-4 border-t border-slate-100">
-          <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1} className="btn-secondary text-sm py-1.5 disabled:opacity-50">Previous</button>
-          <span className="text-sm text-slate-500">Page {page} of {totalPages}</span>
-          <button onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page === totalPages} className="btn-secondary text-sm py-1.5 disabled:opacity-50">Next</button>
-        </div>}
-      </div>
+      {renderTenderTable(paginatedTenders, page, setPage, totalPages)}
 
       {/* Award Notification Overlay */}
       <AnimatePresence>
@@ -4525,9 +6355,92 @@ const Tenders = ({
               <p className="text-sm text-slate-500">
                 {selectedTender.status === TenderStatus.DISPUTED ? "The award process is paused due to a filed challenge. Review the challenge details below and resolve by selecting Upheld or Dismissed." : "The system ranks bidders by weighted technical and financial scoring. First issue the Intent to Award to the best evaluated bidder, then confirm the final award after the cooling-off period to generate the PBA."}
               </p>
+
+              {awardEvaluationStatus && awardEvaluationStatus.complete === false && selectedTender.status !== TenderStatus.DISPUTED && !selectedTender.intentToAwardAt && (
+                <div className="rounded-xl border border-amber-300 bg-amber-50 p-4">
+                  <p className="text-sm font-semibold text-amber-900">Evaluation not yet complete — Intent to Award is locked</p>
+                  <ul className="mt-1 list-disc pl-5 text-xs text-amber-800">
+                    {(awardEvaluationStatus.reasons || []).map((reason, idx) => (
+                      <li key={idx}>{reason}</li>
+                    ))}
+                  </ul>
+                  <p className="mt-1 text-xs text-amber-700">Finalize the scores for every bid (committee quorum) before the RBF can issue an Intent to Award.</p>
+                </div>
+              )}
               
               <div className="grid grid-cols-1 gap-6 xl:grid-cols-[1.2fr_0.8fr]">
                 <div className="space-y-4">
+                  {isLotWiseTender && (
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <p className="text-sm font-bold text-slate-700">Lot-Wise Award</p>
+                          <p className="text-xs text-slate-500">Each lot is ranked and awarded independently. Different lots can go to different vendors. Intent to Award can only be issued to the recommended (highest weighted technical + financial score) bid for each lot.</p>
+                        </div>
+                        {awardRankingWeights && (
+                          <span className="badge bg-slate-200 text-slate-700 whitespace-nowrap">
+                            Technical {awardRankingWeights.technical}% / Financial {awardRankingWeights.financial}%
+                          </span>
+                        )}
+                      </div>
+                      {awardLotRankings.length === 0 && (
+                        <p className="text-xs text-amber-700">No lot rankings available yet — bids may still be under evaluation.</p>
+                      )}
+                      {awardLotRankings.map((lot) => (
+                        <div key={lot.lot_id} className="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-2">
+                          <div className="flex items-center justify-between gap-3">
+                            <p className="font-semibold text-slate-900">{lot.lot_name}</p>
+                            {lot.awarded_vendor_name && (
+                              <span className="badge bg-emerald-100 text-emerald-700">Awarded to {lot.awarded_vendor_name}</span>
+                            )}
+                          </div>
+                          <div className="space-y-1.5 text-xs">
+                            {(lot.rows || []).map((row) => (
+                              <div key={row.bid_id} className={`rounded-lg border px-3 py-2 ${row.is_recommended_winner ? "border-emerald-300 bg-emerald-50" : "border-slate-200 bg-white"}`}>
+                                <div className="flex items-center justify-between gap-3">
+                                  <div>
+                                    <p className="font-semibold text-slate-900">{row.vendor_name}</p>
+                                    <p className="text-slate-500">
+                                      Bid Amount: {row.bid_amount ? `${row.bid_currency || selectedTender.biddingCurrency || "LSL"} ${Number(row.bid_amount).toLocaleString()}` : "N/A"}
+                                      {row.bid_amount && row.bid_currency && row.bid_currency !== selectedTender.biddingCurrency && row.bid_amount_base_currency != null && (
+                                        <> (≈ {selectedTender.biddingCurrency} {Number(row.bid_amount_base_currency).toLocaleString()})</>
+                                      )}
+                                    </p>
+                                  </div>
+                                  <div className="text-right">
+                                    <p className="font-semibold text-slate-900">Rank {row.rank}</p>
+                                    {row.is_recommended_winner && !lot.awarded_vendor_id && (
+                                      <button
+                                        type="button"
+                                        disabled={lotAwardSubmitting === lot.lot_id || (awardEvaluationStatus?.complete === false && selectedTender.status !== TenderStatus.STANDSTILL)}
+                                        onClick={() => setLotAwardPending({ lotId: lot.lot_id, lotName: lot.lot_name, bidId: row.bid_id, vendorName: row.vendor_name || "" })}
+                                        className="mt-1 text-[11px] font-semibold text-emerald-700 underline disabled:opacity-40 disabled:cursor-not-allowed"
+                                      >
+                                        {lotAwardSubmitting === lot.lot_id ? "Submitting..." : "Issue Intent to Award"}
+                                      </button>
+                                    )}
+                                  </div>
+                                </div>
+                                <div className="mt-2 grid grid-cols-1 gap-2 text-slate-600 sm:grid-cols-3">
+                                  <p>Ts (Technical Score{awardRankingWeights ? `, ${awardRankingWeights.technical}%` : ""}): {row.technical_score ?? "N/A"}</p>
+                                  <p>Fs (Financial Score{awardRankingWeights ? `, ${awardRankingWeights.financial}%` : ""}): {row.financial_score ?? "Not finalized"}</p>
+                                  <p>S (Combined Score): {row.combined_score ?? "N/A"}</p>
+                                </div>
+                                {row.disqualification_reason && (
+                                  <p className="mt-1 text-rose-600">{row.disqualification_reason}</p>
+                                )}
+                              </div>
+                            ))}
+                            {(!lot.rows || lot.rows.length === 0) && (
+                              <p className="text-slate-400 italic">No bids for this lot yet.</p>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {!isLotWiseTender && (
+                  <>
                   <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                     <div className="space-y-2 md:col-span-2">
                       <label className="text-sm font-bold text-slate-700">Winning Bid</label>
@@ -4600,6 +6513,8 @@ const Tenders = ({
                       <p className="mt-2 text-xs text-amber-800">After you press the button, you will be asked to confirm this exact Intent to Award action before it is submitted.</p>
                     )}
                   </div>
+                  </>
+                  )}
 
                   <div className="space-y-2">
                     <label className="text-sm font-bold text-slate-700">Notification Options</label>
@@ -4616,9 +6531,16 @@ const Tenders = ({
                     </div>
                   </div>
 
-                  {awardRankingRows.length > 0 && (
+                  {!isLotWiseTender && awardRankingRows.length > 0 && (
                     <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
-                      <p className="text-sm font-semibold text-slate-800">Comparative Ranking Table</p>
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="text-sm font-semibold text-slate-800">Comparative Ranking Table</p>
+                        {awardRankingWeights && (
+                          <span className="badge bg-slate-200 text-slate-700">
+                            Technical {awardRankingWeights.technical}% / Financial {awardRankingWeights.financial}%
+                          </span>
+                        )}
+                      </div>
                       <div className="mt-3 max-h-[34vh] overflow-y-auto space-y-2 pr-1 text-xs">
                         {awardRankingRows.map((row) => (
                           <div key={row.bid_id} className={`rounded-lg border px-3 py-2 ${row.is_recommended_winner ? "border-emerald-300 bg-emerald-50" : "border-slate-200 bg-white"}`}>
@@ -4646,8 +6568,8 @@ const Tenders = ({
                               </div>
                             </div>
                             <div className="mt-2 grid grid-cols-1 gap-2 text-slate-600 sm:grid-cols-3">
-                              <p>Ts (Technical Score): {row.technical_score ?? "N/A"}</p>
-                              <p>Fs (Financial Score): {row.financial_score ?? "Not opened"}</p>
+                              <p>Ts (Technical Score{awardRankingWeights ? `, ${awardRankingWeights.technical}%` : ""}): {row.technical_score ?? "N/A"}</p>
+                              <p>Fs (Financial Score{awardRankingWeights ? `, ${awardRankingWeights.financial}%` : ""}): {row.financial_score ?? "Not opened"}</p>
                               <p>S (Combined Score): {row.combined_score ?? "N/A"}</p>
                             </div>
                             {row.disqualification_reason && (
@@ -4707,12 +6629,41 @@ const Tenders = ({
                 {tenderContracts.length === 0 && (
                   <p className="text-xs text-slate-500">The Performance-Based Agreement will be generated automatically as soon as the award is confirmed.</p>
                 )}
+                {isLotWiseTender && tenderContracts.length > 1 && (
+                  <div className="rounded-lg border border-slate-200 bg-white p-3 space-y-1.5">
+                    <p className="text-xs font-semibold text-slate-700">Contracts Generated ({tenderContracts.length})</p>
+                    {tenderContracts.map((c) => (
+                      <div key={c.id} className={`flex items-center justify-between gap-2 rounded-md border px-2 py-1.5 text-xs ${activeContract?.id === c.id ? "border-emerald-300 bg-emerald-50" : "border-slate-100 bg-slate-50"}`}>
+                        <span className="text-slate-600 min-w-0">{c.lotName ? `${c.lotName} — ` : ""}{c.vendorName || c.referenceNumber}</span>
+                        <div className="flex items-center gap-2 shrink-0">
+                          {c.generatedFile && (
+                            <a href={c.generatedFile} target="_blank" rel="noreferrer" className="text-blue-700 hover:text-blue-800 underline">Download PBA</a>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => { setManageContractId(c.id); resetContractAssignmentDraft(); }}
+                            className="font-semibold text-emerald-700 underline disabled:opacity-40 disabled:cursor-not-allowed"
+                            disabled={activeContract?.id === c.id}
+                          >
+                            {activeContract?.id === c.id ? "Managing" : "Manage this contract"}
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                    <p className="text-[10px] text-slate-400 pt-1">Each lot's winner gets its own contract and project. Select "Manage this contract" to review, approve, and assign the project for that lot.</p>
+                  </div>
+                )}
                 {activeContract && (
                   <div className="space-y-3">
                     <div className="flex items-center justify-between text-sm">
                       <span className="font-medium text-slate-700">{activeContract.referenceNumber}</span>
                       <span className="badge bg-slate-100 text-slate-700">{activeContract.status}</span>
                     </div>
+                    {(activeContract.vendorName || activeContract.lotName) && (
+                      <p className="text-xs text-slate-500 -mt-1">
+                        {activeContract.lotName ? `${activeContract.lotName} — ` : ""}{activeContract.vendorName || ""}
+                      </p>
+                    )}
                     <div className="space-y-3">
                         <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
                           <p className="font-semibold text-slate-700">Signed Contract Review</p>
@@ -4994,8 +6945,8 @@ const Tenders = ({
 
               <div className="flex flex-col gap-3 border-t border-slate-100 pt-4 sm:flex-row sm:flex-wrap">
                 <button onClick={() => navigateView("list")} className="btn-secondary sm:flex-1">Cancel</button>
-                {selectedTender.status !== TenderStatus.AWARDED && selectedTender.status !== TenderStatus.DISPUTED && !selectedTender.intentToAwardAt && (
-                  <button onClick={() => handleAward(selectedTender.id)} disabled={isActioning} className="btn-primary sm:flex-1 bg-purple-600 hover:bg-purple-700 disabled:opacity-60">
+                {!isLotWiseTender && selectedTender.status !== TenderStatus.AWARDED && selectedTender.status !== TenderStatus.DISPUTED && !selectedTender.intentToAwardAt && (
+                  <button onClick={() => handleAward(selectedTender.id)} disabled={isActioning || (awardEvaluationStatus?.complete === false)} className="btn-primary sm:flex-1 bg-purple-600 hover:bg-purple-700 disabled:opacity-60 disabled:cursor-not-allowed">
                     {isActioning ? "Submitting..." : "Issue Intent to Award"}
                   </button>
                 )}
@@ -5085,6 +7036,61 @@ const Tenders = ({
                   className="btn-primary flex-1 bg-purple-600 hover:bg-purple-700 disabled:opacity-60"
                 >
                   {isActioning ? "Submitting..." : "Confirm & Issue"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {lotAwardPending && selectedTender && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[110]">
+          <div className="bg-white rounded-2xl p-6 w-full max-w-lg shadow-2xl">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-slate-900">Confirm Intent to Award</h3>
+              <button onClick={() => setLotAwardPending(null)} className="p-1 hover:bg-slate-100 rounded-lg">
+                <X size={20} className="text-slate-500" />
+              </button>
+            </div>
+            <div className="space-y-4">
+              <div className="p-4 bg-amber-50 rounded-xl border border-amber-100">
+                <p className="text-sm text-amber-800 font-medium">You are about to issue an Intent to Award for {lotAwardPending.lotName}.</p>
+              </div>
+              <div className="space-y-3 text-sm">
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Tender:</span>
+                  <span className="font-medium text-slate-900">{selectedTender.name}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Lot:</span>
+                  <span className="font-medium text-slate-900">{lotAwardPending.lotName}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Winning Vendor:</span>
+                  <span className="font-medium text-slate-900">{lotAwardPending.vendorName}</span>
+                </div>
+                {selectedTender.coolingOffDays && (
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">Cooling-off Period:</span>
+                    <span className="font-medium text-slate-900">{selectedTender.coolingOffDays} days (shared across all lots)</span>
+                  </div>
+                )}
+              </div>
+              <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
+                <p className="text-xs text-slate-600">
+                  Other lots can still be awarded to different vendors. Once every lot you intend to award has an Intent to Award, use Confirm Final Award to generate the contracts.
+                </p>
+              </div>
+              <div className="flex gap-3 pt-2">
+                <button onClick={() => setLotAwardPending(null)} className="btn-secondary flex-1">
+                  Cancel
+                </button>
+                <button
+                  onClick={() => void submitLotAward()}
+                  disabled={lotAwardSubmitting === lotAwardPending.lotId}
+                  className="btn-primary flex-1 bg-purple-600 hover:bg-purple-700 disabled:opacity-60"
+                >
+                  {lotAwardSubmitting === lotAwardPending.lotId ? "Submitting..." : "Confirm & Issue"}
                 </button>
               </div>
             </div>
@@ -8581,7 +10587,7 @@ const PreQualificationSubmission = () => {
   // Show status if vendor has submitted
   if (latestPrequal && !isResubmitMode) {
     return (
-      <div className="max-w-3xl mx-auto space-y-6">
+      <div className="max-w-6xl mx-auto space-y-6">
         <div className="card p-8">
           <div className="flex items-start gap-6">
             <div className="flex-shrink-0">
@@ -8808,7 +10814,7 @@ const PreQualificationSubmission = () => {
   }
 
   return (
-    <div className="max-w-4xl mx-auto space-y-8 pb-20">
+    <div className="max-w-7xl mx-auto space-y-8 pb-20">
       {!latestPrequal && (
         <div className="flex items-start gap-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3">
           <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-amber-400">
@@ -9126,7 +11132,8 @@ const VendorTenders = ({ onSubmitTender, onNavigate }: { onSubmitTender?: (tende
       setLoading(true);
       setError(null);
       const rows = await fetchTenders();
-      setTenders(rows.filter(t => t.status === TenderStatus.PUBLISHED));
+      // EOI Invites live in their own "EOI Invites" tab (VendorEoiInvites) — never here.
+      setTenders(rows.filter(t => t.status === TenderStatus.PUBLISHED && !t.isEoiInviteOnly));
     } catch (err: any) {
       const raw = String(err?.message || "");
       setError(isConnectivityError(raw) ? `Cannot connect to backend (${API_BASE}).` : (toFriendlyApiMessage(raw) || "Failed to load tenders."));
@@ -9240,235 +11247,343 @@ const VendorTenders = ({ onSubmitTender, onNavigate }: { onSubmitTender?: (tende
       }
     };
     const requiredDocs = [
-      { label: "Tender Schedule", url: scheduleUrl },
-      { label: "RFP / Subsidy Framework", url: toFileUrl(selectedTender.rfpDocumentsFile) },
-      { label: "Milestone Payment Schedule", url: toFileUrl(selectedTender.milestonePaymentScheduleFile) },
+      { label: "Tender Schedule", url: scheduleUrl, fileName: fileNameFromUrl(scheduleUrl) },
+      { label: "RFP / Subsidy Framework", url: toFileUrl(selectedTender.rfpDocumentsFile), fileName: fileNameFromUrl(toFileUrl(selectedTender.rfpDocumentsFile)) },
+      { label: "Milestone Payment Schedule", url: toFileUrl(selectedTender.milestonePaymentScheduleFile), fileName: fileNameFromUrl(toFileUrl(selectedTender.milestonePaymentScheduleFile)) },
+      ...(Array.isArray(selectedTender.governingDocuments) ? selectedTender.governingDocuments.map((d) => {
+        const url = toFileUrl(d.file_url);
+        return {
+          label: d.label || "Untitled document",
+          url,
+          fileName: d.file_name || fileNameFromUrl(url),
+          expectedType: d.expected_type,
+        };
+      }) : []),
     ];
     const deadlineValue = selectedTender.deadline;
     const deadlineMs = deadlineValue ? Date.parse(deadlineValue) : NaN;
     const daysLeft = Number.isNaN(deadlineMs) ? null : Math.ceil((deadlineMs - Date.now()) / (1000 * 60 * 60 * 24));
+    const isLotWise = Boolean(selectedTender.lots && selectedTender.lots.length > 0);
+
+    const fact = (label: string, value: React.ReactNode) => (
+      <div className="space-y-1">
+        <p className="text-xs font-bold text-slate-500">{label}</p>
+        <p className="text-sm font-medium text-slate-900">{value ?? "N/A"}</p>
+      </div>
+    );
+    const dateBox = (label: string, value?: string | null) => (
+      <div className="rounded-xl border border-slate-100 bg-slate-50 p-4">
+        <Clock size={16} className="mb-2 text-slate-400" />
+        <p className="text-xs font-bold text-slate-500">{label}</p>
+        <p className="text-sm font-bold text-slate-900">{value ? new Date(value).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "N/A"}</p>
+      </div>
+    );
+    const section = (icon: React.ReactNode, title: string, description: string, children: React.ReactNode) => (
+      <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
+        <div className="flex items-start gap-3 border-b border-slate-100 px-6 py-5">
+          <div className="mt-0.5 rounded-xl bg-emerald-50 p-2.5 text-emerald-700 shrink-0">{icon}</div>
+          <div>
+            <h3 className="text-base font-bold text-slate-900">{title}</h3>
+            <p className="mt-0.5 text-sm text-slate-500">{description}</p>
+          </div>
+        </div>
+        <div className="space-y-5 p-6">{children}</div>
+      </div>
+    );
 
     return (
-      <div className="space-y-6 max-w-5xl mx-auto pb-12">
-        <div className="flex items-center gap-4 mb-6">
-          <button onClick={() => { setSelectedTender(null); onNavigate?.("list"); }} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
-            <ChevronRight className="rotate-180" size={20} />
-          </button>
-          <div>
-            <h1 className="text-2xl font-bold text-slate-900">{selectedTender.name}</h1>
-            <p className="text-sm text-slate-500 font-mono">{selectedTender.referenceNumber}</p>
+      <div className="max-w-[90rem] mx-auto pb-12 space-y-6">
+        {/* Header */}
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="flex min-w-0 items-start gap-3">
+            <button
+              onClick={() => { setSelectedTender(null); onNavigate?.("list"); }}
+              className="mt-1 shrink-0 rounded-lg p-2 text-slate-500 hover:bg-slate-100"
+            >
+              <ChevronRight className="rotate-180" size={20} />
+            </button>
+            <div className="min-w-0">
+              <div className="mb-1.5 flex flex-wrap items-center gap-2">
+                <span className="badge bg-emerald-100 text-emerald-700">{selectedTender.status}</span>
+                <span className="font-mono text-xs text-slate-400">{selectedTender.referenceNumber}</span>
+              </div>
+              <h1 className="truncate text-2xl font-bold text-slate-900">{selectedTender.name}</h1>
+              <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-slate-500">
+                <span>{selectedTender.procurementMethod || "N/A"}</span>
+                <span className="text-slate-300">•</span>
+                <span>{selectedTender.applicationType || "N/A"}</span>
+                <span className="text-slate-300">•</span>
+                <span className="inline-flex items-center gap-1"><MapPin size={13} />{(selectedTender.targetDistricts || []).join(", ") || "N/A"}</span>
+              </div>
+            </div>
           </div>
-          <div className="ml-auto flex items-center gap-3">
+          <div className="flex shrink-0 items-center gap-3">
             <button
               onClick={() => downloadTenderPdf(selectedTender)}
-              className="flex items-center gap-2 px-4 py-2.5 rounded-xl border border-slate-200 text-slate-700 text-sm font-semibold hover:border-emerald-300 hover:text-emerald-700 transition-all"
+              className="flex items-center gap-2 rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-700 transition-all hover:border-emerald-300 hover:text-emerald-700"
             >
               <Download size={15} />
               Download PDF
             </button>
             {onSubmitTender && (
-              <button
-                onClick={() => onSubmitTender(selectedTender.id)}
-                className="btn-primary"
-              >
+              <button onClick={() => onSubmitTender(selectedTender.id)} className="btn-primary">
                 Submit Proposal
               </button>
             )}
           </div>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        {/* Key facts strip */}
+        <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
           <div className="card p-5">
-            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Deadline</p>
-            <p className="text-lg font-bold text-slate-900 mt-2">
-              {selectedTender.deadline || "N/A"}
+            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Deadline</p>
+            <p className="mt-2 text-lg font-bold text-slate-900">{selectedTender.deadline ? new Date(selectedTender.deadline).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "N/A"}</p>
+            <p className={`mt-1 text-xs ${daysLeft != null && daysLeft < 0 ? "text-rose-600 font-semibold" : daysLeft != null && daysLeft <= 7 ? "text-amber-600 font-semibold" : "text-slate-500"}`}>
+              {daysLeft != null ? (daysLeft < 0 ? "Submission closed" : `${daysLeft} day${daysLeft === 1 ? "" : "s"} left to submit`) : "Submission cutoff"}
             </p>
-            <p className="text-xs text-slate-500 mt-1">Submission cutoff</p>
           </div>
           <div className="card p-5">
-            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Stage</p>
-            <p className="text-lg font-bold text-slate-900 mt-2">{selectedTender.stageType || "N/A"}</p>
-            <p className="text-xs text-slate-500 mt-1">Procurement stage</p>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Verification</p>
+            <p className={`mt-2 text-lg font-bold ${selectedTender.isVerified ? "text-emerald-600" : "text-amber-600"}`}>{selectedTender.isVerified ? "Verified" : "Pending"}</p>
+            <p className="mt-1 text-xs text-slate-500">By the RBF Management Team</p>
+          </div>
+          <div className="card p-5">
+            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Tender Security</p>
+            <p className="mt-2 text-lg font-bold text-slate-900">{selectedTender.tenderSecurityRequired ? "Required" : "Not Required"}</p>
+            <p className="mt-1 text-xs text-slate-500">Bid bond / guarantee</p>
+          </div>
+          <div className="card p-5">
+            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Lots</p>
+            <p className="mt-2 text-lg font-bold text-slate-900">{isLotWise ? `${selectedTender.lots?.length} Lots` : "Single Award"}</p>
+            <p className="mt-1 text-xs text-slate-500">{isLotWise ? "Bid on one or more lots" : "Awarded as one package"}</p>
           </div>
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <div className="lg:col-span-2 space-y-6">
-            <div className="card p-8 space-y-8">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                <div className="space-y-4">
-                  <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Tender Information</h3>
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="space-y-1">
-                      <p className="text-xs font-bold text-slate-500">Status</p>
-                      <span className="badge bg-emerald-100 text-emerald-700">{selectedTender.status}</span>
-                    </div>
-                    <div className="space-y-1">
-                      <p className="text-xs font-bold text-slate-500">Verification</p>
-                      <span className={`text-sm font-bold ${selectedTender.isVerified ? 'text-emerald-600' : 'text-amber-600'}`}>
-                        {selectedTender.isVerified ? 'Verified' : 'Pending'}
-                      </span>
-                    </div>
-                    <div className="space-y-1">
-                      <p className="text-xs font-bold text-slate-500">Department</p>
-                      <p className="text-sm font-medium">{selectedTender.department}</p>
-                    </div>
-                    <div className="space-y-1">
-                      <p className="text-xs font-bold text-slate-500">Category</p>
-                      <p className="text-sm font-medium">{selectedTender.category}</p>
-                    </div>
-                  </div>
-                </div>
-
-                  <div className="space-y-4">
-                    <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Tender Details</h3>
-                    <div className="space-y-1">
-                      <p className="text-xs font-bold text-slate-500">Bidding Currency</p>
-                    <p className="text-sm font-medium">{selectedTender.biddingCurrency || "N/A"}</p>
-                  </div>
-                  {selectedTender.fundingSource && (
-                    <div className="space-y-1">
-                      <p className="text-xs font-bold text-slate-500">Funding Source</p>
-                      <p className="text-sm font-medium">{selectedTender.fundingSource}</p>
-                    </div>
-                  )}
-                </div>
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+          <div className="space-y-6 lg:col-span-2">
+            {section(<Info size={18} />, "Overview", "General information about this tender.", (
+              <div className="grid grid-cols-2 gap-4 md:grid-cols-3">
+                {fact("Department", selectedTender.department)}
+                {fact("Category", selectedTender.category)}
+                {fact("Application Type", selectedTender.applicationType)}
+                {fact("Procurement Method", selectedTender.procurementMethod)}
+                {fact("Bidding Currency", selectedTender.biddingCurrency)}
+                {selectedTender.fundingSource && fact("Funding Source", selectedTender.fundingSource)}
+                {fact("Invited By", selectedTender.invitedBy)}
+                {fact("Time for Completion", selectedTender.timeForCompletion)}
               </div>
+            ))}
 
-              <div className="space-y-4 pt-6 border-t border-slate-100">
-                <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Deadlines & Schedule</h3>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                  <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
-                    <Clock size={16} className="text-slate-400 mb-2" />
-                    <p className="text-xs font-bold text-slate-500">Submission Deadline</p>
-                    <p className="text-sm font-bold text-slate-900">{selectedTender.deadline || "N/A"}</p>
-                  </div>
-                </div>
-              </div>
-
-              <div className="space-y-4 pt-6 border-t border-slate-100">
-                <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Technical Requirements</h3>
-                <div className="grid grid-cols-2 gap-6">
-                  <div className="space-y-2">
-                    <p className="text-xs font-bold text-slate-500">Technology Types</p>
-                    <div className="flex flex-wrap gap-2">
-                      {(selectedTender.technologyTypes || []).length ? (selectedTender.technologyTypes || []).map(tech => (
-                        <span key={tech} className="px-2 py-1 bg-emerald-50 text-emerald-700 rounded text-[10px] font-bold uppercase tracking-wider">{tech}</span>
-                      )) : (
-                        <span className="text-xs text-slate-500">N/A</span>
+            {section(<Calendar size={18} />, "Key Dates", "Every deadline that governs this tender's submission window.", (
+              <>
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                  {selectedTender.procurementWorkflow === "sequential" ? (
+                    <>
+                      {dateBox("EOI Deadline", selectedTender.eoiDeadline)}
+                      {dateBox("Technical Deadline", selectedTender.technicalDeadline)}
+                      {dateBox("Financial Deadline", selectedTender.financialDeadline || selectedTender.deadline)}
+                    </>
+                  ) : (
+                    <>
+                      {selectedTender.procurementWorkflow !== "combined" && dateBox("EOI Deadline", selectedTender.eoiDeadline)}
+                      {dateBox(
+                        selectedTender.procurementWorkflow === "combined" ? "Combined Submission Deadline" : "Technical & Financial Deadline",
+                        selectedTender.technicalDeadline || selectedTender.deadline
                       )}
-                    </div>
+                    </>
+                  )}
+                  {selectedTender.clarificationDeadline && dateBox("Clarification / Query Deadline", selectedTender.clarificationDeadline)}
+                  {selectedTender.siteVisitDate && dateBox("Site Visit Date", selectedTender.siteVisitDate)}
+                </div>
+                {(selectedTender.preTenderMeetingInfo || selectedTender.coolingOffDays != null || selectedTender.bidValidityPeriodDays != null) && (
+                  <div className="grid grid-cols-1 gap-4 border-t border-slate-100 pt-5 md:grid-cols-3">
+                    {selectedTender.preTenderMeetingInfo && (
+                      <div className="rounded-lg border border-slate-100 bg-slate-50 p-3 md:col-span-2">
+                        <p className="mb-1 text-[10px] font-bold uppercase tracking-widest text-slate-400">Pre-Tender Meeting</p>
+                        <p className="text-sm text-slate-700">{selectedTender.preTenderMeetingInfo}</p>
+                      </div>
+                    )}
+                    {selectedTender.coolingOffDays != null && (
+                      <div className="rounded-lg border border-slate-100 bg-slate-50 p-3">
+                        <p className="mb-1 text-[10px] font-bold uppercase tracking-widest text-slate-400">Cooling-Off Period</p>
+                        <p className="text-sm text-slate-700">{selectedTender.coolingOffDays} days after intent to award</p>
+                      </div>
+                    )}
+                    {selectedTender.bidValidityPeriodDays != null && (
+                      <div className="rounded-lg border border-slate-100 bg-slate-50 p-3">
+                        <p className="mb-1 text-[10px] font-bold uppercase tracking-widest text-slate-400">Bid Validity Period</p>
+                        <p className="text-sm text-slate-700">Your price stays binding for {selectedTender.bidValidityPeriodDays} days after the deadline.</p>
+                      </div>
+                    )}
                   </div>
-                  <div className="space-y-2">
-                    <p className="text-xs font-bold text-slate-500">Target Site Type</p>
-                    <p className="text-sm font-medium">{selectedTender.targetSiteType || "N/A"}</p>
-                  </div>
-                  <div className="space-y-2">
-                    <p className="text-xs font-bold text-slate-500">Minimum Service Tier</p>
-                    <p className="text-sm font-medium">{selectedTender.minimumServiceTier || "N/A"}</p>
-                  </div>
-                  <div className="space-y-2">
-                    <p className="text-xs font-bold text-slate-500">Approximate Installation Target</p>
-                    <p className="text-sm font-medium">{selectedTender.approximateInstallationTarget != null ? selectedTender.approximateInstallationTarget.toLocaleString() : "N/A"}</p>
+                )}
+              </>
+            ))}
+
+            {section(<Zap size={18} />, "Scope & Technical Requirements", "What this tender covers and what vendors must be capable of delivering.", (
+              <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
+                <div className="space-y-2">
+                  <p className="text-xs font-bold text-slate-500">Technology Types</p>
+                  <div className="flex flex-wrap gap-2">
+                    {(selectedTender.technologyTypes || []).length ? (selectedTender.technologyTypes || []).map(tech => (
+                      <span key={tech} className="rounded bg-emerald-50 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-emerald-700">{tech}</span>
+                    )) : <span className="text-xs text-slate-500">N/A</span>}
                   </div>
                 </div>
+                <div className="space-y-2">
+                  <p className="text-xs font-bold text-slate-500">Target Districts</p>
+                  <div className="flex flex-wrap gap-2">
+                    {(selectedTender.targetDistricts || []).length ? (selectedTender.targetDistricts || []).map(d => (
+                      <span key={d} className="rounded bg-blue-50 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-blue-700">{d}</span>
+                    )) : <span className="text-xs text-slate-500">N/A</span>}
+                  </div>
+                </div>
+                {fact("Target Site Type", selectedTender.targetSiteType)}
+                {fact("Minimum Service Tier", selectedTender.minimumServiceTier)}
+                {fact("Approximate Installation Target", selectedTender.approximateInstallationTarget != null ? selectedTender.approximateInstallationTarget.toLocaleString() : null)}
               </div>
+            ))}
 
-               <div className="space-y-4 pt-6 border-t border-slate-100">
-                 <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Bid Decision Aids</h3>
-                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
-                   <div className="p-3 bg-slate-50 rounded-lg border border-slate-100">
-                     <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Eligibility</p>
-                     <p className="text-slate-700">{selectedTender.biddersEligibility || "Not specified"}</p>
-                   </div>
-                   <div className="p-3 bg-slate-50 rounded-lg border border-slate-100">
-                     <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Instructions</p>
-                     <p className="text-slate-700">{selectedTender.instruction || "Not specified"}</p>
-                   </div>
-                 </div>
-               </div>
+            {section(<Upload size={18} />, "Submission Requirements", "How your bid must be submitted and signed.", (
+              <div className="grid grid-cols-2 gap-4 md:grid-cols-3">
+                {fact("Submission Method", selectedTender.submissionMethod === "hybrid" ? "Online + physical copies" : "Online portal only")}
+                {fact("Digital Signature", selectedTender.digitalSignatureRequired === false ? "Not required" : "Required")}
+                {selectedTender.biddersSchedulePurchase && fact(
+                  "Document Fee",
+                  `${selectedTender.documentFeeAmount != null ? Number(selectedTender.documentFeeAmount).toLocaleString() : "N/A"}${selectedTender.documentFeeType ? ` (${selectedTender.documentFeeType})` : ""}${selectedTender.documentFeeRefundable ? " — Refundable" : ""}`
+                )}
+                {selectedTender.minimumWarrantyPeriodMonths != null && fact("Minimum Warranty Period", `${selectedTender.minimumWarrantyPeriodMonths} months`)}
+              </div>
+            ))}
 
-              <div className="space-y-4 pt-6 border-t border-slate-100">
-                <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Required Documents</h3>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  {requiredDocs.map((doc) => (
-                    <div key={doc.label} className="p-4 border-2 border-dashed border-slate-200 rounded-xl bg-slate-50">
-                      <div className="flex items-center gap-2">
-                        <FileText size={18} className="text-slate-400" />
-                        <span className="text-xs font-bold text-slate-700">{doc.label}</span>
+            {isLotWise && section(<Briefcase size={18} />, "Lots", `This tender is split into ${selectedTender.lots?.length} separately awardable lots. You may bid on one, several, or all of them${selectedTender.maxLotsPerBidder != null ? ` (maximum ${selectedTender.maxLotsPerBidder} per bidder)` : ""}.`, (
+              <div className="space-y-3">
+                {(selectedTender.lots || []).map((lot, i) => (
+                  <div key={lot.id ?? i} className="space-y-2 rounded-xl border border-slate-200 bg-slate-50 p-4">
+                    <p className="font-bold text-slate-900">{lot.name}</p>
+                    {lot.description && <p className="text-sm text-slate-600">{lot.description}</p>}
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
+                        <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Budget</p>
+                        <p className="text-sm font-bold text-slate-900">{lot.budget != null ? `M ${Number(lot.budget).toLocaleString()}` : "Not set"}</p>
                       </div>
-                      <div className="mt-3">
-                        {doc.url ? (
-                          <a
-                            href={doc.url}
-                            target="_blank"
-                            rel="noreferrer"
-                            download={fileNameFromUrl(doc.url)}
-                            className="text-emerald-600 hover:text-emerald-700 text-xs font-bold"
-                          >
-                            Download →
-                          </a>
-                        ) : (
-                          <span className="text-xs text-slate-400">Not provided</span>
-                        )}
+                      <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
+                        <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Installation Target</p>
+                        <p className="text-sm font-bold text-slate-900">{lot.estimatedInstallationTarget != null ? lot.estimatedInstallationTarget.toLocaleString() : "Not set"}</p>
                       </div>
                     </div>
-                  ))}
+                    {Array.isArray(lot.targetDistricts) && lot.targetDistricts.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5">{lot.targetDistricts.map(d => <span key={d} className="badge bg-blue-50 text-blue-700">{d}</span>)}</div>
+                    )}
+                    {Array.isArray(lot.technologyTypes) && lot.technologyTypes.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5">{lot.technologyTypes.map(t => <span key={t} className="badge bg-purple-50 text-purple-700">{t}</span>)}</div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ))}
+
+            {section(<ShieldCheck size={18} />, "Eligibility & Instructions", "Who can bid and any special guidance from the RMT.", (
+              <div className="grid grid-cols-1 gap-4 text-sm md:grid-cols-2">
+                <div className="rounded-lg border border-slate-100 bg-slate-50 p-3">
+                  <p className="mb-1 text-[10px] font-bold uppercase tracking-widest text-slate-400">Eligibility</p>
+                  <p className="text-slate-700">{selectedTender.biddersEligibility || "Not specified"}</p>
+                </div>
+                <div className="rounded-lg border border-slate-100 bg-slate-50 p-3">
+                  <p className="mb-1 text-[10px] font-bold uppercase tracking-widest text-slate-400">Instructions</p>
+                  <p className="text-slate-700">{selectedTender.instruction || "Not specified"}</p>
                 </div>
               </div>
-            </div>
+            ))}
+
+            {section(<FileText size={18} />, "Reference Documents", "Informational documents about this tender — schedule, framework, and any additional attachments.", (
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                {requiredDocs.map((doc) => (
+                  <div key={doc.label} className="rounded-xl border-2 border-dashed border-slate-200 bg-slate-50 p-4">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <FileText size={18} className="shrink-0 text-slate-400" />
+                        <span className="truncate text-xs font-bold text-slate-700" title={doc.label}>{doc.label}</span>
+                      </div>
+                      {doc.expectedType && <span className="badge shrink-0 bg-slate-100 text-slate-600">{doc.expectedType}</span>}
+                    </div>
+                    <div className="mt-3">
+                      {doc.url ? (
+                        <a href={doc.url} target="_blank" rel="noreferrer" download={fileNameFromUrl(doc.url)} className="text-xs font-bold text-emerald-600 hover:text-emerald-700">
+                          Download →
+                        </a>
+                      ) : <span className="text-xs text-slate-400">Not provided</span>}
+                      {doc.url && doc.fileName && <p className="mt-1 truncate text-[10px] text-slate-400" title={doc.fileName}>{doc.fileName}</p>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ))}
+
+            {section(<Upload size={18} />, "Documents You'll Need to Submit", "What to upload at each bidding stage — always check this live list rather than assuming a fixed set.", (
+              (() => {
+                const docs = selectedTender.requiredDocuments || [];
+                const stages: { key: string; label: string }[] = [
+                  { key: "eoi", label: "Stage 1: EOI (Expression of Interest)" },
+                  { key: "technical", label: "Stage 2: Technical" },
+                  { key: "financial", label: "Stage 3: Financial" },
+                  { key: "combined", label: "Stage 2: Combined Technical & Financial" },
+                ];
+                const stageDocs = (key: string) => docs.filter(d => (d.bid_stage || "eoi") === key);
+                if (docs.length === 0) {
+                  return <p className="text-sm text-slate-500">No required bid documents have been defined for this tender.</p>;
+                }
+                return (
+                  <div className="space-y-5">
+                    {stages.map(stage => {
+                      const items = stageDocs(stage.key);
+                      if (items.length === 0) return null;
+                      return (
+                        <div key={stage.key}>
+                          <p className="mb-2 text-xs font-bold text-slate-500">{stage.label}</p>
+                          <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                            {items.map(doc => (
+                              <div key={doc.id} className="rounded-xl border border-slate-100 bg-slate-50 p-3">
+                                <div className="flex items-start gap-2">
+                                  <FileText size={16} className="mt-0.5 shrink-0 text-slate-400" />
+                                  <div className="min-w-0">
+                                    <span className="text-xs font-bold text-slate-700">{doc.name}</span>
+                                    {doc.field_key && REQUIRED_DOCUMENT_HELP[doc.field_key] && (
+                                      <p className="mt-1 text-[11px] font-normal text-slate-500">{REQUIRED_DOCUMENT_HELP[doc.field_key]}</p>
+                                    )}
+                                  </div>
+                                </div>
+                                {doc.expected_type && <div className="mt-2"><span className="badge bg-slate-100 text-[10px] text-slate-600">{doc.expected_type}</span></div>}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })()
+            ))}
           </div>
 
           <div className="space-y-6">
             <div className="card p-6">
-              <h3 className="font-bold text-slate-900 mb-3">Contact</h3>
+              <h3 className="mb-3 font-bold text-slate-900">Contact</h3>
               <p className="text-sm text-slate-600">{selectedTender.contactDetails || "Not provided"}</p>
             </div>
             <div className="card p-6">
-              <h3 className="font-bold text-slate-900 mb-3">Tender Info</h3>
-              <div className="grid grid-cols-1 gap-3 text-sm">
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-500">Application Type</span>
-                  <span className="text-slate-700 font-medium">{selectedTender.applicationType || "N/A"}</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-500">Procurement Method</span>
-                  <span className="text-slate-700 font-medium">{selectedTender.procurementMethod || "N/A"}</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-500">Invited By</span>
-                  <span className="text-slate-700 font-medium">{selectedTender.invitedBy || "N/A"}</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-500">Time for Completion</span>
-                  <span className="text-slate-700 font-medium">{selectedTender.timeForCompletion || "N/A"}</span>
-                </div>
-
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-500">Tender Security</span>
-                  <span className="text-slate-700 font-medium">{selectedTender.tenderSecurityRequired ? "Required" : "Not Required"}</span>
-                </div>
-                {daysLeft != null && (
-                  <div className={`flex items-center justify-between ${daysLeft < 0 ? "text-rose-600" : daysLeft <= 7 ? "text-amber-600" : "text-slate-600"}`}>
-                    <span className="text-slate-500">Days Left</span>
-                    <span className="font-semibold">D-{daysLeft}</span>
-                  </div>
-                )}
-              </div>
-            </div>
-            <div className="card p-6">
-              <h3 className="font-bold text-slate-900 mb-3">Logistics & Locations</h3>
+              <h3 className="mb-3 font-bold text-slate-900">Logistics &amp; Locations</h3>
               <div className="space-y-3 text-sm">
-                <div className="p-3 bg-slate-50 rounded-lg border border-slate-100">
-                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Document Address</p>
+                <div className="rounded-lg border border-slate-100 bg-slate-50 p-3">
+                  <p className="mb-1 text-[10px] font-bold uppercase tracking-widest text-slate-400">Document Address</p>
                   <p className="text-slate-700">{selectedTender.addressForDocument || "Not specified"}</p>
                 </div>
-                <div className="p-3 bg-slate-50 rounded-lg border border-slate-100">
-                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Security Address</p>
+                <div className="rounded-lg border border-slate-100 bg-slate-50 p-3">
+                  <p className="mb-1 text-[10px] font-bold uppercase tracking-widest text-slate-400">Security Address</p>
                   <p className="text-slate-700">{selectedTender.addressForSecurity || "Not specified"}</p>
                 </div>
-                <div className="p-3 bg-slate-50 rounded-lg border border-slate-100">
-                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Opening Venue</p>
+                <div className="rounded-lg border border-slate-100 bg-slate-50 p-3">
+                  <p className="mb-1 text-[10px] font-bold uppercase tracking-widest text-slate-400">Opening Venue</p>
                   <p className="text-slate-700">{selectedTender.placeForOpening || "Not specified"}</p>
                 </div>
               </div>
@@ -9753,6 +11868,153 @@ const VendorTenders = ({ onSubmitTender, onNavigate }: { onSubmitTender?: (tende
   );
 };
 
+// The vendor-facing counterpart to the RBF-side EOI Invites tab (src/components/EoiInvites.tsx).
+// Kept here rather than a separate file since "Submit Expression of Interest" hands off
+// into VendorDashboard's existing bid wizard (App.tsx-local state), avoiding a
+// cross-file dependency for what would otherwise be a one-line navigation call.
+const VendorEoiInvites = ({ onSubmitEoi }: { onSubmitEoi: (tenderId: string) => void }) => {
+  const [invites, setInvites] = useState<Tender[]>([]);
+  const [selected, setSelected] = useState<Tender | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [alreadySubmitted, setAlreadySubmitted] = useState(false);
+  const [page, setPage] = useState(1);
+  const perPage = 10;
+
+  const loadInvites = React.useCallback(async () => {
+    setIsLoading(true);
+    try {
+      const rows = await fetchTenders();
+      setInvites(rows.filter(t => t.isEoiInviteOnly && t.status === TenderStatus.PUBLISHED));
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  React.useEffect(() => { void loadInvites(); }, [loadInvites]);
+
+  const openDetail = async (tender: Tender) => {
+    setSelected(tender);
+    setAlreadySubmitted(false);
+    // The list endpoint (TenderListSerializer) omits instruction/biddersEligibility/
+    // contactDetails/approximateInstallationTarget — fetch the full detail so this
+    // screen has everything it needs to show.
+    fetchTender(tender.id).then(full => setSelected(full)).catch(() => {});
+    try {
+      const bids = await fetchTenderBids(tender.id);
+      setAlreadySubmitted(bids.some(b => (b.bid_stage || "eoi") === "eoi" && b.status !== BidStatus.DRAFT));
+    } catch {
+      // If this fails, the "Submit" button just stays enabled — the backend still
+      // enforces the one-submission-per-tender rule at creation time regardless.
+    }
+  };
+
+  const totalPages = Math.ceil(invites.length / perPage);
+  const paginated = invites.slice((page - 1) * perPage, page * perPage);
+
+  if (selected) {
+    const daysLeft = selected.eoiDeadline ? Math.ceil((new Date(selected.eoiDeadline).getTime() - Date.now()) / (1000 * 60 * 60 * 24)) : null;
+    return (
+      <FormKitShell>
+        <Crumb onBack={() => setSelected(null)} trail="EOI Invites" />
+        <div className="flex items-center justify-between flex-wrap gap-3 mb-1">
+          <div className="flex items-center gap-2.5">
+            <h1 className="text-2xl font-bold text-slate-900">{selected.name}</h1>
+            <span className="font-mono text-xs text-slate-500 bg-slate-100 rounded px-1.5 py-0.5">{selected.referenceNumber}</span>
+          </div>
+          <StatusChip color={AMBER} bg={AMBER_SOFT}>Open for submissions</StatusChip>
+        </div>
+        <p className="text-sm text-slate-500 mb-5">
+          {selected.eoiDeadline ? `Deadline ${new Date(selected.eoiDeadline).toLocaleDateString()}${daysLeft !== null && daysLeft >= 0 ? ` · ${daysLeft} day${daysLeft === 1 ? "" : "s"} left` : ""}` : "No deadline set"}
+        </p>
+
+        <div className="card p-6 md:p-8 space-y-6">
+          <div>
+            <p className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-1">Purpose &amp; Scope</p>
+            <p className="text-sm text-slate-700 whitespace-pre-wrap">{selected.instruction || selected.biddersEligibility || "—"}</p>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div>
+              <p className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-1">Technology Type(s)</p>
+              <div className="flex flex-wrap gap-1.5">
+                {(selected.technologyTypes || []).map(t => <span key={t} className="badge bg-slate-100 text-slate-600">{t}</span>)}
+              </div>
+            </div>
+            <div>
+              <p className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-1">Target District(s)</p>
+              <div className="flex flex-wrap gap-1.5">
+                {(selected.targetDistricts || []).map(d => <span key={d} className="badge bg-slate-100 text-slate-600">{d}</span>)}
+              </div>
+            </div>
+            {selected.approximateInstallationTarget != null && (
+              <div>
+                <p className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-1">Approximate Installation Target</p>
+                <p className="text-sm text-slate-700">{selected.approximateInstallationTarget.toLocaleString()} units (indicative)</p>
+              </div>
+            )}
+            <div>
+              <p className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-1">Contact</p>
+              <p className="text-sm text-slate-700">{selected.contactDetails || "—"}</p>
+            </div>
+          </div>
+
+          <InfoBanner color={AMBER} bg={AMBER_SOFT}>
+            Submitting an Expression of Interest does not commit you to a bid. If shortlisted, you'll be notified and invited to submit a full proposal once the actual tender is published.
+          </InfoBanner>
+
+          <div className="flex justify-end">
+            <button
+              disabled={alreadySubmitted}
+              onClick={() => onSubmitEoi(selected.id)}
+              className="btn-primary disabled:opacity-50"
+            >
+              {alreadySubmitted ? "Already Submitted" : "Submit Expression of Interest"}
+            </button>
+          </div>
+        </div>
+      </FormKitShell>
+    );
+  }
+
+  return (
+    <FormKitShell>
+      <h1 className="text-2xl font-bold text-slate-900 mb-1">EOI Invites</h1>
+      <p className="text-sm text-slate-500 mb-6">Open calls for Expression of Interest — respond to be considered for a future tender's shortlisted vendor pool.</p>
+
+      {isLoading && <p className="text-sm text-slate-500">Loading EOI Invites...</p>}
+      {!isLoading && invites.length === 0 && (
+        <div className="card p-6 text-center text-sm text-slate-500">No EOI Invites are open right now. Check back later.</div>
+      )}
+
+      <div className="space-y-3">
+        {paginated.map(tender => (
+          <button
+            key={tender.id}
+            onClick={() => void openDetail(tender)}
+            className="card w-full text-left p-4 hover:bg-slate-50 transition-colors"
+          >
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="font-mono text-xs text-slate-500">{tender.referenceNumber}</span>
+              <StatusChip color={AMBER} bg={AMBER_SOFT}>Open</StatusChip>
+            </div>
+            <p className="font-bold text-slate-900 mb-1">{tender.name}</p>
+            <p className="text-xs text-slate-500">
+              {tender.eoiDeadline ? `Deadline ${new Date(tender.eoiDeadline).toLocaleDateString()}` : "No deadline set"}
+            </p>
+          </button>
+        ))}
+      </div>
+
+      {totalPages > 1 && (
+        <div className="flex items-center justify-between mt-4">
+          <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1} className="btn-secondary text-sm py-1.5 disabled:opacity-50">Previous</button>
+          <span className="text-sm text-slate-500">Page {page} of {totalPages}</span>
+          <button onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page === totalPages} className="btn-secondary text-sm py-1.5 disabled:opacity-50">Next</button>
+        </div>
+      )}
+    </FormKitShell>
+  );
+};
+
 const VendorApplications = ({ currentUser, onOpenBid }: { currentUser: User | null; onOpenBid: (bid: TenderBid) => void }) => {
   const [activeTab, setActiveTab] = useState<"overview" | "prequal" | "bids" | "blacklisting" | "installations">("overview");
   const [prequals, setPrequals] = useState<VendorPrequalification[]>([]);
@@ -9997,7 +12259,7 @@ const VendorApplications = ({ currentUser, onOpenBid }: { currentUser: User | nu
                     <div className="w-9 h-9 rounded-xl bg-blue-50 flex items-center justify-center text-blue-600"><FileSearch size={18} /></div>
                     <div>
                       <p className="text-sm font-bold text-slate-900">Tender Application - {bid.tender_name || bid.tender_reference || bid.tender}</p>
-                      <p className="text-xs text-slate-500">{bid.vendor_name} • {bid.stage_key === "site_specific" ? "Stage 2" : "Stage 1"}</p>
+                      <p className="text-xs text-slate-500">{bid.vendor_name} • {bid.stage_key === "financial" ? "Stage 3: Financial" : bid.stage_key === "technical" || bid.stage_key === "combined" ? "Stage 2: Technical" : "Stage 1: EOI"}</p>
                     </div>
                   </div>
                   <span className={`inline-flex rounded-full px-3 py-1 text-xs font-bold ${bidStatusTone(bid)}`}>{bid.status}</span>
@@ -10058,6 +12320,21 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
   const [challengeGrounds, setChallengeGrounds] = useState("");
   const [challengeSubmitting, setChallengeSubmitting] = useState(false);
   const [challengedBidIds, setChallengedBidIds] = useState<Set<string>>(new Set());
+  const [howItWorksOpen, setHowItWorksOpen] = useState(() => {
+    try {
+      return localStorage.getItem("rbf_vendor_bids_how_it_works_dismissed") !== "1";
+    } catch {
+      return true;
+    }
+  });
+  const dismissHowItWorks = () => {
+    setHowItWorksOpen(false);
+    try {
+      localStorage.setItem("rbf_vendor_bids_how_it_works_dismissed", "1");
+    } catch {
+      // ignore - purely a per-browser convenience
+    }
+  };
 
   const loadBids = React.useCallback(async () => {
     setLoading(true);
@@ -10092,19 +12369,151 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
   const getBidActivityTimestamp = (bid: TenderBid) =>
     bid.updated_at || bid.submitted_at || bid.reviewed_at || bid.created_at || "";
 
-  const getBidStatusColor = (bid: TenderBid) =>
-    bid.status === BidStatus.SUBMITTED ? "bg-blue-100 text-blue-700" :
-    bid.status === BidStatus.UNDER_REVIEW ? "bg-amber-100 text-amber-700" :
-    bid.status === BidStatus.REVISION_REQUIRED ? "bg-orange-100 text-orange-700" :
-    bid.status === BidStatus.ACCEPTED ? "bg-emerald-100 text-emerald-700" :
-    bid.status === BidStatus.REJECTED ? "bg-rose-100 text-rose-700" :
-    "bg-slate-100 text-slate-700";
+  // The bid lifecycle is a simple, linear pipeline: EOI -> Technical -> Financial (or,
+  // for "combined workflow" tenders, EOI -> Technical & Financial together) -> Award.
+  // Everything below computes exactly where a vendor's bid sits on that pipeline so the
+  // UI can say, in plain language, "here's what's happened" and "here's what to do next"
+  // - instead of the old hardcoded "Stage 1 / Stage 2" labels, which predate the EOI/
+  // Technical/Financial split and no longer match what a bid is actually doing.
+  type StageKey = "eoi" | "technical" | "financial" | "combined";
+  type StepStatus = "completed" | "in_review" | "revision_required" | "action_required" | "locked" | "failed";
+  interface StageStep { key: StageKey; meta: { name: string; short: string }; status: StepStatus; latest: TenderBid | null; priorRevision: TenderBid | null }
 
-  const getBidProgress = (display: TenderBid, editableDraft: TenderBid | null, latestSubmitted: TenderBid | null) => {
-    const hasStageTwoAccess = Boolean(editableDraft?.stage_two_unlocked || display.stage_two_ready || display.stage_key === "site_specific");
-    const stageOnePassed = hasStageTwoAccess;
-    const stageTwoTechnicallyScored = display.stage_key === "site_specific" && display.evaluation_status === "technical_scored";
-    const stageTwoEvaluated = display.stage_key === "site_specific" && display.evaluation_status === "evaluated";
+  const STAGE_META: Record<StageKey, { name: string; short: string }> = {
+    eoi: { name: "Expression of Interest (EOI)", short: "EOI" },
+    technical: { name: "Technical Proposal", short: "Technical" },
+    financial: { name: "Financial Proposal", short: "Financial" },
+    combined: { name: "Technical & Financial Proposal", short: "Technical & Financial" },
+  };
+
+  // bid_stage is the modern field; very old bids predating it only set stage_key.
+  const normalizeStage = (v: TenderBid): StageKey =>
+    v.bid_stage || (v.stage_key === "site_specific" ? "combined" : "eoi");
+
+  const getStageJourney = (versions: TenderBid[]) => {
+    // versions is sorted desc by version_number, so index 0 of a per-stage filter is that
+    // stage's newest record. A fresh Draft the backend auto-provisions right after a
+    // Revision Required decision leaves the reviewer's feedback on the OLDER record at
+    // the same stage - stageVersionsFor lets us look one record back to carry it forward.
+    const stageVersionsFor = (key: StageKey) => versions.filter(v => normalizeStage(v) === key);
+    const latestForStage = (key: StageKey) => stageVersionsFor(key)[0] || null;
+    const stageAccepted = (key: StageKey) =>
+      versions.some(v => normalizeStage(v) === key && (v.status === BidStatus.ACCEPTED || v.status === BidStatus.AWARDED));
+
+    const declaredWorkflow = versions.find(v => v.tender_procurement_workflow)?.tender_procurement_workflow;
+    // A tender linked to an EOI Invite tender already ran its EOI stage over there — the
+    // vendor never has (or needs) an eoi-stage bid record on this tender at all, so it
+    // must be treated the same as a genuine single-stage Combined tender.
+    const skipsEoiStage = versions.some(v => v.tender_skips_eoi_stage);
+    const hasSequentialEvidence = versions.some(v => normalizeStage(v) === "technical" || normalizeStage(v) === "financial" || v.technical_stage_unlocked || v.financial_stage_unlocked);
+    const hasCombinedEvidence = versions.some(v => normalizeStage(v) === "combined" || v.stage_two_unlocked);
+    const declaredEoiCombined = declaredWorkflow === "eoi_combined";
+    const declaredSingleStageCombined = declaredWorkflow === "combined" && !versions.some(v => normalizeStage(v) === "eoi");
+    const workflow: "sequential" | "combined" | "eoi_combined" | "single_combined" =
+      skipsEoiStage ? "single_combined"
+      : declaredWorkflow === "eoi_combined" ? "eoi_combined"
+      : declaredWorkflow === "combined" && declaredSingleStageCombined ? "single_combined"
+      : declaredWorkflow || (hasCombinedEvidence && !hasSequentialEvidence ? "combined" : "sequential");
+    const keys: StageKey[] =
+      workflow === "eoi_combined" ? ["eoi", "combined"]
+      : workflow === "single_combined" ? ["combined"]
+      : workflow === "combined" ? ["eoi", "combined"]
+      : ["eoi", "technical", "financial"];
+
+    const stageUnlocked = (key: StageKey): boolean => {
+      if (key === "eoi") return true;
+      if (key === "technical") return stageAccepted("eoi") || versions.some(v => v.technical_stage_unlocked || v.stage_two_unlocked) || Boolean(latestForStage("technical"));
+      if (key === "financial") return stageAccepted("technical") || versions.some(v => v.financial_stage_unlocked) || Boolean(latestForStage("financial"));
+      if (workflow === "single_combined") return true;
+      return stageAccepted("eoi") || versions.some(v => v.stage_two_unlocked || v.technical_stage_unlocked) || Boolean(latestForStage("combined"));
+    };
+
+    // Technical (and Combined, once financial pricing unseals on it) has no explicit
+    // "accept" action the way EOI does - passing the threshold only ever shows up as
+    // financial_stage_unlocked flipping true / a Financial draft appearing, while the
+    // Technical bid's own status field stays "Under Review" forever. Without this, a
+    // passed Technical step would never show as completed even after Financial opens.
+    const nextStageStarted = (key: StageKey): boolean => {
+      if (key === "technical") return versions.some(v => v.financial_stage_unlocked) || Boolean(latestForStage("financial"));
+      if (key === "combined") return versions.some(v => v.financial_stage_unlocked && v.financial_sealed === false);
+      return false;
+    };
+
+    const steps: StageStep[] = keys.map((key) => {
+      const meta = STAGE_META[key];
+      const stageVersions = stageVersionsFor(key);
+      const latest = stageVersions[0] || null;
+      let status: StepStatus;
+      if (!latest) {
+        status = stageUnlocked(key) ? "action_required" : "locked";
+      } else if (latest.status === BidStatus.ACCEPTED || latest.status === BidStatus.AWARDED || nextStageStarted(key)) {
+        status = "completed";
+      } else if (latest.status === BidStatus.REJECTED) {
+        status = "failed";
+      } else if (latest.status === BidStatus.REVISION_REQUIRED) {
+        status = "revision_required";
+      } else if (latest.status === BidStatus.DRAFT) {
+        status = "action_required";
+      } else {
+        status = "in_review"; // Submitted / Under Review
+      }
+      const priorRevision = (latest?.status === BidStatus.DRAFT
+        ? stageVersions.find(v => v.status === BidStatus.REVISION_REQUIRED)
+        : null) || null;
+      return { key, meta, status, latest, priorRevision };
+    });
+
+    // The "active" step is the leftmost one not yet accepted - i.e. exactly what the
+    // vendor should be looking at right now. null means every declared step was accepted.
+    const activeStep = steps.find(s => s.status !== "completed") || null;
+    return { workflow, steps, activeStep };
+  };
+
+  const describeActiveStep = (step: StageStep, isFirstStep: boolean): { primary: string; secondary: string } => {
+    const { meta } = step;
+    switch (step.status) {
+      case "action_required":
+        if (step.priorRevision) {
+          return {
+            primary: `Continue your revised ${meta.short}`,
+            secondary: step.priorRevision.rejection_reason
+              ? `The review team asked for changes: "${step.priorRevision.rejection_reason}" - address this and resubmit your ${meta.name}.`
+              : `The review team asked for changes to your ${meta.name}. Address their feedback and resubmit.`,
+          };
+        }
+        return {
+          primary: `Continue your ${meta.short}`,
+          secondary: isFirstStep
+            ? `This is the first step. Complete and submit your ${meta.name} to move forward.`
+            : `Your previous submission was accepted - you can now complete and submit your ${meta.name}.`,
+        };
+      case "revision_required":
+        return {
+          primary: `Changes requested on your ${meta.short}`,
+          secondary: `The review team asked for changes before this can move forward. Open your bid, address the feedback, and resubmit.`,
+        };
+      case "in_review":
+        return {
+          primary: `Your ${meta.short} is under review`,
+          secondary: `The review team is checking your submission. We'll notify you as soon as there's a decision - no action is needed from you right now.`,
+        };
+      case "failed":
+        return {
+          primary: `${meta.short} was not successful`,
+          secondary: `This bid did not clear this step. Check the bid details below for the outcome.`,
+        };
+      case "locked":
+        return {
+          primary: `${meta.short} - not started yet`,
+          secondary: `This step unlocks automatically once your earlier submission is reviewed and accepted.`,
+        };
+      default:
+        return { primary: meta.name, secondary: "" };
+    }
+  };
+
+  const getBidProgress = (display: TenderBid, editableDraft: TenderBid | null, versions: TenderBid[]) => {
+    const { workflow, steps, activeStep } = getStageJourney(versions);
     const intentToAwardIssued = Boolean(
       display.tender_intent_to_award_at
       && (
@@ -10117,161 +12526,94 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
       && display.tender_awarded_vendor_id === display.vendor_id
     );
     const finalAccepted = display.status === BidStatus.ACCEPTED || finalAwarded;
-    const rejected = display.status === BidStatus.REJECTED;
-    const isStageTwoContext = display.stage_key === "site_specific" || display.stage?.includes("Stage 2") || Boolean(editableDraft?.stage_two_unlocked);
+    const allStepsCleared = activeStep === null;
 
-    const stageOneStatus =
-      rejected && !stageOnePassed ? "failed" :
-      display.status === BidStatus.REVISION_REQUIRED ? "revision_required" :
-      stageOnePassed ? "passed" :
-      latestSubmitted?.status === BidStatus.SUBMITTED ? "in_review" :
-      display.status === BidStatus.DRAFT ? "draft" :
-      "pending";
-
-    const stageTwoStatus =
-      rejected && isStageTwoContext ? "failed" :
-      finalAccepted ? "passed" :
-      stageTwoEvaluated ? "evaluated" :
-      stageTwoTechnicallyScored ? "technical_scored" :
-      hasStageTwoAccess ? "ready" :
-      isStageTwoContext && latestSubmitted?.status === BidStatus.SUBMITTED ? "in_review" :
-      stageOnePassed ? "available" :
-      "locked";
+    const { primary, secondary } = activeStep
+      ? describeActiveStep(activeStep, steps[0]?.key === activeStep.key)
+      : { primary: "", secondary: "" };
 
     const primaryMessage =
       finalAwarded ? "Tender awarded" :
-      intentToAwardIssued ? "Intent to Award issued" :
-      finalAccepted ? "Final evaluation passed" :
-      stageTwoEvaluated ? "Stage 2 fully evaluated" :
-      stageTwoTechnicallyScored ? "Stage 2 technical evaluation completed" :
-      editableDraft?.stage_two_unlocked ? "Stage 1 passed. Stage 2 is unlocked" :
-      stageOnePassed ? "Stage 1 passed" :
-      display.status === BidStatus.REVISION_REQUIRED ? "Revision required before shortlist" :
-      rejected ? "This bid did not pass review" :
-      latestSubmitted?.status === BidStatus.SUBMITTED ? "Submission under review" :
-      display.status === BidStatus.DRAFT ? "Draft in progress" :
-      "Bid in progress";
+      intentToAwardIssued ? "You're the recommended winner" :
+      finalAccepted || allStepsCleared ? "Final evaluation passed" :
+      primary;
 
     const secondaryMessage =
       finalAwarded ? "Your tender has been awarded. Open Contracting to download and sign the Performance-Based Agreement." :
-      intentToAwardIssued ? "You are currently the recommended winner. Contracting will unlock after the final award is confirmed." :
-      finalAccepted ? "Your bid has passed the final evaluation for this tender." :
-      stageTwoEvaluated ? "Both technical and financial evaluations have been completed for your Stage 2 submission." :
-      stageTwoTechnicallyScored ? "Technical evaluation is complete. Financial evaluation is the next review step." :
-      editableDraft?.stage_two_unlocked ? "You can now continue with the detailed submission requirements." :
-      stageOnePassed && !isStageTwoContext ? "You have been shortlisted in Stage 1 and can now move forward with Stage 2." :
-      display.status === BidStatus.REVISION_REQUIRED ? "The review team requested changes. Open the bid, apply the feedback, and resubmit Stage 1." :
-      isStageTwoContext && latestSubmitted?.status === BidStatus.SUBMITTED ? "Your detailed Stage 2 submission is awaiting final review." :
-      latestSubmitted?.status === BidStatus.SUBMITTED ? "The review team is assessing this submission before the next step unlocks." :
-      rejected ? "Check the bid details for the outcome and any rejection reason." :
-      "Complete the remaining bid information before submission.";
+      intentToAwardIssued ? "The RBF has issued an Intent to Award in your favor. Contracting will unlock once the award is finalized." :
+      finalAccepted || allStepsCleared ? "Your bid has passed every evaluation step for this tender. Watch for the award announcement." :
+      secondary;
 
-    const canProceed = Boolean(editableDraft?.stage_two_unlocked || display.status === BidStatus.DRAFT) && !(display.stage_key === "site_specific" && latestSubmitted?.status === BidStatus.SUBMITTED);
-    const proceedAllowed = canProceed || display.status === BidStatus.REVISION_REQUIRED || display.status === BidStatus.SUBMITTED;
+    // There's something to do whenever there's an editable draft to continue, or the
+    // review team asked for a resubmission, or the vendor may still update a submission
+    // that hasn't been locked in for review yet.
+    const canProceed = Boolean(editableDraft) || display.status === BidStatus.REVISION_REQUIRED || display.status === BidStatus.SUBMITTED;
     const proceedLabel =
-      editableDraft?.stage_two_unlocked ? "Proceed to Stage 2" :
-      display.status === BidStatus.REVISION_REQUIRED ? "Revise Stage 1" :
+      editableDraft ? `Continue ${STAGE_META[normalizeStage(editableDraft)].short}` :
+      display.status === BidStatus.REVISION_REQUIRED ? "Revise & Resubmit" :
       display.status === BidStatus.SUBMITTED ? "Resubmit" :
-      display.stage_two_unlocked ? "Continue Stage 2" :
-      display.status === BidStatus.DRAFT ? "Continue Draft" :
       null;
 
     return {
-      stageOnePassed,
-      stageOneStatus,
-      stageTwoStatus,
-      stageTwoTechnicallyScored,
-      stageTwoEvaluated,
+      workflow,
+      steps,
+      activeStep,
+      allStepsCleared,
       finalAccepted,
       finalAwarded,
       intentToAwardIssued,
-      rejected,
+      rejected: activeStep?.status === "failed",
       primaryMessage,
       secondaryMessage,
-      canProceed: proceedAllowed,
+      canProceed,
       proceedLabel,
     };
   };
 
-  const getVendorVisibleStatus = (display: TenderBid, editableDraft: TenderBid | null, latestSubmitted: TenderBid | null) => {
-    const progress = getBidProgress(display, editableDraft, latestSubmitted);
+  const getVendorVisibleStatus = (display: TenderBid, progress: ReturnType<typeof getBidProgress>) => {
     if (progress.finalAwarded) {
       return { label: "Awarded - Contract Ready", color: "bg-emerald-100 text-emerald-700" };
     }
     if (progress.intentToAwardIssued) {
       return { label: "Intent to Award Issued", color: "bg-blue-100 text-blue-700" };
     }
-    if (display.stage_key === "site_specific" && display.evaluation_status === "evaluated") {
-      return { label: "Stage 2 Evaluated", color: "bg-emerald-100 text-emerald-700" };
-    }
-    if (display.stage_key === "site_specific" && display.evaluation_status === "technical_scored") {
-      return { label: "Stage 2 Technical Score Saved", color: "bg-blue-100 text-blue-700" };
-    }
-    if (progress.finalAccepted) {
+    if (progress.finalAccepted || progress.allStepsCleared) {
       return { label: "Final Evaluation Passed", color: "bg-emerald-100 text-emerald-700" };
     }
-    if (display.status === BidStatus.REVISION_REQUIRED) {
-      return { label: "Revision Required", color: "bg-orange-100 text-orange-700" };
+    const step = progress.activeStep;
+    if (!step) return { label: display.status, color: "bg-slate-100 text-slate-700" };
+    switch (step.status) {
+      case "action_required": return { label: `${step.meta.short} - Action Needed`, color: "bg-amber-100 text-amber-700" };
+      case "revision_required": return { label: "Revision Required", color: "bg-orange-100 text-orange-700" };
+      case "in_review": return { label: `${step.meta.short} Under Review`, color: "bg-blue-100 text-blue-700" };
+      case "failed": return { label: "Not Successful", color: "bg-rose-100 text-rose-700" };
+      case "locked": return { label: `${step.meta.short} Locked`, color: "bg-slate-100 text-slate-700" };
+      default: return { label: display.status, color: "bg-slate-100 text-slate-700" };
     }
-    if (progress.rejected && !progress.stageOnePassed) {
-      return { label: "Not Shortlisted", color: "bg-rose-100 text-rose-700" };
-    }
-    if (display.stage_key !== "site_specific" && (editableDraft?.stage_two_unlocked || progress.stageOnePassed)) {
-      return { label: "Shortlisted - Submit Stage 2", color: "bg-emerald-100 text-emerald-700" };
-    }
-    if (display.status === BidStatus.DRAFT) {
-      return { label: "Draft", color: "bg-slate-100 text-slate-700" };
-    }
-    if (latestSubmitted?.status === BidStatus.SUBMITTED || display.status === BidStatus.UNDER_REVIEW) {
-      return {
-        label: progress.stageOnePassed || display.stage_key === "site_specific" ? "Stage 2 Submitted - Under Evaluation" : "Stage 1 Submitted - Awaiting Review",
-        color: "bg-amber-100 text-amber-700",
-      };
-    }
-    return { label: display.status, color: getBidStatusColor(display) };
   };
 
-  const getStageTwoBadge = (stageTwoStatus: string) => {
-    if (stageTwoStatus === "passed") return { label: "Passed", color: "bg-emerald-100 text-emerald-700" };
-    if (stageTwoStatus === "evaluated") return { label: "Evaluated", color: "bg-emerald-100 text-emerald-700" };
-    if (stageTwoStatus === "technical_scored") return { label: "Technical Scored", color: "bg-blue-100 text-blue-700" };
-    if (stageTwoStatus === "ready" || stageTwoStatus === "available") return { label: stageTwoStatus === "ready" ? "Ready" : "Available", color: "bg-blue-100 text-blue-700" };
-    if (stageTwoStatus === "in_review") return { label: "In Review", color: "bg-amber-100 text-amber-700" };
-    if (stageTwoStatus === "failed") return { label: "Failed", color: "bg-rose-100 text-rose-700" };
-    return { label: "Locked", color: "bg-slate-100 text-slate-700" };
-  };
-
-  const getBidOperationalState = (display: TenderBid, editableDraft: TenderBid | null, latestSubmitted: TenderBid | null) => {
-    if (display.status === BidStatus.REJECTED) return "rejected";
-    if (display.stage_key === "site_specific" && display.evaluation_status === "evaluated") return "completed";
-    if (display.status === BidStatus.ACCEPTED || display.status === BidStatus.AWARDED || (display.tender_status === TenderStatus.AWARDED && display.tender_awarded_vendor_id === display.vendor_id)) return "completed";
-    if (editableDraft?.stage_two_unlocked || display.status === BidStatus.DRAFT || display.status === BidStatus.REVISION_REQUIRED) return "action_required";
-    if (latestSubmitted?.status === BidStatus.SUBMITTED || display.status === BidStatus.UNDER_REVIEW) return "under_review";
+  const getBidOperationalState = (progress: ReturnType<typeof getBidProgress>) => {
+    if (progress.finalAwarded || progress.finalAccepted || progress.allStepsCleared) return "completed";
+    const step = progress.activeStep;
+    if (!step) return "completed";
+    if (step.status === "failed") return "rejected";
+    if (step.status === "action_required" || step.status === "revision_required") return "action_required";
+    if (step.status === "in_review") return "under_review";
     return "all";
   };
 
-  const getBidActionLabel = (display: TenderBid, editableDraft: TenderBid | null) => {
-    if (editableDraft?.stage_two_unlocked || display.status === BidStatus.DRAFT) return "Continue";
-    if (display.status === BidStatus.SUBMITTED) return "Resubmit";
-    if (display.status === BidStatus.REVISION_REQUIRED) return "Resubmit";
-    return "View";
-  };
-
-  const pickLatestByVersion = (items: TenderBid[]) =>
-    items.slice().sort((a, b) => (b.version_number || 0) - (a.version_number || 0))[0] || null;
-
   const resolveVendorBidVersions = (items: TenderBid[]) => {
     const sorted = items.slice().sort((a, b) => (b.version_number || 0) - (a.version_number || 0));
-    const latestStageTwoSubmitted = pickLatestByVersion(
-      sorted.filter((item) => item.stage_key === "site_specific" && item.status !== BidStatus.DRAFT)
-    );
-    const stageTwoDraft = latestStageTwoSubmitted
-      ? null
-      : (sorted.find((item) => item.stage_key === "site_specific" && item.status === BidStatus.DRAFT) || null);
-    const stageOneDraft = sorted.find((item) => item.stage_key !== "site_specific" && item.status === BidStatus.DRAFT) || null;
-    const latestSubmitted = latestStageTwoSubmitted || sorted.find((item) => item.status !== BidStatus.DRAFT) || null;
-    const editableDraft = stageTwoDraft || (!latestSubmitted ? stageOneDraft : null);
-    const display = editableDraft || latestSubmitted || stageOneDraft || sorted[0] || null;
+    // Version numbers increase monotonically across a bid's whole lifecycle (EOI ->
+    // Technical -> Financial/Combined — see _ensure_stage_draft on the backend), so the
+    // highest-version record is always the vendor's current position: if it's still a
+    // draft, that's the item needing action; otherwise it's the latest decision made on
+    // this tender. (This replaces an older "stage_key === site_specific" check that only
+    // matched a legacy stage value the backend no longer produces, which caused a fresh
+    // Technical/Financial draft to be hidden behind a stale, already-decided EOI record.)
+    const editableDraft = sorted[0]?.status === BidStatus.DRAFT ? sorted[0] : null;
+    const latestSubmitted = sorted.find((item) => item.status !== BidStatus.DRAFT) || null;
+    const display = editableDraft || latestSubmitted || sorted[0] || null;
     return {
       sorted,
       editableDraft,
@@ -10293,8 +12635,9 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
       if (!display) {
         return null;
       }
-      const operationalState = getBidOperationalState(display, editableDraft, latestSubmitted);
-      return { tenderId, latest: sorted[0], latestSubmitted, display, editableDraft, operationalState, versions: sorted };
+      const progress = getBidProgress(display, editableDraft, sorted);
+      const operationalState = getBidOperationalState(progress);
+      return { tenderId, latest: sorted[0], latestSubmitted, display, editableDraft, operationalState, progress, versions: sorted };
     }).filter((group): group is NonNullable<typeof group> => Boolean(group))
       .sort((a, b) => getBidActivityTimestamp(b.display).localeCompare(getBidActivityTimestamp(a.display)));
   }, [bids]);
@@ -10308,7 +12651,7 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
 
   const filteredGrouped = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
-    return grouped.filter(({ display, latestSubmitted, operationalState, versions }) => {
+    return grouped.filter(({ display, latestSubmitted, operationalState, versions, progress }) => {
       const matchesStatus = statusFilter === "all" || operationalState === statusFilter;
       if (!matchesStatus) return false;
       if (!query) return true;
@@ -10317,6 +12660,7 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
         display.tender_reference,
         display.stage,
         display.stage_badge,
+        progress.activeStep?.meta.short,
         display.status,
         latestSubmitted?.status,
         versions.map(version => version.version_number).join(" "),
@@ -10324,6 +12668,36 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
       return haystack.includes(query);
     });
   }, [grouped, searchQuery, statusFilter]);
+
+  const StepTracker = ({ steps }: { steps: StageStep[] }) => (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {steps.map((step, idx) => {
+        const circleClass =
+          step.status === "completed" ? "bg-emerald-600 text-white" :
+          step.status === "in_review" ? "bg-blue-600 text-white" :
+          step.status === "revision_required" ? "bg-orange-500 text-white" :
+          step.status === "failed" ? "bg-rose-600 text-white" :
+          step.status === "action_required" ? "bg-slate-900 text-white" :
+          "bg-slate-200 text-slate-500";
+        const labelClass =
+          step.status === "locked" ? "text-slate-400" :
+          step.status === "failed" ? "text-rose-700" :
+          step.status === "revision_required" ? "text-orange-700" :
+          "text-slate-700";
+        return (
+          <React.Fragment key={step.key}>
+            {idx > 0 && <div className={`h-0.5 w-4 rounded-full sm:w-8 ${step.status !== "locked" || steps[idx - 1].status === "completed" ? "bg-emerald-200" : "bg-slate-200"}`} />}
+            <div className="flex items-center gap-1.5" title={step.meta.name}>
+              <div className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-bold ${circleClass}`}>
+                {step.status === "completed" ? <Check size={12} /> : step.status === "failed" ? <X size={12} /> : idx + 1}
+              </div>
+              <span className={`text-[11px] font-semibold ${labelClass}`}>{step.meta.short}</span>
+            </div>
+          </React.Fragment>
+        );
+      })}
+    </div>
+  );
 
   const openViewBid = async (bid: TenderBid) => {
     setViewBid(bid);
@@ -10348,10 +12722,57 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-slate-900">My Bids</h1>
-        <p className="text-slate-500">Track live bid status, Stage 2 readiness, and next actions across every tender you have entered</p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-900">My Bids</h1>
+          <p className="text-slate-500">See exactly where every bid stands, and what to do next</p>
+        </div>
+        {!howItWorksOpen && (
+          <button
+            onClick={() => setHowItWorksOpen(true)}
+            className="btn-secondary shrink-0 text-xs"
+          >
+            <HelpCircle size={14} className="mr-1.5 inline" />How this works
+          </button>
+        )}
       </div>
+
+      {howItWorksOpen && (
+        <div className="card overflow-hidden border border-emerald-100 bg-emerald-50/40">
+          <div className="flex items-start justify-between gap-4 p-5">
+            <div className="flex items-start gap-3">
+              <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-emerald-600 text-white">
+                <Info size={16} />
+              </span>
+              <div>
+                <p className="text-sm font-bold text-slate-900">How the bidding process works</p>
+                <p className="mt-1 text-xs text-slate-600">Every tender follows the same path. Most bids move through it one step at a time — nothing here needs guessing.</p>
+              </div>
+            </div>
+            <button onClick={dismissHowItWorks} className="shrink-0 rounded-lg p-1.5 text-slate-400 hover:bg-white/60 hover:text-slate-600">
+              <X size={16} />
+            </button>
+          </div>
+          <div className="grid grid-cols-1 gap-3 border-t border-emerald-100 bg-white px-5 py-4 sm:grid-cols-2 lg:grid-cols-4">
+            {[
+              { step: "1", title: "Expression of Interest (EOI)", body: "A short application to confirm you're an eligible bidder. No pricing yet." },
+              { step: "2", title: "Technical Proposal", body: "If shortlisted, submit your detailed technical design — technology, sites, and your delivery plan." },
+              { step: "3", title: "Financial Proposal", body: "If your technical proposal clears review, submit your final, binding price." },
+              { step: "4", title: "Award", body: "The best-value qualifying bid receives an Intent to Award, then a signed contract." },
+            ].map((item) => (
+              <div key={item.step} className="rounded-xl border border-slate-100 bg-slate-50 p-3.5">
+                <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-slate-900 text-[11px] font-bold text-white">{item.step}</span>
+                <p className="mt-2 text-xs font-bold text-slate-900">{item.title}</p>
+                <p className="mt-1 text-[11px] leading-snug text-slate-600">{item.body}</p>
+              </div>
+            ))}
+          </div>
+          <div className="flex items-start gap-2.5 border-t border-emerald-100 bg-white px-5 py-3 text-xs text-slate-600">
+            <AlertCircle size={14} className="mt-0.5 shrink-0 text-slate-400" />
+            <span>Some tenders combine Technical &amp; Financial into a single step submitted together — if that's the case for a tender, you'll see it labeled "Technical &amp; Financial" instead of two separate steps. Each step only unlocks after the review team accepts the one before it.</span>
+          </div>
+        </div>
+      )}
 
       {summary.actionRequired > 0 && (
         <div className="flex items-start gap-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3">
@@ -10360,10 +12781,10 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
           </span>
           <div>
             <p className="text-sm font-bold text-amber-800">
-              {summary.actionRequired} bid{summary.actionRequired !== 1 ? "s" : ""} require your attention
+              {summary.actionRequired} bid{summary.actionRequired !== 1 ? "s" : ""} need something from you
             </p>
             <p className="mt-0.5 text-xs text-amber-700">
-              These bids are highlighted below — they have revision requests or an unlocked Stage 2 submission waiting for you.
+              These are highlighted below — each one has a draft to finish, a revision to make, or a newly unlocked step waiting.
             </p>
           </div>
         </div>
@@ -10378,7 +12799,7 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
         <div className="card p-5 border border-amber-100 bg-amber-50/60">
           <p className="text-[11px] font-bold uppercase tracking-widest text-amber-700">Needs Action</p>
           <p className="mt-3 text-3xl font-bold text-slate-900">{summary.actionRequired}</p>
-          <p className="mt-2 text-xs text-amber-800">Drafts and unlocked Stage 2 submissions ready to continue</p>
+          <p className="mt-2 text-xs text-amber-800">Drafts, revisions, or a newly unlocked step ready to continue</p>
         </div>
         <div className="card p-5 border border-blue-100 bg-blue-50/60">
           <p className="text-[11px] font-bold uppercase tracking-widest text-blue-700">Under Review</p>
@@ -10443,12 +12864,8 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
               <button onClick={() => { setSearchQuery(""); setStatusFilter("all"); }} className="btn-secondary mt-4 text-sm">Clear filters</button>
             </div>
           )}
-          {!loading && filteredGrouped.map(({ latest, latestSubmitted, display, editableDraft, operationalState, versions }) => {
-            const progress = getBidProgress(display, editableDraft, latestSubmitted);
-            const visibleStatus = getVendorVisibleStatus(display, editableDraft, latestSubmitted);
-            const stageTwoBadge = getStageTwoBadge(progress.stageTwoStatus);
-            const isStageTwo = display.stage_key === "site_specific";
-            const showResubmit = display.status === BidStatus.SUBMITTED || display.status === BidStatus.REVISION_REQUIRED || Boolean(editableDraft?.stage_two_unlocked);
+          {!loading && filteredGrouped.map(({ latest, display, editableDraft, operationalState, progress }) => {
+            const visibleStatus = getVendorVisibleStatus(display, progress);
             return (
               <div key={latest.id} className={`rounded-2xl shadow-sm hover:shadow-md transition-shadow border-l-4 ${
                 operationalState === "action_required"
@@ -10459,16 +12876,13 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
                   <div className="flex items-start justify-between gap-4">
                     <div className="flex flex-wrap items-center gap-2">
                       <span className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-bold ${visibleStatus.color}`}>{visibleStatus.label}</span>
-                      <span className="inline-flex items-center rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-medium text-slate-600">
-                        {(isStageTwo ? "Stage 2" : display.stage_badge || display.stage || "Stage 1")}
-                      </span>
                       <span className="text-xs text-slate-400">v{latest.version_number}</span>
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
-                      <button onClick={() => openViewBid(display)} className="btn-secondary py-1.5 px-3 text-xs">View</button>
-                      {progress.canProceed && (
+                      <button onClick={() => openViewBid(display)} className="btn-secondary py-1.5 px-3 text-xs">View Details</button>
+                      {progress.canProceed && progress.proceedLabel && (
                         <button onClick={() => onOpenBid(display)} className="btn-primary py-1.5 px-3 text-xs">
-                          {progress.proceedLabel || getBidActionLabel(display, editableDraft)}
+                          {progress.proceedLabel}
                         </button>
                       )}
                     </div>
@@ -10479,65 +12893,20 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
                       {display.tender_name || `Tender ${display.tender_reference || display.tender}`}
                     </p>
                     <p className="mt-0.5 text-xs text-slate-500">
-                      Ref: {display.tender_reference || "N/A"} • {display.bid_amount != null ? `Amount: M ${Number(display.bid_amount).toLocaleString()}` : "Amount: N/A"}
+                      Ref: {display.tender_reference || "N/A"} • {summarizeLotOffers(display) ?? (display.bid_amount != null ? `Amount: ${display.bid_currency || "LSL"} ${Number(display.bid_amount).toLocaleString()}` : "Amount: N/A")}
                     </p>
                   </div>
 
-                  <div className="mt-4 flex items-center gap-4">
-                    <div className="flex items-center gap-2">
-                      <div className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 ${
-                        progress.stageOneStatus === "passed" ? "bg-emerald-50" :
-                        progress.stageOneStatus === "in_review" ? "bg-amber-50" :
-                        progress.stageOneStatus === "failed" ? "bg-rose-50" :
-                        progress.stageOneStatus === "draft" ? "bg-blue-50" :
-                        "bg-slate-50"
-                      }`}>
-                        <div className={`w-2 h-2 rounded-full ${
-                          progress.stageOneStatus === "passed" ? "bg-emerald-500" :
-                          progress.stageOneStatus === "in_review" ? "bg-amber-500" :
-                          progress.stageOneStatus === "failed" ? "bg-rose-500" :
-                          progress.stageOneStatus === "draft" ? "bg-blue-500" :
-                          "bg-slate-400"
-                        }`} />
-                        <span className={`text-xs font-semibold ${
-                          progress.stageOneStatus === "passed" ? "text-emerald-700" :
-                          progress.stageOneStatus === "in_review" ? "text-amber-700" :
-                          progress.stageOneStatus === "failed" ? "text-rose-700" :
-                          progress.stageOneStatus === "draft" ? "text-blue-700" :
-                          "text-slate-600"
-                        }`}>
-                          Stage 1 {progress.stageOneStatus === "passed" ? "Passed" : progress.stageOneStatus === "in_review" ? "In Review" : progress.stageOneStatus === "failed" ? "Failed" : progress.stageOneStatus === "draft" ? "Draft" : "Pending"}
-                        </span>
-                      </div>
-                      <ChevronRight size={14} className="text-slate-300" />
-                      <div className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 ${
-                        stageTwoBadge.label === "Passed" || stageTwoBadge.label === "Evaluated" ? "bg-emerald-50" :
-                        stageTwoBadge.label === "Technical Scored" || stageTwoBadge.label === "Ready" || stageTwoBadge.label === "Available" ? "bg-blue-50" :
-                        stageTwoBadge.label === "In Review" ? "bg-amber-50" :
-                        stageTwoBadge.label === "Failed" ? "bg-rose-50" :
-                        "bg-slate-50"
-                      }`}>
-                        <div className={`w-2 h-2 rounded-full ${
-                          stageTwoBadge.label === "Passed" || stageTwoBadge.label === "Evaluated" ? "bg-emerald-500" :
-                          stageTwoBadge.label === "Technical Scored" || stageTwoBadge.label === "Ready" || stageTwoBadge.label === "Available" ? "bg-blue-500" :
-                          stageTwoBadge.label === "In Review" ? "bg-amber-500" :
-                          stageTwoBadge.label === "Failed" ? "bg-rose-500" :
-                          "bg-slate-400"
-                        }`} />
-                        <span className={`text-xs font-semibold ${
-                          stageTwoBadge.label === "Passed" || stageTwoBadge.label === "Evaluated" ? "text-emerald-700" :
-                          stageTwoBadge.label === "Technical Scored" || stageTwoBadge.label === "Ready" || stageTwoBadge.label === "Available" ? "text-blue-700" :
-                          stageTwoBadge.label === "In Review" ? "text-amber-700" :
-                          stageTwoBadge.label === "Failed" ? "text-rose-700" :
-                          "text-slate-600"
-                        }`}>
-                          Stage 2 {stageTwoBadge.label}
-                        </span>
-                      </div>
-                    </div>
+                  <div className="mt-4">
+                    <StepTracker steps={progress.steps} />
                   </div>
 
-                  <div className="mt-3 rounded-xl bg-slate-50 border border-slate-100 px-3.5 py-2.5">
+                  <div className={`mt-3 rounded-xl border px-3.5 py-2.5 ${
+                    progress.rejected ? "border-rose-100 bg-rose-50" :
+                    progress.activeStep?.status === "revision_required" ? "border-orange-100 bg-orange-50" :
+                    progress.finalAwarded || progress.finalAccepted || progress.allStepsCleared ? "border-emerald-100 bg-emerald-50" :
+                    "border-slate-100 bg-slate-50"
+                  }`}>
                     <p className="text-sm font-semibold text-slate-900">{progress.primaryMessage}</p>
                     <p className="mt-0.5 text-xs text-slate-600">{progress.secondaryMessage}</p>
                   </div>
@@ -10642,9 +13011,7 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
           (() => {
             const resolvedVersions = resolveVendorBidVersions(viewBidVersions.length ? viewBidVersions : [viewBid]);
             const viewEditableDraft = resolvedVersions.editableDraft;
-            const viewLatestSubmitted = resolvedVersions.latestSubmitted || (viewBid.status !== BidStatus.DRAFT ? viewBid : null);
-            const viewProgress = getBidProgress(viewBid, viewEditableDraft, viewLatestSubmitted);
-            const viewStageTwoBadge = getStageTwoBadge(viewProgress.stageTwoStatus);
+            const viewProgress = getBidProgress(viewBid, viewEditableDraft, resolvedVersions.sorted.length ? resolvedVersions.sorted : [viewBid]);
             return (
           <motion.div
             initial={{ opacity: 0 }}
@@ -10660,301 +13027,333 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
               className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl p-6 space-y-5 max-h-[85vh] overflow-y-auto"
               onClick={(e) => e.stopPropagation()}
             >
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <h2 className="text-xl font-bold text-slate-900">Bid Details</h2>
-                  <p className="text-sm text-slate-500">
-                    {viewBid.tender_name || `Tender ${viewBid.tender_reference || viewBid.tender}`}
-                  </p>
+              <div className="flex items-start justify-between gap-4 border-b border-slate-100 pb-5">
+                <div className="flex items-start gap-3">
+                  <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-slate-900 text-white">
+                    <FileText size={20} />
+                  </div>
+                  <div>
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Bid Submission Record</p>
+                    <h2 className="text-xl font-bold text-slate-900">
+                      {viewBid.tender_name || `Tender ${viewBid.tender_reference || viewBid.tender}`}
+                    </h2>
+                    <p className="text-xs text-slate-500 mt-0.5">Ref: {viewBid.tender_reference || viewBid.tender}</p>
+                  </div>
                 </div>
-                <button onClick={() => setViewBid(null)} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
+                <button onClick={() => setViewBid(null)} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500 shrink-0">
                   <X size={18} />
                 </button>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
                 <div className="card p-4">
-                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Status</p>
+                  <div className="flex items-center gap-1.5">
+                    <ClipboardCheck size={12} className="text-slate-400" />
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Status</p>
+                  </div>
                   <p className="text-base font-bold text-slate-900 mt-2">{viewBid.status}</p>
                   <p className="text-xs text-slate-500 mt-1">Current processing stage</p>
                 </div>
                 <div className="card p-4">
-                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Bid Amount</p>
+                  <div className="flex items-center gap-1.5">
+                    <CreditCard size={12} className="text-slate-400" />
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Bid Amount</p>
+                  </div>
                   <p className="text-base font-bold text-slate-900 mt-2">
-                    {viewBid.bid_amount != null ? `M ${Number(viewBid.bid_amount).toLocaleString()}` : "N/A"}
+                    {summarizeLotOffers(viewBid) ?? (viewBid.bid_amount != null ? `${viewBid.bid_currency || "LSL"} ${Number(viewBid.bid_amount).toLocaleString()}` : "N/A")}
                   </p>
                   <p className="text-xs text-slate-500 mt-1">Total project cost</p>
                 </div>
                 <div className="card p-4">
-                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Subsidy Requested</p>
+                  <div className="flex items-center gap-1.5">
+                    <Award size={12} className="text-slate-400" />
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Subsidy Requested</p>
+                  </div>
                   <p className="text-base font-bold text-slate-900 mt-2">
-                    {viewBid.subsidy_requested != null ? `M ${Number(viewBid.subsidy_requested).toLocaleString()}` : "N/A"}
+                    {viewBid.subsidy_requested != null ? `${viewBid.bid_currency || "LSL"} ${Number(viewBid.subsidy_requested).toLocaleString()}` : "N/A"}
                   </p>
                   <p className="text-xs text-slate-500 mt-1">Requested subsidy</p>
                 </div>
                 <div className="card p-4">
-                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Version</p>
-                  <p className="text-base font-bold text-slate-900 mt-2">{viewBid.version_number}</p>
-                  <p className="text-xs text-slate-500 mt-1">Submission version</p>
-                </div>
-              </div>
-
-              <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
-                <div>
-                  <p className="text-sm font-semibold text-slate-900">Next step</p>
-                  <p className="text-xs text-slate-600">
-                    {viewProgress.secondaryMessage}
-                  </p>
-                </div>
-                {(viewProgress.canProceed || viewBid.status === BidStatus.SUBMITTED) && (
-                  <button onClick={() => onOpenBid(viewBid)} className="btn-primary text-sm">
-                    {viewProgress.proceedLabel || (viewBid.status === BidStatus.DRAFT ? "Continue Editing" : viewBid.status === BidStatus.SUBMITTED ? "Resubmit" : "Open Bid")}
-                  </button>
-                )}
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <div className="rounded-2xl border border-slate-200 bg-white px-4 py-4">
-                  <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Stage Progress</p>
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    <span className={`badge ${viewProgress.stageOnePassed ? "bg-emerald-100 text-emerald-700" : viewProgress.stageOneStatus === "in_review" ? "bg-amber-100 text-amber-700" : viewProgress.stageOneStatus === "failed" ? "bg-rose-100 text-rose-700" : "bg-slate-100 text-slate-700"}`}>
-                      Stage 1 {viewProgress.stageOnePassed ? "Passed" : viewProgress.stageOneStatus === "in_review" ? "In Review" : viewProgress.stageOneStatus === "failed" ? "Failed" : viewProgress.stageOneStatus === "draft" ? "Draft" : "Pending"}
-                    </span>
-                    <span className={`badge ${viewStageTwoBadge.color}`}>
-                      Stage 2 {viewStageTwoBadge.label}
-                    </span>
+                  <div className="flex items-center gap-1.5">
+                    <History size={12} className="text-slate-400" />
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Version</p>
                   </div>
-                  <p className="mt-3 text-sm font-semibold text-slate-900">{viewProgress.primaryMessage}</p>
-                  <p className="mt-1 text-xs text-slate-600">{viewProgress.secondaryMessage}</p>
+                  <p className="text-base font-bold text-slate-900 mt-2">v{viewBid.version_number}</p>
+                  <p className="text-xs text-slate-500 mt-1">{STAGE_META[normalizeStage(viewBid)].short} stage</p>
                 </div>
-                <div className="rounded-2xl border border-slate-200 bg-white px-4 py-4">
-                  <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Proceeding</p>
-                  <p className="mt-3 text-sm font-semibold text-slate-900">
-                    {viewProgress.proceedLabel ? viewProgress.proceedLabel : "No vendor action required right now"}
-                  </p>
-                  <p className="mt-1 text-xs text-slate-600">
-                    {viewProgress.proceedLabel
-                      ? viewBid.status === BidStatus.SUBMITTED
-                        ? "You can resubmit this bid to update your submission."
-                        : viewBid.status === BidStatus.REVISION_REQUIRED
-                          ? "Apply the requested changes and resubmit."
-                          : "You can move this bid forward from here using the action button."
-                      : viewBid.status === BidStatus.ACCEPTED
-                        ? "This bid has already passed the final evaluation."
-                        : viewBid.status === BidStatus.REJECTED
-                          ? "This bid has reached an unsuccessful outcome."
-                          : "The bid is currently waiting for a review decision before the next step becomes available."}
-                  </p>
+              </div>
+
+              <div className="rounded-2xl border border-slate-200 bg-white px-4 py-4">
+                <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Where this bid stands</p>
+                <div className="mt-3">
+                  <StepTracker steps={viewProgress.steps} />
+                </div>
+                <div className={`mt-3 flex flex-col gap-3 rounded-xl border px-3.5 py-3 lg:flex-row lg:items-center lg:justify-between ${
+                  viewProgress.rejected ? "border-rose-100 bg-rose-50" :
+                  viewProgress.activeStep?.status === "revision_required" ? "border-orange-100 bg-orange-50" :
+                  viewProgress.finalAwarded || viewProgress.finalAccepted || viewProgress.allStepsCleared ? "border-emerald-100 bg-emerald-50" :
+                  "border-slate-100 bg-slate-50"
+                }`}>
+                  <div>
+                    <p className="text-sm font-semibold text-slate-900">{viewProgress.primaryMessage}</p>
+                    <p className="mt-0.5 text-xs text-slate-600">{viewProgress.secondaryMessage}</p>
+                  </div>
+                  {viewProgress.canProceed && viewProgress.proceedLabel && (
+                    <button onClick={() => onOpenBid(viewBid)} className="btn-primary shrink-0 text-sm">
+                      {viewProgress.proceedLabel}
+                    </button>
+                  )}
                 </div>
               </div>
 
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                 <div className="space-y-4">
-                  <div className="card p-6 space-y-5">
-                    <div className="space-y-3">
-                      <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Bid Information</h3>
+                  <div className="card p-6">
+                    <div className="flex items-center gap-2 mb-4">
+                      <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-500">
+                        <FileText size={16} />
+                      </div>
+                      <h3 className="text-sm font-bold text-slate-900">Bid Information</h3>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+                      <div>
+                        <p className="text-xs font-bold text-slate-500">Reference</p>
+                        <p className="text-sm font-medium">{viewBid.tender_reference || "N/A"}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs font-bold text-slate-500">Stage</p>
+                        <p className="text-sm font-medium">{STAGE_META[normalizeStage(viewBid)].name}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs font-bold text-slate-500">Submitted</p>
+                        <p className="text-sm font-medium">{viewBid.submitted_at ? new Date(viewBid.submitted_at).toLocaleString() : "Draft"}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs font-bold text-slate-500">Reviewed</p>
+                        <p className="text-sm font-medium">{viewBid.reviewed_at ? new Date(viewBid.reviewed_at).toLocaleString() : "Pending"}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs font-bold text-slate-500">Tech Tier</p>
+                        <p className="text-sm font-medium">{viewBid.tech_tier || viewBid.service_tier || "N/A"}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs font-bold text-slate-500">Energy Target</p>
+                        <p className="text-sm font-medium">{viewBid.energy_target ? `${viewBid.energy_target} kWh/month` : viewBid.energy_target_kwh_month ? `${viewBid.energy_target_kwh_month} kWh/month` : "N/A"}</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {viewBid.system_configuration && (
+                    <div className="card p-6">
+                      <div className="flex items-center gap-2 mb-4">
+                        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-500">
+                          <Settings size={16} />
+                        </div>
+                        <h3 className="text-sm font-bold text-slate-900">System Configuration</h3>
+                      </div>
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
                         <div>
-                          <p className="text-xs font-bold text-slate-500">Reference</p>
-                          <p className="text-sm font-medium">{viewBid.tender_reference || "N/A"}</p>
+                          <p className="text-xs font-bold text-slate-500">Technology Type</p>
+                          <p className="text-sm font-medium">{viewBid.system_configuration?.technology_type || viewBid.technology_type || "N/A"}</p>
                         </div>
                         <div>
-                          <p className="text-xs font-bold text-slate-500">Stage</p>
-                          <p className="text-sm font-medium">{viewBid.stage || "N/A"}</p>
+                          <p className="text-xs font-bold text-slate-500">Co-financing Amount</p>
+                          <p className="text-sm font-medium">{viewBid.system_configuration?.co_financing_amount_lsl ? `M ${Number(viewBid.system_configuration.co_financing_amount_lsl).toLocaleString()}` : viewBid.co_financing_amount ? `M ${Number(viewBid.co_financing_amount).toLocaleString()}` : "N/A"}</p>
                         </div>
                         <div>
-                          <p className="text-xs font-bold text-slate-500">Submitted</p>
-                          <p className="text-sm font-medium">{viewBid.submitted_at ? new Date(viewBid.submitted_at).toLocaleString() : "Draft"}</p>
+                          <p className="text-xs font-bold text-slate-500">Device Brand</p>
+                          <p className="text-sm font-medium">{viewBid.system_configuration?.device_brand || viewBid.device_brand || "N/A"}</p>
                         </div>
                         <div>
-                          <p className="text-xs font-bold text-slate-500">Reviewed</p>
-                          <p className="text-sm font-medium">{viewBid.reviewed_at ? new Date(viewBid.reviewed_at).toLocaleString() : "Pending"}</p>
+                          <p className="text-xs font-bold text-slate-500">Device Model</p>
+                          <p className="text-sm font-medium">{viewBid.system_configuration?.device_model || viewBid.device_model || "N/A"}</p>
                         </div>
                         <div>
-                          <p className="text-xs font-bold text-slate-500">Tech Tier</p>
-                          <p className="text-sm font-medium">{viewBid.tech_tier || viewBid.service_tier || "N/A"}</p>
+                          <p className="text-xs font-bold text-slate-500">System Capacity</p>
+                          <p className="text-sm font-medium">{viewBid.system_configuration?.system_capacity ? `${viewBid.system_configuration.system_capacity} ${viewBid.system_configuration.system_capacity_unit || ""}` : "N/A"}</p>
                         </div>
                         <div>
-                          <p className="text-xs font-bold text-slate-500">Energy Target</p>
-                          <p className="text-sm font-medium">{viewBid.energy_target ? `${viewBid.energy_target} kWh/month` : viewBid.energy_target_kwh_month ? `${viewBid.energy_target_kwh_month} kWh/month` : "N/A"}</p>
+                          <p className="text-xs font-bold text-slate-500">Rated Power</p>
+                          <p className="text-sm font-medium">{viewBid.system_configuration?.rated_power_w ? `${viewBid.system_configuration.rated_power_w} W` : "N/A"}</p>
                         </div>
                       </div>
                     </div>
+                  )}
 
-                    {viewBid.system_configuration && (
-                      <div className="space-y-3 pt-4 border-t border-slate-100">
-                        <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">System Configuration</h3>
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
-                          <div>
-                            <p className="text-xs font-bold text-slate-500">Technology Type</p>
-                            <p className="text-sm font-medium">{viewBid.system_configuration?.technology_type || viewBid.technology_type || "N/A"}</p>
-                          </div>
-                          <div>
-                            <p className="text-xs font-bold text-slate-500">Co-financing Amount</p>
-                            <p className="text-sm font-medium">{viewBid.system_configuration?.co_financing_amount_lsl ? `M ${Number(viewBid.system_configuration.co_financing_amount_lsl).toLocaleString()}` : viewBid.co_financing_amount ? `M ${Number(viewBid.co_financing_amount).toLocaleString()}` : "N/A"}</p>
-                          </div>
-                          <div>
-                            <p className="text-xs font-bold text-slate-500">Device Brand</p>
-                            <p className="text-sm font-medium">{viewBid.system_configuration?.device_brand || viewBid.device_brand || "N/A"}</p>
-                          </div>
-                          <div>
-                            <p className="text-xs font-bold text-slate-500">Device Model</p>
-                            <p className="text-sm font-medium">{viewBid.system_configuration?.device_model || viewBid.device_model || "N/A"}</p>
-                          </div>
-                          <div>
-                            <p className="text-xs font-bold text-slate-500">System Capacity</p>
-                            <p className="text-sm font-medium">{viewBid.system_configuration?.system_capacity ? `${viewBid.system_configuration.system_capacity} ${viewBid.system_configuration.system_capacity_unit || ""}` : "N/A"}</p>
-                          </div>
-                          <div>
-                            <p className="text-xs font-bold text-slate-500">Rated Power</p>
-                            <p className="text-sm font-medium">{viewBid.system_configuration?.rated_power_w ? `${viewBid.system_configuration.rated_power_w} W` : "N/A"}</p>
-                          </div>
-                        </div>
+                  <div className="card p-6">
+                    <div className="flex items-center gap-2 mb-4">
+                      <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-500">
+                        <Users size={16} />
                       </div>
-                    )}
-
-                    <div className="space-y-3 pt-4 border-t border-slate-100">
-                      <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Inclusion Targets</h3>
-                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
-                        <div>
-                          <p className="text-xs font-bold text-slate-500">Female-headed Households</p>
-                          <p className="text-sm font-medium">{viewBid.female_target_pct != null ? `${viewBid.female_target_pct}%` : viewBid.gender_inclusion_target != null ? `${viewBid.gender_inclusion_target}%` : "N/A"}</p>
-                        </div>
-                        <div>
-                          <p className="text-xs font-bold text-slate-500">Vulnerable Groups</p>
-                          <p className="text-sm font-medium">{viewBid.vulnerable_target_pct != null ? `${viewBid.vulnerable_target_pct}%` : viewBid.vulnerable_group_target != null ? `${viewBid.vulnerable_group_target}%` : "N/A"}</p>
-                        </div>
-                        <div>
-                          <p className="text-xs font-bold text-slate-500">Low-income Households</p>
-                          <p className="text-sm font-medium">{viewBid.low_income_target_pct != null ? `${viewBid.low_income_target_pct}%` : viewBid.low_income_target != null ? `${viewBid.low_income_target}%` : "N/A"}</p>
-                        </div>
+                      <h3 className="text-sm font-bold text-slate-900">Inclusion Targets</h3>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
+                      <div>
+                        <p className="text-xs font-bold text-slate-500">Female-headed Households</p>
+                        <p className="text-sm font-medium">{viewBid.female_target_pct != null ? `${viewBid.female_target_pct}%` : viewBid.gender_inclusion_target != null ? `${viewBid.gender_inclusion_target}%` : "N/A"}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs font-bold text-slate-500">Vulnerable Groups</p>
+                        <p className="text-sm font-medium">{viewBid.vulnerable_target_pct != null ? `${viewBid.vulnerable_target_pct}%` : viewBid.vulnerable_group_target != null ? `${viewBid.vulnerable_group_target}%` : "N/A"}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs font-bold text-slate-500">Low-income Households</p>
+                        <p className="text-sm font-medium">{viewBid.low_income_target_pct != null ? `${viewBid.low_income_target_pct}%` : viewBid.low_income_target != null ? `${viewBid.low_income_target}%` : "N/A"}</p>
                       </div>
                     </div>
-
-                    <div className="space-y-3 pt-4 border-t border-slate-100">
-                      <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Sites Summary</h3>
-                      {(viewBid.sites || []).length === 0 && (
-                        <p className="text-sm text-slate-500">No sites provided for this bid.</p>
-                      )}
-                      {(viewBid.sites || []).length > 0 && (
-                        <div className="space-y-2 text-sm text-slate-600">
-                          {(viewBid.sites || []).map((site, idx) => (
-                            <div key={`${site.siteName}-${idx}`} className="rounded-lg border border-slate-100 bg-white px-3 py-2">
-                              <div className="flex justify-between items-start">
-                                <div>
-                                  <p className="font-medium text-slate-900">{site.siteName}</p>
-                                  <p className="text-xs text-slate-500">{site.district || "District N/A"} • {site.villageSubDistrict || "Sub-district N/A"}</p>
-                                </div>
-                                <div className="text-right">
-                                  <p className="text-xs font-medium text-slate-700">{site.estimatedHouseholds || site.numberOfHouseholds || 0} households</p>
-                                  <p className="text-[10px] text-slate-500">{site.targetBeneficiaryType || "Beneficiary type N/A"}</p>
-                                </div>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-
-                    {(viewBid.om_strategy_summary || viewBid.aftersales_description || viewBid.warranty_period || viewBid.local_technicians_to_be_trained) && (
-                      <div className="space-y-3 pt-4 border-t border-slate-100">
-                        <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">Additional Details</h3>
-                        <div className="space-y-3 text-sm">
-                          {viewBid.om_strategy_summary && (
-                            <div>
-                              <p className="text-xs font-bold text-slate-500">O&M Strategy Summary</p>
-                              <p className="text-sm text-slate-700 whitespace-pre-wrap">{viewBid.om_strategy_summary}</p>
-                            </div>
-                          )}
-                          {viewBid.aftersales_description && (
-                            <div>
-                              <p className="text-xs font-bold text-slate-500">After-sales Description</p>
-                              <p className="text-sm text-slate-700 whitespace-pre-wrap">{viewBid.aftersales_description}</p>
-                            </div>
-                          )}
-                          {viewBid.warranty_period != null && (
-                            <div>
-                              <p className="text-xs font-bold text-slate-500">Warranty Period</p>
-                              <p className="text-sm text-slate-700">{viewBid.warranty_period} months</p>
-                            </div>
-                          )}
-                          {viewBid.local_technicians_to_be_trained != null && (
-                            <div>
-                              <p className="text-xs font-bold text-slate-500">Local Technicians to be Trained</p>
-                              <p className="text-sm text-slate-700">{viewBid.local_technicians_to_be_trained}</p>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    )}
-
-                    {(viewBid.offer_paygo || viewBid.paygo_platform || viewBid.daily_payment_amount_lsl || viewBid.collection_method) && (
-                      <div className="space-y-3 pt-4 border-t border-slate-100">
-                        <h3 className="font-bold text-slate-900 uppercase text-[10px] tracking-widest text-slate-400">PAYGO Details</h3>
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
-                          <div>
-                            <p className="text-xs font-bold text-slate-500">Offer PAYGO</p>
-                            <p className="text-sm font-medium">{viewBid.offer_paygo ? "Yes" : "No"}</p>
-                          </div>
-                          {viewBid.paygo_platform && (
-                            <div>
-                              <p className="text-xs font-bold text-slate-500">PAYGO Platform</p>
-                              <p className="text-sm font-medium">{viewBid.paygo_platform}</p>
-                            </div>
-                          )}
-                          {viewBid.daily_payment_amount_lsl != null && (
-                            <div>
-                              <p className="text-xs font-bold text-slate-500">Daily Payment Amount</p>
-                              <p className="text-sm font-medium">M {viewBid.daily_payment_amount_lsl}</p>
-                            </div>
-                          )}
-                          {viewBid.collection_method && (
-                            <div>
-                              <p className="text-xs font-bold text-slate-500">Collection Method</p>
-                              <p className="text-sm font-medium">{viewBid.collection_method}</p>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    )}
-
                     {viewBid.inclusion_commitment_confirmed !== undefined && (
-                      <div className="space-y-3 pt-4 border-t border-slate-100">
-                        <div className="flex items-center gap-2">
-                          <p className="text-xs font-bold text-slate-500">Inclusion Commitment Confirmed:</p>
-                          <span className={`badge ${viewBid.inclusion_commitment_confirmed ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700"}`}>
-                            {viewBid.inclusion_commitment_confirmed ? "Yes" : "No"}
-                          </span>
-                        </div>
+                      <div className="mt-4 pt-4 border-t border-slate-100 flex items-center gap-2">
+                        <p className="text-xs font-bold text-slate-500">Inclusion Commitment Confirmed:</p>
+                        <span className={`badge ${viewBid.inclusion_commitment_confirmed ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700"}`}>
+                          {viewBid.inclusion_commitment_confirmed ? "Yes" : "No"}
+                        </span>
                       </div>
                     )}
                   </div>
 
                   <div className="card p-6">
-                    <h3 className="text-sm font-bold text-slate-400 uppercase mb-4">Bid Versions</h3>
+                    <div className="flex items-center gap-2 mb-4">
+                      <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-500">
+                        <MapPin size={16} />
+                      </div>
+                      <h3 className="text-sm font-bold text-slate-900">Sites Summary</h3>
+                    </div>
+                    {(viewBid.sites || []).length === 0 && (
+                      <p className="text-sm text-slate-500">No sites provided for this bid.</p>
+                    )}
+                    {(viewBid.sites || []).length > 0 && (
+                      <div className="space-y-2 text-sm text-slate-600">
+                        {(viewBid.sites || []).map((site, idx) => (
+                          <div key={`${site.siteName}-${idx}`} className="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2">
+                            <div className="flex justify-between items-start">
+                              <div>
+                                <p className="font-medium text-slate-900">{site.siteName}</p>
+                                <p className="text-xs text-slate-500">{site.district || "District N/A"} • {site.villageSubDistrict || "Sub-district N/A"}</p>
+                              </div>
+                              <div className="text-right">
+                                <p className="text-xs font-medium text-slate-700">{site.numberOfHouseholds || 0} households</p>
+                                <p className="text-[10px] text-slate-500">{site.targetBeneficiaryType || "Beneficiary type N/A"}</p>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {(viewBid.om_strategy_summary || viewBid.aftersales_description || viewBid.warranty_period || viewBid.local_technicians_to_be_trained) && (
+                    <div className="card p-6">
+                      <div className="flex items-center gap-2 mb-4">
+                        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-500">
+                          <ClipboardCheck size={16} />
+                        </div>
+                        <h3 className="text-sm font-bold text-slate-900">O&M &amp; After-sales</h3>
+                      </div>
+                      <div className="space-y-3 text-sm">
+                        {viewBid.om_strategy_summary && (
+                          <div>
+                            <p className="text-xs font-bold text-slate-500">O&M Strategy Summary</p>
+                            <p className="text-sm text-slate-700 whitespace-pre-wrap">{viewBid.om_strategy_summary}</p>
+                          </div>
+                        )}
+                        {viewBid.aftersales_description && (
+                          <div>
+                            <p className="text-xs font-bold text-slate-500">After-sales Description</p>
+                            <p className="text-sm text-slate-700 whitespace-pre-wrap">{viewBid.aftersales_description}</p>
+                          </div>
+                        )}
+                        {viewBid.warranty_period != null && (
+                          <div>
+                            <p className="text-xs font-bold text-slate-500">Warranty Period</p>
+                            <p className="text-sm text-slate-700">{viewBid.warranty_period} months</p>
+                          </div>
+                        )}
+                        {viewBid.local_technicians_to_be_trained != null && (
+                          <div>
+                            <p className="text-xs font-bold text-slate-500">Local Technicians to be Trained</p>
+                            <p className="text-sm text-slate-700">{viewBid.local_technicians_to_be_trained}</p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {(viewBid.offer_paygo || viewBid.paygo_platform || viewBid.daily_payment_amount_lsl || viewBid.collection_method) && (
+                    <div className="card p-6">
+                      <div className="flex items-center gap-2 mb-4">
+                        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-500">
+                          <CreditCard size={16} />
+                        </div>
+                        <h3 className="text-sm font-bold text-slate-900">PAYGO Details</h3>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+                        <div>
+                          <p className="text-xs font-bold text-slate-500">Offer PAYGO</p>
+                          <p className="text-sm font-medium">{viewBid.offer_paygo ? "Yes" : "No"}</p>
+                        </div>
+                        {viewBid.paygo_platform && (
+                          <div>
+                            <p className="text-xs font-bold text-slate-500">PAYGO Platform</p>
+                            <p className="text-sm font-medium">{viewBid.paygo_platform}</p>
+                          </div>
+                        )}
+                        {viewBid.daily_payment_amount_lsl != null && (
+                          <div>
+                            <p className="text-xs font-bold text-slate-500">Daily Payment Amount</p>
+                            <p className="text-sm font-medium">M {viewBid.daily_payment_amount_lsl}</p>
+                          </div>
+                        )}
+                        {viewBid.collection_method && (
+                          <div>
+                            <p className="text-xs font-bold text-slate-500">Collection Method</p>
+                            <p className="text-sm font-medium">{viewBid.collection_method}</p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="card p-6">
+                    <div className="flex items-center gap-2 mb-4">
+                      <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-500">
+                        <History size={16} />
+                      </div>
+                      <h3 className="text-sm font-bold text-slate-900">Bid Versions</h3>
+                    </div>
                     {viewBidLoading && <p className="text-sm text-slate-500">Loading versions...</p>}
                     {!viewBidLoading && viewBidVersions.length === 0 && (
                       <p className="text-sm text-slate-500">No versions available.</p>
                     )}
                     {!viewBidLoading && viewBidVersions.length > 0 && (
                       <div className="space-y-3">
+                        {viewBidVersions.length > 1 && (
+                          <p className="text-xs text-slate-500">Click a version below to view its full submitted content.</p>
+                        )}
                         {viewBidVersions.map((version) => {
-                          const versionProgress = getBidProgress(version, version.stage_two_unlocked ? version : null, version.status !== BidStatus.DRAFT ? version : viewLatestSubmitted);
+                          const isActive = version.id === viewBid.id;
                           return (
-                          <div key={version.id} className="flex items-center justify-between rounded-lg border border-slate-100 bg-slate-50 px-3 py-2">
-                            <div>
-                              <p className="text-sm font-medium text-slate-900">Version {version.version_number}</p>
-                              <p className="text-xs text-slate-500">{version.submitted_at ? new Date(version.submitted_at).toLocaleString() : "Draft"}</p>
-                              <p className="text-[11px] text-slate-500 mt-1">
-                                {versionProgress.primaryMessage}
-                              </p>
-                            </div>
-                            <div className="flex flex-col items-end gap-1">
-                              <span className="badge bg-slate-100 text-slate-700">{version.status}</span>
-                              <span className="text-[11px] text-slate-500">{version.stage_badge || version.stage || "Bid"}</span>
-                            </div>
-                          </div>
-                        )})}
+                            <button
+                              key={version.id}
+                              type="button"
+                              onClick={() => setViewBid(version)}
+                              className={`w-full flex items-center justify-between rounded-lg border px-3 py-2 text-left transition ${
+                                isActive ? "border-slate-900 bg-slate-900" : "border-slate-100 bg-slate-50 hover:border-slate-300"
+                              }`}
+                            >
+                              <div>
+                                <p className={`text-sm font-medium ${isActive ? "text-white" : "text-slate-900"}`}>
+                                  Version {version.version_number}{isActive ? " — Viewing" : ""}
+                                </p>
+                                <p className={`text-xs ${isActive ? "text-slate-300" : "text-slate-500"}`}>{version.submitted_at ? new Date(version.submitted_at).toLocaleString() : "Draft"}</p>
+                              </div>
+                              <div className="flex flex-col items-end gap-1">
+                                <span className={`badge ${isActive ? "bg-white text-slate-900" : "bg-slate-100 text-slate-700"}`}>{version.status}</span>
+                                <span className={`text-[11px] ${isActive ? "text-slate-300" : "text-slate-500"}`}>{STAGE_META[normalizeStage(version)].short}</span>
+                              </div>
+                            </button>
+                          );
+                        })}
                       </div>
                     )}
                   </div>
@@ -10962,7 +13361,12 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
 
                 <div className="space-y-4">
                   <div className="card p-6">
-                    <h3 className="text-sm font-bold text-slate-400 uppercase mb-4">Narratives</h3>
+                    <div className="flex items-center gap-2 mb-4">
+                      <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-500">
+                        <BookOpen size={16} />
+                      </div>
+                      <h3 className="text-sm font-bold text-slate-900">Narratives</h3>
+                    </div>
                     <div className="space-y-3 text-sm">
                       <details className="rounded-xl border border-slate-100 bg-slate-50 px-4 py-3">
                         <summary className="cursor-pointer text-sm font-bold text-slate-700">Concept Note</summary>
@@ -10986,7 +13390,12 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
                   </div>
 
                      <div className="card p-6">
-                     <h3 className="text-sm font-bold text-slate-400 uppercase mb-4">Documents</h3>
+                     <div className="flex items-center gap-2 mb-4">
+                       <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-500">
+                         <Paperclip size={16} />
+                       </div>
+                       <h3 className="text-sm font-bold text-slate-900">Documents</h3>
+                     </div>
                      <div className="space-y-3">
                        {[
                          { label: "Technical Proposal", url: viewBid.technical_proposal_file },
@@ -11027,7 +13436,12 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
 
                   {viewBid.rejection_reason && (
                     <div className="card p-6 border border-rose-100 bg-rose-50">
-                      <h3 className="text-sm font-bold text-rose-700 uppercase mb-2">Rejection Reason</h3>
+                      <div className="flex items-center gap-2 mb-2">
+                        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-rose-100 text-rose-600">
+                          <AlertTriangle size={16} />
+                        </div>
+                        <h3 className="text-sm font-bold text-rose-700">Rejection Reason</h3>
+                      </div>
                       <p className="text-sm text-rose-700">{viewBid.rejection_reason}</p>
                     </div>
                   )}
@@ -11043,6 +13457,55 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
           })()
         )}
       </AnimatePresence>
+    </div>
+  );
+};
+
+type LotBoqItemEntry = { itemNumber: number; templateItemId?: string; description: string; unit: string; qty: string; unitPrice: string; total: number };
+type LotOfferEntry = { selected: boolean; bidAmount: string; subsidyRequested: string; boqItems?: LotBoqItemEntry[] };
+
+// Shared e-tender-style numbered section card for the vendor bid submission wizard —
+// one wrapper so every section (Financial, Geography, Technical, BOQ, O&M, Inclusion,
+// Documents, Notes) shares identical chrome: a numbered badge that becomes a checkmark
+// once complete, and a status pill. Always fully expanded — sections cannot be
+// collapsed or closed, so a vendor filling one in never loses it from view. Declared
+// at module scope (not nested inside VendorDashboard) so its component identity is
+// stable across renders — nesting it would make React remount this whole subtree,
+// and every input inside it, on every keystroke, since a new inline function is a
+// different component type on every render.
+const BidSectionCard = ({
+  id, number, title, description, complete, optional, contentClassName = "space-y-6 p-6", children,
+}: {
+  id: string; number: number; title: string; description: string; complete: boolean;
+  optional?: boolean; contentClassName?: string; children: React.ReactNode;
+}) => {
+  return (
+    <div id={`bid-section-${id}`} className="card overflow-hidden border-slate-200">
+      <div className="px-6 py-4">
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex items-center gap-4">
+            <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-sm font-black ring-4 ${complete ? "bg-emerald-600 text-white ring-emerald-100" : "bg-slate-900 text-white ring-slate-100"}`}>
+              {complete ? <Check size={17} /> : number}
+            </div>
+            <div>
+              <h3 className="text-base font-bold text-slate-900">{title}</h3>
+              <p className="mt-0.5 text-sm text-slate-500">{description}</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-3 shrink-0">
+            {optional ? (
+              <span className="hidden rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-bold uppercase tracking-wider text-slate-500 sm:inline-block">Optional</span>
+            ) : (
+              <span className={`hidden rounded-full px-2.5 py-1 text-[11px] font-bold uppercase tracking-wider sm:inline-block ${complete ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
+                {complete ? "Complete" : "Incomplete"}
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
+      <div className={`border-t border-slate-100 ${contentClassName}`}>
+        {children}
+      </div>
     </div>
   );
 };
@@ -11082,6 +13545,7 @@ const VendorDashboard = ({
   const [ruleBookOpen, setRuleBookOpen] = useState(false);
   const [editingBidId, setEditingBidId] = useState<string | null>(null);
   const [editingBidStatus, setEditingBidStatus] = useState<BidStatus | null>(null);
+  const [activeStage, setActiveStage] = useState<"eoi" | "technical" | "financial" | "combined">("eoi");
   const [bidHistory, setBidHistory] = useState<TenderBid[]>([]);
   const [contracts, setContracts] = useState<TenderContract[]>([]);
   const [installationReports, setInstallationReports] = useState<InstallationReport[]>([]);
@@ -11092,6 +13556,9 @@ const VendorDashboard = ({
   const [latestApprovedPrequal, setLatestApprovedPrequal] = useState<VendorPrequalification | null>(null);
   const [bidForm, setBidForm] = useState({
     bidAmount: "",
+    // Blank means "the tender's base currency" — set explicitly once the vendor picks
+    // one of the tender's accepted currencies.
+    bidCurrency: "",
     subsidyRequested: "",
     coFinancingAmount: "",
     conceptNote: "",
@@ -11112,15 +13579,13 @@ const VendorDashboard = ({
       inverterType: "",
     },
     boqItems: [
-      { itemNumber: 1, description: "", qty: "", unit: "", unitPrice: "", total: 0 },
+      { itemNumber: 1, description: "", qty: "", unit: "", unitPrice: "", total: 0, templateItemId: undefined as string | undefined },
     ],
     femaleTargetPct: "50",
     vulnerableTargetPct: "30",
     lowIncomeTargetPct: "60",
     inclusionCommitmentConfirmed: false,
     omStrategySummary: "",
-    aftersalesDescription: "",
-    inclusionStrategy: "",
     localTechniciansToBeTrained: "",
     warrantyPeriodMonths: "",
     offerPaygo: false,
@@ -11133,12 +13598,12 @@ const VendorDashboard = ({
     trackRecordSummary: "",
     sites: [
       {
+        lot: "",
         siteName: "",
-        district: "Maseru",
+        district: "",
         villageSubDistrict: "",
         latitude: "",
         longitude: "",
-        estimatedHouseholds: "",
         numberOfHouseholds: "",
         targetTechnology: "",
         targetBeneficiaryType: "standard",
@@ -11148,6 +13613,8 @@ const VendorDashboard = ({
       },
     ],
   });
+  const [lotOffers, setLotOffers] = useState<Record<string, LotOfferEntry>>({});
+  const [declaredLots, setDeclaredLots] = useState<string[]>([]);
   const [bidFiles, setBidFiles] = useState<{
     technicalProposal: File | null;
     financialProposal: File | null;
@@ -11155,6 +13622,7 @@ const VendorDashboard = ({
     genderActionPlan: File | null;
     implementationPlan: File | null;
     omPlan: File | null;
+    reportingTemplates: File | null;
     distributionMap: File | null;
     tenderSecurity: File | null;
     companyCredentials: File | null;
@@ -11168,6 +13636,7 @@ const VendorDashboard = ({
     genderActionPlan: null,
     implementationPlan: null,
     omPlan: null,
+    reportingTemplates: null,
     distributionMap: null,
     tenderSecurity: null,
     companyCredentials: null,
@@ -11175,8 +13644,15 @@ const VendorDashboard = ({
     technicalExperience: null,
     trackRecord: null,
   });
+  const [bidCustomFiles, setBidCustomFiles] = useState<Record<string, File | null>>({});
   const [bidConfirmOpen, setBidConfirmOpen] = useState(false);
   const [bidSubmissionConfirmed, setBidSubmissionConfirmed] = useState(false);
+  // Sequential numbering for BidSectionCard badges, reset to 0 right before the
+  // first numbered section renders each pass (see the wizard body below) so the
+  // numbers stay correct regardless of which stage (eoi/technical/financial/
+  // combined) is active and which subset of sections that stage shows.
+  let bidStepCounter = 0;
+  const nextBidStep = () => ++bidStepCounter;
   const [claimStep, setClaimStep] = useState(1);
   const [isClaimSubmitting, setIsClaimSubmitting] = useState(false);
   const [formData, setFormData] = useState({
@@ -11361,16 +13837,14 @@ const VendorDashboard = ({
 
   const resolveDashboardBidVersions = (items: TenderBid[]) => {
     const sorted = items.slice().sort((a, b) => (b.version_number || 0) - (a.version_number || 0));
-    const latestStageTwoSubmitted = pickLatestVendorDashboardBidByVersion(
-      sorted.filter((item) => item.stage_key === "site_specific" && item.status !== BidStatus.DRAFT)
-    );
-    const stageTwoDraft = latestStageTwoSubmitted
-      ? null
-      : (sorted.find((item) => item.stage_key === "site_specific" && item.status === BidStatus.DRAFT) || null);
-    const stageOneDraft = sorted.find((item) => item.stage_key !== "site_specific" && item.status === BidStatus.DRAFT) || null;
-    const latestSubmitted = latestStageTwoSubmitted || sorted.find((item) => item.status !== BidStatus.DRAFT) || null;
-    const editableDraft = stageTwoDraft || (!latestSubmitted ? stageOneDraft : null);
-    const display = editableDraft || latestSubmitted || stageOneDraft || sorted[0] || null;
+    // See resolveVendorBidVersions: version numbers increase monotonically across a
+    // bid's whole lifecycle, so the highest-version record is always the vendor's
+    // current position. The previous "stage_key === site_specific" check matched a
+    // legacy value the backend no longer produces, hiding fresh Technical/Financial
+    // drafts behind a stale, already-decided EOI record.
+    const editableDraft = sorted[0]?.status === BidStatus.DRAFT ? sorted[0] : null;
+    const latestSubmitted = sorted.find((item) => item.status !== BidStatus.DRAFT) || null;
+    const display = editableDraft || latestSubmitted || sorted[0] || null;
     return {
       sorted,
       editableDraft,
@@ -11407,25 +13881,34 @@ const VendorDashboard = ({
     bid.status === BidStatus.REJECTED ? "bg-rose-100 text-rose-700" :
     "bg-slate-100 text-slate-700";
 
+  const getBidStageLabel = (bid: TenderBid) => {
+    const raw = String(bid.bid_stage || bid.stage_key || "").toLowerCase().replace(/\s+/g, "_");
+    if (raw === "financial") return "Financial";
+    if (raw === "combined") return "Technical & Financial";
+    if (raw === "technical" || raw === "site_specific" || raw === "site" || raw === "detailed" || raw === "stage_2" || raw === "stage2") return "Technical";
+    return "EOI";
+  };
+
   const getDashboardVendorVisibleStatus = (display: TenderBid, editableDraft: TenderBid | null, latestSubmitted: TenderBid | null) => {
     const stageOnePassed = Boolean(editableDraft?.stage_two_unlocked || display.stage_two_ready || display.stage_key === "site_specific");
     const finalAccepted = display.status === BidStatus.ACCEPTED;
     const rejected = display.status === BidStatus.REJECTED;
+    const bidStageLabelForDisplay = getBidStageLabel(display);
 
     if (display.stage_key === "site_specific" && display.evaluation_status === "evaluated") {
-      return { label: "Stage 2 Evaluated", color: "bg-emerald-100 text-emerald-700" };
+      return { label: `${bidStageLabelForDisplay} Evaluated`, color: "bg-emerald-100 text-emerald-700" };
     }
     if (display.stage_key === "site_specific" && display.evaluation_status === "technical_scored") {
-      return { label: "Stage 2 Technical Score Saved", color: "bg-blue-100 text-blue-700" };
+      return { label: "Technical Stage Scored", color: "bg-blue-100 text-blue-700" };
     }
     if (finalAccepted) {
       return { label: "Final Evaluation Passed", color: "bg-emerald-100 text-emerald-700" };
     }
     if (rejected && !stageOnePassed) {
-      return { label: "Stage 1 Failed", color: "bg-rose-100 text-rose-700" };
+      return { label: `${bidStageLabelForDisplay} Failed`, color: "bg-rose-100 text-rose-700" };
     }
     if (display.stage_key !== "site_specific" && (editableDraft?.stage_key === "site_specific" || stageOnePassed)) {
-      return { label: "Stage 1 Passed", color: "bg-emerald-100 text-emerald-700" };
+      return { label: "EOI Passed", color: "bg-emerald-100 text-emerald-700" };
     }
     if (display.status === BidStatus.DRAFT) {
       return { label: "Draft", color: "bg-slate-100 text-slate-700" };
@@ -11453,6 +13936,7 @@ const VendorDashboard = ({
   const resetBidForm = () => {
     setBidForm({
       bidAmount: "",
+      bidCurrency: "",
       subsidyRequested: "",
       coFinancingAmount: "",
       conceptNote: "",
@@ -11480,8 +13964,6 @@ const VendorDashboard = ({
       lowIncomeTargetPct: "60",
       inclusionCommitmentConfirmed: false,
       omStrategySummary: "",
-      aftersalesDescription: "",
-      inclusionStrategy: "",
       localTechniciansToBeTrained: "",
       warrantyPeriodMonths: "",
       offerPaygo: false,
@@ -11494,12 +13976,12 @@ const VendorDashboard = ({
       trackRecordSummary: "",
       sites: [
         {
+          lot: "",
           siteName: "",
-          district: bidTender?.targetDistricts?.[0] || "Maseru",
+          district: "",
           villageSubDistrict: "",
           latitude: "",
           longitude: "",
-          estimatedHouseholds: "",
           numberOfHouseholds: "",
           targetTechnology: bidTender?.technologyTypes?.[0] || "",
           targetBeneficiaryType: "standard",
@@ -11519,6 +14001,7 @@ const VendorDashboard = ({
       genderActionPlan: null,
       implementationPlan: null,
       omPlan: null,
+      reportingTemplates: null,
       distributionMap: null,
       tenderSecurity: null,
       companyCredentials: null,
@@ -11528,6 +14011,11 @@ const VendorDashboard = ({
     });
     setBidConfirmOpen(false);
     setBidSubmissionConfirmed(false);
+    setEditingBidId(null);
+    setEditingBidStatus(null);
+    setActiveStage((bidTender?.procurementWorkflow === "combined" && !bidTender?.eoiDeadline) ? "combined" : "eoi");
+    setLotOffers({});
+    setDeclaredLots([]);
   };
 
   const openBidForm = async (tender: Tender, selectedBidId?: string | null, syncUrl = true) => {
@@ -11539,6 +14027,16 @@ const VendorDashboard = ({
     setBidTender(tender);
     setBidMessage(null);
     resetBidForm();
+    setActiveStage((tender.procurementWorkflow === "combined" && !tender.eoiDeadline) ? "combined" : "eoi");
+    let fullTenderForBoq: Tender | null = null;
+    try {
+      // The tender list endpoint omits required_documents for payload size — fetch the
+      // full detail so the stage document checklists reflect what the RBF Admin configured.
+      const fullTender = await fetchTender(tender.id).catch(() => null);
+      if (fullTender) { setBidTender(fullTender); fullTenderForBoq = fullTender; }
+    } catch {
+      // Non-fatal — the wizard still works with the list-derived tender if this fails.
+    }
     try {
       const versions = await fetchTenderBids(tender.id);
       setBidVersions(versions);
@@ -11560,12 +14058,33 @@ const VendorDashboard = ({
       if (preferredVersion) {
         useBidVersion(preferredVersion);
         if (preferredVersion.status !== BidStatus.DRAFT) {
+          const vrKey = String(preferredVersion.bid_stage || "").toLowerCase().replace(/\s+/g, "_");
+          const stageName = vrKey === "financial" ? "Financial" : vrKey === "technical" ? "Technical" : vrKey === "combined" ? "Technical & Financial" : "EOI";
           setBidMessage(
-            preferredVersion.stage_key === "site_specific"
-              ? "This Stage 2 proposal has been submitted. You can edit and resubmit it."
-              : "Stage 1 has been submitted. You can edit and resubmit. Stage 2 will unlock only if you are shortlisted."
+            vrKey === "technical" || vrKey === "financial" || vrKey === "combined"
+              ? `This ${stageName} proposal has been submitted. You can edit and resubmit it.`
+              : tender?.isEoiInviteOnly
+                ? "Your Expression of Interest has been submitted. You can edit and resubmit it until the deadline."
+                : "Your EOI has been submitted. You can edit and resubmit. The next stage unlocks only after this stage is cleared."
           );
         }
+      } else if (fullTenderForBoq && !(fullTenderForBoq.lots && fullTenderForBoq.lots.length > 0) && fullTenderForBoq.boqItems && fullTenderForBoq.boqItems.length > 0) {
+        // A brand-new bid on a tender whose BOQ the RBF Official designed — start the
+        // vendor's BOQ pre-filled from that template (locked description/unit/qty,
+        // vendor only supplies unit_price) instead of one blank free-form row.
+        const template = fullTenderForBoq.boqItems;
+        setBidForm(prev => ({
+          ...prev,
+          boqItems: template.map((item, index) => ({
+            itemNumber: index + 1,
+            templateItemId: item.id,
+            description: item.description,
+            unit: item.unit || "",
+            qty: String(item.quantity),
+            unitPrice: "",
+            total: 0,
+          })),
+        }));
       }
     } catch {
       setBidVersions([]);
@@ -11593,8 +14112,21 @@ const VendorDashboard = ({
         : Math.max(0, Number(version.bid_amount || 0) - Number(version.subsidy_requested || 0));
     setEditingBidId(version.id);
     setEditingBidStatus(version.status);
+    const versionWorkflow = (bidTender?.procurementWorkflow === "combined" || bidTender?.procurementWorkflow === "eoi_combined") ? "combined" : "sequential";
+    const versionStageRaw = String(version.bid_stage || version.stage_key || "").toLowerCase().replace(/\s+/g, "_");
+    setActiveStage(
+      versionStageRaw === "financial" ? "financial"
+      : versionStageRaw === "combined"
+        ? "combined"
+        : versionStageRaw === "site_specific" || versionStageRaw === "site" || versionStageRaw === "detailed" || versionStageRaw === "stage_2" || versionStageRaw === "stage2"
+          ? (versionWorkflow === "combined" ? "combined" : "technical")
+          : versionStageRaw === "technical"
+            ? "technical"
+            : "eoi"
+    );
     setBidForm({
       bidAmount: version.bid_amount != null ? String(version.bid_amount) : "",
+      bidCurrency: version.bid_currency ?? "",
       subsidyRequested: version.subsidy_requested != null ? String(version.subsidy_requested) : "",
       coFinancingAmount: coFinancingAmount ? String(coFinancingAmount) : "",
       conceptNote: version.concept_note ?? "",
@@ -11619,6 +14151,7 @@ const VendorDashboard = ({
         return boqSource.length > 0
           ? boqSource.map((item: any, index: number) => ({
               itemNumber: item.item_number ?? index + 1,
+              templateItemId: item.template_item_id != null ? String(item.template_item_id) : undefined,
               description: item.description ?? "",
               qty: item.qty != null ? String(item.qty) : "",
               unit: item.unit ?? "",
@@ -11632,8 +14165,6 @@ const VendorDashboard = ({
       lowIncomeTargetPct: version.low_income_target_pct != null ? String(version.low_income_target_pct) : "60",
       inclusionCommitmentConfirmed: Boolean(version.inclusion_commitment_confirmed),
       omStrategySummary: version.om_strategy_summary ?? "",
-      aftersalesDescription: version.aftersales_description ?? "",
-      inclusionStrategy: version.om_strategy_summary ?? "",
       localTechniciansToBeTrained: version.local_technicians_to_be_trained != null ? String(version.local_technicians_to_be_trained) : "",
       warrantyPeriodMonths: version.warranty_period_months != null ? String(version.warranty_period_months) : "",
       offerPaygo: Boolean(version.offer_paygo),
@@ -11651,6 +14182,7 @@ const VendorDashboard = ({
               : ["Maseru", "Leribe", "Berea", "Mafeteng", "Mohale's Hoek", "Quthing", "Qacha's Nek", "Mokhotlong", "Thaba-Tseka", "Butha-Buthe"];
             const loadedDistrict = site.district ?? "";
             return {
+            lot: site.lot != null ? String(site.lot) : "",
             siteName: site.siteName ?? "",
             district: validDistricts.includes(loadedDistrict)
               ? loadedDistrict
@@ -11658,7 +14190,6 @@ const VendorDashboard = ({
             villageSubDistrict: site.villageSubDistrict ?? "",
             latitude: site.latitude != null ? String(site.latitude) : "",
             longitude: site.longitude != null ? String(site.longitude) : "",
-            estimatedHouseholds: site.estimatedHouseholds != null ? String(site.estimatedHouseholds) : (site.numberOfHouseholds != null ? String(site.numberOfHouseholds) : ""),
             numberOfHouseholds: site.numberOfHouseholds != null ? String(site.numberOfHouseholds) : "",
             targetTechnology: site.targetTechnology ?? version.system_configuration?.technology_type ?? bidTender?.technologyTypes?.[0] ?? "",
             targetBeneficiaryType: site.targetBeneficiaryType ?? "standard",
@@ -11668,8 +14199,9 @@ const VendorDashboard = ({
             };
           })
         : [{
+            lot: "",
             siteName: "",
-            district: bidTender?.targetDistricts?.[0] || "Maseru",
+            district: "",
             villageSubDistrict: "",
             latitude: "",
             longitude: "",
@@ -11681,6 +14213,29 @@ const VendorDashboard = ({
             notes: "",
           }]),
     });
+    setLotOffers(() => {
+      const next: Record<string, LotOfferEntry> = {};
+      (version.lot_offers || []).forEach((offer) => {
+        next[String(offer.lot)] = {
+          selected: true,
+          bidAmount: offer.bid_amount != null ? String(offer.bid_amount) : "",
+          subsidyRequested: offer.subsidy_requested != null ? String(offer.subsidy_requested) : "",
+          boqItems: Array.isArray(offer.boq_items) && offer.boq_items.length > 0
+            ? offer.boq_items.map((item, index) => ({
+                itemNumber: item.item_number ?? index + 1,
+                templateItemId: item.template_item_id != null ? String(item.template_item_id) : undefined,
+                description: item.description ?? "",
+                unit: item.unit || "",
+                qty: item.qty != null ? String(item.qty) : "",
+                unitPrice: item.unit_price != null ? String(item.unit_price) : "",
+                total: item.total != null ? Number(item.total) : 0,
+              }))
+            : undefined,
+        };
+      });
+      return next;
+    });
+    setDeclaredLots(Array.isArray(version.declared_lots) ? version.declared_lots.map((id) => String(id)) : []);
     setBidFiles({
       technicalProposal: null,
       financialProposal: null,
@@ -11688,6 +14243,7 @@ const VendorDashboard = ({
       genderActionPlan: null,
       implementationPlan: null,
       omPlan: null,
+      reportingTemplates: null,
       distributionMap: null,
       tenderSecurity: null,
       companyCredentials: null,
@@ -11700,24 +14256,163 @@ const VendorDashboard = ({
   };
 
   const currentEditingBidVersion = bidVersions.find(version => version.id === editingBidId);
-  const activeBidVersionForStage =
-    currentEditingBidVersion
-    || pickLatestVendorDashboardBidByVersion(bidVersions.filter(v => v.stage_key === "site_specific" && v.status !== BidStatus.DRAFT))
-    || bidVersions.find(v => v.stage_key === "site_specific" && v.status === BidStatus.DRAFT)
-    || bidVersions[0];
-  const bidStageKey = useMemo(() => {
-    const raw = String(activeBidVersionForStage?.stage_key || bidTender?.stageType || "").toLowerCase().replace(/\s+/g, "_");
-    if (raw.includes("site") || raw.includes("detailed") || raw.includes("stage_2") || raw.includes("stage2")) return "site_specific";
-    return "pre_qualification";
-  }, [activeBidVersionForStage, bidTender]);
-  const bidStageLabel = bidStageKey === "site_specific" ? "Stage 2: Detailed" : "Stage 1: Concept";
-  const isPreQualificationStage = bidStageKey === "pre_qualification";
-  const isSiteSpecificStage = bidStageKey === "site_specific";
-  const currentBidStage: "eoi" | "technical" | "financial" | "combined" =
-    ((["eoi", "technical", "financial", "combined"] as const) as readonly string[]).includes(activeBidVersionForStage?.bid_stage ?? "")
-      ? (activeBidVersionForStage?.bid_stage as "eoi" | "technical" | "financial" | "combined")
-      : (bidStageKey === "site_specific" ? "technical" : "eoi");
+  const isCombinedStyleWorkflow = bidTender?.procurementWorkflow === "combined" || bidTender?.procurementWorkflow === "eoi_combined";
+  // A newly-created "Combined" workflow tender is a single Technical & Financial
+  // stage with no EOI step. A handful of legacy 'combined' tenders predate that rule
+  // and still carry a genuine eoi_deadline (the backend keeps treating those as
+  // 2-stage for compatibility — see TenderSerializer.validate()'s `has_eoi`), so this
+  // must mirror the backend exactly rather than always forcing single-stage.
+  const isSingleStageCombinedWorkflow = bidTender?.procurementWorkflow === "combined" && !bidTender?.eoiDeadline;
+  // A tender linked to an EOI Invite tender already ran its EOI stage over there —
+  // invited vendors were copied over at link time (see backend
+  // TenderSerializer._sync_linked_eoi_vendors) — so this tender's own bid wizard skips
+  // straight to Combined, just like a genuine single-stage Combined tender.
+  const isLinkedEoiWorkflow = Boolean(bidTender?.skipsEoiStage ?? bidTender?.linkedEoiTenderId);
+  const skipsEoiStep = isSingleStageCombinedWorkflow || isLinkedEoiWorkflow;
+  const tenderWorkflow: "sequential" | "combined" = isCombinedStyleWorkflow ? "combined" : "sequential";
+  // An EOI Invite (is_eoi_invite_only) never itself runs a Technical/Combined stage —
+  // if a vendor is shortlisted, that happens on a *different*, newly-created tender
+  // later. So unlike a real eoi_combined tender, its wizard has exactly one stage,
+  // ever, on this record.
+  const isEoiInviteOnlyTender = Boolean(bidTender?.isEoiInviteOnly);
+  const stagePlan: Array<{ key: "eoi" | "technical" | "financial" | "combined"; label: string; sublabel: string }> =
+    isEoiInviteOnlyTender
+      ? [
+          { key: "eoi", label: "Expression of Interest", sublabel: "Submission" },
+        ]
+      : !skipsEoiStep && tenderWorkflow === "combined"
+      ? [
+          { key: "eoi", label: "Stage 1: EOI", sublabel: "Expression of Interest" },
+          { key: "combined", label: "Stage 2: Technical & Financial", sublabel: "Combined Proposal" },
+        ]
+      : skipsEoiStep
+        ? [
+            { key: "combined", label: "Technical & Financial", sublabel: "Combined Proposal" },
+          ]
+        : [
+          { key: "eoi", label: "Stage 1: EOI", sublabel: "Expression of Interest" },
+          { key: "technical", label: "Stage 2: Technical", sublabel: "Design, Use & BOQ" },
+          { key: "financial", label: "Stage 3: Financial", sublabel: "Pricing & Bid Amount" },
+        ];
+  const currentBidStage: "eoi" | "technical" | "financial" | "combined" = activeStage;
+  const stageIndex = stagePlan.findIndex(s => s.key === currentBidStage);
+  const currentStageConfig = stagePlan[Math.max(0, stageIndex)] ?? stagePlan[0];
+  const bidStageLabel = currentStageConfig.label;
+  const isPreQualificationStage = currentBidStage === "eoi";
+  const isSiteSpecificStage = currentBidStage === "technical" || currentBidStage === "combined" || currentBidStage === "financial";
   const isEoiStage = currentBidStage === "eoi";
+  const isTechnicalStage = currentBidStage === "technical";
+  const isFinancialStage = currentBidStage === "financial";
+  const isCombinedStage = currentBidStage === "combined";
+  const tenderLots = bidTender?.lots || [];
+  const isLotWise = tenderLots.length > 0;
+  const collectsFinalPricing = isFinancialStage || isCombinedStage;
+  const tenderBaseCurrency = bidTender?.biddingCurrency || "LSL";
+  const tenderCurrencyOptions = [tenderBaseCurrency, ...Object.keys(bidTender?.currencyRates || {})];
+  const hasMultipleCurrencies = tenderCurrencyOptions.length > 1;
+  const selectedBidCurrency = bidForm.bidCurrency || tenderBaseCurrency;
+  const selectedCurrencyRate = selectedBidCurrency === tenderBaseCurrency
+    ? 1
+    : Number((bidTender?.currencyRates || {})[selectedBidCurrency] || 1);
+  const lotOfferValues = Object.values(lotOffers) as LotOfferEntry[];
+  const lotOfferEntries = Object.entries(lotOffers) as [string, LotOfferEntry][];
+  const selectedLotCount = lotOfferValues.filter(o => o.selected).length;
+  const maxLotsPerBidder = bidTender?.maxLotsPerBidder;
+  const lotOffersTotal = lotOfferValues.filter(o => o.selected).reduce((sum, o) => sum + Number(o.bidAmount || 0), 0);
+  // A lot not declared at EOI can't be tagged to a site or priced later. Bids from before
+  // this feature existed have no declaredLots recorded, so fall back to allowing any lot.
+  const eligibleSiteLots = declaredLots.length > 0 ? tenderLots.filter((l) => declaredLots.includes(String(l.id || ""))) : tenderLots;
+
+  // Seeds a lot's boqItems from that lot's own RBF-designed template (TenderLot.boqItems)
+  // the first time the vendor selects it, if it doesn't already have priced rows.
+  const ensureLotBoqSeeded = (lotId: string, lot: TenderLot) => {
+    if (!lot.boqItems || lot.boqItems.length === 0) return;
+    setLotOffers(prev => {
+      const existing = prev[lotId];
+      if (existing?.boqItems && existing.boqItems.length > 0) return prev;
+      const seeded: LotBoqItemEntry[] = lot.boqItems!.map((item, index) => ({
+        itemNumber: index + 1,
+        templateItemId: item.id,
+        description: item.description,
+        unit: item.unit || "",
+        qty: String(item.quantity),
+        unitPrice: "",
+        total: 0,
+      }));
+      return { ...prev, [lotId]: { ...(existing || { selected: false, bidAmount: "", subsidyRequested: "" }), boqItems: seeded } };
+    });
+  };
+
+  // Updates one line's unit price for a templated lot BOQ and keeps that lot's
+  // bidAmount auto-derived from the sum — the vendor never types the lot total by hand.
+  const updateLotBoqItemPrice = (lotId: string, itemIndex: number, value: string) => {
+    setLotOffers(prev => {
+      const offer = prev[lotId] || { selected: false, bidAmount: "", subsidyRequested: "" };
+      const items = (offer.boqItems || []).map((item, i) => {
+        if (i !== itemIndex) return item;
+        const qty = Number(item.qty || 0);
+        const unitPrice = Number(value || 0);
+        return { ...item, unitPrice: value, total: roundCurrency(qty * unitPrice) };
+      });
+      const total = roundCurrency(items.reduce((sum, item) => sum + Number(item.total || 0), 0));
+      return { ...prev, [lotId]: { ...offer, boqItems: items, bidAmount: String(total) } };
+    });
+    clearBidFieldError("lotOffers");
+  };
+
+  const stageAccess = useMemo(() => {
+    const eoiCleared = bidVersions.some(v => (v.bid_stage === "eoi" || (!v.bid_stage && v.stage_key !== "site_specific")) && v.status === BidStatus.ACCEPTED);
+    const technicalCleared = bidVersions.some(v => v.bid_stage === "technical" && v.status === BidStatus.ACCEPTED);
+    const technicalUnlocked = bidVersions.some(v => v.technical_stage_unlocked || v.stage_two_unlocked);
+    const financialUnlocked = bidVersions.some(v => v.financial_stage_unlocked);
+    const combinedUnlocked = bidVersions.some(v => v.stage_two_unlocked || v.technical_stage_unlocked);
+    const hasTechnicalBid = bidVersions.some(v => v.bid_stage === "technical" && v.status !== BidStatus.DRAFT);
+    const hasFinancialBid = bidVersions.some(v => v.bid_stage === "financial" && v.status !== BidStatus.DRAFT);
+    const hasCombinedBid = bidVersions.some(v => v.bid_stage === "combined" && v.status !== BidStatus.DRAFT);
+    if (skipsEoiStep) {
+      return { eoi: false, technical: false, financial: false, combined: true };
+    }
+    if (tenderWorkflow === "combined") {
+      return {
+        eoi: true,
+        technical: false,
+        financial: false,
+        combined: combinedUnlocked || eoiCleared || hasCombinedBid,
+      };
+    }
+    return {
+      eoi: true,
+      technical: technicalUnlocked || eoiCleared || hasTechnicalBid,
+      financial: financialUnlocked || technicalCleared || hasFinancialBid,
+      combined: false,
+    };
+  }, [bidVersions, tenderWorkflow, skipsEoiStep]);
+
+  const stageStatusMap = useMemo(() => {
+    const eoiSubmitted = bidVersions.some(v => (v.bid_stage === "eoi" || (!v.bid_stage && v.stage_key !== "site_specific")) && v.status !== BidStatus.DRAFT);
+    const eoiAccepted = bidVersions.some(v => (v.bid_stage === "eoi" || (!v.bid_stage && v.stage_key !== "site_specific")) && v.status === BidStatus.ACCEPTED);
+    const techSubmitted = bidVersions.some(v => v.bid_stage === "technical" && v.status !== BidStatus.DRAFT);
+    // Technical has no explicit "accept" action the way EOI does - clearing the
+    // threshold only ever shows up as financial_stage_unlocked flipping true (or a
+    // Financial-stage bid appearing), while the Technical bid's own status stays
+    // "Under Review" forever. Without this, the stepper would never show Technical as
+    // complete even after Financial has already opened.
+    const techAccepted = bidVersions.some(v => v.bid_stage === "technical" && (v.status === BidStatus.ACCEPTED || v.financial_stage_unlocked))
+      || bidVersions.some(v => v.bid_stage === "financial");
+    const finSubmitted = bidVersions.some(v => v.bid_stage === "financial" && v.status !== BidStatus.DRAFT);
+    const finAccepted = bidVersions.some(v => v.bid_stage === "financial" && v.status === BidStatus.ACCEPTED);
+    const combSubmitted = bidVersions.some(v => v.bid_stage === "combined" && v.status !== BidStatus.DRAFT);
+    const combAccepted = bidVersions.some(v => v.bid_stage === "combined" && v.status === BidStatus.ACCEPTED);
+    const result: Record<string, "completed" | "submitted" | "in_progress" | "locked" | "empty"> = {};
+    stagePlan.forEach(({ key }) => {
+      if (key === "eoi") result[key] = eoiAccepted ? "completed" : eoiSubmitted ? "submitted" : "in_progress";
+      else if (key === "technical") result[key] = techAccepted ? "completed" : techSubmitted ? "submitted" : stageAccess.technical ? "in_progress" : "locked";
+      else if (key === "financial") result[key] = finAccepted ? "completed" : finSubmitted ? "submitted" : stageAccess.financial ? "in_progress" : "locked";
+      else if (key === "combined") result[key] = combAccepted ? "completed" : combSubmitted ? "submitted" : stageAccess.combined ? "in_progress" : "locked";
+    });
+    return result;
+  }, [bidVersions, stagePlan, stageAccess]);
+
   const bidTechnologyTypeOptions = Array.isArray(bidTender?.technologyTypes)
     ? bidTender.technologyTypes.filter((value): value is string => Boolean(String(value || "").trim()))
     : [];
@@ -11741,45 +14436,68 @@ const VendorDashboard = ({
     if (hours > 0) return `${hours}h ${minutes}m remaining`;
     return `${minutes}m remaining`;
   }, [bidDeadlineLabel]);
-   const existingStageTwoDocuments = {
-     technicalProposal: currentEditingBidVersion?.technical_proposal_file,
-     financialProposal: currentEditingBidVersion?.financial_proposal_file,
-     boq: currentEditingBidVersion?.boq_file,
-     genderActionPlan: currentEditingBidVersion?.gender_action_plan_file,
-     implementationPlan: currentEditingBidVersion?.implementation_plan_file,
-     omPlan: currentEditingBidVersion?.om_plan_file || currentEditingBidVersion?.om_plan_document,
-     distributionMap: currentEditingBidVersion?.distribution_map_file,
-     tenderSecurity: currentEditingBidVersion?.tender_security_file,
+   // Required documents are no longer a fixed, hardcoded checklist per stage — they come
+   // entirely from what the RBF Admin configured for this tender (TenderRequiredDocument).
+   // A document with a field_key binds to one of TenderBid's structured file fields (so
+   // BOQ, contract-annex generation, and evaluator screens keep working); one without a
+   // field_key is a fully custom upload stored in custom_documents.
+   const FIELD_KEY_TO_BID_FILE_KEY: Record<string, string> = {
+     company_credentials_file: "companyCredentials",
+     financial_standing_file: "financialStanding",
+     technical_experience_file: "technicalExperience",
+     track_record_file: "trackRecord",
+     technical_proposal_file: "technicalProposal",
+     boq_file: "boq",
+     gender_action_plan_file: "genderActionPlan",
+     implementation_plan_file: "implementationPlan",
+     om_plan_file: "omPlan",
+     reporting_templates_file: "reportingTemplates",
+     distribution_map_file: "distributionMap",
+     financial_proposal_file: "financialProposal",
+     tender_security_file: "tenderSecurity",
    };
-   const existingEoiDocuments = {
-     companyCredentials: currentEditingBidVersion?.company_credentials_file,
-     financialStanding: currentEditingBidVersion?.financial_standing_file,
-     technicalExperience: currentEditingBidVersion?.technical_experience_file,
-     trackRecord: currentEditingBidVersion?.track_record_file,
+   const existingDocumentsByFieldKey: Record<string, string | undefined> = {
+     company_credentials_file: currentEditingBidVersion?.company_credentials_file,
+     financial_standing_file: currentEditingBidVersion?.financial_standing_file,
+     technical_experience_file: currentEditingBidVersion?.technical_experience_file,
+     track_record_file: currentEditingBidVersion?.track_record_file,
+     technical_proposal_file: currentEditingBidVersion?.technical_proposal_file,
+     boq_file: currentEditingBidVersion?.boq_file,
+     gender_action_plan_file: currentEditingBidVersion?.gender_action_plan_file,
+     implementation_plan_file: currentEditingBidVersion?.implementation_plan_file,
+     om_plan_file: currentEditingBidVersion?.om_plan_file || currentEditingBidVersion?.om_plan_document,
+     reporting_templates_file: (currentEditingBidVersion as any)?.reporting_templates_file,
+     distribution_map_file: currentEditingBidVersion?.distribution_map_file,
+     financial_proposal_file: currentEditingBidVersion?.financial_proposal_file,
+     tender_security_file: currentEditingBidVersion?.tender_security_file,
    };
-   const eoiDocuments = [
-     { key: "companyCredentials", label: "Company Credentials", hint: "PDF/DOCX", long: "Registration certificate, CR number, directors' details." },
-     { key: "financialStanding", label: "Financial Standing", hint: "PDF/DOCX/XLSX", long: "Audited financial statements or bank reference." },
-     { key: "technicalExperience", label: "Technical Experience", hint: "PDF/DOCX", long: "Track record of similar installations." },
-     { key: "trackRecord", label: "Track Record", hint: "PDF/DOCX", long: "References from past successful projects." },
-   ] as const;
-   const uploadedEoiDocumentCount = eoiDocuments.filter(doc => Boolean((bidFiles as any)[doc.key] || (existingEoiDocuments as any)[doc.key])).length;
-   const eoiDocumentsComplete = uploadedEoiDocumentCount === eoiDocuments.length;
-   const eoiNarrativeCharCount = bidForm.eoiNarrative.trim().length;
-   const eoiNarrativeValid = eoiNarrativeCharCount >= 200;
-   const stageTwoDocuments = [
-     { key: "technicalProposal", label: "Technical Proposal", hint: "PDF/DOCX" },
-     { key: "financialProposal", label: "Financial Proposal", hint: "PDF/DOCX/XLSX" },
-     { key: "boq", label: "Bill of Quantities", hint: "PDF/DOCX/XLSX" },
-     { key: "genderActionPlan", label: "Gender Action Plan", hint: "PDF/DOCX/XLSX" },
-     { key: "implementationPlan", label: "Implementation Plan", hint: "PDF/DOCX/XLSX" },
-     { key: "omPlan", label: "O&M Plan", hint: "PDF/DOCX/XLSX" },
-     ...(bidTender?.tenderSecurityRequired ? [{ key: "tenderSecurity", label: "Tender Security", hint: "PDF/DOCX" }] : []),
-   ] as const;
-  const uploadedStageTwoDocumentCount = stageTwoDocuments.filter(doc => Boolean((bidFiles as any)[doc.key] || (existingStageTwoDocuments as any)[doc.key])).length;
-  const customRequiredDocsForStage = (bidTender?.requiredDocuments || []).filter(
+  const requiredDocumentsForActiveStage = (bidTender?.requiredDocuments || []).filter(
     (d) => d.bid_stage === currentBidStage || d.bid_stage === "combined"
   );
+  const structuredRequiredDocuments = requiredDocumentsForActiveStage.filter((d) => d.field_key);
+  const customRequiredDocsForStage = requiredDocumentsForActiveStage.filter((d) => !d.field_key);
+  // Financial pricing files stay off the Technical checklist even if a legacy config
+  // still lists one — Technical never touches pricing (see the redesigned stage split).
+  const visibleStructuredDocuments = isTechnicalStage
+    ? structuredRequiredDocuments.filter((d) => d.field_key !== "financial_proposal_file")
+    : structuredRequiredDocuments;
+  const activeStageDocuments = visibleStructuredDocuments.map((d) => ({
+    key: FIELD_KEY_TO_BID_FILE_KEY[d.field_key!] || d.field_key!,
+    label: d.name,
+    hint: d.expected_type || "PDF/DOCX",
+    long: REQUIRED_DOCUMENT_HELP[d.field_key!] as string | undefined,
+  }));
+  const existingStageTwoDocuments: Record<string, string | undefined> = {};
+  Object.entries(FIELD_KEY_TO_BID_FILE_KEY).forEach(([fieldKey, bidFileKey]) => {
+    existingStageTwoDocuments[bidFileKey] = existingDocumentsByFieldKey[fieldKey];
+  });
+  const existingEoiDocuments = existingStageTwoDocuments;
+  const eoiDocuments = activeStageDocuments;
+  const uploadedEoiDocumentCount = eoiDocuments.filter(doc => Boolean((bidFiles as any)[doc.key] || (existingEoiDocuments as any)[doc.key])).length;
+  const eoiDocumentsComplete = requiredDocumentsForActiveStage.length === 0 || uploadedEoiDocumentCount === eoiDocuments.length;
+  const eoiNarrativeCharCount = bidForm.eoiNarrative.trim().length;
+  const eoiNarrativeValid = eoiNarrativeCharCount >= 200;
+  const activeStageUploadedCount = activeStageDocuments.filter(doc => Boolean((bidFiles as any)[doc.key] || (existingStageTwoDocuments as any)[doc.key])).length;
   const customDocsExistingMap: Record<string, { file_name?: string; file_url?: string; expected_type?: string }> = {};
   (currentEditingBidVersion?.customDocuments || []).forEach((cd: any) => {
     customDocsExistingMap[cd.name] = { file_name: cd.file_name, file_url: cd.file_url, expected_type: cd.expected_type };
@@ -11795,47 +14513,64 @@ const VendorDashboard = ({
   const requiredVulnerableTarget = 30;
   const approvedTierLevel = parseTierLevel(latestApprovedPrequal?.techTier);
   const selectedTierLevel = parseTierLevel(bidForm.techTier);
-  const implementationStrategyCharCount = bidForm.conceptNote.trim().length;
   const roundCurrency = (value: number) => Math.round((value + Number.EPSILON) * 100) / 100;
-  const totalProjectValue = Number(bidForm.bidAmount || 0);
-  const subsidyValue = Number(bidForm.subsidyRequested || 0);
+  const totalProjectValue = (collectsFinalPricing && isLotWise) ? lotOffersTotal : Number(bidForm.bidAmount || 0);
+  const subsidyValue = (collectsFinalPricing && isLotWise)
+    ? lotOfferValues.filter(o => o.selected).reduce((sum, o) => sum + Number(o.subsidyRequested || 0), 0)
+    : Number(bidForm.subsidyRequested || 0);
   const coFinancingValue = Number(bidForm.coFinancingAmount || 0);
   const boqGrandTotal = roundCurrency(bidForm.boqItems.reduce((sum, item) => sum + (Number(item.qty || 0) * Number(item.unitPrice || 0)), 0));
+  const boqRowsComplete = bidForm.boqItems.length > 0 && bidForm.boqItems.every((item) => item.description.trim() && Number(item.qty) > 0 && item.unit.trim() && String(item.unitPrice).trim() !== "" && Number(item.unitPrice) >= 0);
+  // This tender's own designed BOQ (RBF-defined description/unit/qty) rather than the
+  // vendor's free-form one — set on every row when openBidForm/useBidVersion populated
+  // bidForm.boqItems from Tender.boqItems (see TenderBoqItem on the backend).
+  const hasBoqTemplate = !isLotWise && bidForm.boqItems.some((item) => item.templateItemId);
+  const omSectionComplete = Boolean(bidForm.omStrategySummary.trim());
   const fundingDelta = roundCurrency(isSiteSpecificStage ? totalProjectValue - boqGrandTotal : totalProjectValue - subsidyValue);
   const boqUploaded = Boolean(bidFiles.boq || existingStageTwoDocuments.boq);
   const genderActionPlanUploaded = Boolean(bidFiles.genderActionPlan || existingStageTwoDocuments.genderActionPlan);
-  const stageTwoDocumentsComplete = uploadedStageTwoDocumentCount === stageTwoDocuments.length;
-  const geographyRows = bidForm.sites.filter(site => site.siteName.trim() || site.estimatedHouseholds || site.latitude || site.longitude);
-  const installationTarget = geographyRows.reduce((sum, site) => sum + Number(site.estimatedHouseholds || site.numberOfHouseholds || 0), 0);
-  const primaryDistrict = geographyRows.find((site) => site.district?.trim())?.district || bidForm.sites[0]?.district || "Maseru";
+  const geographyRows = bidForm.sites.filter(site => site.siteName.trim() || site.numberOfHouseholds || site.latitude || site.longitude);
+  const installationTarget = geographyRows.reduce((sum, site) => sum + Number(site.numberOfHouseholds || 0), 0);
+  const primaryDistrict = geographyRows.find((site) => site.district?.trim())?.district || bidForm.sites[0]?.district || "";
   const districtOptions = (bidTender?.targetDistricts && bidTender.targetDistricts.length > 0) 
     ? bidTender.targetDistricts 
     : ["Maseru", "Leribe", "Berea", "Mafeteng", "Mohale's Hoek", "Quthing", "Qacha's Nek", "Mokhotlong", "Thaba-Tseka", "Butha-Buthe"];
-  const costPerConnection = subsidyValue > 0 && installationTarget > 0 ? subsidyValue / installationTarget : null;
   const stageOneSiteRows = geographyRows;
   const allStageOneSitesComplete = stageOneSiteRows.length > 0 && stageOneSiteRows.every((site) => (
     site.siteName.trim()
     && site.district?.trim()
-    && Number(site.estimatedHouseholds || site.numberOfHouseholds || 0) > 0
+    && Number(site.numberOfHouseholds || 0) > 0
     && site.targetBeneficiaryType?.trim()
   ));
   const stageTwoSiteRows = geographyRows;
   const allStageTwoSitesComplete = stageTwoSiteRows.length > 0 && stageTwoSiteRows.every((site) => (
     site.siteName.trim()
     && site.district?.trim()
-    && Number(site.estimatedHouseholds || site.numberOfHouseholds || 0) > 0
+    && Number(site.numberOfHouseholds || 0) > 0
     && site.targetBeneficiaryType?.trim()
     && site.latitude
     && site.longitude
     && typeof site.roadAccessAvailable === "boolean"
   ));
-  const financialSectionComplete =
-    totalProjectValue > 0
-    && subsidyValue > 0
-    && subsidyValue <= totalProjectValue
-    && (!isSiteSpecificStage || (Math.abs(fundingDelta) < 0.01 && boqUploaded));
+  const financialSectionComplete = isTechnicalStage
+    ? true // Technical doesn't collect pricing — nothing to complete here.
+    : isEoiStage
+      ? true // Indicative pricing at EOI is optional.
+      : (collectsFinalPricing && isLotWise)
+        ? (
+          selectedLotCount > 0
+          && (maxLotsPerBidder == null || selectedLotCount <= maxLotsPerBidder)
+          && lotOfferEntries.filter(([, o]) => o.selected).every(([, o]) => Number(o.bidAmount || 0) > 0)
+          && (!isCombinedStage || boqUploaded)
+        )
+        : (
+          totalProjectValue > 0
+          && subsidyValue > 0
+          && subsidyValue <= totalProjectValue
+          && (!isCombinedStage || (Math.abs(fundingDelta) < 0.01 && boqUploaded))
+        );
   const geographySectionComplete = isPreQualificationStage ? allStageOneSitesComplete : allStageTwoSitesComplete;
-  const hardwareSectionComplete = !isSiteSpecificStage || (
+  const hardwareSectionComplete = !(isTechnicalStage || isCombinedStage) || (
     bidForm.systemConfiguration.technologyType.trim()
     && bidForm.deviceBrand.trim()
     && bidForm.deviceModel.trim()
@@ -11847,16 +14582,16 @@ const VendorDashboard = ({
     && Number(bidForm.vulnerableTargetPct || 0) >= requiredVulnerableTarget
     && Number(bidForm.lowIncomeTargetPct || 0) >= 60
     && bidForm.inclusionCommitmentConfirmed;
-  const inclusionSectionReady = inclusionSectionComplete && (!isSiteSpecificStage || genderActionPlanUploaded);
-  const narrativeSectionComplete = !isPreQualificationStage || implementationStrategyCharCount >= 200;
-  const documentSectionComplete = !isSiteSpecificStage || stageTwoDocumentsComplete;
+  const inclusionSectionReady = inclusionSectionComplete && (!(isTechnicalStage || isCombinedStage) || genderActionPlanUploaded);
+  const narrativeSectionComplete = true; // Optional supplementary narrative, Technical/Combined only.
+  const documentSectionComplete = !isEoiStage && activeStageDocuments.every(doc => Boolean((bidFiles as any)[doc.key] || (existingStageTwoDocuments as any)[doc.key])) && customDocsComplete;
   const proposalSections = [
-    { id: "financial", label: "Financial", icon: CreditCard, complete: financialSectionComplete, note: isSiteSpecificStage ? (boqUploaded ? "BoQ attached" : "BoQ required") : "Concept-stage budget check" },
-    ...(isSiteSpecificStage ? [{ id: "technical", label: "Technical", icon: Database, complete: Boolean(hardwareSectionComplete), note: approvedTierLevel ? `Tier ceiling: ${latestApprovedPrequal?.techTier}` : "Specs required" }] : []),
+    ...(!isTechnicalStage && !isEoiStage ? [{ id: "financial", label: "Financial", icon: CreditCard, complete: financialSectionComplete, note: isCombinedStage ? (boqUploaded ? "BoQ attached" : "BoQ required") : "Final pricing" }] : []),
+    ...((isTechnicalStage || isCombinedStage) ? [{ id: "technical", label: "Technical", icon: Database, complete: Boolean(hardwareSectionComplete), note: approvedTierLevel ? `Tier ceiling: ${latestApprovedPrequal?.techTier}` : "Specs required" }] : []),
     { id: "geography", label: "Geography", icon: MapPin, complete: geographySectionComplete, note: `${installationTarget || 0} household target` },
     { id: "inclusion", label: "Inclusion", icon: ShieldCheck, complete: inclusionSectionReady, note: `${bidForm.femaleTargetPct || 0}% female / ${bidForm.vulnerableTargetPct || 0}% vulnerable / ${bidForm.lowIncomeTargetPct || 0}% low-income` },
-    { id: "narrative", label: "Narrative", icon: FileText, complete: narrativeSectionComplete, note: isPreQualificationStage ? `${implementationStrategyCharCount}/200 chars` : "Summaries optional" },
-    ...(isSiteSpecificStage ? [{ id: "documents", label: "Documents", icon: Upload, complete: documentSectionComplete, note: `${uploadedStageTwoDocumentCount}/${stageTwoDocuments.length} uploaded` }] : []),
+    ...((isTechnicalStage || isCombinedStage) ? [{ id: "narrative", label: "Narrative", icon: FileText, complete: narrativeSectionComplete, note: "Optional" }] : []),
+    ...((isTechnicalStage || isCombinedStage || isFinancialStage) ? [{ id: "documents", label: isFinancialStage ? "Financial Docs" : "Documents", icon: Upload, complete: documentSectionComplete, note: `${activeStageUploadedCount}/${activeStageDocuments.length} uploaded` }] : []),
   ];
   const completedProposalSections = proposalSections.filter(section => section.complete).length;
   const ruleBookSections: { heading: string; points: string[] }[] = isPreQualificationStage
@@ -11866,16 +14601,11 @@ const VendorDashboard = ({
           "Only one final submitted bid is allowed per tender. Drafts can be saved and revised until the deadline.",
           "Bids are accepted only during the tender's submission window. Late submissions are rejected automatically.",
         ] },
-        { heading: "Financial Rules (Section A)", points: [
-          "Bid amount and subsidy requested are mandatory before submission.",
-          "Subsidy requested cannot exceed the bid amount - the vendor must provide the co-financing difference.",
-          "All financial values are in Lesotho Maloti (LSL).",
-        ] },
-        { heading: "Concept Note (Section E)", points: [
+        { heading: "Concept Note (EOI Stage)", points: [
           "The concept note must be at least 200 characters before submission.",
           "Explain the implementation strategy, target communities, and expected impact.",
         ] },
-        { heading: "Site & Geography Rules (Section C)", points: [
+        { heading: "Site & Geography Rules (Section B)", points: [
           "Provide site name, district, primary beneficiary type, and estimated households for every village site.",
           "GPS coordinates are optional at Stage 1 but recommended. If provided, they must fall within Lesotho.",
         ] },
@@ -11895,19 +14625,19 @@ const VendorDashboard = ({
           "Bids are accepted only during the tender's submission window. Late submissions are rejected automatically.",
         ] },
         { heading: "Financial Rules (Section A)", points: [
-          "Bid amount and subsidy requested are mandatory before submission.",
-          "The BOQ grand total must exactly equal the bid amount.",
+          "Bid amount and subsidy requested are mandatory before submission (Stage 2 for Combined workflow, Stage 3 for sequential workflow).",
+          "For Combined workflow, the BOQ grand total must exactly equal the bid amount. For sequential workflow, they're submitted at different stages and aren't cross-checked.",
           "Subsidy requested cannot exceed the bid amount - the vendor must provide the co-financing difference.",
         ] },
-        { heading: "Technical Rules (Section B)", points: [
+        { heading: "Technical Rules (Section C)", points: [
           "The selected technology tier cannot exceed your approved pre-qualification tier.",
           "Device brand, model, technology type, and system configuration must be fully specified.",
         ] },
         { heading: "Required Documents", points: [
-          "Stage 2 requires the Technical Proposal, Financial Proposal, and Bill of Quantities documents.",
+          "The documents required at your current stage are listed in the checklist above — this varies by tender, so always check the live checklist rather than assuming a fixed list.",
           "Accepted formats: PDF, DOCX, XLSX only. Maximum file size: 10MB per file.",
         ] },
-        { heading: "Site & Geography Rules (Section C)", points: [
+        { heading: "Site & Geography Rules (Section B)", points: [
           "Provide the exact village list with mandatory GPS coordinates for every project site.",
           "All site coordinates must fall within Lesotho for field verification.",
           "Include households, primary beneficiary type, and road access details for each site.",
@@ -11992,12 +14722,12 @@ const VendorDashboard = ({
       sites: [
         ...prev.sites,
         {
+          lot: "",
           siteName: "",
-          district: bidTender?.targetDistricts?.[0] || "Maseru",
+          district: "",
           villageSubDistrict: "",
           latitude: "",
           longitude: "",
-          estimatedHouseholds: "",
           numberOfHouseholds: "",
           targetTechnology: bidTender?.technologyTypes?.[0] || "",
           targetBeneficiaryType: "standard",
@@ -12034,7 +14764,6 @@ const VendorDashboard = ({
   const [bidFileErrors, setBidFileErrors] = useState<Record<string, string>>({});
   const [bidFieldErrors, setBidFieldErrors] = useState<Record<string, string>>({});
   const [bidSiteErrors, setBidSiteErrors] = useState<Record<number, string>>({});
-  const [bidCustomFiles, setBidCustomFiles] = useState<Record<string, File | null>>({});
 
   const handleBidFileChange = (key: string, file: File | null) => {
     if (!file) {
@@ -12150,40 +14879,79 @@ const VendorDashboard = ({
     const sites: Record<number, string> = {};
     const files: Record<string, string> = {};
 
-    if (!String(bidForm.bidAmount || "").trim()) {
-      fields.bidAmount = "Bid amount is required.";
-    } else if (Number(bidForm.bidAmount) <= 0) {
-      fields.bidAmount = "Bid amount must be greater than 0.";
-    }
-    if (!String(bidForm.subsidyRequested || "").trim()) {
-      fields.subsidyRequested = "Subsidy requested is required.";
-    } else if (Number(bidForm.subsidyRequested) < 0) {
-      fields.subsidyRequested = "Subsidy requested cannot be negative.";
-    } else if (Number(bidForm.subsidyRequested) > Number(bidForm.bidAmount || 0)) {
-      fields.subsidyRequested = "Subsidy requested must be less than or equal to the bid amount.";
-    }
-
-    if (isPreQualificationStage) {
-      if (!bidForm.conceptNote.trim()) {
-        fields.conceptNote = "Concept note is required for Stage 1 submissions.";
-      } else if (implementationStrategyCharCount < 200) {
-        fields.conceptNote = `Concept note must contain at least 200 characters before submission (currently ${implementationStrategyCharCount}).`;
-      }
-      if (isEoiStage) {
-        if (eoiNarrativeCharCount < 200) {
-          fields.eoiNarrative = `EOI narrative must contain at least 200 characters before submission (currently ${eoiNarrativeCharCount}).`;
-        }
-        eoiDocuments.forEach((doc) => {
-          if (!(bidFiles as any)[doc.key] && !(existingEoiDocuments as any)[doc.key]) {
-            files[doc.key] = `${doc.label} document is required for the EOI (Stage 1) submission.`;
+    // Pricing is collected in exactly one place: the final, binding figure at Financial
+    // (or Combined, which submits technical and financial content together) under the
+    // sealed two-envelope model. EOI is interest-only; Technical never touches pricing.
+    if ((isFinancialStage || isCombinedStage) && isLotWise) {
+      const selectedOffers = lotOfferEntries.filter(([, o]) => o.selected);
+      if (selectedOffers.length === 0) {
+        fields.lotOffers = "Select at least one lot to bid on.";
+      } else if (maxLotsPerBidder != null && selectedOffers.length > maxLotsPerBidder) {
+        fields.lotOffers = `This tender allows bidding on at most ${maxLotsPerBidder} lot${maxLotsPerBidder === 1 ? "" : "s"}.`;
+      } else {
+        const badOffer = selectedOffers.find(([, o]) => !String(o.bidAmount || "").trim() || Number(o.bidAmount) <= 0);
+        if (badOffer) {
+          fields.lotOffers = "Enter a bid amount greater than 0 for each selected lot.";
+        } else {
+          // A lot with an RBF-designed BOQ template needs every line priced — its
+          // bidAmount is auto-summed from these (see updateLotBoqItemPrice), so a
+          // missing line wouldn't otherwise be caught by the bidAmount > 0 check above
+          // if other lines are already priced.
+          const lotWithMissingBoqPrice = selectedOffers.find(([, o]) => (o.boqItems || []).some(item => !String(item.unitPrice || "").trim() || Number(item.unitPrice) < 0));
+          if (lotWithMissingBoqPrice) {
+            const lotName = tenderLots.find(l => String(l.id || "") === lotWithMissingBoqPrice[0])?.name || "a selected lot";
+            fields.lotOffers = `Enter a unit price for every Bill of Quantities line on ${lotName}.`;
+          } else {
+            const badSubsidy = selectedOffers.find(([, o]) => String(o.subsidyRequested || "").trim() && (Number(o.subsidyRequested) < 0 || Number(o.subsidyRequested) > Number(o.bidAmount || 0)));
+            if (badSubsidy) {
+              fields.lotOffers = "Subsidy requested for a lot cannot be negative or exceed that lot's bid amount.";
+            }
           }
-        });
+        }
+      }
+    } else if (isFinancialStage || isCombinedStage) {
+      if (!String(bidForm.bidAmount || "").trim()) {
+        fields.bidAmount = "Bid amount is required.";
+      } else if (Number(bidForm.bidAmount) <= 0) {
+        fields.bidAmount = "Bid amount must be greater than 0.";
+      }
+      if (!String(bidForm.subsidyRequested || "").trim()) {
+        fields.subsidyRequested = "Subsidy requested is required.";
+      } else if (Number(bidForm.subsidyRequested) < 0) {
+        fields.subsidyRequested = "Subsidy requested cannot be negative.";
+      } else if (Number(bidForm.subsidyRequested) > Number(bidForm.bidAmount || 0)) {
+        fields.subsidyRequested = "Subsidy requested must be less than or equal to the bid amount.";
       }
     }
 
-    if (isSiteSpecificStage) {
+    if (isEoiStage) {
+      if (eoiNarrativeCharCount < 200) {
+        fields.eoiNarrative = `EOI narrative must contain at least 200 characters before submission (currently ${eoiNarrativeCharCount}).`;
+      }
+      // Inclusion commitment is declared once, here, and carried forward to later stages.
+      if (Number(bidForm.femaleTargetPct || 0) < requiredFemaleTarget) {
+        fields.femaleTargetPct = `Female-headed household target must be at least ${requiredFemaleTarget}%.`;
+      }
+      if (Number(bidForm.vulnerableTargetPct || 0) < requiredVulnerableTarget) {
+        fields.vulnerableTargetPct = `Vulnerable group target must be at least ${requiredVulnerableTarget}%.`;
+      }
+      if (Number(bidForm.lowIncomeTargetPct || 0) < 60) {
+        fields.lowIncomeTargetPct = "Low-income household target must be at least 60%.";
+      }
+      if (!bidForm.inclusionCommitmentConfirmed) {
+        fields.inclusionCommitmentConfirmed = "You must confirm the inclusion commitment before submitting.";
+      }
+      if (isLotWise) {
+        if (declaredLots.length === 0) {
+          fields.declaredLots = "Select at least one lot to bid on.";
+        } else if (maxLotsPerBidder != null && declaredLots.length > maxLotsPerBidder) {
+          fields.declaredLots = `This tender allows bidding on at most ${maxLotsPerBidder} lot${maxLotsPerBidder === 1 ? "" : "s"}.`;
+        }
+      }
+    }
+    if (isTechnicalStage || isCombinedStage) {
       if (!bidForm.omStrategySummary.trim()) {
-        fields.omStrategySummary = "O&M strategy summary is required for Stage 2 submissions.";
+        fields.omStrategySummary = "O&M strategy summary is required for technical submissions.";
       }
       if (isShsTender && bidForm.offerPaygo) {
         if (!bidForm.paygoPlatform.trim()) fields.paygoPlatform = "PAYGO platform is required when PAYGO is offered.";
@@ -12209,59 +14977,57 @@ const VendorDashboard = ({
         if (raw !== "" && Number(raw) <= 0) fields[`systemConfiguration.${key}`] = message;
       });
 
-      const boqRows = bidForm.boqItems.filter(item => item.description.trim() || item.qty || item.unit.trim() || item.unitPrice);
-      if (boqRows.length === 0) {
-        fields.boqItems = "Add at least one BOQ line item before submitting.";
-      } else {
-        const incompleteBoqRow = boqRows.find(item => !item.description.trim() || !(Number(item.qty) > 0) || !item.unit.trim() || Number(item.unitPrice || 0) < 0);
-        if (incompleteBoqRow) {
-          fields.boqItems = "Each BOQ row needs a description, quantity, unit, and unit price before submission.";
+      // Lot-wise tenders have no tender-level BOQ section at all (it's designed and
+      // priced per lot instead — see the lotOffers BOQ template rows below and the
+      // "boq" BidSectionCard's `!isLotWise` gate) — this flat check only applies to
+      // non-lot-wise tenders, whose single BOQ lives in bidForm.boqItems.
+      if (!isLotWise) {
+        const boqRows = bidForm.boqItems.filter(item => item.description.trim() || item.qty || item.unit.trim() || item.unitPrice);
+        if (boqRows.length === 0) {
+          fields.boqItems = "Add at least one BOQ line item before submitting.";
         } else {
-          const boqTotal = roundCurrency(boqRows.reduce((sum, item) => sum + (Number(item.qty || 0) * Number(item.unitPrice || 0)), 0));
-          if (Math.abs(roundCurrency(Number(bidForm.bidAmount || 0)) - boqTotal) > 0.01) {
-            fields.boqItems = `BOQ grand total (LSL ${boqTotal.toLocaleString()}) must match the bid amount (LSL ${Number(bidForm.bidAmount || 0).toLocaleString()}).`;
+          const incompleteBoqRow = boqRows.find(item => !item.description.trim() || !(Number(item.qty) > 0) || !item.unit.trim() || !String(item.unitPrice).trim() || Number(item.unitPrice) < 0);
+          if (incompleteBoqRow) {
+            fields.boqItems = "Each BOQ row needs a description, quantity, unit, and unit price before submission.";
+          } else if (isCombinedStage) {
+            // Technical-stage BOQ is not reconciled against a bid amount — pricing isn't
+            // collected there. Combined submits both together, so the totals must match.
+            const boqTotal = roundCurrency(boqRows.reduce((sum, item) => sum + (Number(item.qty || 0) * Number(item.unitPrice || 0)), 0));
+            if (Math.abs(roundCurrency(Number(bidForm.bidAmount || 0)) - boqTotal) > 0.01) {
+              fields.boqItems = `BOQ grand total (${selectedBidCurrency} ${boqTotal.toLocaleString()}) must match the bid amount (${selectedBidCurrency} ${Number(bidForm.bidAmount || 0).toLocaleString()}).`;
+            }
           }
         }
       }
 
-      const requiredStageTwoFiles: Record<string, string> = {
-        technicalProposal: "Technical Proposal",
-        financialProposal: "Financial Proposal",
-        boq: "Bill of Quantities",
-      };
-      Object.entries(requiredStageTwoFiles).forEach(([key, label]) => {
-        if (!(bidFiles as any)[key] && !(existingStageTwoDocuments as any)[key]) {
-          files[key] = `${label} document is required for Stage 2 submissions.`;
-        }
-      });
     }
 
-    if (Number(bidForm.femaleTargetPct || 0) < requiredFemaleTarget) {
-      fields.femaleTargetPct = `Female-headed household target must be at least ${requiredFemaleTarget}%.`;
-    }
-    if (Number(bidForm.vulnerableTargetPct || 0) < requiredVulnerableTarget) {
-      fields.vulnerableTargetPct = `Vulnerable group target must be at least ${requiredVulnerableTarget}%.`;
-    }
-    if (Number(bidForm.lowIncomeTargetPct || 0) < 60) {
-      fields.lowIncomeTargetPct = "Low-income household target must be at least 60%.";
-    }
-    if (!bidForm.inclusionCommitmentConfirmed) {
-      fields.inclusionCommitmentConfirmed = "You must confirm the inclusion commitment before submitting.";
-    }
+    // Required documents (whichever stage they belong to) come entirely from what the
+    // RBF Admin configured for this tender — activeStageDocuments is already scoped to
+    // the current stage.
+    activeStageDocuments.forEach((doc) => {
+      if (!(bidFiles as any)[doc.key] && !(existingStageTwoDocuments as any)[doc.key]) {
+        files[doc.key] = `${doc.label} document is required for this stage.`;
+      }
+    });
 
-    const validSites = bidForm.sites.filter(site => site.siteName.trim() || site.district?.trim() || site.estimatedHouseholds || site.numberOfHouseholds || site.targetTechnology?.trim() || site.latitude || site.longitude);
+    const validSites = bidForm.sites.filter(site => site.siteName.trim() || site.district?.trim() || site.numberOfHouseholds || site.targetTechnology?.trim() || site.latitude || site.longitude);
     if (validSites.length === 0) {
-      fields.sites = `Add at least one ${isSiteSpecificStage ? "project" : "village"} site before submitting.`;
+      fields.sites = `Add at least one ${isEoiStage || isFinancialStage ? "village" : "project"} site before submitting.`;
     } else {
       validSites.forEach((site) => {
         const siteIndex = bidForm.sites.indexOf(site);
-        if (isSiteSpecificStage) {
-          if (!site.siteName.trim() || !site.district?.trim() || !site.targetBeneficiaryType?.trim() || !(site.estimatedHouseholds || site.numberOfHouseholds)) {
+        if (isFinancialStage) {
+          if (!site.siteName.trim() || !site.district?.trim()) {
+            sites[siteIndex] = "Site name and district are required before submitting the Financial stage.";
+          }
+        } else if (isTechnicalStage || isCombinedStage) {
+          if (!site.siteName.trim() || !site.district?.trim() || !site.targetBeneficiaryType?.trim() || !site.numberOfHouseholds) {
             sites[siteIndex] = "Site name, district, primary beneficiary type, and number of households are required before submitting.";
             return;
           }
           if (!String(site.latitude || "").trim() || !String(site.longitude || "").trim()) {
-            sites[siteIndex] = "Latitude and longitude are required for every Stage 2 site.";
+            sites[siteIndex] = "Latitude and longitude are required for every Technical stage site.";
             return;
           }
           const lat = Number(site.latitude);
@@ -12274,8 +15040,12 @@ const VendorDashboard = ({
             sites[siteIndex] = "Site coordinates must fall within Lesotho.";
             return;
           }
+          if (isLotWise && !site.lot) {
+            sites[siteIndex] = "Select which lot this site belongs to.";
+            return;
+          }
         } else {
-          if (!site.siteName.trim() || !site.district?.trim() || !site.targetBeneficiaryType?.trim() || !(site.estimatedHouseholds || site.numberOfHouseholds)) {
+          if (!site.siteName.trim() || !site.district?.trim() || !site.targetBeneficiaryType?.trim() || !site.numberOfHouseholds) {
             sites[siteIndex] = "Site name, district, primary beneficiary type, and estimated households are required before submitting.";
             return;
           }
@@ -12312,7 +15082,7 @@ const VendorDashboard = ({
     }
   }
   const FIELD_TO_SECTION: Record<string, string> = {
-    bidAmount: "financial", subsidyRequested: "financial", boqItems: "financial", coFinancingAmount: "financial",
+    bidAmount: "financial", subsidyRequested: "financial", boqItems: "financial", coFinancingAmount: "financial", bid_currency: "financial",
     technologyType: "technical", deviceBrand: "technical", deviceModel: "technical", techTier: "technical",
     ratedPowerW: "technical", batteryCapacityWh: "technical", pvPanelSizeW: "technical",
     paygoPlatform: "technical", dailyPaymentAmountLsl: "technical", collectionMethod: "technical",
@@ -12415,15 +15185,15 @@ const VendorDashboard = ({
     setBidMessage(null);
     try {
       const payloadSites = bidForm.sites
-        .filter((site) => site.siteName.trim() || site.district?.trim() || site.estimatedHouseholds || site.numberOfHouseholds || site.targetTechnology?.trim() || site.latitude || site.longitude)
+        .filter((site) => site.siteName.trim() || site.district?.trim() || site.numberOfHouseholds || site.targetTechnology?.trim() || site.latitude || site.longitude)
         .map((site) => ({
+        lot: site.lot || undefined,
         siteName: site.siteName,
         district: site.district,
         villageSubDistrict: site.villageSubDistrict,
         latitude: site.latitude ? Number(site.latitude) : undefined,
         longitude: site.longitude ? Number(site.longitude) : undefined,
-        estimatedHouseholds: site.estimatedHouseholds ? Number(site.estimatedHouseholds) : (site.numberOfHouseholds ? Number(site.numberOfHouseholds) : undefined),
-        numberOfHouseholds: site.numberOfHouseholds ? Number(site.numberOfHouseholds) : (site.estimatedHouseholds ? Number(site.estimatedHouseholds) : undefined),
+        numberOfHouseholds: site.numberOfHouseholds ? Number(site.numberOfHouseholds) : undefined,
         targetTechnology: site.targetTechnology?.trim() || bidForm.systemConfiguration.technologyType || bidTender?.technologyTypes?.[0] || "",
         targetBeneficiaryType: site.targetBeneficiaryType,
         estimatedEnergyDemandKwhMonth: site.estimatedEnergyDemandKwhMonth ? Number(site.estimatedEnergyDemandKwhMonth) : undefined,
@@ -12434,13 +15204,14 @@ const VendorDashboard = ({
         .filter(item => item.description.trim() || item.qty || item.unit.trim() || item.unitPrice)
         .map(item => ({
           item_number: item.itemNumber,
+          template_item_id: item.templateItemId || undefined,
           description: item.description,
           qty: Number(item.qty || 0),
           unit: item.unit,
           unit_price: Number(item.unitPrice || 0),
           total: roundCurrency(Number(item.qty || 0) * Number(item.unitPrice || 0)),
         }));
-      if (status === BidStatus.SUBMITTED && isSiteSpecificStage) {
+      if (status === BidStatus.SUBMITTED && (isTechnicalStage || isCombinedStage)) {
         const incompleteBoqItem = filteredBoqItems.find((item) =>
           !String(item.description || "").trim()
           || !(Number(item.qty || 0) > 0)
@@ -12455,7 +15226,7 @@ const VendorDashboard = ({
         const incompleteSite = payloadSites.find((site) =>
           !site.siteName?.trim()
           || !site.district?.trim()
-          || !(site.estimatedHouseholds || site.numberOfHouseholds)
+          || !site.numberOfHouseholds
           || !site.targetBeneficiaryType?.trim()
           || site.latitude == null
           || site.longitude == null
@@ -12465,31 +15236,66 @@ const VendorDashboard = ({
           setIsBidSubmitting(false);
           return;
         }
-        const filteredBoqGrandTotal = roundCurrency(filteredBoqItems.reduce((sum, item) => sum + Number(item.total || 0), 0));
-        if (Math.abs(roundCurrency(Number(bidForm.bidAmount || 0)) - filteredBoqGrandTotal) > 0.01) {
-          setBidSubmitError(`BOQ grand total must match the bid amount before submission. Current total: LSL ${filteredBoqGrandTotal.toLocaleString()}.`);
-          setIsBidSubmitting(false);
-          return;
+        if (isCombinedStage && !isLotWise) {
+          // Technical-stage BOQ isn't reconciled against a bid amount — Technical never
+          // collects pricing. Combined submits both together, so the totals must match.
+          // For lot-wise tenders, pricing is per lot, so there's no single bid amount to check.
+          const filteredBoqGrandTotal = roundCurrency(filteredBoqItems.reduce((sum, item) => sum + Number(item.total || 0), 0));
+          if (Math.abs(roundCurrency(Number(bidForm.bidAmount || 0)) - filteredBoqGrandTotal) > 0.01) {
+            setBidSubmitError(`BOQ grand total must match the bid amount before submission. Current total: ${selectedBidCurrency} ${filteredBoqGrandTotal.toLocaleString()}.`);
+            setIsBidSubmitting(false);
+            return;
+          }
         }
       }
-      if (status === BidStatus.SUBMITTED && isPreQualificationStage) {
+      if (status === BidStatus.SUBMITTED && isEoiStage) {
         const incompleteConceptSite = payloadSites.find((site) =>
           !site.siteName?.trim()
           || !site.district?.trim()
           || !site.targetBeneficiaryType?.trim()
-          || !site.estimatedHouseholds
+          || !site.numberOfHouseholds
         );
         if (incompleteConceptSite) {
-          setBidSubmitError("Each Stage 1 site needs a site name, district, primary beneficiary type, and estimated households.");
+          setBidSubmitError(
+            isEoiInviteOnlyTender
+              ? "Each site needs a site name, district, primary beneficiary type, and estimated households."
+              : "Each Stage 1 site needs a site name, district, primary beneficiary type, and estimated households."
+          );
           setIsBidSubmitting(false);
           return;
         }
       }
       const payload = {
         tender: bidTender.id,
-        bid_amount: bidForm.bidAmount ? Number(bidForm.bidAmount) : undefined,
-        subsidy_requested: bidForm.subsidyRequested ? Number(bidForm.subsidyRequested) : undefined,
-        concept_note: bidForm.conceptNote,
+        // Pricing is collected only at Financial/Combined (final, binding) under the
+        // sealed two-envelope model. EOI is interest-only and Technical never submits
+        // a price, so it stays sealed from evaluators until the technical threshold clears.
+        bid_amount: !isEoiStage && !isTechnicalStage && !(collectsFinalPricing && isLotWise) && bidForm.bidAmount ? Number(bidForm.bidAmount) : undefined,
+        bid_currency: collectsFinalPricing ? (bidForm.bidCurrency || undefined) : undefined,
+        subsidy_requested: !isEoiStage && !isTechnicalStage && !(collectsFinalPricing && isLotWise) && bidForm.subsidyRequested ? Number(bidForm.subsidyRequested) : undefined,
+        // Lot-wise tenders price per lot instead of a single bid amount/subsidy.
+        lot_offers: (collectsFinalPricing && isLotWise)
+          ? lotOfferEntries.filter(([, o]) => o.selected).map(([lotId, o]) => ({
+              lot: lotId,
+              bid_amount: Number(o.bidAmount || 0),
+              subsidy_requested: o.subsidyRequested ? Number(o.subsidyRequested) : undefined,
+              boq_items: o.boqItems ? o.boqItems.map((item) => ({
+                template_item_id: item.templateItemId,
+                item_number: item.itemNumber,
+                description: item.description,
+                qty: Number(item.qty || 0),
+                unit: item.unit,
+                unit_price: Number(item.unitPrice || 0),
+                total: item.total,
+              })) : undefined,
+            }))
+          : undefined,
+        // The vendor's declared lot interest at EOI — scopes which lots may later be
+        // tagged to sites and priced. Carried forward unchanged at later stages.
+        declared_lots: isLotWise ? declaredLots : undefined,
+        // The EOI Narrative is the single narrative field at EOI — mirrored into
+        // concept_note so read-only evaluator/RMT screens that still display it keep working.
+        concept_note: isEoiStage ? bidForm.eoiNarrative : bidForm.conceptNote,
         bid_stage: currentBidStage,
         eoi_narrative: bidForm.eoiNarrative,
         financial_standing_summary: bidForm.financialStandingSummary,
@@ -12516,7 +15322,7 @@ const VendorDashboard = ({
           pv_panel_size_w: bidForm.systemConfiguration.pvPanelSizeW ? Number(bidForm.systemConfiguration.pvPanelSizeW) : undefined,
           inverter_type: bidForm.systemConfiguration.inverterType,
         },
-        boq_details: filteredBoqItems.length ? filteredBoqItems : undefined,
+        boq_items: filteredBoqItems.length ? filteredBoqItems : undefined,
         technical_proposal_file: bidFiles.technicalProposal ?? undefined,
         financial_proposal_file: bidFiles.financialProposal ?? undefined,
         boq_file: bidFiles.boq ?? undefined,
@@ -12528,17 +15334,15 @@ const VendorDashboard = ({
         low_income_target_pct: Number(bidForm.lowIncomeTargetPct),
         inclusion_commitment_confirmed: bidForm.inclusionCommitmentConfirmed,
         om_strategy_summary: bidForm.omStrategySummary,
-        aftersales_description: bidForm.aftersalesDescription,
         local_technicians_to_be_trained: bidForm.localTechniciansToBeTrained ? Number(bidForm.localTechniciansToBeTrained) : undefined,
-        warranty_period: bidForm.warrantyPeriodMonths ? Number(bidForm.warrantyPeriodMonths) : undefined,
+        warranty_period_months: bidForm.warrantyPeriodMonths ? Number(bidForm.warrantyPeriodMonths) : undefined,
         offer_paygo: bidForm.offerPaygo,
         paygo_platform: bidForm.offerPaygo ? bidForm.paygoPlatform : "",
         daily_payment_amount_lsl: bidForm.offerPaygo && bidForm.dailyPaymentAmountLsl ? Number(bidForm.dailyPaymentAmountLsl) : undefined,
         collection_method: bidForm.offerPaygo ? bidForm.collectionMethod : "",
         om_plan_file: bidFiles.omPlan ?? undefined,
-        om_plan_document: bidFiles.omPlan ?? undefined,
+        reporting_templates_file: bidFiles.reportingTemplates ?? undefined,
         distribution_map_file: bidFiles.distributionMap ?? undefined,
-        service_tier: bidForm.techTier as TenderBid["service_tier"],
         custom_documents: customRequiredDocsForStage.length
           ? customRequiredDocsForStage.map((d) => {
               const file = bidCustomFiles[d.name] || null;
@@ -12574,7 +15378,11 @@ const VendorDashboard = ({
         setBidMessage(`Draft saved: ${savedAt}`);
       } else {
         const submittedAt = created.submitted_at ? new Date(created.submitted_at).toLocaleString() : "now";
-        setBidMessage(`Bid submitted. Ref: ${bidTender.referenceNumber} • Version ${created.version_number} • ${submittedAt}.`);
+        setBidMessage(
+          isEoiInviteOnlyTender
+            ? `Expression of Interest submitted. Ref: ${bidTender.referenceNumber} • ${submittedAt}.`
+            : `Bid submitted. Ref: ${bidTender.referenceNumber} • Version ${created.version_number} • ${submittedAt}.`
+        );
       }
       setBidSubmitError(null);
       setBidConfirmOpen(false);
@@ -12589,7 +15397,15 @@ const VendorDashboard = ({
           setBidFieldErrors(parsed.fields);
           setBidSiteErrors(parsed.sites);
           setBidFileErrors(prev => ({ ...prev, ...parsed.files }));
-          setBidSubmitError("The server rejected the submission. Please fix the highlighted fields below and try again.");
+          // `tender`/`detail` are top-level errors from access checks (deadline passed,
+          // tender not published, duplicate submission, stage not unlocked, etc.) — they
+          // don't belong to any specific form field or section, so there's nothing to
+          // "highlight." Show the real message instead of a generic one that points the
+          // vendor at fields that are actually fine.
+          const topLevelMessage = parsed.fields["tender"] || parsed.fields["detail"];
+          setBidSubmitError(
+            topLevelMessage || "The server rejected the submission. Please fix the highlighted fields below and try again."
+          );
           setBidConfirmOpen(false);
           return;
         }
@@ -12670,107 +15486,549 @@ const VendorDashboard = ({
   if (view === "bid" && bidTender) {
     const versionsSorted = [...bidVersions].sort((a, b) => (b.version_number || 0) - (a.version_number || 0));
     const canEdit = !editingBidStatus || editingBidStatus === BidStatus.DRAFT || editingBidStatus === BidStatus.REVISION_REQUIRED || editingBidStatus === BidStatus.SUBMITTED;
-    return (
-      <div className="space-y-6 max-w-6xl mx-auto pb-20">
-        <div className="flex items-center gap-4 mb-6">
-          <button onClick={() => navigateView("dashboard")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
-            <ChevronRight className="rotate-180" size={20} />
-          </button>
+
+    // A dedicated, purpose-built submission page for EOI Invites — distinct from the
+    // generic multi-stage Tender bid wizard below (which has to cover Technical/
+    // Financial/Combined pricing, lots, and BOQs that never apply here).
+    if (isEoiInviteOnlyTender) {
+      const eoiProgressSections = [
+        ...(eoiDocuments.length > 0 ? [{ id: "documents", label: "Documents", complete: eoiDocumentsComplete, note: `${uploadedEoiDocumentCount}/${eoiDocuments.length} uploaded` }] : []),
+        { id: "sites", label: "Sites", complete: geographySectionComplete, note: `${installationTarget || 0} household target` },
+        { id: "inclusion", label: "Inclusion", complete: inclusionSectionComplete, note: `${bidForm.femaleTargetPct || 0}% / ${bidForm.vulnerableTargetPct || 0}% / ${bidForm.lowIncomeTargetPct || 0}%` },
+        { id: "statement", label: "Statement", complete: eoiNarrativeValid, note: `${eoiNarrativeCharCount}/200 chars` },
+      ];
+      const eoiCompletedCount = eoiProgressSections.filter((s) => s.complete).length;
+      const sectionHeader = (icon: React.ReactNode, title: string, description: string, accent: string, accentSoft: string) => (
+        <div className="flex items-start gap-3 border-b border-slate-100 px-6 py-5">
+          <div className="rounded-xl p-2.5 shrink-0" style={{ background: accentSoft, color: accent }}>{icon}</div>
           <div>
-            <h1 className="text-2xl font-bold text-slate-900">Submit Tender Proposal</h1>
-            <p className="text-slate-500">Tender: {bidTender.name} ({bidTender.referenceNumber})</p>
+            <h2 className="text-base font-bold text-slate-900">{title}</h2>
+            <p className="mt-0.5 text-sm text-slate-500">{description}</p>
+          </div>
+        </div>
+      );
+
+      return (
+        <div className="max-w-[90rem] mx-auto pb-32">
+          <button
+            onClick={() => navigateView("dashboard")}
+            className="inline-flex items-center gap-1.5 text-sm font-medium text-slate-500 hover:text-slate-900 mb-6 transition-colors"
+          >
+            <ChevronLeft size={16} /> Back
+          </button>
+
+          <div className="mb-6">
+            <div className="flex items-center gap-2 mb-3">
+              <StatusChip color={AMBER} bg={AMBER_SOFT}>Expression of Interest</StatusChip>
+              <span className="font-mono text-xs text-slate-400">{bidTender.referenceNumber}</span>
+            </div>
+            <h1 className="text-3xl font-bold tracking-tight text-slate-900">{bidTender.name}</h1>
+            <div className="mt-2.5 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-sm text-slate-500">
+              <span>{bidTender.technologyTypes?.join(" / ") || "Technology not set"}</span>
+              <span className="inline-flex items-center gap-1"><MapPin size={13} />{bidTender.targetDistricts?.join(", ") || "—"}</span>
+              <span className="inline-flex items-center gap-1 font-semibold text-slate-700"><Clock size={13} />{bidDeadlineCountdown}</span>
+            </div>
+            <p className="mt-4 max-w-2xl text-sm text-slate-600">
+              A short application so the RMT can confirm you're a serious, eligible respondent for this opportunity. If you're shortlisted, you'll be notified and invited to submit a full bid separately.
+            </p>
+          </div>
+
+          {editingBidStatus && editingBidStatus !== BidStatus.DRAFT && editingBidStatus !== BidStatus.SUBMITTED && (
+            <div className="flex items-start gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 mb-6 text-sm text-amber-800">
+              <AlertTriangle size={16} className="mt-0.5 shrink-0 text-amber-600" />
+              <span className="font-medium">
+                {editingBidStatus === BidStatus.REVISION_REQUIRED
+                  ? "Revision required. Update this submission using the review feedback, then resubmit."
+                  : "This submission has been locked for editing."}
+              </span>
+            </div>
+          )}
+
+          <div className="mb-6 rounded-2xl border border-slate-200 bg-white px-5 py-4">
+            <div className="mb-2 flex items-center justify-between text-sm">
+              <span className="font-semibold text-slate-700">Submission progress</span>
+              <span className="font-bold text-slate-900">{eoiCompletedCount}/{eoiProgressSections.length} complete</span>
+            </div>
+            <div className="h-1.5 overflow-hidden rounded-full bg-slate-100">
+              <div
+                className="h-full rounded-full transition-all duration-300"
+                style={{ width: `${eoiProgressSections.length ? (eoiCompletedCount / eoiProgressSections.length) * 100 : 0}%`, background: TEAL }}
+              />
+            </div>
+            <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1.5 text-xs text-slate-500">
+              {eoiProgressSections.map((s) => (
+                <span key={s.id} className="inline-flex items-center gap-1.5">
+                  {s.complete ? <CheckCircle2 size={12} className="text-emerald-600" /> : <AlertTriangle size={12} className="text-amber-500" />}
+                  {s.label} · {s.note}
+                </span>
+              ))}
+            </div>
+          </div>
+
+          <div className="space-y-6">
+            {eoiDocuments.length > 0 && (
+              <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
+                {sectionHeader(<FileText size={18} />, "Company Profile", "Upload the documents that support your credentials and capacity.", TEAL, TEAL_SOFT)}
+                <div className="space-y-5 p-6">
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                    {eoiDocuments.map((doc) => {
+                      const uploadedName = (bidFiles as any)[doc.key]?.name;
+                      const uploaded = Boolean(uploadedName || (existingEoiDocuments as any)[doc.key]);
+                      return (
+                        <label
+                          key={doc.key}
+                          htmlFor={`eoi-doc-${doc.key}`}
+                          className={`cursor-pointer rounded-2xl border p-4 transition ${uploaded ? "border-emerald-200 bg-emerald-50/60" : "border-slate-200 bg-white hover:border-slate-300"}`}
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className={`rounded-xl p-2 ${uploaded ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>
+                              <FileText size={16} />
+                            </div>
+                            {uploaded ? <CheckCircle2 size={16} className="text-emerald-600" /> : <Upload size={16} className="text-slate-300" />}
+                          </div>
+                          <p className="mt-3 text-sm font-bold text-slate-900">{doc.label}</p>
+                          <p className="mt-0.5 text-xs text-slate-500">{doc.hint}</p>
+                          <p className="mt-2.5 truncate text-xs font-medium text-slate-500">{uploaded ? (uploadedName || "Uploaded and ready") : "Click to upload"}</p>
+                          <input
+                            id={`eoi-doc-${doc.key}`}
+                            type="file"
+                            accept=".pdf,.docx,.xlsx"
+                            className="hidden"
+                            onChange={(e) => handleBidFileChange(doc.key, e.target.files?.[0] || null)}
+                          />
+                          {bidFileErrors[doc.key] && <p className="mt-2 text-xs font-semibold text-rose-600">{bidFileErrors[doc.key]}</p>}
+                        </label>
+                      );
+                    })}
+                  </div>
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-3 border-t border-slate-100 pt-5">
+                    <div className="space-y-1">
+                      <label className="text-xs font-bold text-slate-600">Financial Standing — notes (optional)</label>
+                      <textarea
+                        className="input-field min-h-[84px] text-sm"
+                        value={bidForm.financialStandingSummary}
+                        onChange={(e) => setBidForm((prev) => ({ ...prev, financialStandingSummary: e.target.value }))}
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs font-bold text-slate-600">Technical Experience — notes (optional)</label>
+                      <textarea
+                        className="input-field min-h-[84px] text-sm"
+                        value={bidForm.technicalExperienceSummary}
+                        onChange={(e) => setBidForm((prev) => ({ ...prev, technicalExperienceSummary: e.target.value }))}
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs font-bold text-slate-600">Track Record — notes (optional)</label>
+                      <textarea
+                        className="input-field min-h-[84px] text-sm"
+                        value={bidForm.trackRecordSummary}
+                        onChange={(e) => setBidForm((prev) => ({ ...prev, trackRecordSummary: e.target.value }))}
+                      />
+                    </div>
+                  </div>
+                </div>
+              </section>
+            )}
+
+            <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
+              {sectionHeader(<MapPin size={18} />, "Where You'll Operate", "The sites and households you plan to serve — this feeds directly into your milestone payment targets later.", TEAL, TEAL_SOFT)}
+              <div className="space-y-5 p-6">
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <div className="space-y-1">
+                    <label className="text-sm font-bold text-slate-700 ml-1">Primary District *</label>
+                    <select className="input-field" value={primaryDistrict} onChange={(e) => updatePrimaryDistrict(e.target.value)}>
+                      <option value="" disabled>Select district</option>
+                      {districtOptions.map((district) => (
+                        <option key={district} value={district}>{district}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-sm font-bold text-slate-700 ml-1">Total Household Target</label>
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-medium text-slate-700">
+                      {installationTarget > 0 ? `${installationTarget.toLocaleString()} households` : "Add site rows below to calculate this automatically"}
+                    </div>
+                  </div>
+                </div>
+                <BidFieldError message={bidFieldErrors["sites"]} />
+                <div className="space-y-4">
+                  {bidForm.sites.map((site, index) => {
+                    const siteReady = Boolean(site.siteName && site.district && site.targetBeneficiaryType && site.numberOfHouseholds);
+                    return (
+                      <div key={`eoi-site-${index}`} className="rounded-2xl border border-slate-200 p-5">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <p className="text-sm font-bold text-slate-900">Site {index + 1}</p>
+                            <p className="text-xs text-slate-500">{site.siteName || "Unnamed site draft"}</p>
+                          </div>
+                          <div className="flex items-center gap-3">
+                            {siteReady ? (
+                              <span className="inline-flex items-center rounded-full bg-emerald-100 px-3 py-1 text-xs font-bold text-emerald-700">Ready</span>
+                            ) : (
+                              <span className="inline-flex items-center rounded-full bg-amber-100 px-3 py-1 text-xs font-bold text-amber-700">Incomplete</span>
+                            )}
+                            {bidForm.sites.length > 1 && (
+                              <button type="button" onClick={() => removeBidSite(index)} className="text-sm font-bold text-rose-600">Remove</button>
+                            )}
+                          </div>
+                        </div>
+                        <BidFieldError message={bidSiteErrors[index]} />
+                        <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                          <div className="space-y-1">
+                            <label className="text-sm font-bold text-slate-700 ml-1">Site Name *</label>
+                            <input className="input-field" placeholder="E.g. Ha Mokoteli Primary School" value={site.siteName} onChange={(e) => updateBidSite(index, "siteName", e.target.value)} />
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-sm font-bold text-slate-700 ml-1">District *</label>
+                            <select className="input-field" value={site.district} onChange={(e) => updateBidSite(index, "district", e.target.value)}>
+                              <option value="" disabled>Select district</option>
+                              {districtOptions.map((district) => (
+                                <option key={district} value={district}>{district}</option>
+                              ))}
+                            </select>
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-sm font-bold text-slate-700 ml-1">Estimated Households *</label>
+                            <input type="number" className="input-field" value={site.numberOfHouseholds} onChange={(e) => updateBidSite(index, "numberOfHouseholds", e.target.value)} />
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-sm font-bold text-slate-700 ml-1">Primary Beneficiary Type *</label>
+                            <select className="input-field" value={site.targetBeneficiaryType} onChange={(e) => updateBidSite(index, "targetBeneficiaryType", e.target.value)}>
+                              <option value="standard">Standard</option>
+                              <option value="female_headed">Female-headed</option>
+                              <option value="vulnerable">Vulnerable</option>
+                              <option value="low_income">Low-income</option>
+                            </select>
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-sm font-bold text-slate-700 ml-1">Village / Community</label>
+                            <input className="input-field" placeholder="E.g. Ha Mokoteli" value={site.villageSubDistrict} onChange={(e) => updateBidSite(index, "villageSubDistrict", e.target.value)} />
+                          </div>
+                          <div className="space-y-1">
+                            <div className="grid grid-cols-2 gap-3">
+                              <div className="space-y-1">
+                                <label className="text-sm font-bold text-slate-700 ml-1">Latitude (Optional)</label>
+                                <input type="number" className="input-field" placeholder="E.g. -29.3167" value={site.latitude} onChange={(e) => updateBidSite(index, "latitude", e.target.value)} />
+                              </div>
+                              <div className="space-y-1">
+                                <label className="text-sm font-bold text-slate-700 ml-1">Longitude (Optional)</label>
+                                <input type="number" className="input-field" placeholder="E.g. 27.4833" value={site.longitude} onChange={(e) => updateBidSite(index, "longitude", e.target.value)} />
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => useCurrentLocationForSite(index)}
+                          className="mt-4 inline-flex items-center gap-2 rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                        >
+                          <MapPin size={14} />
+                          Use My Location
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+                <button type="button" onClick={addBidSite} className="btn-secondary">+ Add Site</button>
+              </div>
+            </section>
+
+            <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
+              {sectionHeader(<ShieldCheck size={18} />, "Inclusion Commitments", "Minimum shares of households you commit to reaching within each group — these become the targets your milestone payments are measured against.", AMBER, AMBER_SOFT)}
+              <div className="space-y-5 p-6">
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                    <label className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Female-Headed *</label>
+                    <div className="mt-3 flex items-end gap-2">
+                      <input type="number" required min={50} className={inclusionInputClass(femaleTargetInvalid)} value={bidForm.femaleTargetPct} onChange={(e) => { setBidForm((prev) => ({ ...prev, femaleTargetPct: e.target.value })); clearBidFieldError("femaleTargetPct"); }} />
+                      <span className="pb-3 text-sm font-bold text-slate-500">%</span>
+                    </div>
+                    <p className="mt-2 text-xs text-slate-500">Minimum 50%.</p>
+                    <BidFieldError message={bidFieldErrors["femaleTargetPct"]} />
+                  </div>
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                    <label className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Vulnerable Group *</label>
+                    <div className="mt-3 flex items-end gap-2">
+                      <input type="number" required min={30} className={inclusionInputClass(vulnerableTargetInvalid)} value={bidForm.vulnerableTargetPct} onChange={(e) => { setBidForm((prev) => ({ ...prev, vulnerableTargetPct: e.target.value })); clearBidFieldError("vulnerableTargetPct"); }} />
+                      <span className="pb-3 text-sm font-bold text-slate-500">%</span>
+                    </div>
+                    <p className="mt-2 text-xs text-slate-500">Minimum 30%.</p>
+                    <BidFieldError message={bidFieldErrors["vulnerableTargetPct"]} />
+                  </div>
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                    <label className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Low-Income *</label>
+                    <div className="mt-3 flex items-end gap-2">
+                      <input type="number" required min={60} className={inclusionInputClass(lowIncomeTargetInvalid)} value={bidForm.lowIncomeTargetPct} onChange={(e) => { setBidForm((prev) => ({ ...prev, lowIncomeTargetPct: e.target.value })); clearBidFieldError("lowIncomeTargetPct"); }} />
+                      <span className="pb-3 text-sm font-bold text-slate-500">%</span>
+                    </div>
+                    <p className="mt-2 text-xs text-slate-500">Minimum 60%.</p>
+                    <BidFieldError message={bidFieldErrors["lowIncomeTargetPct"]} />
+                  </div>
+                </div>
+                <label className="flex items-start gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                  <input type="checkbox" checked={bidForm.inclusionCommitmentConfirmed} onChange={(e) => { setBidForm((prev) => ({ ...prev, inclusionCommitmentConfirmed: e.target.checked })); clearBidFieldError("inclusionCommitmentConfirmed"); }} className="mt-1" />
+                  <span className="text-sm text-slate-700">I confirm these inclusion commitments are part of this Expression of Interest and will be honored if I'm invited to bid.</span>
+                </label>
+                <BidFieldError message={bidFieldErrors["inclusionCommitmentConfirmed"]} />
+              </div>
+            </section>
+
+            <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
+              {sectionHeader(<HelpCircle size={18} />, "Your Statement", "Briefly describe why your company is well-suited for this opportunity.", TEAL, TEAL_SOFT)}
+              <div className="space-y-2 p-6">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-sm font-bold text-slate-700">Expression of Interest *</span>
+                  <span className={`inline-flex rounded-full px-3 py-1 text-xs font-bold ${eoiNarrativeValid ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
+                    {eoiNarrativeCharCount}/200 chars
+                  </span>
+                </div>
+                <textarea
+                  className="input-field min-h-[160px]"
+                  value={bidForm.eoiNarrative}
+                  onChange={(e) => { setBidForm((prev) => ({ ...prev, eoiNarrative: e.target.value })); clearBidFieldError("eoiNarrative"); }}
+                  placeholder="Briefly describe why your company is well-suited for this opportunity, including capacity, experience, and intended approach."
+                />
+                <BidFieldError message={bidFieldErrors["eoiNarrative"]} />
+              </div>
+            </section>
+
+            {versionsSorted.length > 0 && (
+              <div className="rounded-2xl border border-slate-200 bg-white p-5">
+                <p className="mb-3 text-sm font-bold text-slate-900">Previous submissions</p>
+                <div className="space-y-2">
+                  {versionsSorted.map((version) => (
+                    <div key={version.id} className="flex items-center justify-between gap-3 text-sm">
+                      <span className="text-slate-600">Version {version.version_number} · {version.status}</span>
+                      <button onClick={() => useBidVersion(version)} className="shrink-0 text-xs font-bold text-emerald-700 hover:underline">Use this version</button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="sticky bottom-4 z-20 mt-8">
+            <div className="flex flex-col gap-4 rounded-[20px] border border-slate-200 bg-white/95 px-5 py-4 shadow-xl shadow-slate-900/10 backdrop-blur sm:flex-row sm:items-center">
+              <div className="min-w-0 flex-1">
+                {bidSubmitError ? (
+                  <p className="text-sm font-semibold text-rose-700">{bidSubmitError}</p>
+                ) : bidMessage ? (
+                  <p className="text-sm font-semibold text-emerald-700">{bidMessage}</p>
+                ) : (
+                  <div>
+                    <p className="text-xs font-bold uppercase tracking-widest text-slate-400">Ready to submit</p>
+                    <p className="text-sm font-semibold text-slate-700">{eoiCompletedCount} of {eoiProgressSections.length} sections complete</p>
+                  </div>
+                )}
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
+                <button onClick={() => submitBid(BidStatus.DRAFT)} disabled={isBidSubmitting || !canEdit} className="btn-secondary px-5 py-2.5 disabled:opacity-60">
+                  {isBidSubmitting ? "Saving..." : "Save Draft"}
+                </button>
+                <button
+                  onClick={() => {
+                    setBidSubmissionConfirmed(false);
+                    void submitBid(BidStatus.SUBMITTED, false);
+                  }}
+                  disabled={isBidSubmitting || !canEdit}
+                  className="btn-primary px-5 py-2.5 disabled:opacity-60"
+                >
+                  {isBidSubmitting ? "Submitting..." : "Submit Expression of Interest"}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {bidConfirmOpen && (
+            <div className="fixed inset-0 bg-slate-900/50 flex items-center justify-center z-50 p-4">
+              <div className="bg-white rounded-2xl max-w-md w-full p-6">
+                <h3 className="text-lg font-bold text-slate-900 mb-2">Confirm Submission</h3>
+                <div className="space-y-3 text-sm text-slate-600">
+                  <p>You are about to submit your Expression of Interest. You can edit and resubmit it later if needed — each submission creates a new version.</p>
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 space-y-2">
+                    <div className="flex items-center justify-between"><span>Sites</span><span className="font-bold text-slate-900">{bidSiteCount}</span></div>
+                    {eoiDocuments.length > 0 && (
+                      <div className="flex items-center justify-between"><span>Documents</span><span className="font-bold text-slate-900">{uploadedEoiDocumentCount} of {eoiDocuments.length} uploaded</span></div>
+                    )}
+                    <div className="flex items-center justify-between"><span>Inclusion</span><span className="font-bold text-slate-900">{bidForm.femaleTargetPct || 0}% / {bidForm.vulnerableTargetPct || 0}% / {bidForm.lowIncomeTargetPct || 0}%</span></div>
+                  </div>
+                  <div className="rounded-xl border border-blue-200 bg-blue-50/60 px-4 py-3 text-blue-900">
+                    <p className="font-bold mb-1">What happens next</p>
+                    <p>The RMT typically reviews EOIs within 3–5 business days. If you're shortlisted, you'll be notified and invited to submit a full bid separately.</p>
+                  </div>
+                  <label className="flex items-start gap-3 rounded-xl border border-slate-200 p-3">
+                    <input type="checkbox" checked={bidSubmissionConfirmed} onChange={(e) => setBidSubmissionConfirmed(e.target.checked)} className="mt-1" />
+                    <span>I confirm this Expression of Interest is complete and ready to submit.</span>
+                  </label>
+                </div>
+                <div className="flex gap-3 mt-5">
+                  <button onClick={() => setBidConfirmOpen(false)} className="flex-1 btn-secondary">Cancel</button>
+                  <button
+                    onClick={() => { submitBid(BidStatus.SUBMITTED, true); }}
+                    disabled={!bidSubmissionConfirmed}
+                    className="flex-1 btn-primary"
+                  >
+                    Confirm &amp; Submit
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    return (
+      <div className="space-y-6 max-w-[90rem] mx-auto pb-20">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-3">
+          <button
+            onClick={() => navigateView("dashboard")}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm font-medium text-slate-600 shadow-sm transition hover:border-slate-300 hover:bg-slate-50"
+          >
+            <ChevronRight className="rotate-180" size={16} />
+            Back
+          </button>
+          <div className="min-w-0">
+            <h1 className="text-2xl font-bold tracking-tight text-slate-900">{isEoiInviteOnlyTender ? "Submit Expression of Interest" : "Submit Tender Proposal"}</h1>
+            <p className="truncate text-sm text-slate-500">
+              <span className="font-semibold text-slate-700">{bidTender.name}</span>
+              <span className="mx-2 text-slate-300">·</span>
+              {bidTender.referenceNumber}
+            </p>
+          </div>
+          <div className="ml-auto flex shrink-0 items-center gap-2">
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 text-xs font-bold uppercase tracking-wider text-slate-700 ring-1 ring-slate-200">
+              <Activity size={13} />
+              {bidStageLabel}
+            </span>
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-white px-3 py-1.5 text-xs font-bold text-slate-600 ring-1 ring-slate-200">
+              <Clock size={13} />
+              {bidDeadlineCountdown}
+            </span>
           </div>
         </div>
 
         {editingBidStatus && editingBidStatus !== BidStatus.DRAFT && editingBidStatus !== BidStatus.SUBMITTED && (
-          <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700 font-medium">
-            {editingBidStatus === BidStatus.REVISION_REQUIRED
-              ? "Revision required. Update this Stage 1 submission using the review feedback, then resubmit."
-              : "This bid has been locked for editing."}
+          <div className="flex items-start gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+            <AlertTriangle size={16} className="mt-0.5 shrink-0 text-amber-600" />
+            <span className="font-medium">
+              {editingBidStatus === BidStatus.REVISION_REQUIRED
+                ? isEoiInviteOnlyTender
+                  ? "Revision required. Update this submission using the review feedback, then resubmit."
+                  : "Revision required. Update this Stage 1 submission using the review feedback, then resubmit."
+                : "This bid has been locked for editing."}
+            </span>
           </div>
         )}
-        <div className="overflow-hidden rounded-[28px] border border-slate-200 bg-gradient-to-br from-slate-950 via-slate-900 to-emerald-900 text-white shadow-xl shadow-slate-200">
-          <div className="grid gap-6 px-6 py-6 lg:grid-cols-[1.5fr,1fr] lg:px-8">
-            <div className="space-y-5">
-              <div className="flex flex-wrap items-center gap-3">
-                <span className="inline-flex items-center rounded-full border border-white/20 bg-white/10 px-3 py-1 text-xs font-bold uppercase tracking-[0.18em] text-emerald-100">
+
+        <div className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+          <div className="grid gap-0 lg:grid-cols-[minmax(0,1fr),340px]">
+            <div className="space-y-6 p-6 lg:p-8">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="inline-flex items-center rounded bg-slate-800 px-3 py-1 text-xs font-bold uppercase tracking-wider text-white">
                   {bidStageLabel}
                 </span>
-                <span className="inline-flex items-center rounded-full border border-white/20 bg-white/10 px-3 py-1 text-xs font-bold uppercase tracking-[0.18em] text-slate-100">
+                <span className="inline-flex items-center rounded bg-slate-100 px-3 py-1 text-xs font-bold uppercase tracking-wider text-slate-600 ring-1 ring-slate-200">
                   {bidTender.technologyTypes?.join(" / ") || "Technology not set"}
                 </span>
-                <button
-                  type="button"
-                  onClick={() => setRuleBookOpen(true)}
-                  className="inline-flex items-center gap-2 rounded-full bg-emerald-400 px-4 py-2 text-xs font-bold uppercase tracking-[0.16em] text-emerald-950 shadow-lg shadow-emerald-400/20 transition hover:bg-emerald-300"
-                >
-                  <BookOpen size={14} />
-                  View Rule Book
-                </button>
+                {bidTender?.targetDistricts?.map((district) => (
+                  <span key={district} className="inline-flex items-center rounded bg-slate-100 px-3 py-1 text-xs font-medium text-slate-500 ring-1 ring-slate-200">
+                    <MapPin size={11} className="mr-1" />
+                    {district}
+                  </span>
+                ))}
+                {!isEoiInviteOnlyTender && (
+                  <button
+                    type="button"
+                    onClick={() => setRuleBookOpen(true)}
+                    className="ml-auto inline-flex items-center gap-2 rounded border border-slate-300 bg-white px-4 py-2 text-xs font-bold uppercase tracking-wider text-slate-700 transition hover:bg-slate-50"
+                  >
+                    <BookOpen size={14} />
+                    View Rule Book
+                  </button>
+                )}
               </div>
               <div>
-                <h2 className="text-3xl font-black tracking-tight">{bidTender.name}</h2>
-                <p className="mt-2 max-w-2xl text-sm text-slate-200">
-                  Build the proposal section by section. This flow is designed to feel ready for real procurement work, with clear completion states, document checks, and a live readiness summary.
+                <h2 className="text-2xl font-black tracking-tight text-slate-900">{bidTender.name}</h2>
+                <p className="mt-1 max-w-2xl text-sm text-slate-500">
+                  {isEoiInviteOnlyTender
+                    ? "Complete each section below to submit your Expression of Interest."
+                    : "Build the proposal section by section. Clear completion states, document checks, and a live readiness summary keep you on track."}
                 </p>
+              </div>
+              <div>
+                <div className="flex items-center justify-between gap-4">
+                  <p className="text-xs font-bold uppercase tracking-widest text-slate-500">Overall progress</p>
+                  <p className="text-xs font-black text-slate-900">{completedProposalSections}/{proposalSections.length} complete</p>
+                </div>
+                <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-100">
+                  <div
+                    className="h-full rounded-full bg-slate-800 transition-all duration-300"
+                    style={{ width: `${proposalSections.length ? (completedProposalSections / proposalSections.length) * 100 : 0}%` }}
+                  />
+                </div>
               </div>
               <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                 {proposalSections.map((section) => {
                   const Icon = section.icon;
                   return (
-                    <div key={section.id} className={`rounded-2xl border px-4 py-4 ${section.complete ? "border-emerald-300/40 bg-emerald-400/10" : "border-white/10 bg-white/5"}`}>
+                    <button
+                      key={section.id}
+                      type="button"
+                      onClick={() => {
+                        document.getElementById(`bid-section-${section.id}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+                      }}
+                      className={`rounded border-l-4 px-4 py-4 text-left transition hover:shadow-sm ${section.complete ? "border-l-emerald-600 border-y border-r border-y-slate-200 border-r-slate-200 bg-white" : "border-l-slate-300 border-y border-r border-y-slate-200 border-r-slate-200 bg-white hover:border-l-slate-400"}`}
+                    >
                       <div className="flex items-start justify-between gap-3">
-                        <div className={`rounded-xl p-2 ${section.complete ? "bg-emerald-400/20 text-emerald-100" : "bg-white/10 text-slate-200"}`}>
+                        <div className={`rounded p-2.5 ${section.complete ? "bg-slate-800 text-white" : "bg-slate-100 text-slate-500"}`}>
                           <Icon size={16} />
                         </div>
-                        {section.complete ? <CheckCircle2 size={18} className="text-emerald-200" /> : <Clock size={18} className="text-amber-200" />}
+                        {section.complete ? <CheckCircle2 size={18} className="text-emerald-600" /> : <Clock size={18} className="text-slate-300" />}
                       </div>
-                      <p className="mt-4 text-sm font-bold text-white">{section.label}</p>
-                      <p className="mt-1 text-xs text-slate-300">{section.note}</p>
-                    </div>
+                      <p className="mt-4 text-sm font-bold text-slate-900">{section.label}</p>
+                      <p className="mt-1 text-xs text-slate-500">{section.note}</p>
+                    </button>
                   );
                 })}
               </div>
             </div>
-            <div className="rounded-3xl border border-white/10 bg-white/10 p-5 backdrop-blur">
-              <p className="text-xs font-bold uppercase tracking-[0.18em] text-emerald-100">Submission Readiness</p>
-              <div className="mt-4 flex items-end justify-between gap-4">
+            <div className="border-t border-slate-200 bg-slate-50/70 p-6 lg:border-l lg:border-t-0">
+              <div className="flex items-center justify-between gap-4">
                 <div>
-                  <p className="text-4xl font-black">{completedProposalSections}/{proposalSections.length}</p>
-                  <p className="mt-1 text-sm text-slate-200">Sections complete</p>
+                  <p className="text-xs font-bold uppercase tracking-widest text-slate-500">Submission Readiness</p>
+                  <p className="mt-2 text-4xl font-black text-slate-900">
+                    {completedProposalSections}
+                    <span className="text-slate-400">/{proposalSections.length}</span>
+                  </p>
+                  <p className="mt-1 text-sm text-slate-500">Sections complete</p>
                 </div>
-                <div className="text-right">
-                  <p className="text-xs uppercase tracking-[0.18em] text-slate-300">Deadline</p>
-                  <p className="mt-1 text-lg font-bold text-white">{bidDeadlineCountdown}</p>
-                </div>
-              </div>
-              <div className="mt-5 h-2 overflow-hidden rounded-full bg-white/10">
-                <div className="h-full rounded-full bg-gradient-to-r from-emerald-300 via-emerald-400 to-cyan-300" style={{ width: `${proposalSections.length ? (completedProposalSections / proposalSections.length) * 100 : 0}%` }} />
-              </div>
-              <div className="mt-5 grid gap-3 sm:grid-cols-2">
-                <div className="rounded-2xl border border-white/10 bg-slate-950/20 px-4 py-3">
-                  <p className="text-xs uppercase tracking-[0.16em] text-slate-300">Tender Reference</p>
-                  <p className="mt-1 text-sm font-bold text-white">{bidTender.referenceNumber}</p>
-                </div>
-                <div className="rounded-2xl border border-white/10 bg-slate-950/20 px-4 py-3">
-                  <p className="text-xs uppercase tracking-[0.16em] text-slate-300">Submission Window</p>
-                  <p className="mt-1 text-sm font-bold text-white">{bidDeadlineLabel || "N/A"}</p>
-                </div>
-                <div className="rounded-2xl border border-white/10 bg-slate-950/20 px-4 py-3">
-                  <p className="text-xs uppercase tracking-[0.16em] text-slate-300">Technology</p>
-                  <p className="mt-1 text-sm font-bold text-white">{bidTender.technologyTypes?.join(" / ") || "Not set"}</p>
-                </div>
-                <div className="rounded-2xl border border-white/10 bg-slate-950/20 px-4 py-3">
-                  <p className="text-xs uppercase tracking-[0.16em] text-slate-300">Target District{bidTender?.targetDistricts && bidTender.targetDistricts.length > 1 ? "s" : ""}</p>
-                  <p className="mt-1 text-sm font-bold text-white">{bidTender?.targetDistricts?.join(", ") || primaryDistrict || "Maseru"}</p>
+                <div className="shrink-0 rounded border border-slate-200 bg-white px-4 py-3 text-right">
+                  <p className="text-xs font-bold uppercase tracking-wider text-slate-500">Deadline</p>
+                  <p className="mt-1 text-lg font-black text-slate-900">{bidDeadlineCountdown}</p>
                 </div>
               </div>
+              <dl className="mt-6 divide-y divide-slate-200 rounded border border-slate-200 bg-white text-sm">
+                {[
+                  { label: isEoiInviteOnlyTender ? "Reference" : "Tender Reference", value: bidTender.referenceNumber },
+                  { label: "Submission Window", value: bidDeadlineLabel || "N/A" },
+                  { label: "Technology", value: bidTender.technologyTypes?.join(" / ") || "Not set" },
+                  { label: `Target District${bidTender?.targetDistricts && bidTender.targetDistricts.length > 1 ? "s" : ""}`, value: bidTender?.targetDistricts?.join(", ") || primaryDistrict || "Maseru" },
+                ].map((item) => (
+                  <div key={item.label} className="flex items-center justify-between gap-4 px-4 py-3">
+                    <dt className="text-xs font-bold uppercase tracking-wider text-slate-500">{item.label}</dt>
+                    <dd className="text-right font-bold text-slate-900">{item.value}</dd>
+                  </div>
+                ))}
+              </dl>
             </div>
           </div>
         </div>
         {inclusionTargetWarning && (
-          <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 font-medium">
-            {inclusionTargetWarning}
+          <div className="flex items-start gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+            <AlertTriangle size={16} className="mt-0.5 shrink-0 text-amber-600" />
+            <span className="font-medium">{inclusionTargetWarning}</span>
           </div>
         )}
 
@@ -12835,18 +16093,22 @@ const VendorDashboard = ({
                     {[
                       "Bid amount and subsidy requested filled in",
                       "Subsidy requested is not greater than the bid amount",
-                      isPreQualificationStage
-                        ? "Concept note is at least 200 characters"
-                        : "Technical Proposal, Financial Proposal and BOQ documents uploaded",
-                      isPreQualificationStage
+                      isEoiStage
+                        ? "Concept note and EOI narrative are at least 200 characters"
+                        : isFinancialStage
+                          ? "Financial Proposal document uploaded"
+                          : "Technical Proposal and BOQ documents uploaded",
+                      isEoiStage
                         ? "Every site has a name, district, beneficiary type and estimated households"
-                        : "Every site has mandatory GPS coordinates inside Lesotho",
-                      isSiteSpecificStage ? "BOQ grand total exactly equals the bid amount" : "Co-financing difference covered by the vendor",
-                      isSiteSpecificStage ? "O&M strategy summary provided" : "Village sites target the tender districts",
-                      isSiteSpecificStage && isShsTender ? "PAYGO platform, daily payment and collection method completed" : null,
+                        : isFinancialStage
+                          ? "Sites reference the locations submitted in the Technical stage"
+                          : "Every site has mandatory GPS coordinates inside Lesotho",
+                      (isTechnicalStage || isCombinedStage) ? "BOQ grand total exactly equals the bid amount" : isFinancialStage ? "Bid amount matches the Technical-stage BOQ total" : "Co-financing difference covered by the vendor",
+                      (isTechnicalStage || isCombinedStage) ? "O&M strategy summary provided" : isEoiStage ? "Village sites target the tender districts" : null,
+                      (isTechnicalStage || isCombinedStage) && isShsTender ? "PAYGO platform, daily payment and collection method completed" : null,
                       "Inclusion targets meet 50% female-headed / 30% vulnerable / 60% low-income",
                       "Inclusion commitment confirmed",
-                      isSiteSpecificStage ? "Technology tier does not exceed your approved pre-qualification tier" : null,
+                      (isTechnicalStage || isCombinedStage) ? "Technology tier does not exceed your approved pre-qualification tier" : null,
                     ].filter((point): point is string => Boolean(point)).map((point) => (
                       <li key={point} className="flex items-start gap-2">
                         <AlertCircle size={15} className="mt-0.5 shrink-0 text-emerald-600" />
@@ -12869,158 +16131,520 @@ const VendorDashboard = ({
           </div>
         )}
 
-        <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr),320px]">
-          <div className="space-y-6">
-            <div className="card overflow-hidden border-slate-200">
-              <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
-                <div className="flex items-center gap-3">
-                  <div className="rounded-2xl bg-slate-900 p-3 text-white">
-                    <FileText size={18} />
-                  </div>
-                  <div>
-                    <h3 className="text-lg font-bold text-slate-900">Header & Identity</h3>
-                    <p className="text-sm text-slate-500">Auto-populated tender context and submission identity.</p>
-                  </div>
+        {/* Stage Wizard Stepper */}
+        <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+          <div className="border-b border-slate-100 px-4 py-4 sm:px-6">
+            <div className="flex items-center justify-start gap-1 sm:gap-2">
+              {stagePlan.map((stage, idx) => {
+                const stageStatus = stageStatusMap[stage.key] ?? "locked";
+                const isAccessible = stageAccess[stage.key] || false;
+                const isActive = activeStage === stage.key;
+                const circleClass =
+                  stageStatus === "completed" ? "bg-emerald-600 text-white ring-4 ring-emerald-100"
+                  : isActive ? "bg-slate-900 text-white ring-4 ring-slate-200"
+                  : stageStatus === "submitted" ? "bg-blue-600 text-white ring-4 ring-blue-100"
+                  : "bg-slate-200 text-slate-500 ring-4 ring-slate-100";
+                return (
+                  <React.Fragment key={stage.key}>
+                    {idx > 0 && (
+                      <div className={`hidden h-0.5 flex-1 rounded-full sm:block ${stageStatus !== "locked" ? "bg-emerald-200" : "bg-slate-200"}`} />
+                    )}
+                    <button
+                      type="button"
+                      disabled={!isAccessible && !isActive}
+                      onClick={() => { if (isAccessible || isActive) setActiveStage(stage.key); }}
+                      className={`relative flex items-center gap-2 px-1 py-1.5 transition sm:px-2 ${
+                        isActive ? "cursor-default" : isAccessible ? "cursor-pointer" : "cursor-not-allowed"
+                      }`}
+                    >
+                      <div className={`flex h-10 w-10 items-center justify-center rounded-full text-sm font-bold transition ${circleClass}`}>
+                        {stageStatus === "completed" ? <CheckCircle2 size={17} /> : idx + 1}
+                      </div>
+                      <div className="text-left">
+                        <p className={`text-xs font-bold sm:text-sm ${isActive ? "text-slate-900" : isAccessible ? "text-slate-700" : "text-slate-400"}`}>
+                          {stage.label}
+                        </p>
+                        <p className={`hidden text-[11px] lg:block ${isActive ? "text-slate-500" : isAccessible ? "text-slate-400" : "text-slate-300"}`}>
+                          {stage.sublabel}
+                        </p>
+                      </div>
+                      {stageStatus === "submitted" && !isActive && (
+                        <span className="absolute -right-0.5 -top-0.5 flex h-3 w-3">
+                          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-blue-400 opacity-75" />
+                          <span className="relative inline-flex h-3 w-3 rounded-full bg-blue-500" />
+                        </span>
+                      )}
+                    </button>
+                  </React.Fragment>
+                );
+              })}
+            </div>
+          </div>
+          {tenderWorkflow === "sequential" && (
+            <div className="flex items-start gap-2.5 border-t border-slate-100 bg-slate-50/70 px-6 py-3 text-xs text-slate-600">
+              <Info size={14} className="mt-0.5 shrink-0 text-slate-400" />
+              <span>
+                <span className="font-bold">Three stages, one at a time:</span> submit Stage 1 (EOI) first. Stage 2 (Technical) only unlocks once the RMT accepts your EOI. Stage 3 (Financial) only unlocks once the RMT accepts your Technical proposal.
+              </span>
+            </div>
+          )}
+          {isEoiInviteOnlyTender && (
+            <div className="flex items-start gap-2.5 border-t border-slate-100 bg-slate-50/70 px-6 py-3 text-xs text-slate-600">
+              <Info size={14} className="mt-0.5 shrink-0 text-slate-400" />
+              <span>
+                <span className="font-bold">One step:</span> submit your Expression of Interest. There is no Technical or Financial stage on this record — if the RMT shortlists you, you'll be notified and invited to submit a full bid separately.
+              </span>
+            </div>
+          )}
+          {tenderWorkflow === "combined" && !skipsEoiStep && !isEoiInviteOnlyTender && (
+            <div className="flex items-start gap-2.5 border-t border-slate-100 bg-slate-50/70 px-6 py-3 text-xs text-slate-600">
+              <Info size={14} className="mt-0.5 shrink-0 text-slate-400" />
+              <span>
+                <span className="font-bold">Two stages:</span> submit Stage 1 (EOI) first. Stage 2 (your full Technical &amp; Financial proposal, submitted together) only unlocks once the RMT accepts your EOI.
+              </span>
+            </div>
+          )}
+          {tenderWorkflow === "combined" && isSingleStageCombinedWorkflow && (
+            <div className="flex items-start gap-2.5 border-t border-slate-100 bg-slate-50/70 px-6 py-3 text-xs text-slate-600">
+              <Info size={14} className="mt-0.5 shrink-0 text-slate-400" />
+              <span>
+                <span className="font-bold">Single stage:</span> submit your full Technical &amp; Financial proposal (submitted together). No EOI or shortlisting required.
+              </span>
+            </div>
+          )}
+          {tenderWorkflow === "combined" && isLinkedEoiWorkflow && (
+            <div className="flex items-start gap-2.5 border-t border-slate-100 bg-slate-50/70 px-6 py-3 text-xs text-slate-600">
+              <Info size={14} className="mt-0.5 shrink-0 text-slate-400" />
+              <span>
+                <span className="font-bold">Single stage:</span> submit your full Technical &amp; Financial proposal (submitted together). You were already shortlisted through a separate EOI Invite, so there's no EOI step on this tender.
+              </span>
+            </div>
+          )}
+        </div>
+
+        {(() => {
+          const stageIntro: Record<"eoi" | "technical" | "financial" | "combined", { heading: string; what: string; why: string; need: string[]; next: string }> = {
+            eoi: {
+              heading: "Stage 1: Expression of Interest (EOI) — what this is for",
+              what: "A short screening application so the RMT can confirm you're a serious, eligible bidder before you invest time in a full proposal.",
+              why: "The RMT is checking your company credentials, financial standing, and relevant experience — not your final price or technical design yet.",
+              need: [
+                "Company credential documents (trading license, tax clearance, registration — as configured for this tender)",
+                "A short written narrative explaining why your company is a good fit",
+                "Your project sites and inclusion commitments",
+              ],
+              next: "The RMT typically reviews EOIs within 3–5 business days. If you're shortlisted, Stage 2 unlocks automatically and you'll be notified.",
+            },
+            technical: {
+              heading: "Stage 2: Technical Proposal — what this is for",
+              what: "Your detailed, binding technical design — the system you'll actually install if awarded this tender.",
+              why: "The RMT verifies you can technically deliver what you're proposing: the right technology, a realistic cost breakdown, real installation sites, and a credible support plan.",
+              need: [
+                "System specifications (technology, brand, capacity)",
+                "An itemized Bill of Quantities (BOQ)",
+                "Installation site details, including GPS coordinates",
+                "An Operations, Maintenance & After-Sales plan",
+              ],
+              next: "Your Technical proposal is scored against a minimum threshold. If you clear it, Stage 3 (Financial) unlocks and you'll be notified.",
+            },
+            financial: {
+              heading: "Stage 3: Financial Proposal — what this is for",
+              what: "Your final, binding price for this project.",
+              why: "This is the number the RMT compares against other qualifying bidders to decide the award — it's what determines your score and, if you win, what you'll be paid against.",
+              need: [
+                "Your final bid amount and subsidy requested",
+                "Any pricing-specific supporting documents",
+              ],
+              next: "Once submitted, this price is locked in. The RMT completes financial evaluation and issues an Intent to Award to the best-value qualifying bidder.",
+            },
+            combined: {
+              heading: "Stage 2: Combined Technical & Financial Proposal — what this is for",
+              what: "Your full technical design and your final binding price, submitted together in one package.",
+              why: "The RMT verifies your technical delivery plan the same way as a sequential tender, but your price stays sealed and unseen until your technical proposal clears — so it can't influence the technical review.",
+              need: [
+                "System specifications and an itemized Bill of Quantities (BOQ)",
+                "Installation site details, including GPS coordinates",
+                "Your final bid amount and subsidy requested",
+              ],
+              next: "The RMT evaluates your technical proposal first; your price is only opened once that clears the minimum threshold.",
+            },
+          };
+          const intro = isEoiInviteOnlyTender
+            ? {
+                heading: "Expression of Interest — what this is for",
+                what: "A short application so the RMT can confirm you're a serious, eligible respondent for this opportunity.",
+                why: "The RMT is reviewing your company credentials, financial standing, and relevant experience.",
+                need: [
+                  "Company credential documents (trading license, tax clearance, registration)",
+                  "A short written statement explaining why your company is a good fit",
+                  "Your project sites and inclusion commitments",
+                ],
+                next: "The RMT reviews submissions and shortlists respondents. If you're shortlisted, you'll be notified and invited to submit a full bid separately — there is no further stage on this record.",
+              }
+            : isSingleStageCombinedWorkflow
+            ? { ...stageIntro.combined, heading: "Combined Technical & Financial Proposal — what this is for", what: "Your full technical design and your final binding price, submitted together in one package.", why: "The RMT verifies your technical delivery plan and price together. There is no separate EOI or shortlisting step for this tender.", next: "The RMT evaluates your combined proposal and awards directly." }
+            : isLinkedEoiWorkflow
+              ? { ...stageIntro.combined, heading: "Combined Technical & Financial Proposal — what this is for", what: "Your full technical design and your final binding price, submitted together in one package.", why: "You were already shortlisted through a separate EOI Invite, so there's no EOI step on this tender — you can submit your combined proposal directly.", next: "The RMT evaluates your combined proposal and awards directly." }
+              : stageIntro[currentBidStage];
+          return (
+            <div className="rounded-2xl border border-blue-200 bg-blue-50/60 p-5">
+              <div className="flex items-start gap-3">
+                <div className="mt-0.5 rounded-lg bg-blue-100 p-2 text-blue-700">
+                  <HelpCircle size={18} />
                 </div>
-              </div>
-              <div className="grid grid-cols-1 gap-4 p-6 md:grid-cols-2">
-                {[
-                  { label: "Tender Title", value: bidTender.name },
-                  { label: "Tender ID", value: bidTender.referenceNumber },
-                  { label: "Vendor Name", value: currentUser?.fullName || currentUser?.username || "Unknown" },
-                  { label: "Application Stage", value: bidStageLabel },
-                  { label: "Deadline Timer", value: bidDeadlineCountdown },
-                  { label: "Technology Type", value: bidTender.technologyTypes?.join(" / ") || "Not set" },
-                  { label: `Target District${bidTender?.targetDistricts && bidTender.targetDistricts.length > 1 ? "s" : ""}`, value: bidTender?.targetDistricts?.join(", ") || primaryDistrict || "Maseru" },
-                ].map((item) => (
-                  <div key={item.label} className="space-y-1">
-                    <label className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">{item.label}</label>
-                    <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-medium text-slate-700">{item.value}</div>
+                <div className="space-y-2">
+                  <p className="text-sm font-bold text-blue-900">{intro.heading}</p>
+                  <p className="text-sm text-blue-900">{intro.what} {intro.why}</p>
+                  <div>
+                    <p className="text-xs font-bold uppercase tracking-widest text-blue-700">What you need to submit</p>
+                    <ul className="mt-1 list-disc space-y-0.5 pl-5 text-xs text-blue-900">
+                      {intro.need.map((item) => <li key={item}>{item}</li>)}
+                    </ul>
                   </div>
-                ))}
+                  <p className="text-xs text-blue-800"><span className="font-bold">What happens next: </span>{intro.next}</p>
+                </div>
               </div>
             </div>
+          );
+        })()}
 
-            <div id="bid-section-financial" className="card overflow-hidden border-slate-200">
-              <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
-                <div className="flex items-center justify-between gap-4">
-                  <div className="flex items-center gap-3">
-                    <div className={`rounded-2xl p-3 ${financialSectionComplete ? "bg-emerald-100 text-emerald-700" : "bg-slate-900 text-white"}`}>
-                      <CreditCard size={18} />
-                    </div>
-                    <div>
-                      <h3 className="text-lg font-bold text-slate-900">Section A: Financial Proposal (Value for Money)</h3>
-                      <p className="text-sm text-slate-500">This section tells the RMT if the project is affordable and efficient.</p>
-                    </div>
-                  </div>
-                  {financialSectionComplete ? <CheckCircle2 size={18} className="text-emerald-600" /> : <AlertTriangle size={18} className="text-amber-500" />}
-                </div>
+        <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr),320px]">
+          <div className="space-y-6">
+            <div className="overflow-hidden rounded-lg border-2 border-slate-800 bg-white">
+              <div className="flex items-center justify-between gap-3 border-b-2 border-slate-800 bg-slate-800 px-6 py-3">
+                <h3 className="text-sm font-bold uppercase tracking-[0.2em] text-white">Tender Particulars</h3>
+                <span className="font-mono text-xs font-bold uppercase tracking-widest text-slate-300">Form: Bid-{isEoiInviteOnlyTender ? "EOI" : "TF"}-01</span>
               </div>
-              <div className="space-y-6 p-6">
+              <table className="w-full text-sm">
+                <tbody>
+                  {[
+                    { label: isEoiInviteOnlyTender ? "Opportunity Title" : "Tender Title", value: bidTender.name },
+                    { label: isEoiInviteOnlyTender ? "Reference No." : "Tender Reference No.", value: bidTender.referenceNumber, mono: true },
+                    { label: "Bidder (Vendor) Name", value: currentUser?.fullName || currentUser?.username || "Unknown" },
+                    { label: "Submission Stage", value: bidStageLabel },
+                    { label: "Time Remaining to Submit", value: bidDeadlineCountdown },
+                    { label: "Technology Category", value: bidTender.technologyTypes?.join(" / ") || "Not set" },
+                    { label: `Target District${bidTender?.targetDistricts && bidTender.targetDistricts.length > 1 ? "s" : ""}`, value: bidTender?.targetDistricts?.join(", ") || primaryDistrict || "Maseru" },
+                  ].map((item, idx) => (
+                    <tr key={item.label} className={idx % 2 === 1 ? "bg-slate-50" : "bg-white"}>
+                      <th scope="row" className="w-64 border-b border-slate-200 px-6 py-3 text-left align-top text-xs font-bold uppercase tracking-wider text-slate-500">{item.label}</th>
+                      <td className={`border-b border-slate-200 px-6 py-3 font-semibold text-slate-900 ${item.mono ? "font-mono tracking-wide" : ""}`}>{item.value}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {(isTechnicalStage || isCombinedStage) && isLotWise && declaredLots.length > 0 && (
+              <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                <span className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Bidding on</span>
+                {tenderLots.filter((l) => declaredLots.includes(String(l.id || ""))).map((lot) => (
+                  <span key={lot.id} className="inline-flex items-center rounded-full bg-slate-900 px-3 py-1 text-xs font-bold text-white">{lot.name}</span>
+                ))}
+              </div>
+            )}
+
+            {!isTechnicalStage && !isEoiStage && (
+            <BidSectionCard
+              id="financial"
+              number={nextBidStep()}
+              title="Financial Proposal (Value for Money)"
+              description="This section tells the RMT if the project is affordable and efficient — this is your final, binding price."
+              complete={financialSectionComplete}
+            >
                 {bidSectionErrors["financial"] && (
                   <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 font-medium">
                     {bidSectionErrors["financial"]}
                   </div>
                 )}
-                <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-                  <div className="space-y-1">
-                    <label className="text-sm font-bold text-slate-700 ml-1">Bid Amount (LSL) *</label>
-                    <input type="number" className="input-field" value={bidForm.bidAmount} onChange={(e) => {
-                      const bidAmount = Number(e.target.value || 0);
-                      const subsidy = Number(bidForm.subsidyRequested || 0);
-                      const coFinancing = Math.max(0, bidAmount - subsidy);
-                      setBidForm(prev => ({ ...prev, bidAmount: e.target.value, coFinancingAmount: String(coFinancing) }));
-                      clearBidFieldError("bidAmount");
-                    }} />
-                    <BidFieldError message={bidFieldErrors["bidAmount"]} />
+                {hasMultipleCurrencies && (
+                  <div className="space-y-1 md:w-64">
+                    <label className="text-sm font-bold text-slate-700 ml-1">Bidding Currency *</label>
+                    <select
+                      className="input-field"
+                      value={selectedBidCurrency}
+                      onChange={(e) => setBidForm(prev => ({ ...prev, bidCurrency: e.target.value === tenderBaseCurrency ? "" : e.target.value }))}
+                    >
+                      {tenderCurrencyOptions.map((currency) => (
+                        <option key={currency} value={currency}>{currency}</option>
+                      ))}
+                    </select>
+                    <p className="text-xs text-slate-500">This tender accepts bids in more than one currency — pick which one you're pricing in (applies to your whole bid, including every lot below). Your price is compared fairly against other bidders using the tender's set exchange rate.</p>
+                    <BidFieldError message={bidFieldErrors["bid_currency"]} />
                   </div>
-                  <div className="space-y-1">
-                    <label className="text-sm font-bold text-slate-700 ml-1">Subsidy Requested (LSL) *</label>
-                    <input type="number" className="input-field" value={bidForm.subsidyRequested} onChange={(e) => {
-                      const subsidy = Number(e.target.value || 0);
-                      const bidAmount = Number(bidForm.bidAmount || 0);
-                      const coFinancing = Math.max(0, bidAmount - subsidy);
-                      setBidForm(prev => ({ ...prev, subsidyRequested: e.target.value, coFinancingAmount: String(coFinancing) }));
-                      clearBidFieldError("subsidyRequested");
-                    }} />
-                    <BidFieldError message={bidFieldErrors["subsidyRequested"]} />
-                  </div>
-                  {isSiteSpecificStage && (
-                    <div className="space-y-1">
-                      <label className="text-sm font-bold text-slate-700 ml-1">Co-financing Amount (LSL)</label>
-                      <input type="number" className="input-field bg-slate-100" value={bidForm.coFinancingAmount} readOnly />
-                      <p className="text-xs text-slate-500">Auto-calculated: Bid Amount - Subsidy Requested</p>
+                )}
+                {collectsFinalPricing && isLotWise ? (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between flex-wrap gap-2">
+                      <p className="text-sm font-bold text-slate-700 ml-1">Select the lot(s) you wish to bid on and enter your price for each *</p>
+                      {maxLotsPerBidder != null && (
+                        <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${selectedLotCount > maxLotsPerBidder ? "bg-rose-100 text-rose-700" : "bg-slate-100 text-slate-600"}`}>
+                          {selectedLotCount} / {maxLotsPerBidder} lots selected
+                        </span>
+                      )}
                     </div>
-                  )}
+                    <p className="text-xs text-slate-500 -mt-1">Only lots you declared at Stage 1 (EOI) are shown here.</p>
+                    <BidFieldError message={bidFieldErrors["lotOffers"]} />
+                    <div className="space-y-2">
+                      {eligibleSiteLots.map((lot) => {
+                        const offer = lotOffers[lot.id || ""] || { selected: false, bidAmount: "", subsidyRequested: "" };
+                        const atCap = !offer.selected && maxLotsPerBidder != null && selectedLotCount >= maxLotsPerBidder;
+                        const lotHasBoqTemplate = Boolean(lot.boqItems && lot.boqItems.length > 0);
+                        return (
+                          <div key={lot.id} className={`p-3 rounded-xl border ${offer.selected ? "border-emerald-200 bg-emerald-50/40" : "border-slate-200 bg-slate-50"}`}>
+                            <div className="flex flex-col sm:flex-row gap-2 items-stretch sm:items-center">
+                              <label className="flex items-center gap-2 flex-1 min-w-0 cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  className="w-4 h-4 rounded text-emerald-600 shrink-0"
+                                  checked={offer.selected}
+                                  disabled={atCap}
+                                  onChange={(e) => {
+                                    setLotOffers(prev => ({ ...prev, [lot.id || ""]: { ...offer, selected: e.target.checked } }));
+                                    clearBidFieldError("lotOffers");
+                                    if (e.target.checked && lotHasBoqTemplate) ensureLotBoqSeeded(lot.id || "", lot);
+                                  }}
+                                />
+                                <span className="text-sm font-semibold text-slate-800 truncate">{lot.name}</span>
+                              </label>
+                              {!lotHasBoqTemplate && (
+                                <input
+                                  type="number"
+                                  className="input-field sm:w-40"
+                                  placeholder={`Bid amount (${selectedBidCurrency})`}
+                                  disabled={!offer.selected}
+                                  value={offer.bidAmount}
+                                  onChange={(e) => { setLotOffers(prev => ({ ...prev, [lot.id || ""]: { ...offer, bidAmount: e.target.value } })); clearBidFieldError("lotOffers"); }}
+                                />
+                              )}
+                              {lotHasBoqTemplate && offer.selected && (
+                                <div className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-bold text-slate-900 sm:w-40 text-right">
+                                  {selectedBidCurrency} {Number(offer.bidAmount || 0).toLocaleString()}
+                                </div>
+                              )}
+                              <input
+                                type="number"
+                                className="input-field sm:w-40"
+                                placeholder={`Subsidy requested (${selectedBidCurrency})`}
+                                disabled={!offer.selected}
+                                value={offer.subsidyRequested}
+                                onChange={(e) => { setLotOffers(prev => ({ ...prev, [lot.id || ""]: { ...offer, subsidyRequested: e.target.value } })); clearBidFieldError("lotOffers"); }}
+                              />
+                            </div>
+                            {lot.description && <p className="mt-1.5 text-xs text-slate-500">{lot.description}</p>}
+                            {lotHasBoqTemplate && offer.selected && (
+                              <div className="mt-3 space-y-2 rounded-xl border border-indigo-200 bg-indigo-50/40 p-3">
+                                <div className="text-xs text-indigo-900">
+                                  <p className="font-bold">This lot's Bill of Quantities was designed by the RBF Official — it applies only to {lot.name} (other lots may have a completely different BOQ).</p>
+                                  <ul className="mt-1.5 list-disc space-y-1 pl-4">
+                                    <li>Description, Quantity, and Unit for each line are locked — enter only the <span className="font-semibold">Unit Price</span> for each item.</li>
+                                    <li>Each row's Total is auto-calculated (Quantity × Unit Price), and this lot's Bid Amount above is the sum of all rows — you never type it in by hand.</li>
+                                  </ul>
+                                </div>
+                                <div className="hidden gap-2 px-1 text-[10px] font-bold uppercase tracking-widest text-slate-400 sm:grid sm:grid-cols-5">
+                                  <span className="sm:col-span-2">Description</span>
+                                  <span>Qty &amp; Unit</span>
+                                  <span>Unit Price ({selectedBidCurrency})</span>
+                                  <span>Total (auto)</span>
+                                </div>
+                                {(offer.boqItems || []).map((item, itemIdx) => (
+                                  <div key={itemIdx} className="grid grid-cols-1 gap-2 rounded-lg border border-slate-200 bg-white p-2.5 sm:grid-cols-5 sm:items-center">
+                                    <div className="text-sm text-slate-700 sm:col-span-2">{item.description}</div>
+                                    <div className="text-sm text-slate-500">{item.qty} {item.unit}</div>
+                                    <input
+                                      type="number"
+                                      className="input-field text-sm"
+                                      placeholder={`Unit price (${selectedBidCurrency})`}
+                                      value={item.unitPrice}
+                                      onChange={(e) => updateLotBoqItemPrice(lot.id || "", itemIdx, e.target.value)}
+                                    />
+                                    <div className="text-sm font-semibold text-slate-700 text-right">{selectedBidCurrency} {Number(item.total || 0).toLocaleString()}</div>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : (
+                <div className="space-y-4">
+                  <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                    <div className="space-y-1">
+                      <label className="text-sm font-bold text-slate-700 ml-1">Bid Amount ({selectedBidCurrency}) *</label>
+                      <input type="number" className="input-field" value={bidForm.bidAmount} onChange={(e) => {
+                        const bidAmount = Number(e.target.value || 0);
+                        const subsidy = Number(bidForm.subsidyRequested || 0);
+                        const coFinancing = Math.max(0, bidAmount - subsidy);
+                        setBidForm(prev => ({ ...prev, bidAmount: e.target.value, coFinancingAmount: String(coFinancing) }));
+                        clearBidFieldError("bidAmount");
+                      }} />
+                      {selectedBidCurrency !== tenderBaseCurrency && bidForm.bidAmount && (
+                        <p className="text-xs text-slate-500">≈ {tenderBaseCurrency} {(Number(bidForm.bidAmount) * selectedCurrencyRate).toLocaleString()}</p>
+                      )}
+                      <BidFieldError message={bidFieldErrors["bidAmount"]} />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-sm font-bold text-slate-700 ml-1">Subsidy Requested ({selectedBidCurrency}) *</label>
+                      <input type="number" className="input-field" value={bidForm.subsidyRequested} onChange={(e) => {
+                        const subsidy = Number(e.target.value || 0);
+                        const bidAmount = Number(bidForm.bidAmount || 0);
+                        const coFinancing = Math.max(0, bidAmount - subsidy);
+                        setBidForm(prev => ({ ...prev, subsidyRequested: e.target.value, coFinancingAmount: String(coFinancing) }));
+                        clearBidFieldError("subsidyRequested");
+                      }} />
+                      <BidFieldError message={bidFieldErrors["subsidyRequested"]} />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-sm font-bold text-slate-700 ml-1">Co-financing Amount ({selectedBidCurrency})</label>
+                      <input type="number" className="input-field bg-slate-100" value={bidForm.coFinancingAmount} readOnly />
+                      <p className="text-xs text-slate-500">The portion of the project cost you (or the customer) cover on top of the RBF subsidy — auto-calculated as Bid Amount − Subsidy Requested.</p>
+                    </div>
+                  </div>
                 </div>
+                )}
                 <div className="grid gap-4 lg:grid-cols-[1.15fr,0.85fr]">
-                  {isSiteSpecificStage ? (
-                    <div className="rounded-3xl border border-dashed border-slate-300 bg-slate-50 p-5 text-center">
-                      <label htmlFor="bid-doc-boq" className="cursor-pointer block">
-                        <Upload size={22} className="mx-auto text-slate-400" />
-                        <p className="mt-3 text-sm font-bold text-slate-800">Itemized Bill of Quantities (BoQ)</p>
-                        <p className="mt-1 text-xs text-slate-500">Accepted formats: PDF, DOCX, or XLSX</p>
-                        <p className="mt-3 text-xs font-medium text-slate-500">{bidFiles.boq?.name || existingStageTwoDocuments.boq ? "Uploaded and ready" : "Click to upload supporting BoQ"}</p>
-                      </label>
-                      <input id="bid-doc-boq" type="file" accept=".pdf,.docx,.xlsx" className="hidden" onChange={(e) => handleBidFileChange("boq", e.target.files?.[0] || null)} />
-                      {bidFileErrors["boq"] && <p className="mt-2 text-xs font-semibold text-rose-600">{bidFileErrors["boq"]}</p>}
+                  {isCombinedStage && isLotWise ? (
+                    <div className="rounded-3xl border border-slate-200 bg-slate-50 p-5">
+                      <p className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">BOQ Reference</p>
+                      <p className="mt-3 text-sm text-slate-700">This tender is lot-wise, so pricing is set per lot above rather than reconciled against a single BOQ total.</p>
+                    </div>
+                  ) : isCombinedStage ? (
+                    <div className="rounded-3xl border border-slate-200 bg-slate-50 p-5">
+                      <p className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Bill of Quantities (BOQ) Reconciliation</p>
+                      <p className="mt-3 text-sm text-slate-700">Your Bill of Quantities (the itemized cost breakdown below) must add up to exactly the bid amount above, since Technical and Financial are submitted together here.</p>
                     </div>
                   ) : (
                     <div className="rounded-3xl border border-slate-200 bg-slate-50 p-5">
-                      <p className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Stage 1 Scope</p>
-                      <p className="mt-3 text-sm text-slate-700">Stage 1 only checks the headline bid amount, requested subsidy, and concept readiness. Detailed costing opens in Stage 2.</p>
+                      <p className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Bill of Quantities (BOQ) Reference</p>
+                      <p className="mt-3 text-sm text-slate-700">Your itemized cost breakdown (the Bill of Quantities) was already submitted with the Technical stage for engineering review — it isn't re-checked against the final price here.</p>
                     </div>
                   )}
-                  <div className={`rounded-3xl border px-5 py-5 ${Math.abs(fundingDelta) < 0.01 ? "border-emerald-200 bg-emerald-50" : "border-amber-200 bg-amber-50"}`}>
-                    <p className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Internal Metrics</p>
+                  <div className={`rounded-3xl border px-5 py-5 ${(isCombinedStage && isLotWise) || Math.abs(fundingDelta) < 0.01 ? "border-emerald-200 bg-emerald-50" : "border-amber-200 bg-amber-50"}`}>
+                    <p className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Your Pricing Summary</p>
                     <div className="mt-4 space-y-3 text-sm">
                       <div className="flex items-center justify-between">
-                        <span className="text-slate-600">Bid Amount</span>
-                        <span className="font-bold text-slate-900">LSL {totalProjectValue.toLocaleString()}</span>
+                        <span className="text-slate-600">{isLotWise ? "Total Bid (Selected Lots)" : "Bid Amount"}</span>
+                        <span className="font-bold text-slate-900">{selectedBidCurrency} {totalProjectValue.toLocaleString()}</span>
                       </div>
-                      {isSiteSpecificStage ? (
+                      {isCombinedStage && !isLotWise ? (
                         <div className="flex items-center justify-between">
                           <span className="text-slate-600">BOQ Grand Total</span>
-                          <span className="font-bold text-slate-900">LSL {boqGrandTotal.toLocaleString()}</span>
+                          <span className="font-bold text-slate-900">{selectedBidCurrency} {boqGrandTotal.toLocaleString()}</span>
                         </div>
                       ) : (
                         <div className="flex items-center justify-between">
                           <span className="text-slate-600">Subsidy Requested</span>
-                          <span className="font-bold text-slate-900">LSL {subsidyValue.toLocaleString()}</span>
+                          <span className="font-bold text-slate-900">{selectedBidCurrency} {subsidyValue.toLocaleString()}</span>
                         </div>
                       )}
-                      <div className="border-t border-current/10 pt-3 flex items-center justify-between">
-                        <span className="font-medium text-slate-700">{isSiteSpecificStage ? "Live Difference" : "Vendor Co-financing"}</span>
-                        <span className={`font-black ${Math.abs(fundingDelta) < 0.01 ? "text-emerald-700" : "text-amber-700"}`}>
-                          {Math.abs(fundingDelta).toLocaleString()} {fundingDelta >= 0 ? "under" : "over"}
-                        </span>
-                      </div>
-                      <div className="border-t border-current/10 pt-3 flex items-center justify-between">
-                        <span className="font-medium text-slate-700">Cost per Connection</span>
-                        <span className="font-black text-slate-900">{costPerConnection != null ? `LSL ${costPerConnection.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : "Awaiting household target"}</span>
-                      </div>
+                      {!(isCombinedStage && isLotWise) && (
+                        <div className="border-t border-current/10 pt-3 flex items-center justify-between">
+                          <span className="font-medium text-slate-700">{isCombinedStage ? "Live Difference" : "Vendor Co-financing"}</span>
+                          <span className={`font-black ${Math.abs(fundingDelta) < 0.01 ? "text-emerald-700" : "text-amber-700"}`}>
+                            {Math.abs(fundingDelta).toLocaleString()} {fundingDelta >= 0 ? "under" : "over"}
+                          </span>
+                        </div>
+                      )}
                     </div>
                   </div>
+                </div>
+            </BidSectionCard>
+            )}
+
+            {isFinancialStage && (
+            <div id="bid-section-financial-recap" className="card overflow-hidden border-slate-200">
+              <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
+                <div className="flex items-center gap-3">
+                  <div className="rounded-2xl p-3 bg-slate-100 text-slate-600">
+                    <ClipboardCheck size={18} />
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-bold text-slate-900">Recap: What You're Pricing Against</h3>
+                    <p className="text-sm text-slate-500">Read-only — a reminder of what you committed at earlier stages. To change any of this, go back and edit your Technical submission.</p>
+                  </div>
+                </div>
+              </div>
+              <div className="grid grid-cols-1 gap-4 p-6 md:grid-cols-4">
+                <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
+                  <p className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Sites</p>
+                  <p className="mt-2 text-2xl font-bold text-slate-900">{geographyRows.length}</p>
+                  <p className="mt-1 text-xs text-slate-500">{Array.from(new Set(geographyRows.map((s) => s.district).filter(Boolean))).join(", ") || "No districts recorded"}</p>
+                </div>
+                <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
+                  <p className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Household Target</p>
+                  <p className="mt-2 text-2xl font-bold text-slate-900">{installationTarget || 0}</p>
+                  <p className="mt-1 text-xs text-slate-500">Total across all sites</p>
+                </div>
+                <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
+                  <p className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Inclusion Commitments</p>
+                  <p className="mt-2 text-sm font-bold text-slate-900">{bidForm.femaleTargetPct || 0}% female / {bidForm.vulnerableTargetPct || 0}% vulnerable / {bidForm.lowIncomeTargetPct || 0}% low-income</p>
+                </div>
+                <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
+                  <p className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">BOQ Grand Total (from Technical)</p>
+                  <p className="mt-2 text-2xl font-bold text-slate-900">{selectedBidCurrency} {boqGrandTotal.toLocaleString()}</p>
                 </div>
               </div>
             </div>
+            )}
 
-            <div id="bid-section-geography" className="card overflow-hidden border-slate-200">
-              <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
-                <div className="flex items-center justify-between gap-4">
-                  <div className="flex items-center gap-3">
-                    <div className={`rounded-2xl p-3 ${geographySectionComplete ? "bg-emerald-100 text-emerald-700" : "bg-slate-900 text-white"}`}>
-                      <MapPin size={18} />
-                    </div>
-                    <div>
-                      <h3 className="text-lg font-bold text-slate-900">Section C: Project Sites &amp; Scope (Geography)</h3>
-                      <p className="text-sm text-slate-500">This section pre-fills the district and installation target used later in milestone assignment.</p>
-                    </div>
-                  </div>
-                  {geographySectionComplete ? <CheckCircle2 size={18} className="text-emerald-600" /> : <AlertTriangle size={18} className="text-amber-500" />}
+            {isEoiStage && isLotWise && (
+            <BidSectionCard
+              id="lots"
+              number={nextBidStep()}
+              title="Lots You're Bidding On"
+              description="This tender is split into separately awardable lots. Choose which one(s) you intend to bid on — only lots declared here can later be tagged to sites and priced."
+              complete={declaredLots.length > 0}
+              contentClassName="space-y-3 p-6"
+            >
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <p className="text-sm font-bold text-slate-700 ml-1">Select the lot(s) you intend to bid on *</p>
+                  {maxLotsPerBidder != null && (
+                    <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${declaredLots.length > maxLotsPerBidder ? "bg-rose-100 text-rose-700" : "bg-slate-100 text-slate-600"}`}>
+                      {declaredLots.length} / {maxLotsPerBidder} lots selected
+                    </span>
+                  )}
                 </div>
-              </div>
-              <div className="p-6">
+                <BidFieldError message={bidFieldErrors["declaredLots"]} />
+                <div className="space-y-2">
+                  {tenderLots.map((lot) => {
+                    const lotId = String(lot.id || "");
+                    const selected = declaredLots.includes(lotId);
+                    const atCap = !selected && maxLotsPerBidder != null && declaredLots.length >= maxLotsPerBidder;
+                    return (
+                      <label key={lot.id} className={`flex items-center gap-3 p-3 rounded-xl border cursor-pointer ${selected ? "border-emerald-200 bg-emerald-50/40" : "border-slate-200 bg-slate-50"} ${atCap ? "opacity-60 cursor-not-allowed" : ""}`}>
+                        <input
+                          type="checkbox"
+                          className="w-4 h-4 rounded text-emerald-600 shrink-0"
+                          checked={selected}
+                          disabled={atCap}
+                          onChange={(e) => {
+                            setDeclaredLots(prev => e.target.checked ? [...prev, lotId] : prev.filter((id) => id !== lotId));
+                            clearBidFieldError("declaredLots");
+                          }}
+                        />
+                        <div className="min-w-0">
+                          <span className="text-sm font-semibold text-slate-800">{lot.name}</span>
+                          {lot.description && <p className="mt-0.5 text-xs text-slate-500">{lot.description}</p>}
+                        </div>
+                      </label>
+                    );
+                  })}
+                </div>
+                <p className="text-xs text-slate-500">This is non-binding at this stage, but scopes the rest of your submission — you may drop a declared lot later, but not add a new one after Stage 1 (EOI).</p>
+            </BidSectionCard>
+            )}
+
+            {!isFinancialStage && (
+            <BidSectionCard
+              id="geography"
+              number={nextBidStep()}
+              title="Project Sites & Scope (Geography)"
+              description="Where you'll actually install — this list of sites and households feeds directly into your milestone payment targets later."
+              complete={geographySectionComplete}
+              contentClassName="p-6"
+            >
                 {bidSectionErrors["geography"] && (
                   <div className="mb-4 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 font-medium">
                     {bidSectionErrors["geography"]}
@@ -13031,23 +16655,29 @@ const VendorDashboard = ({
                     <div className="space-y-1">
                       <label className="text-sm font-bold text-slate-700 ml-1">Primary District *</label>
                       <select className="input-field" value={primaryDistrict} onChange={(e) => updatePrimaryDistrict(e.target.value)}>
+                        <option value="" disabled>Select district</option>
                         {districtOptions.map((district) => (
                           <option key={district} value={district}>{district}</option>
                         ))}
                       </select>
                     </div>
                     <div className="space-y-1">
-                      <label className="text-sm font-bold text-slate-700 ml-1">Installation Target</label>
+                      <label className="text-sm font-bold text-slate-700 ml-1">Total Household Target</label>
                       <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-medium text-slate-700">
-                        {installationTarget > 0 ? `${installationTarget.toLocaleString()} installations` : "Add village rows to calculate target"}
+                        {installationTarget > 0 ? `${installationTarget.toLocaleString()} households` : "Add site rows below to calculate this automatically"}
                       </div>
+                      <p className="text-xs text-slate-500">Auto-calculated by adding up "Estimated Households" across every site below — this is what your milestone payments will be measured against.</p>
                     </div>
                   </div>
                   <div className="flex items-center justify-between gap-4">
                     <div>
                       <h4 className="text-sm font-bold text-slate-900">Village Site List</h4>
                       <p className="mt-1 text-xs text-slate-500">
-                        {isPreQualificationStage ? "Stage 1 requires site name, district, primary beneficiary type, and estimated households. GPS is optional at this stage." : "Stage 2 requires the exact village list with mandatory GPS coordinates, households, and access details for field verification."}
+                        {isPreQualificationStage
+                          ? isEoiInviteOnlyTender
+                            ? "This step only requires site name, district, primary beneficiary type, and estimated households. GPS coordinates are optional at this stage."
+                            : "Stage 1 (EOI) only requires site name, district, primary beneficiary type, and estimated households. GPS coordinates are optional at this stage."
+                          : "GPS coordinates, households, and access details are mandatory here — this is what field verification teams use to confirm your installations later."}
                       </p>
                     </div>
                     <div className="flex items-center gap-3">
@@ -13065,9 +16695,11 @@ const VendorDashboard = ({
                   <div className="space-y-4">
                     <BidFieldError message={bidFieldErrors["sites"]} />
                     {bidForm.sites.map((site, index) => {
-                      const siteReady = isPreQualificationStage
-                        ? Boolean(site.siteName && site.district && site.targetBeneficiaryType && site.estimatedHouseholds)
-                        : Boolean(site.siteName && site.district && site.targetBeneficiaryType && site.estimatedHouseholds && site.latitude && site.longitude);
+                      const siteReady = isEoiStage
+                        ? Boolean(site.siteName && site.district && site.targetBeneficiaryType && site.numberOfHouseholds)
+                        : isFinancialStage
+                          ? Boolean(site.siteName && site.district)
+                          : Boolean(site.siteName && site.district && site.targetBeneficiaryType && site.numberOfHouseholds && site.latitude && site.longitude);
                       return (
                         <div key={`site-${index}`} className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
                           <div className="flex items-center justify-between gap-3">
@@ -13088,24 +16720,36 @@ const VendorDashboard = ({
                           </div>
                           <BidFieldError message={bidSiteErrors[index]} />
                           <div className="mt-5 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+                            {isLotWise && (
+                              <div className="space-y-1">
+                                <label className="text-sm font-bold text-slate-700 ml-1">Lot {isEoiStage ? "(Optional)" : "*"}</label>
+                                <select className="input-field" value={site.lot || ""} onChange={(e) => updateBidSite(index, "lot", e.target.value)}>
+                                  <option value="">{isEoiStage ? "Not yet assigned" : "Select lot"}</option>
+                                  {eligibleSiteLots.map((lot) => (
+                                    <option key={lot.id} value={lot.id}>{lot.name}</option>
+                                  ))}
+                                </select>
+                                <p className="text-xs text-slate-500">Which lot this site belongs to — must be one of the lots you declared at Stage 1 (EOI).</p>
+                              </div>
+                            )}
                             <div className="space-y-1">
                               <label className="text-sm font-bold text-slate-700 ml-1">Site Name *</label>
-                              <input className="input-field" value={site.siteName} onChange={(e) => updateBidSite(index, "siteName", e.target.value)} />
+                              <input className="input-field" placeholder="E.g. Ha Mokoteli Primary School" value={site.siteName} onChange={(e) => updateBidSite(index, "siteName", e.target.value)} />
+                              <p className="text-xs text-slate-500">A short, identifiable name for this specific installation location.</p>
                             </div>
                             <div className="space-y-1">
                               <label className="text-sm font-bold text-slate-700 ml-1">District *</label>
                               <select className="input-field" value={site.district} onChange={(e) => updateBidSite(index, "district", e.target.value)}>
+                                <option value="" disabled>Select district</option>
                                 {districtOptions.map((district) => (
                                   <option key={district} value={district}>{district}</option>
                                 ))}
                               </select>
                             </div>
                             <div className="space-y-1">
-                              <label className="text-sm font-bold text-slate-700 ml-1">Estimated Installations *</label>
-                              <input type="number" className="input-field" value={site.estimatedHouseholds} onChange={(e) => {
-                                updateBidSite(index, "estimatedHouseholds", e.target.value);
-                                updateBidSite(index, "numberOfHouseholds", e.target.value);
-                              }} />
+                              <label className="text-sm font-bold text-slate-700 ml-1">Estimated Households *</label>
+                              <input type="number" className="input-field" value={site.numberOfHouseholds} onChange={(e) => updateBidSite(index, "numberOfHouseholds", e.target.value)} />
+                              <p className="text-xs text-slate-500">How many households (families) will actually receive service from this site — not the total population of the village.</p>
                             </div>
                             <div className="space-y-1">
                               <label className="text-sm font-bold text-slate-700 ml-1">Primary Beneficiary Type *</label>
@@ -13115,24 +16759,32 @@ const VendorDashboard = ({
                                 <option value="vulnerable">Vulnerable</option>
                                 <option value="low_income">Low-income</option>
                               </select>
+                              <p className="text-xs text-slate-500">Which group this site mainly serves. This is separate from your overall percentage commitments in Section D above.</p>
                             </div>
-                            <div className="space-y-1">
-                              <label className="text-sm font-bold text-slate-700 ml-1">Latitude {isSiteSpecificStage ? "*" : "(Optional)"}</label>
-                              <input type="number" className="input-field" value={site.latitude} onChange={(e) => updateBidSite(index, "latitude", e.target.value)} />
-                            </div>
-                            <div className="space-y-1">
-                              <label className="text-sm font-bold text-slate-700 ml-1">Longitude {isSiteSpecificStage ? "*" : "(Optional)"}</label>
-                              <input type="number" className="input-field" value={site.longitude} onChange={(e) => updateBidSite(index, "longitude", e.target.value)} />
+                            <div className="space-y-1 xl:col-span-2">
+                              <div className="grid grid-cols-2 gap-4">
+                                <div className="space-y-1">
+                                  <label className="text-sm font-bold text-slate-700 ml-1">Latitude {isEoiStage || isFinancialStage ? "(Optional)" : "*"}</label>
+                                  <input type="number" className="input-field" placeholder="E.g. -29.3167" value={site.latitude} onChange={(e) => updateBidSite(index, "latitude", e.target.value)} />
+                                </div>
+                                <div className="space-y-1">
+                                  <label className="text-sm font-bold text-slate-700 ml-1">Longitude {isEoiStage || isFinancialStage ? "(Optional)" : "*"}</label>
+                                  <input type="number" className="input-field" placeholder="E.g. 27.4833" value={site.longitude} onChange={(e) => updateBidSite(index, "longitude", e.target.value)} />
+                                </div>
+                              </div>
+                              <p className="text-xs text-slate-500">GPS coordinates pinpoint exactly where you'll install, so field verification teams can confirm it later. Don't know them? Stand at (or near) the site with a smartphone and tap "Use My Location" below — it fills both fields in automatically.</p>
                             </div>
                             <div className="space-y-1">
                               <label className="text-sm font-bold text-slate-700 ml-1">Village / Community</label>
-                              <input className="input-field" value={site.villageSubDistrict} onChange={(e) => updateBidSite(index, "villageSubDistrict", e.target.value)} />
+                              <input className="input-field" placeholder="E.g. Ha Mokoteli" value={site.villageSubDistrict} onChange={(e) => updateBidSite(index, "villageSubDistrict", e.target.value)} />
+                              <p className="text-xs text-slate-500">The local village or community name — more specific than District, separate from the Site Name above.</p>
                             </div>
-                            {isSiteSpecificStage && (
+                            {(isTechnicalStage || isCombinedStage) && (
                               <>
                                 <div className="space-y-1">
-                                  <label className="text-sm font-bold text-slate-700 ml-1">Estimated Energy Demand (kWh)</label>
+                                  <label className="text-sm font-bold text-slate-700 ml-1">Site Energy Demand (kWh/month)</label>
                                   <input type="number" className="input-field" value={site.estimatedEnergyDemandKwhMonth} onChange={(e) => updateBidSite(index, "estimatedEnergyDemandKwhMonth", e.target.value)} />
+                                  <p className="text-xs text-slate-500">How much energy this one site is expected to use per month.</p>
                                 </div>
                                 <div className="space-y-1">
                                   <label className="text-sm font-bold text-slate-700 ml-1">Road Access *</label>
@@ -13140,6 +16792,7 @@ const VendorDashboard = ({
                                     <option value="yes">Yes</option>
                                     <option value="no">No</option>
                                   </select>
+                                  <p className="text-xs text-slate-500">Can a vehicle reach this site? This affects your installation logistics and how field verification teams plan their visit.</p>
                                 </div>
                               </>
                             )}
@@ -13148,30 +16801,24 @@ const VendorDashboard = ({
                             <MapPin size={16} />
                             Use My Location
                           </button>
+                          <p className="mt-2 text-xs text-slate-400">Tapping this fills in Latitude/Longitude from your device's current GPS position — make sure you're physically at (or very near) the site first.</p>
                         </div>
                       );
                     })}
                   </div>
                 </div>
-              </div>
-            </div>
+            </BidSectionCard>
+            )}
 
-            {isSiteSpecificStage && (
-              <div id="bid-section-technical" className="card overflow-hidden border-slate-200">
-                <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
-                  <div className="flex items-center justify-between gap-4">
-                    <div className="flex items-center gap-3">
-                      <div className={`rounded-2xl p-3 ${hardwareSectionComplete ? "bg-emerald-100 text-emerald-700" : "bg-slate-900 text-white"}`}>
-                        <Database size={18} />
-                      </div>
-                      <div>
-                        <h3 className="text-lg font-bold text-slate-900">Section B: Technical Specification (Hardware Baseline)</h3>
-                        <p className="text-sm text-slate-500">This section sets the technology and energy baseline used during technical review and downstream project setup.</p>
-                      </div>
-                    </div>
-                    {hardwareSectionComplete ? <CheckCircle2 size={18} className="text-emerald-600" /> : <AlertTriangle size={18} className="text-amber-500" />}
-                  </div>
-                </div>
+            {(isTechnicalStage || isCombinedStage) && (
+              <BidSectionCard
+                id="technical"
+                number={nextBidStep()}
+                title="Technical Specification (Hardware Baseline)"
+                description="Describe the actual system you'll install — this is what the RMT checks during technical review, and what gets verified on-site later."
+                complete={Boolean(hardwareSectionComplete)}
+                contentClassName=""
+              >
                 <div className="grid grid-cols-1 gap-4 p-6 md:grid-cols-2">
                   {bidSectionErrors["technical"] && (
                     <div className="col-span-full rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 font-medium">
@@ -13219,38 +16866,56 @@ const VendorDashboard = ({
                       ))}
                     </select>
                     <BidFieldError message={bidFieldErrors["techTier"]} />
+                    <p className="text-xs text-slate-500 mt-1">Higher tiers are bigger, more capable systems (more power, more appliances supported). You cannot bid above your approved pre-qualification tier.</p>
                     {latestApprovedPrequal?.techTier && (
                       <p className={`text-xs mt-1 ${approvedTierLevel && selectedTierLevel && selectedTierLevel > approvedTierLevel ? "text-amber-700" : "text-slate-500"}`}>
                         Approved pre-qualification ceiling: {latestApprovedPrequal.techTier}
                       </p>
                     )}
                   </div>
+                  <div className="col-span-full -mb-2 mt-1">
+                    <p className="text-xs font-bold uppercase tracking-widest text-slate-400">System sizing</p>
+                    <p className="text-xs text-slate-500">These four numbers describe your system's physical size and power output — bigger numbers generally mean a bigger, more capable, and usually pricier system.</p>
+                  </div>
+                  {isMiniGridTender && (
+                    <div className="space-y-1">
+                      <label className="text-sm font-bold text-slate-700 ml-1">System Capacity ({bidForm.systemCapacityUnit})</label>
+                      <input type="number" className="input-field" value={bidForm.systemCapacity} onChange={(e) => setBidForm(prev => ({ ...prev, systemCapacity: e.target.value }))} />
+                      <p className="text-xs text-slate-500">The overall generation capacity of the mini-grid system you're proposing.</p>
+                    </div>
+                  )}
                   <div className="space-y-1">
                     <label className="text-sm font-bold text-slate-700 ml-1">Rated Power (W)</label>
                     <input type="number" className="input-field" value={bidForm.systemConfiguration.ratedPowerW} onChange={(e) => { setBidForm(prev => ({ ...prev, systemConfiguration: { ...prev.systemConfiguration, ratedPowerW: e.target.value } })); clearBidFieldError("systemConfiguration.ratedPowerW"); }} />
+                    <p className="text-xs text-slate-500">The system's maximum power output, in Watts (W) — how much it can run at once.</p>
                     <BidFieldError message={bidFieldErrors["systemConfiguration.ratedPowerW"]} />
                   </div>
                   <div className="space-y-1">
                     <label className="text-sm font-bold text-slate-700 ml-1">Battery Capacity (Wh)</label>
                     <input type="number" className="input-field" value={bidForm.systemConfiguration.batteryCapacityWh} onChange={(e) => { setBidForm(prev => ({ ...prev, systemConfiguration: { ...prev.systemConfiguration, batteryCapacityWh: e.target.value } })); clearBidFieldError("systemConfiguration.batteryCapacityWh"); }} />
+                    <p className="text-xs text-slate-500">How much energy the battery can store, in Watt-hours (Wh) — determines how long the system runs without sunlight.</p>
                     <BidFieldError message={bidFieldErrors["systemConfiguration.batteryCapacityWh"]} />
                   </div>
                   <div className="space-y-1">
                     <label className="text-sm font-bold text-slate-700 ml-1">PV Panel Size (W)</label>
                     <input type="number" className="input-field" value={bidForm.systemConfiguration.pvPanelSizeW} onChange={(e) => { setBidForm(prev => ({ ...prev, systemConfiguration: { ...prev.systemConfiguration, pvPanelSizeW: e.target.value } })); clearBidFieldError("systemConfiguration.pvPanelSizeW"); }} />
+                    <p className="text-xs text-slate-500">The solar panel's power rating, in Watts (W) — how fast it recharges the battery in sunlight.</p>
                     <BidFieldError message={bidFieldErrors["systemConfiguration.pvPanelSizeW"]} />
                   </div>
                   <div className="space-y-1">
                     <label className="text-sm font-bold text-slate-700 ml-1">Inverter Type</label>
                     <input className="input-field" value={bidForm.systemConfiguration.inverterType} onChange={(e) => setBidForm(prev => ({ ...prev, systemConfiguration: { ...prev.systemConfiguration, inverterType: e.target.value } }))} />
+                    <p className="text-xs text-slate-500">The component that converts the battery's stored power into usable electricity (e.g. "Pure sine wave, 500W").</p>
                   </div>
                   <div className="space-y-1">
-                    <label className="text-sm font-bold text-slate-700 ml-1">Estimated Monthly Energy Demand (kWh/month)</label>
+                    <label className="text-sm font-bold text-slate-700 ml-1">Overall Project Energy Demand (kWh/month)</label>
                     <input type="number" className="input-field" value={bidForm.energyTarget} onChange={(e) => setBidForm(prev => ({ ...prev, energyTarget: e.target.value }))} />
+                    <p className="text-xs text-slate-500">The combined energy demand across every site in this bid, per month — different from the per-site figure you'll enter for each site below.</p>
                   </div>
                 </div>
                 {isShsTender && (
                   <div className="border-t border-slate-200 px-6 py-6">
+                    <p className="text-xs text-slate-500 mb-4"><span className="font-bold">Pay-As-You-Go (PAYGO)</span> lets customers pay for their system in small installments — often via mobile money — instead of the full price upfront. Offering it can make your system accessible to more households.</p>
                     <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                       <div className="space-y-1">
                         <label className="text-sm font-bold text-slate-700 ml-1">PAYGO Offered *</label>
@@ -13267,7 +16932,8 @@ const VendorDashboard = ({
                             <BidFieldError message={bidFieldErrors["paygoPlatform"]} />
                           </div>
                           <div className="space-y-1">
-                            <label className="text-sm font-bold text-slate-700 ml-1">Minimum Daily Payment (LSL) *</label>
+                            <label className="text-sm font-bold text-slate-700 ml-1">Minimum Daily Payment ({tenderBaseCurrency}) *</label>
+                            <p className="text-xs text-slate-500 -mt-0.5">Always collected from households in the tender's base currency, regardless of what currency your bid price is in.</p>
                             <input type="number" className="input-field" value={bidForm.dailyPaymentAmountLsl} onChange={(e) => { setBidForm(prev => ({ ...prev, dailyPaymentAmountLsl: e.target.value })); clearBidFieldError("dailyPaymentAmountLsl"); }} />
                             <BidFieldError message={bidFieldErrors["dailyPaymentAmountLsl"]} />
                           </div>
@@ -13281,101 +16947,137 @@ const VendorDashboard = ({
                     </div>
                   </div>
                 )}
-              </div>
+            </BidSectionCard>
             )}
 
-            {isSiteSpecificStage && (
-              <div className="card overflow-hidden border-slate-200">
-                <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
-                  <div className="flex items-center justify-between gap-4">
-                    <div>
-                      <h3 className="text-lg font-bold text-slate-900">Section B2: Bill of Quantities</h3>
-                      <p className="text-sm text-slate-500">Each row updates the grand total automatically. The grand total must equal the bid amount.</p>
+            {(isTechnicalStage || isCombinedStage) && !isLotWise && (
+              <BidSectionCard
+                id="boq"
+                number={nextBidStep()}
+                title="Bill of Quantities (BOQ)"
+                description={hasBoqTemplate
+                  ? `A fixed cost breakdown was designed for this tender by the RBF Official. You only need to price it — see the notice below for exactly what to do. ${isCombinedStage ? "The grand total must equal the bid amount you entered above." : "The grand total should match the final price you'll submit at Stage 3 (Financial)."}`
+                  : `List every material, piece of equipment, and labor cost that adds up to your price — one row per item. ${isCombinedStage ? "The grand total below must equal the bid amount you entered above." : "The grand total below should match the final price you'll submit at Stage 3 (Financial)."}`}
+                complete={boqRowsComplete}
+                contentClassName="space-y-4 p-6"
+              >
+                  {hasBoqTemplate ? (
+                    <div className="rounded-2xl border border-indigo-200 bg-indigo-50 px-4 py-4 text-xs text-indigo-900">
+                      <p className="font-bold text-indigo-900">This Bill of Quantities was designed by the RBF Official for this tender — it is the same for every vendor bidding here.</p>
+                      <ul className="mt-2 list-disc space-y-1.5 pl-5">
+                        <li><span className="font-semibold">Description, Quantity, and Unit are locked</span> — you cannot change, add, or remove any line item. This keeps every vendor's bid comparable against exactly the same scope of work.</li>
+                        <li><span className="font-semibold">Your only job is the Unit Price column</span> — enter what you would charge for one unit of each item (e.g. the price for one solar panel, or the price per hour of installation labor).</li>
+                        <li>The <span className="font-semibold">Total</span> for each row is calculated for you automatically: Quantity × Unit Price.</li>
+                        <li>The <span className="font-semibold">Grand Total</span> at the bottom is the sum of every row's Total — {isCombinedStage ? "it must exactly equal the Bid Amount you entered in the Financial Proposal section above" : "it should match the final price you'll submit later, at Stage 3 (Financial)"}. Adjust your unit prices until the reconciliation box shows LSL 0 under/over.</li>
+                      </ul>
                     </div>
-                    <button type="button" onClick={addBoqItem} className="btn-secondary">+ Add Row</button>
+                  ) : (
+                    <>
+                      <div className="flex justify-end">
+                        <button type="button" onClick={addBoqItem} className="btn-secondary">+ Add Row</button>
+                      </div>
+                      <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-600">
+                        <p><span className="font-bold">One row per cost item.</span> Example: "Solar Panel 150W" — Qty <span className="font-mono">4</span> — Unit <span className="font-mono">pcs</span> — Unit Price <span className="font-mono">1,200</span> → Total is calculated for you (Qty × Unit Price). List everything that adds up to your price: equipment, materials, transport, and labor/installation costs.</p>
+                      </div>
+                    </>
+                  )}
+                  <div className="hidden gap-4 px-4 text-[10px] font-bold uppercase tracking-widest text-slate-400 md:grid md:grid-cols-6">
+                    <span className="md:col-span-2">Description</span>
+                    <span>Quantity</span>
+                    <span>Unit</span>
+                    <span>Unit Price ({selectedBidCurrency})</span>
+                    <span>Total (auto)</span>
                   </div>
-                </div>
-                <div className="space-y-4 p-6">
                   {bidForm.boqItems.map((item, index) => (
                     <div key={`boq-${index}`} className="grid grid-cols-1 gap-4 rounded-3xl border border-slate-200 p-4 md:grid-cols-6">
-                      <input className="input-field md:col-span-2" placeholder="Description" value={item.description} onChange={(e) => updateBoqItem(index, "description", e.target.value)} />
-                      <input type="number" className="input-field" placeholder="Qty" value={item.qty} onChange={(e) => updateBoqItem(index, "qty", e.target.value)} />
-                      <input className="input-field" placeholder="Unit" value={item.unit} onChange={(e) => updateBoqItem(index, "unit", e.target.value)} />
-                      <input type="number" className="input-field" placeholder="Unit Price" value={item.unitPrice} onChange={(e) => updateBoqItem(index, "unitPrice", e.target.value)} />
+                      {hasBoqTemplate ? (
+                        <>
+                          <div className="flex items-center rounded-2xl border border-slate-100 bg-slate-50 px-4 py-3 text-sm font-medium text-slate-700 md:col-span-2">{item.description}</div>
+                          <div className="flex items-center rounded-2xl border border-slate-100 bg-slate-50 px-4 py-3 text-sm font-medium text-slate-700">{item.qty}</div>
+                          <div className="flex items-center rounded-2xl border border-slate-100 bg-slate-50 px-4 py-3 text-sm font-medium text-slate-700">{item.unit || "—"}</div>
+                        </>
+                      ) : (
+                        <>
+                          <input className="input-field md:col-span-2" placeholder="E.g. Solar Panel 150W" value={item.description} onChange={(e) => updateBoqItem(index, "description", e.target.value)} />
+                          <input type="number" className="input-field" placeholder="E.g. 4" value={item.qty} onChange={(e) => updateBoqItem(index, "qty", e.target.value)} />
+                          <input className="input-field" placeholder="E.g. pcs, set, m, hour" value={item.unit} onChange={(e) => updateBoqItem(index, "unit", e.target.value)} />
+                        </>
+                      )}
+                      <input type="number" className="input-field" placeholder="E.g. 1200" value={item.unitPrice} onChange={(e) => updateBoqItem(index, "unitPrice", e.target.value)} />
                       <div className="flex items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-700">
-                        <span>LSL {Number(item.total || 0).toLocaleString()}</span>
-                        <button type="button" onClick={() => removeBoqItem(index)} className="text-rose-600">Remove</button>
+                        <span>{selectedBidCurrency} {Number(item.total || 0).toLocaleString()}</span>
+                        {!hasBoqTemplate && <button type="button" onClick={() => removeBoqItem(index)} className="text-rose-600">Remove</button>}
                       </div>
                     </div>
                   ))}
-                  <div className={`rounded-3xl border px-5 py-4 ${Math.abs(fundingDelta) < 0.01 ? "border-emerald-200 bg-emerald-50" : "border-amber-200 bg-amber-50"}`}>
-                    <div className="flex items-center justify-between text-sm">
-                      <span className="font-medium text-slate-700">Grand Total</span>
-                      <span className="font-black text-slate-900">LSL {boqGrandTotal.toLocaleString()}</span>
+                  {isCombinedStage && !isLotWise ? (
+                    <div className={`rounded-3xl border px-5 py-4 ${Math.abs(fundingDelta) < 0.01 ? "border-emerald-200 bg-emerald-50" : "border-amber-200 bg-amber-50"}`}>
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="font-medium text-slate-700">Grand Total</span>
+                        <span className="font-black text-slate-900">{selectedBidCurrency} {boqGrandTotal.toLocaleString()}</span>
+                      </div>
+                      <div className="mt-2 flex items-center justify-between text-sm">
+                        <span className="font-medium text-slate-700">Difference vs Bid Amount</span>
+                        <span className={`font-black ${Math.abs(fundingDelta) < 0.01 ? "text-emerald-700" : "text-amber-700"}`}>
+                          {selectedBidCurrency} {Math.abs(fundingDelta).toLocaleString()} {fundingDelta >= 0 ? "under" : "over"}
+                        </span>
+                      </div>
+                      <p className="mt-2 text-xs text-slate-500">Add or adjust rows until this reaches {selectedBidCurrency} 0 under/over — your itemized costs and your bid amount need to match.</p>
                     </div>
-                    <div className="mt-2 flex items-center justify-between text-sm">
-                      <span className="font-medium text-slate-700">Difference vs Bid Amount</span>
-                      <span className={`font-black ${Math.abs(fundingDelta) < 0.01 ? "text-emerald-700" : "text-amber-700"}`}>
-                        M {Math.abs(fundingDelta).toLocaleString()} {fundingDelta >= 0 ? "under" : "over"}
-                      </span>
+                  ) : (
+                    <div className="rounded-3xl border border-slate-200 bg-slate-50 px-5 py-4">
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="font-medium text-slate-700">Grand Total</span>
+                        <span className="font-black text-slate-900">{selectedBidCurrency} {boqGrandTotal.toLocaleString()}</span>
+                      </div>
                     </div>
-                  </div>
+                  )}
                   <BidFieldError message={bidFieldErrors["boqItems"]} />
-                </div>
-              </div>
+              </BidSectionCard>
             )}
 
-            {isSiteSpecificStage && (
-              <div className="card overflow-hidden border-slate-200">
-                <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
-                  <div>
-                    <h3 className="text-lg font-bold text-slate-900">Section B3: O&amp;M Plan</h3>
-                    <p className="text-sm text-slate-500">Summarize how the system will be maintained after installation.</p>
-                  </div>
-                </div>
-                <div className="grid grid-cols-1 gap-4 p-6 md:grid-cols-2">
+            {(isTechnicalStage || isCombinedStage) && (
+              <BidSectionCard
+                id="om"
+                number={nextBidStep()}
+                title="Operations, Maintenance & After-Sales Plan"
+                description="Installing a system is only half the job — this tells the RMT how you'll keep it running and support customers afterward."
+                complete={omSectionComplete}
+                contentClassName="grid grid-cols-1 gap-4 p-6 md:grid-cols-2"
+              >
                   <div className="space-y-1 md:col-span-2">
-                    <label className="text-sm font-bold text-slate-700 ml-1">O&amp;M Strategy Summary *</label>
-                    <textarea className="input-field min-h-[140px]" value={bidForm.omStrategySummary} onChange={(e) => { setBidForm(prev => ({ ...prev, omStrategySummary: e.target.value })); clearBidFieldError("omStrategySummary"); }} />
+                    <label className="text-sm font-bold text-slate-700 ml-1">Operations, Maintenance &amp; After-Sales Plan *</label>
+                    <textarea className="input-field min-h-[140px]" placeholder="E.g. how often you'll service systems, how customers reach you for repairs, spare parts availability, and response times." value={bidForm.omStrategySummary} onChange={(e) => { setBidForm(prev => ({ ...prev, omStrategySummary: e.target.value })); clearBidFieldError("omStrategySummary"); }} />
                     <BidFieldError message={bidFieldErrors["omStrategySummary"]} />
                   </div>
                   <div className="space-y-1">
                     <label className="text-sm font-bold text-slate-700 ml-1">Local Technicians Count</label>
                     <input type="number" className="input-field" value={bidForm.localTechniciansToBeTrained} onChange={(e) => setBidForm(prev => ({ ...prev, localTechniciansToBeTrained: e.target.value }))} />
+                    <p className="text-xs text-slate-500">How many local technicians you'll train to service these systems near their installation sites.</p>
                   </div>
                   <div className="space-y-1">
-                    <label className="text-sm font-bold text-slate-700 ml-1">Warranty Months</label>
+                    <label className="text-sm font-bold text-slate-700 ml-1">Warranty (Months)</label>
                     <input type="number" className="input-field" value={bidForm.warrantyPeriodMonths} onChange={(e) => setBidForm(prev => ({ ...prev, warrantyPeriodMonths: e.target.value }))} />
+                    <p className="text-xs text-slate-500">How many months you'll cover repairs or replacements at no extra cost to the customer.</p>
                   </div>
-                  <div className="space-y-1 md:col-span-2">
-                    <label className="text-sm font-bold text-slate-700 ml-1">After-sales Description</label>
-                    <textarea className="input-field min-h-[120px]" value={bidForm.aftersalesDescription} onChange={(e) => setBidForm(prev => ({ ...prev, aftersalesDescription: e.target.value }))} />
-                  </div>
-                </div>
-              </div>
+              </BidSectionCard>
             )}
 
-            <div id="bid-section-inclusion" className="card overflow-hidden border-slate-200">
-              <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
-                <div className="flex items-center justify-between gap-4">
-                  <div className="flex items-center gap-3">
-                    <div className={`rounded-2xl p-3 ${inclusionSectionReady ? "bg-emerald-100 text-emerald-700" : "bg-slate-900 text-white"}`}>
-                      <ShieldCheck size={18} />
-                    </div>
-                    <div>
-                      <h3 className="text-lg font-bold text-slate-900">Section D: Social Inclusion Commitments (Impact)</h3>
-                      <p className="text-sm text-slate-500">These targets pre-fill the milestone inclusion percentages and establish the minimum impact commitments.</p>
-                    </div>
-                  </div>
-                  {inclusionSectionReady ? <CheckCircle2 size={18} className="text-emerald-600" /> : <AlertTriangle size={18} className="text-amber-500" />}
-                </div>
-              </div>
-              <div className="space-y-5 p-6">
+            {!isFinancialStage && (
+            <BidSectionCard
+              id="inclusion"
+              number={nextBidStep()}
+              title="Social Inclusion Commitments (Impact)"
+              description={isEoiStage ? "Minimum shares of households you commit to reaching within each group — these become the targets your milestone payments are measured against." : "Declared at Stage 1 (EOI) and locked in — shown here for reference, not editable at this stage."}
+              complete={inclusionSectionReady}
+              contentClassName="space-y-5 p-6"
+            >
                 {bidSectionErrors["inclusion"] && (
                   <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 font-medium">
                     {bidSectionErrors["inclusion"]}
                   </div>
                 )}
+                {isEoiStage ? (
                 <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
                   <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
                     <label className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Female-Headed Household Target *</label>
@@ -13383,6 +17085,7 @@ const VendorDashboard = ({
                       <input type="number" required min={50} className={inclusionInputClass(femaleTargetInvalid)} value={bidForm.femaleTargetPct} onChange={(e) => { setBidForm(prev => ({ ...prev, femaleTargetPct: e.target.value })); clearBidFieldError("femaleTargetPct"); }} />
                       <span className="pb-3 text-sm font-bold text-slate-500">%</span>
                     </div>
+                    <p className="mt-2 text-xs text-slate-500">Minimum 50% — the share of your installations that go to households headed by a woman.</p>
                     <BidFieldError message={bidFieldErrors["femaleTargetPct"]} />
                   </div>
                   <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
@@ -13391,6 +17094,7 @@ const VendorDashboard = ({
                       <input type="number" required min={30} className={inclusionInputClass(vulnerableTargetInvalid)} value={bidForm.vulnerableTargetPct} onChange={(e) => { setBidForm(prev => ({ ...prev, vulnerableTargetPct: e.target.value })); clearBidFieldError("vulnerableTargetPct"); }} />
                       <span className="pb-3 text-sm font-bold text-slate-500">%</span>
                     </div>
+                    <p className="mt-2 text-xs text-slate-500">Minimum 30% — households with elderly, disabled, or chronically ill (e.g. HIV-affected) members.</p>
                     <BidFieldError message={bidFieldErrors["vulnerableTargetPct"]} />
                   </div>
                   <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
@@ -13399,10 +17103,25 @@ const VendorDashboard = ({
                       <input type="number" required min={60} className={inclusionInputClass(lowIncomeTargetInvalid)} value={bidForm.lowIncomeTargetPct} onChange={(e) => { setBidForm(prev => ({ ...prev, lowIncomeTargetPct: e.target.value })); clearBidFieldError("lowIncomeTargetPct"); }} />
                       <span className="pb-3 text-sm font-bold text-slate-500">%</span>
                     </div>
+                    <p className="mt-2 text-xs text-slate-500">Minimum 60% — the share of your installations that go to households below the local low-income threshold.</p>
                     <BidFieldError message={bidFieldErrors["lowIncomeTargetPct"]} />
                   </div>
                 </div>
-                {isSiteSpecificStage && (
+                ) : (
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                  {[
+                    { label: "Female-Headed Household Target", value: bidForm.femaleTargetPct },
+                    { label: "Vulnerable Group Inclusion", value: bidForm.vulnerableTargetPct },
+                    { label: "Low-Income Household Target", value: bidForm.lowIncomeTargetPct },
+                  ].map((item) => (
+                    <div key={item.label} className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
+                      <label className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">{item.label}</label>
+                      <p className="mt-3 text-2xl font-bold text-slate-700">{item.value || 0}%</p>
+                    </div>
+                  ))}
+                </div>
+                )}
+                {(isTechnicalStage || isCombinedStage) && !activeStageDocuments.some((doc) => doc.key === "genderActionPlan") && (
                   <div className={`rounded-3xl border p-5 ${genderActionPlanUploaded ? "border-emerald-200 bg-emerald-50" : "border-slate-200 bg-white"}`}>
                     <label htmlFor="bid-doc-gap" className="cursor-pointer block">
                       <div className="flex items-start justify-between gap-3">
@@ -13419,42 +17138,46 @@ const VendorDashboard = ({
                     {bidFileErrors["genderActionPlan"] && <p className="mt-2 text-xs font-semibold text-rose-600">{bidFileErrors["genderActionPlan"]}</p>}
                   </div>
                 )}
-                <label className="flex items-start gap-3 rounded-3xl border border-slate-200 bg-slate-50 p-4">
-                  <input type="checkbox" checked={bidForm.inclusionCommitmentConfirmed} onChange={(e) => { setBidForm(prev => ({ ...prev, inclusionCommitmentConfirmed: e.target.checked })); clearBidFieldError("inclusionCommitmentConfirmed"); }} className="mt-1" />
-                  <span className="text-sm text-slate-700">I confirm these inclusion commitments are part of this proposal and will be honored if the tender is awarded.</span>
-                </label>
-                <BidFieldError message={bidFieldErrors["inclusionCommitmentConfirmed"]} />
-              </div>
-            </div>
-
-            {isSiteSpecificStage && (
-              <div id="bid-section-documents" className="card overflow-hidden border-slate-200">
-                <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
-                  <div className="flex items-center justify-between gap-4">
-                    <div className="flex items-center gap-3">
-                      <div className={`rounded-2xl p-3 ${documentSectionComplete ? "bg-emerald-100 text-emerald-700" : "bg-slate-900 text-white"}`}>
-                        <Upload size={18} />
-                      </div>
-                      <div>
-                        <h3 className="text-lg font-bold text-slate-900">Stage 2 Supporting Documents</h3>
-                        <p className="text-sm text-slate-500">Upload the remaining proposal files used during the detailed evaluation workflow.</p>
-                      </div>
-                    </div>
-                    {documentSectionComplete ? <CheckCircle2 size={18} className="text-emerald-600" /> : <AlertTriangle size={18} className="text-amber-500" />}
+                {isEoiStage ? (
+                  <>
+                    <label className="flex items-start gap-3 rounded-3xl border border-slate-200 bg-slate-50 p-4">
+                      <input type="checkbox" checked={bidForm.inclusionCommitmentConfirmed} onChange={(e) => { setBidForm(prev => ({ ...prev, inclusionCommitmentConfirmed: e.target.checked })); clearBidFieldError("inclusionCommitmentConfirmed"); }} className="mt-1" />
+                      <span className="text-sm text-slate-700">
+                        {isEoiInviteOnlyTender
+                          ? "I confirm these inclusion commitments are part of this Expression of Interest and will be honored if I'm invited to bid."
+                          : "I confirm these inclusion commitments are part of this proposal and will be honored if the tender is awarded."}
+                      </span>
+                    </label>
+                    <BidFieldError message={bidFieldErrors["inclusionCommitmentConfirmed"]} />
+                  </>
+                ) : (
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+                    {bidForm.inclusionCommitmentConfirmed ? "Inclusion commitment confirmed at Stage 1 (EOI)." : "Inclusion commitment not yet confirmed."}
                   </div>
-                </div>
-                <div className="space-y-4 p-6">
+                )}
+            </BidSectionCard>
+            )}
+
+            {(isTechnicalStage || isCombinedStage || isFinancialStage) && (
+              <BidSectionCard
+                id="documents"
+                number={nextBidStep()}
+                title={isFinancialStage ? "Stage 3 Supporting Documents" : "Stage 2 Supporting Documents"}
+                description={isFinancialStage ? "Upload the pricing submission used during financial evaluation." : "Upload the remaining proposal files used during the detailed evaluation workflow."}
+                complete={documentSectionComplete}
+                contentClassName="space-y-4 p-6"
+              >
                   {bidSectionErrors["documents"] && (
                     <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 font-medium">
                       {bidSectionErrors["documents"]}
                     </div>
                   )}
                   <div className="flex items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-                    <span className="text-sm font-medium text-slate-700">Stage 2 document checklist</span>
-                    <span className="text-xs font-bold text-slate-500">{uploadedStageTwoDocumentCount} of {stageTwoDocuments.length} uploaded</span>
+                    <span className="text-sm font-medium text-slate-700">{isFinancialStage ? "Stage 3 document checklist" : "Stage 2 document checklist"}</span>
+                    <span className="text-xs font-bold text-slate-500">{activeStageUploadedCount} of {activeStageDocuments.length} uploaded</span>
                   </div>
                   <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                    {stageTwoDocuments.map((doc, idx) => {
+                    {activeStageDocuments.map((doc, idx) => {
                       const uploaded = Boolean((bidFiles as any)[doc.key]?.name || (existingStageTwoDocuments as any)[doc.key]);
                       return (
                         <div key={doc.key} className={`rounded-3xl border p-5 ${uploaded ? "border-emerald-200 bg-emerald-50" : "border-slate-200 bg-white"}`}>
@@ -13467,6 +17190,7 @@ const VendorDashboard = ({
                             </div>
                             <p className="mt-4 text-sm font-bold text-slate-900">{doc.label}</p>
                             <p className="mt-1 text-xs text-slate-500">{doc.hint}</p>
+                            {doc.long && <p className="mt-1 text-xs text-slate-500">{doc.long}</p>}
                             <p className="mt-3 text-xs font-medium text-slate-500">{uploaded ? "Uploaded and ready" : "Click to upload"}</p>
                           </label>
                           <input
@@ -13524,34 +17248,25 @@ const VendorDashboard = ({
                       </div>
                     </div>
                   )}
-                </div>
-              </div>
+              </BidSectionCard>
             )}
 
             {isEoiStage && (
-              <div id="bid-section-eoi" className="card overflow-hidden border-slate-200">
-                <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
-                  <div className="flex items-center justify-between gap-4">
-                    <div className="flex items-center gap-3">
-                      <div className={`rounded-2xl p-3 ${eoiDocumentsComplete && eoiNarrativeValid ? "bg-emerald-100 text-emerald-700" : "bg-slate-900 text-white"}`}>
-                        <FileText size={18} />
-                      </div>
-                      <div>
-                        <h3 className="text-lg font-bold text-slate-900">Stage 1: Expression of Interest (EOI)</h3>
-                        <p className="text-sm text-slate-500">Submit your company credentials, financial standing, technical experience, and track record to be considered for this tender.</p>
-                      </div>
-                    </div>
-                    {eoiDocumentsComplete && eoiNarrativeValid ? <CheckCircle2 size={18} className="text-emerald-600" /> : <AlertTriangle size={18} className="text-amber-500" />}
-                  </div>
-                </div>
-                <div className="space-y-4 p-6">
+              <BidSectionCard
+                id="eoi"
+                number={nextBidStep()}
+                title={isEoiInviteOnlyTender ? "Expression of Interest" : "Stage 1: Expression of Interest (EOI)"}
+                description={`Submit your company credentials, financial standing, technical experience, and track record to be considered for this ${isEoiInviteOnlyTender ? "opportunity" : "tender"}.`}
+                complete={Boolean(eoiDocumentsComplete && eoiNarrativeValid)}
+                contentClassName="space-y-4 p-6"
+              >
                   {bidSectionErrors["eoi"] && (
                     <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 font-medium">
                       {bidSectionErrors["eoi"]}
                     </div>
                   )}
                   <div className="flex items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-                    <span className="text-sm font-medium text-slate-700">EOI document checklist</span>
+                    <span className="text-sm font-medium text-slate-700">{isEoiInviteOnlyTender ? "Document checklist" : "Stage 1 (EOI) document checklist"}</span>
                     <span className="text-xs font-bold text-slate-500">{uploadedEoiDocumentCount} of {eoiDocuments.length} uploaded</span>
                   </div>
                   <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
@@ -13568,7 +17283,8 @@ const VendorDashboard = ({
                             </div>
                             <p className="mt-4 text-sm font-bold text-slate-900">{doc.label}</p>
                             <p className="mt-1 text-xs text-slate-500">{doc.hint}</p>
-                            <p className="mt-3 text-xs font-medium text-slate-500">{uploaded ? (doc.long || "Uploaded and ready") : "Click to upload"}</p>
+                            {doc.long && <p className="mt-1 text-xs text-slate-500">{doc.long}</p>}
+                            <p className="mt-3 text-xs font-medium text-slate-500">{uploaded ? "Uploaded and ready" : "Click to upload"}</p>
                           </label>
                           <input
                             id={`bid-eoi-doc-${doc.key}-${idx}`}
@@ -13625,19 +17341,20 @@ const VendorDashboard = ({
                       </div>
                     </div>
                   )}
-                  <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-                    <div className="space-y-1">
-                      <label className="text-sm font-bold text-slate-700 ml-1">Financial Standing Summary (Optional)</label>
-                      <textarea className="input-field min-h-[120px]" value={bidForm.financialStandingSummary} onChange={(e) => setBidForm(prev => ({ ...prev, financialStandingSummary: e.target.value }))} />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-sm font-bold text-slate-700 ml-1">Technical Experience Summary (Optional)</label>
-                      <textarea className="input-field min-h-[120px]" value={bidForm.technicalExperienceSummary} onChange={(e) => setBidForm(prev => ({ ...prev, technicalExperienceSummary: e.target.value }))} />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-sm font-bold text-slate-700 ml-1">Track Record Summary (Optional)</label>
-                      <textarea className="input-field min-h-[120px]" value={bidForm.trackRecordSummary} onChange={(e) => setBidForm(prev => ({ ...prev, trackRecordSummary: e.target.value }))} />
-                    </div>
+                  <div className="space-y-1">
+                    <label className="text-sm font-bold text-slate-700 ml-1">Financial Standing Summary (Optional)</label>
+                    <p className="text-xs text-slate-500 ml-1">Anything not already covered by the Financial Standing document above.</p>
+                    <textarea className="input-field min-h-[100px]" value={bidForm.financialStandingSummary} onChange={(e) => setBidForm(prev => ({ ...prev, financialStandingSummary: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-sm font-bold text-slate-700 ml-1">Technical Experience Summary (Optional)</label>
+                    <p className="text-xs text-slate-500 ml-1">Briefly highlight the relevant projects covered by the Technical Experience document above.</p>
+                    <textarea className="input-field min-h-[100px]" value={bidForm.technicalExperienceSummary} onChange={(e) => setBidForm(prev => ({ ...prev, technicalExperienceSummary: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-sm font-bold text-slate-700 ml-1">Track Record Summary (Optional)</label>
+                    <p className="text-xs text-slate-500 ml-1">Briefly highlight the outcomes covered by the Track Record document above.</p>
+                    <textarea className="input-field min-h-[100px]" value={bidForm.trackRecordSummary} onChange={(e) => setBidForm(prev => ({ ...prev, trackRecordSummary: e.target.value }))} />
                   </div>
                   <div className="flex items-center justify-between gap-3">
                     <label className="text-sm font-bold text-slate-700 ml-1">EOI Narrative *</label>
@@ -13652,81 +17369,166 @@ const VendorDashboard = ({
                     placeholder="Briefly describe why your company is well-suited for this opportunity, including capacity, experience, and intended approach."
                   />
                   <BidFieldError message={bidFieldErrors["eoiNarrative"]} />
-                </div>
-              </div>
+              </BidSectionCard>
             )}
 
-            <div id="bid-section-narrative" className="card">
-              <div className="border-b border-slate-100 p-6">
-                <div className="flex items-center justify-between gap-4">
-                  <div className="flex items-center gap-3">
-                    <div className={`rounded-2xl p-3 ${narrativeSectionComplete ? "bg-emerald-100 text-emerald-700" : "bg-slate-900 text-white"}`}>
-                      <Settings size={18} />
-                    </div>
-                    <div>
-                      <h3 className="text-lg font-bold text-slate-900">Section E: Project Narrative (Concept Note)</h3>
-                      <p className="text-sm text-slate-500">Stage 1 uses this concept note as the main narrative gate for shortlisting.</p>
-                    </div>
-                  </div>
-                  {narrativeSectionComplete ? <CheckCircle2 size={18} className="text-emerald-600" /> : <AlertTriangle size={18} className="text-amber-500" />}
+            {(isTechnicalStage || isCombinedStage) && (
+              <BidSectionCard
+                id="narrative"
+                number={nextBidStep()}
+                title="Additional Notes (Optional)"
+                description="A short, plain-language summary evaluators read first, before diving into your full technical and financial documents — helps busy reviewers quickly grasp your approach."
+                complete={Boolean(bidForm.technicalProposal.trim())}
+                optional
+                contentClassName="space-y-1 p-6"
+              >
+                  <label className="text-sm font-bold text-slate-700 ml-1">Technical Approach &amp; Value Proposition</label>
+                  <textarea className="input-field min-h-[140px]" placeholder="In a few sentences: what are you installing, why is your technical approach a good fit, and what makes your price good value for money?" value={bidForm.technicalProposal} onChange={(e) => setBidForm(prev => ({ ...prev, technicalProposal: e.target.value }))} />
+              </BidSectionCard>
+            )}
+          </div>
+
+          <div className="space-y-6 xl:sticky xl:top-6 xl:self-start">
+            <div className="card p-6">
+              <div className="flex items-center gap-3">
+                <div className="rounded-2xl bg-emerald-600 p-3 text-white">
+                  <CheckCircle2 size={18} />
+                </div>
+                <div>
+                  <h3 className="font-bold text-slate-900">Submission Checklist</h3>
+                  <p className="text-sm text-slate-500">{completedProposalSections} of {proposalSections.length} sections ready</p>
                 </div>
               </div>
-              <div className="space-y-4 p-6">
-                {bidSectionErrors["narrative"] && (
-                  <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 font-medium">
-                    {bidSectionErrors["narrative"]}
-                  </div>
-                )}
-                <div className="flex items-center justify-between gap-3">
-                  <label className="text-sm font-bold text-slate-700 ml-1">Concept Note {isPreQualificationStage ? "*" : ""}</label>
-                  <span className={`inline-flex rounded-full px-3 py-1 text-xs font-bold ${implementationStrategyCharCount >= 200 ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
-                    {implementationStrategyCharCount}/200 chars
-                  </span>
+              <div className="mt-5 space-y-2">
+                {proposalSections.map((section, idx) => {
+                  const Icon = section.icon;
+                  return (
+                    <button
+                      key={section.id}
+                      type="button"
+                      onClick={() => {
+                        document.getElementById(`bid-section-${section.id}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+                      }}
+                      className={`flex w-full items-center gap-3 rounded-2xl border px-3 py-2.5 text-left transition ${section.complete ? "border-emerald-100 bg-emerald-50/60 hover:bg-emerald-50" : "border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50"}`}
+                    >
+                      <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[11px] font-black ${section.complete ? "bg-emerald-600 text-white" : "bg-slate-100 text-slate-500"}`}>
+                        {section.complete ? <Check size={12} /> : idx + 1}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block text-sm font-semibold text-slate-800">{section.label}</span>
+                        <span className="block truncate text-[11px] text-slate-500">{section.note}</span>
+                      </span>
+                      <Icon size={15} className={`shrink-0 ${section.complete ? "text-emerald-600" : "text-slate-300"}`} />
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="mt-5 rounded-2xl bg-slate-50 p-4">
+                <div className="flex items-center justify-between text-sm">
+                  <span className="font-medium text-slate-600">Overall readiness</span>
+                  <span className="font-black text-slate-900">{Math.round((proposalSections.length ? completedProposalSections / proposalSections.length : 0) * 100)}%</span>
                 </div>
-                <textarea className="input-field min-h-[220px]" value={bidForm.conceptNote} onChange={(e) => { setBidForm(prev => ({ ...prev, conceptNote: e.target.value })); clearBidFieldError("conceptNote"); }} placeholder="Explain the approach, logistics, implementation sequence, and community engagement strategy for this tender." />
-                <BidFieldError message={bidFieldErrors["conceptNote"]} />
-                <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
-                  {isPreQualificationStage ? "This is the main Stage 1 concept note reviewed by the RMT before detailed documents are unlocked." : "Keep the narrative aligned with the approved concept and use it to give evaluators context for the detailed submission."}
+                <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-200">
+                  <div
+                    className="h-full rounded-full bg-emerald-500 transition-all duration-300"
+                    style={{ width: `${proposalSections.length ? (completedProposalSections / proposalSections.length) * 100 : 0}%` }}
+                  />
                 </div>
               </div>
             </div>
-            {isSiteSpecificStage && (
-              <div className="card overflow-hidden border-slate-200">
-                <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
-                  <div>
-                    <h3 className="text-lg font-bold text-slate-900">Section F: Optional Summaries</h3>
-                    <p className="text-sm text-slate-500">These summaries help evaluators scan the proposal quickly.</p>
-                  </div>
-                </div>
-                <div className="grid grid-cols-1 gap-4 p-6 md:grid-cols-2">
-                  <div className="space-y-1">
-                    <label className="text-sm font-bold text-slate-700 ml-1">Technical Summary</label>
-                    <textarea className="input-field min-h-[140px]" value={bidForm.technicalProposal} onChange={(e) => setBidForm(prev => ({ ...prev, technicalProposal: e.target.value }))} />
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-sm font-bold text-slate-700 ml-1">Financial Summary</label>
-                    <textarea className="input-field min-h-[140px]" value={bidForm.financialProposal} onChange={(e) => setBidForm(prev => ({ ...prev, financialProposal: e.target.value }))} />
-                  </div>
-                </div>
-              </div>
-            )}
 
-            {bidSubmitError && (
-              <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 font-medium">
-                {bidSubmitError}
+            <div className="card overflow-hidden">
+              <div className="flex items-center gap-3 border-b border-slate-100 px-6 py-4">
+                <div className="rounded-2xl bg-slate-100 p-2.5 text-slate-600">
+                  <History size={16} />
+                </div>
+                <h3 className="font-bold text-slate-900">Version History</h3>
               </div>
-            )}
-            <button
-              type="button"
-              onClick={() => setRuleBookOpen(true)}
-              className="flex w-full items-center justify-center gap-2 rounded-2xl border-2 border-emerald-300 bg-emerald-50 px-6 py-3 text-sm font-bold text-emerald-800 transition hover:border-emerald-400 hover:bg-emerald-100"
-            >
-              <BookOpen size={16} />
-              View Bid Submission Rule Book
-              <HelpCircle size={16} />
-            </button>
-            <div className="flex flex-col gap-3 sm:flex-row">
-              <button onClick={() => submitBid(BidStatus.DRAFT)} disabled={isBidSubmitting || !canEdit} className="btn-secondary flex-1 py-3 disabled:opacity-60">
+              {versionsSorted.length === 0 ? (
+                <p className="px-6 py-5 text-sm text-slate-500">No versions yet.</p>
+              ) : (
+                <div className="divide-y divide-slate-100">
+                  {versionsSorted.map((version) => (
+                    <div key={version.id} className="flex items-start justify-between gap-4 px-6 py-3.5">
+                      <div className="min-w-0">
+                        <p className="text-sm font-bold text-slate-900">Version {version.version_number}</p>
+                        <p className="text-xs text-slate-500">{version.status}</p>
+                        {version.submitted_at && (
+                          <p className="mt-0.5 text-[11px] text-slate-400">Saved: {new Date(version.submitted_at).toLocaleString()}</p>
+                        )}
+                      </div>
+                      <button onClick={() => useBidVersion(version)} className="shrink-0 rounded-lg bg-emerald-50 px-3 py-1.5 text-xs font-bold text-emerald-700 transition hover:bg-emerald-100">
+                        Use Version
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="card p-6">
+              <h3 className="font-bold text-slate-900 mb-4">{isEoiInviteOnlyTender ? "Submission Snapshot" : "Proposal Snapshot"}</h3>
+              <div className="space-y-3 text-sm">
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-500">{isPreQualificationStage ? "EOI narrative" : "Configured sites"}</span>
+                  <span className="font-bold text-slate-900">{isPreQualificationStage ? `${eoiNarrativeCharCount} chars` : `${stageTwoSiteRows.length} site${stageTwoSiteRows.length === 1 ? "" : "s"}`}</span>
+                </div>
+                {!isPreQualificationStage && (
+                  <>
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-500">Project value</span>
+                      <span className="font-bold text-slate-900">{selectedBidCurrency} {totalProjectValue.toLocaleString()}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-500">Subsidy ask</span>
+                      <span className="font-bold text-slate-900">{selectedBidCurrency} {subsidyValue.toLocaleString()}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-500">Co-financing</span>
+                      <span className="font-bold text-slate-900">{selectedBidCurrency} {coFinancingValue.toLocaleString()}</span>
+                    </div>
+                  </>
+                )}
+                <div className="mt-3 flex items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                  <div className="rounded-xl bg-slate-900 p-2 text-white">
+                    <Calendar size={15} />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-xs font-bold text-slate-900">{bidDeadlineCountdown}</p>
+                    <p className="truncate text-xs text-slate-500">{bidTender.deadline ? new Date(bidTender.deadline).toLocaleString() : "N/A"}</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="xl:sticky xl:bottom-4 xl:z-20">
+          <div className="flex flex-col gap-4 rounded-[20px] border border-slate-200 bg-white/95 px-5 py-4 shadow-xl shadow-slate-900/10 backdrop-blur sm:flex-row sm:items-center">
+            <div className="min-w-0 flex-1">
+              {bidSubmitError ? (
+                <p className="text-sm font-semibold text-rose-700">{bidSubmitError}</p>
+              ) : bidMessage ? (
+                <p className="text-sm font-semibold text-emerald-700">{bidMessage}</p>
+              ) : (
+                <div>
+                  <p className="text-xs font-bold uppercase tracking-widest text-slate-400">Ready to submit</p>
+                  <p className="text-sm font-semibold text-slate-700">{completedProposalSections} of {proposalSections.length} sections complete</p>
+                </div>
+              )}
+            </div>
+            <div className="flex flex-wrap items-center gap-3">
+              {!isEoiInviteOnlyTender && (
+                <button
+                  type="button"
+                  onClick={() => setRuleBookOpen(true)}
+                  className="inline-flex items-center gap-2 rounded-xl px-3 py-2.5 text-sm font-medium text-slate-500 transition hover:bg-slate-50 hover:text-emerald-700"
+                >
+                  <BookOpen size={15} />
+                  Rule Book
+                </button>
+              )}
+              <button onClick={() => submitBid(BidStatus.DRAFT)} disabled={isBidSubmitting || !canEdit} className="btn-secondary px-5 py-2.5 disabled:opacity-60">
                 {isBidSubmitting ? "Saving..." : "Save Draft"}
               </button>
               <button
@@ -13735,137 +17537,68 @@ const VendorDashboard = ({
                   void submitBid(BidStatus.SUBMITTED, false);
                 }}
                 disabled={isBidSubmitting || !canEdit}
-                className="btn-primary flex-1 py-3 disabled:opacity-60"
+                className="btn-primary px-5 py-2.5 disabled:opacity-60"
               >
-                {isBidSubmitting ? "Submitting..." : "Submit Final Proposal"}
+                {isBidSubmitting ? "Submitting..." : isEoiStage ? "Submit Expression of Interest" : "Submit Final Proposal"}
               </button>
-            </div>
-            {bidMessage && !bidSubmitError && (
-              <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800 font-medium">
-                {bidMessage}
-              </div>
-            )}
-          </div>
-
-          <div className="space-y-6 xl:sticky xl:top-6 xl:self-start">
-            <div className="card p-6">
-              <div className="flex items-center gap-3">
-                <div className="rounded-2xl bg-emerald-100 p-3 text-emerald-700">
-                  <CheckCircle2 size={18} />
-                </div>
-                <div>
-                  <h3 className="font-bold text-slate-900">Submission Summary</h3>
-                  <p className="text-sm text-slate-500">See what is ready and what still needs work before final submission.</p>
-                </div>
-              </div>
-              <div className="mt-5 space-y-3">
-                {proposalSections.map((section) => {
-                  const Icon = section.icon;
-                  return (
-                    <div key={section.id} className="flex items-center gap-3 rounded-2xl border border-slate-200 px-4 py-3">
-                      <div className={`rounded-xl p-2 ${section.complete ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
-                        <Icon size={15} />
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <p className="text-sm font-bold text-slate-900">{section.label}</p>
-                        <p className="truncate text-xs text-slate-500">{section.note}</p>
-                      </div>
-                      {section.complete ? <CheckCircle2 size={16} className="text-emerald-600" /> : <Clock size={16} className="text-amber-500" />}
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div className="card p-6">
-              <h3 className="font-bold text-slate-900">Proposal Snapshot</h3>
-              <div className="mt-4 space-y-3 text-sm">
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-500">Project value</span>
-                  <span className="font-bold text-slate-900">LSL {totalProjectValue.toLocaleString()}</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-500">Subsidy ask</span>
-                  <span className="font-bold text-slate-900">LSL {subsidyValue.toLocaleString()}</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-500">Co-financing</span>
-                  <span className="font-bold text-slate-900">LSL {coFinancingValue.toLocaleString()}</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-500">{isPreQualificationStage ? "Implementation strategy" : "Configured sites"}</span>
-                  <span className="font-bold text-slate-900">{isPreQualificationStage ? `${implementationStrategyCharCount} chars` : `${stageTwoSiteRows.length} site${stageTwoSiteRows.length === 1 ? "" : "s"}`}</span>
-                </div>
-              </div>
-            </div>
-
-            <div className="card p-6">
-              <h3 className="font-bold text-slate-900 mb-4">Version History</h3>
-              {versionsSorted.length === 0 && (
-                <p className="text-sm text-slate-500">No versions yet.</p>
-              )}
-              <div className="space-y-3">
-                {versionsSorted.map((version) => (
-                  <div key={version.id} className="rounded-2xl border border-slate-200 p-4">
-                    <div className="flex items-start justify-between gap-4">
-                      <div>
-                        <p className="text-sm font-bold text-slate-900">Version {version.version_number}</p>
-                        <p className="text-xs text-slate-500">{version.status}</p>
-                      </div>
-                      <button onClick={() => useBidVersion(version)} className="text-emerald-600 text-xs font-bold">Use Version</button>
-                    </div>
-                    {version.submitted_at && (
-                      <p className="mt-2 text-[11px] text-slate-400">Saved: {new Date(version.submitted_at).toLocaleString()}</p>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="card p-6">
-              <h3 className="font-bold text-slate-900 mb-3">Tender Deadline</h3>
-              <div className="flex items-center gap-3 rounded-2xl bg-slate-50 px-4 py-4">
-                <div className="rounded-xl bg-slate-900 p-2 text-white">
-                  <Calendar size={16} />
-                </div>
-                <div>
-                  <p className="text-sm font-bold text-slate-900">{bidDeadlineCountdown}</p>
-                  <p className="text-xs text-slate-500">{bidTender.deadline}</p>
-                </div>
-              </div>
             </div>
           </div>
         </div>
 
         {bidConfirmOpen && (
           <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-            <div className="bg-white rounded-2xl max-w-md w-full p-6">
-              <h3 className="text-lg font-bold text-slate-900 mb-2">Confirm Final Submission</h3>
-              <div className="space-y-3 text-sm text-slate-600">
-                <p>You are about to submit the final proposal. You can edit and resubmit it later if needed — each submission creates a new version.</p>
-                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                  <div className="flex items-center justify-between"><span>Bid Amount</span><span className="font-bold text-slate-900">LSL {totalProjectValue.toLocaleString()}</span></div>
-                  <div className="mt-2 flex items-center justify-between"><span>Stage</span><span className="font-bold text-slate-900">{bidStageLabel}</span></div>
+            <div className="bg-white rounded-lg border-2 border-slate-800 max-w-md w-full overflow-hidden">
+              <div className="border-b-2 border-slate-800 bg-slate-800 px-6 py-4">
+                <h3 className="text-sm font-bold uppercase tracking-[0.2em] text-white">{isEoiInviteOnlyTender ? "Confirm Submission" : "Confirm Final Submission"}</h3>
+              </div>
+              <div className="p-6 space-y-3 text-sm text-slate-600">
+                <p>
+                  {isEoiInviteOnlyTender
+                    ? "You are about to submit your Expression of Interest. You can edit and resubmit it later if needed — each submission creates a new version."
+                    : "You are about to submit the final proposal. You can edit and resubmit it later if needed — each submission creates a new version."}
+                </p>
+                <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+                  {!isEoiStage && <div className="flex items-center justify-between"><span>Bid Amount</span><span className="font-bold text-slate-900">{selectedBidCurrency} {totalProjectValue.toLocaleString()}</span></div>}
+                  <div className={isEoiStage ? "flex items-center justify-between" : "mt-2 flex items-center justify-between"}><span>Stage</span><span className="font-bold text-slate-900">{bidStageLabel}</span></div>
                   <div className="mt-2 flex items-center justify-between"><span>Sites</span><span className="font-bold text-slate-900">{bidSiteCount}</span></div>
-                  <div className="mt-2 flex items-center justify-between"><span>Documents</span><span className="font-bold text-slate-900">{uploadedStageTwoDocumentCount} of {stageTwoDocuments.length} uploaded</span></div>
+                  <div className="mt-2 flex items-center justify-between"><span>Documents</span><span className="font-bold text-slate-900">{isEoiStage ? `${uploadedEoiDocumentCount} of ${eoiDocuments.length}` : `${activeStageUploadedCount} of ${activeStageDocuments.length}`} uploaded</span></div>
                   <div className="mt-2 flex items-center justify-between"><span>Inclusion</span><span className="font-bold text-slate-900">{bidForm.femaleTargetPct || 0}% / {bidForm.vulnerableTargetPct || 0}% / {bidForm.lowIncomeTargetPct || 0}%</span></div>
                 </div>
-                {isSiteSpecificStage && stageTwoDocuments.filter(doc => !(bidFiles as any)[doc.key] && !(existingStageTwoDocuments as any)[doc.key]).length > 0 && (
-                  <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-amber-800">
+                {!isEoiStage && activeStageDocuments.filter(doc => !(bidFiles as any)[doc.key] && !(existingStageTwoDocuments as any)[doc.key]).length > 0 && (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-amber-800">
                     <p className="font-medium mb-1">The following required documents are missing:</p>
                     <ul className="list-disc list-inside space-y-0.5">
-                      {stageTwoDocuments.filter(doc => !(bidFiles as any)[doc.key] && !(existingStageTwoDocuments as any)[doc.key]).map(doc => (
+                      {activeStageDocuments.filter(doc => !(bidFiles as any)[doc.key] && !(existingStageTwoDocuments as any)[doc.key]).map(doc => (
                         <li key={doc.key}>{doc.label}</li>
                       ))}
                     </ul>
                   </div>
                 )}
-                <label className="flex items-start gap-3 rounded-xl border border-slate-200 p-3">
+                <div className="rounded-lg border border-blue-200 bg-blue-50/60 px-4 py-3 text-blue-900">
+                  <p className="font-bold mb-1">What happens next</p>
+                  <p>
+                    {isEoiInviteOnlyTender
+                      ? "The RMT typically reviews EOIs within 3–5 business days. If you're shortlisted, you'll be notified and invited to submit a full bid separately."
+                      : isEoiStage
+                        ? "The RMT typically reviews EOIs within 3–5 business days. If you're shortlisted, Stage 2 unlocks automatically and you'll be notified."
+                        : isTechnicalStage
+                          ? "Your Technical proposal is scored against a minimum threshold. If you clear it, Stage 3 (Financial) unlocks and you'll be notified."
+                          : isFinancialStage
+                            ? "Once submitted, this price is locked in. The RMT completes financial evaluation and issues an Intent to Award to the best-value qualifying bidder."
+                            : "The RMT evaluates your technical proposal first; your price stays sealed and is only opened once that clears the minimum threshold."}
+                  </p>
+                </div>
+                <label className="flex items-start gap-3 rounded-lg border border-slate-300 bg-slate-50 p-3.5">
                   <input type="checkbox" checked={bidSubmissionConfirmed} onChange={(e) => setBidSubmissionConfirmed(e.target.checked)} className="mt-1" />
-                  <span>I confirm this proposal is complete and ready for final submission.</span>
+                  <span className="text-slate-800">
+                    <span className="font-bold uppercase tracking-wide text-[11px] text-slate-500 block mb-1">Declaration &amp; Certification</span>
+                    {isEoiInviteOnlyTender
+                      ? "I hereby certify that the information and documents submitted in this Expression of Interest are true and accurate to the best of my knowledge, and that I am duly authorized to submit this application on behalf of my organization."
+                      : "I hereby certify that the information, prices, and documents submitted in this bid are true, accurate, and complete to the best of my knowledge; that I am duly authorized to submit this bid on behalf of my organization; and that this submission is binding once accepted."}
+                  </span>
                 </label>
               </div>
-              <div className="flex gap-3">
+              <div className="flex gap-3 border-t border-slate-200 bg-slate-50 p-6">
                 <button
                   onClick={() => setBidConfirmOpen(false)}
                   className="flex-1 btn-secondary"
@@ -13891,7 +17624,7 @@ const VendorDashboard = ({
 
   if (view === "new-claim") {
     return (
-      <div className="space-y-6 max-w-4xl mx-auto pb-20">
+      <div className="space-y-6 max-w-7xl mx-auto pb-20">
         <div className="flex items-center gap-4 mb-8">
           <button onClick={() => navigateView("dashboard")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
             <ChevronRight className="rotate-180" size={20} />
@@ -14073,6 +17806,7 @@ const VendorDashboard = ({
                     <div>
                       <p className="text-xs font-semibold text-slate-400">Contract Reference</p>
                       <p className="text-base font-bold text-slate-900">{contract.referenceNumber}</p>
+                      {contract.lotName && <p className="text-xs font-semibold text-emerald-700 mt-0.5">{contract.lotName}</p>}
                       <p className="text-xs text-slate-500 mt-1">Status: {contract.status}</p>
                       <p className="text-xs text-slate-500">Signature: {contract.signatureStatus || "awaiting"}</p>
                     </div>
@@ -14387,7 +18121,7 @@ const VendorDashboard = ({
                   <div className="text-right">
                     <span className={`badge ${visibleStatus.color}`}>{visibleStatus.label}</span>
                     <div className="text-xs text-slate-500 mt-2">
-                      Amount: {display.bid_amount != null ? `M ${Number(display.bid_amount).toLocaleString()}` : "N/A"}
+                      {summarizeLotOffers(display) ?? `Amount: ${display.bid_amount != null ? `M ${Number(display.bid_amount).toLocaleString()}` : "N/A"}`}
                     </div>
                   </div>
                 </div>
@@ -14894,7 +18628,7 @@ const VendorProfileView = ({ vendorId, viewerRole, onClose, embedded = false, us
                           <td className="p-3">{bid.id}</td>
                           <td className="p-3">{bid.tender_name || bid.tender_reference || bid.tender}</td>
                           <td className="p-3">{bid.stage_badge || bid.stage || "N/A"}</td>
-                          <td className="p-3">{formatCurrency(bid.bid_amount || 0)}</td>
+                          <td className="p-3">{summarizeLotOffers(bid) ?? formatCurrency(bid.bid_amount || 0)}</td>
                           <td className="p-3">{bid.status}</td>
                           <td className="p-3">{bid.submitted_at ? new Date(bid.submitted_at).toLocaleDateString() : "N/A"}</td>
                         </tr>
@@ -16182,6 +19916,18 @@ const ProjectsHub = ({
     if (typeof value !== "number" || Number.isNaN(value) || value <= 0) return "N/A";
     return suffix ? `${Number(value).toLocaleString()}${suffix}` : Number(value).toLocaleString();
   };
+  const projectTarget = (project: Project) => Number(project.targetInstallations || project.installationTarget || 0);
+  const projectDurationMonths = (project: Project) => {
+    if (project.projectDurationMonths && project.projectDurationMonths > 0) return project.projectDurationMonths;
+    if (project.startDate && project.endDate) {
+      const start = new Date(project.startDate).getTime();
+      const end = new Date(project.endDate).getTime();
+      if (Number.isFinite(start) && Number.isFinite(end) && end > start) {
+        return Math.max(1, Math.round((end - start) / (30 * 24 * 60 * 60 * 1000)));
+      }
+    }
+    return 0;
+  };
   const formatPercent = (value?: number, digits = 0) => {
     if (typeof value !== "number" || Number.isNaN(value)) return "N/A";
     return `${value.toFixed(digits)}%`;
@@ -17133,7 +20879,7 @@ const ProjectsHub = ({
             <div><p className="text-xs text-slate-500">Verification Method</p><p className="font-semibold text-slate-900">Manual (CSV + ODK)</p></div>
             <div><p className="text-xs text-slate-500">Created by</p><p className="font-semibold text-slate-900">{updatesForProject(project.id)[0]?.authorUsername || "N/A"}</p></div>
             <div><p className="text-xs text-slate-500">Assigned on</p><p className="font-semibold text-slate-900">{formatDate(startDateForProject(project))}</p></div>
-            <div><p className="text-xs text-slate-500">Target / Verified</p><p className="font-semibold text-slate-900">{formatMetricValue(project.targetInstallations)} / {verifiedCount.toLocaleString()} ({formatPercent(verifiedPct, 0)})</p></div>
+            <div><p className="text-xs text-slate-500">Target / Verified</p><p className="font-semibold text-slate-900">{formatMetricValue(projectTarget(project))} / {verifiedCount.toLocaleString()} ({formatPercent(verifiedPct, 0)})</p></div>
           </div>
           <div className="flex flex-wrap gap-3">
             <a href={projectContractFile ? toFileUrl(projectContractFile) || "#" : "#"} target="_blank" rel="noreferrer" className={`btn-secondary text-xs ${projectContractFile ? "" : "pointer-events-none opacity-50"}`}>View Contract</a>
@@ -17526,7 +21272,7 @@ const ProjectsHub = ({
                 <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
                   <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-slate-500">Project Configuration</p>
                   <div className="mt-3 space-y-2 text-sm text-slate-700">
-                    <p>Installation Target: {formatMetricValue(project.targetInstallations)}</p>
+                    <p>Installation Target: {formatMetricValue(projectTarget(project))}</p>
                     <p>Technology Type: {project.techType || "N/A"}</p>
                     <p>Verification Method: {project.verificationMethod || "Manual"}</p>
                     <p>Female Target: {project.targetFemalePct != null ? `>=${project.targetFemalePct}%` : "Configured in KPI"}</p>
@@ -21133,8 +24879,8 @@ const ProjectsHub = ({
                     <p className="text-base font-semibold text-slate-900">{project.projectReference || `PRJ-${project.id}`}</p>
                     <p className="text-xs text-slate-500 mt-1">{project.techType || "N/A"} • {project.assignedDistrict || project.district || project.region || "Unassigned district"}</p>
                     <div className="flex flex-wrap gap-2 mt-3 text-[11px]">
-                      <span className="badge bg-slate-100 text-slate-700">Target {formatMetricValue(project.targetInstallations)}</span>
-                      <span className="badge bg-slate-100 text-slate-700">Duration {project.projectDurationMonths ? `${project.projectDurationMonths} months` : "N/A"}</span>
+                      <span className="badge bg-slate-100 text-slate-700">Target {formatMetricValue(projectTarget(project))}</span>
+                      <span className="badge bg-slate-100 text-slate-700">Duration {projectDurationMonths(project) > 0 ? `${projectDurationMonths(project)} months` : "N/A"}</span>
                       {project.status && <span className="badge bg-emerald-50 text-emerald-700">{project.status}</span>}
                       {project.contractStatus && <span className="badge bg-blue-50 text-blue-700">{project.contractStatus}</span>}
                     </div>
@@ -21180,11 +24926,11 @@ const ProjectsHub = ({
                   </div>
                   <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
                     <p className="uppercase tracking-wider text-slate-400">Installation Target</p>
-                    <p className="font-semibold text-slate-700">{formatMetricValue(project.targetInstallations)}</p>
+                    <p className="font-semibold text-slate-700">{formatMetricValue(projectTarget(project))}</p>
                   </div>
                   <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
                     <p className="uppercase tracking-wider text-slate-400">Project Duration</p>
-                    <p className="font-semibold text-slate-700">{project.projectDurationMonths ? `${project.projectDurationMonths} months` : "N/A"}</p>
+                    <p className="font-semibold text-slate-700">{projectDurationMonths(project) > 0 ? `${projectDurationMonths(project)} months` : "N/A"}</p>
                   </div>
                 </div>
                 <div className="grid gap-3 md:grid-cols-3">
@@ -21216,8 +24962,12 @@ const ProjectsHub = ({
   );
 };
 
-const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavigate?: (action: string, id?: string) => void }) => {
-  const isFinancialEvaluationMode = mode === "financial";
+export const TACView = ({ mode, onNavigate, initialTenderId }: { mode: "technical" | "financial" | "eoi"; onNavigate?: (action: string, id?: string) => void; initialTenderId?: string }) => {
+  // "eoi" reuses the same Stage-1 review machinery originally built under "financial"
+  // mode (document checklist, inclusion checks, shortlist/reject) — see the
+  // isStageOneBid branch below. "financial" itself is legacy/unused (superseded by the
+  // dedicated FinancialEvaluationView tab) but left wired for backward compatibility.
+  const isFinancialEvaluationMode = mode === "financial" || mode === "eoi";
   const [view, setView] = useState<"list" | "evaluate">("list");
   const navigateView = (newView: typeof view, id?: string | null) => { setView(newView); onNavigate?.(newView, id ?? undefined); };
   const [submittedBidOpen, setSubmittedBidOpen] = useState(false);
@@ -21225,6 +24975,9 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
     bid: TenderBid;
     evaluationId?: string;
     comments: string;
+    justifications: Record<string, string>;
+    submissionStatus?: "draft" | "submitted";
+    submittedAt?: string;
     criteria: {
       technical: number;
       financial: number;
@@ -21242,16 +24995,28 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
   const [tenderSecurityRequired, setTenderSecurityRequired] = useState<Record<string, boolean>>({});
   const [tenderDetails, setTenderDetails] = useState<Record<string, Tender>>({});
   const [expandedTender, setExpandedTender] = useState<string | null>(null);
+  const [folderViewMode, setFolderViewMode] = useState<"grid" | "list">("grid");
+  const [folderSearch, setFolderSearch] = useState("");
+  const [showPendingOnly, setShowPendingOnly] = useState(false);
+  const [folderPage, setFolderPage] = useState(1);
+  const FOLDER_PAGE_SIZE = 12;
+  const [bidListPage, setBidListPage] = useState<Record<string, number>>({});
+  const BID_LIST_PAGE_SIZE = 8;
   const [activeStage, setActiveStage] = useState<"stage1" | "stage2">(() => isFinancialEvaluationMode ? "stage1" : "stage2");
   const [isLoading, setIsLoading] = useState(false);
   const [notification, setNotification] = useState<string | null>(null);
   const [isStageOneDecisionSubmitting, setIsStageOneDecisionSubmitting] = useState(false);
+  const [coiStatus, setCoiStatus] = useState<EvaluationCommitteeCoIStatus | null>(null);
+  const [isAttestingCoi, setIsAttestingCoi] = useState(false);
+  const [declaredCoiVendorId, setDeclaredCoiVendorId] = useState<string | null>(null);
+  const [isSubmitScoreSubmitting, setIsSubmitScoreSubmitting] = useState(false);
 
   const showNotification = (msg: string) => {
     setNotification(msg);
     setTimeout(() => setNotification(null), 3000);
   };
-  const stageTwoTechnicalCriteria = [
+  const [scoringConfig, setScoringConfig] = useState<EvaluationScoringConfig | null>(null);
+  const DEFAULT_TECHNICAL_CRITERIA = [
     { key: "technical", label: "Technical design quality", max: 20 },
     { key: "feasibility", label: "Technology tier", max: 15 },
     { key: "om", label: "O&M strategy", max: 10 },
@@ -21259,6 +25024,20 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
     { key: "gender", label: "Gender/inclusion approach", max: 10 },
     { key: "environmental", label: "Local capacity", max: 5 },
   ] as const;
+  const TECHNICAL_CRITERION_LOCAL_KEY: Record<string, typeof DEFAULT_TECHNICAL_CRITERIA[number]["key"]> = {
+    technical_score: "technical",
+    feasibility_score: "feasibility",
+    om_score: "om",
+    kpi_score: "kpi",
+    gender_score: "gender",
+    environmental_score: "environmental",
+  };
+  const stageTwoTechnicalCriteria = scoringConfig?.technicalScoringCriteria?.length
+    ? scoringConfig.technicalScoringCriteria
+        .filter((c) => TECHNICAL_CRITERION_LOCAL_KEY[c.key])
+        .map((c) => ({ key: TECHNICAL_CRITERION_LOCAL_KEY[c.key], label: c.label, max: c.maxScore }))
+    : DEFAULT_TECHNICAL_CRITERIA;
+  const technicalScoreTotal = scoringConfig?.technicalScoreTotal || 70;
   const stageTwoFinancialCriteria = [
     { key: "technical", label: "Value for money", max: 10 },
     { key: "feasibility", label: "Subsidy reasonableness", max: 10 },
@@ -21276,16 +25055,18 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
   const loadEvaluations = React.useCallback(async () => {
     setIsLoading(true);
     try {
-      const [bids, evals, tenderRows] = await Promise.all([
+      const [bids, evals, tenderRows, scoring] = await Promise.all([
         fetchTenderBids(),
         fetchBidEvaluations(),
         fetchTenders(),
+        fetchEvaluationScoringConfig().catch(() => null),
       ]);
       setTenderThresholds(Object.fromEntries(tenderRows.map((item) => [item.id, item.technicalThreshold ?? 70])));
       setTenderSecurityRequired(Object.fromEntries(tenderRows.map((item) => [item.id, item.tenderSecurityRequired ?? false])));
       setTenderDetails(Object.fromEntries(tenderRows.map((item) => [item.id, item])));
       setBidQueue(bids.filter(b => b.status !== BidStatus.DRAFT));
       setEvaluations(evals);
+      if (scoring) setScoringConfig(scoring);
     } finally {
       setIsLoading(false);
     }
@@ -21301,19 +25082,34 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
     return () => window.removeEventListener("rbf-bid-updated", handler);
   }, [loadEvaluations]);
 
+  const currentUser = getStoredUser();
+  const currentUserId = String(currentUser?.id || "");
+
+  // "By bid" here means "the current user's own row for this bid" — used for prefill
+  // and for the pending-queue filter, since each committee member has their own
+  // pending queue independent of whether colleagues have already scored a bid. A
+  // separate count (below) tracks the committee's overall progress on a bid.
   const technicalEvaluationsByBid = useMemo(() => {
     const map = new Map<string, TenderBidEvaluation>();
     evaluations
-      .filter(ev => ev.evaluatorRole === UserRole.TAC || ev.evaluatorRole === UserRole.ADMIN)
+      .filter(ev => ev.stage === "technical" && String(ev.evaluator) === currentUserId)
       .forEach(ev => map.set(ev.bid, ev));
     return map;
-  }, [evaluations]);
+  }, [evaluations, currentUserId]);
 
   const financialEvaluationsByBid = useMemo(() => {
     const map = new Map<string, TenderBidEvaluation>();
     evaluations
-      .filter(ev => ev.evaluatorRole === UserRole.RBF_OFFICIAL || ev.evaluatorRole === UserRole.ADMIN)
+      .filter(ev => ev.stage === "financial" && String(ev.evaluator) === currentUserId)
       .forEach(ev => map.set(ev.bid, ev));
+    return map;
+  }, [evaluations, currentUserId]);
+
+  const technicalScoredCountByBid = useMemo(() => {
+    const map = new Map<string, number>();
+    evaluations.filter(ev => ev.stage === "technical" && ev.status === "Scored").forEach(ev => {
+      map.set(ev.bid, (map.get(ev.bid) || 0) + 1);
+    });
     return map;
   }, [evaluations]);
 
@@ -21350,22 +25146,28 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
     const threshold = tenderThresholds[bid.tender] ?? 70;
     const technicalBid = bidsById.get(bid.id) || bid;
     const technicalScore = technicalBid.technical_score_total ?? getTechnicalComposite(technicalEvaluationsByBid.get(technicalBid.id));
-    return technicalScore >= Math.round((threshold / 100) * 70);
+    return technicalScore >= Math.round((threshold / 100) * technicalScoreTotal);
   };
 
+  // "site_specific" was the legacy stage-2 sentinel from before the EOI -> Technical ->
+  // Financial/Combined stage system existed. The backend never produces it anymore
+  // (get_stage_key only ever returns eoi/technical/financial/combined), so checking for
+  // it here always evaluated to false — this queue was silently always empty. The
+  // modern equivalent of "a detailed, Stage-2-style submission" is technical/combined.
+  const isDetailedStageBid = (bid: TenderBid) => bid.stage_key === "technical" || bid.stage_key === "combined";
   const filteredBidQueue = useMemo(() => {
     if (isFinancialEvaluationMode) {
       return bidQueue.filter((bid) =>
-        bid.stage_key === "site_specific" &&
+        isDetailedStageBid(bid) &&
         hasPassedTechnicalThreshold(bid) &&
         bid.financial_sealed !== true
       );
     }
-    return bidQueue.filter((bid) => bid.stage_key === "site_specific");
+    return bidQueue.filter((bid) => isDetailedStageBid(bid));
   }, [bidQueue, isFinancialEvaluationMode, technicalEvaluationsByBid, tenderThresholds, bidsById]);
 
   const stageOneReviewQueue = useMemo(
-    () => bidQueue.filter((bid) => bid.stage_key !== "site_specific"),
+    () => bidQueue.filter((bid) => !isDetailedStageBid(bid)),
     [bidQueue]
   );
 
@@ -21396,19 +25198,132 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
   const stageOneGroups = useMemo(() => groupByTender(stageOneReviewQueue, item => [BidStatus.SUBMITTED, BidStatus.UNDER_REVIEW].includes(item.status)), [stageOneReviewQueue]);
   const stageTwoGroups = useMemo(() => groupByTender(filteredBidQueue, item => !roleScopedEvaluationsByBid.get(item.id)), [filteredBidQueue, roleScopedEvaluationsByBid]);
 
-  const activeStageGroups = activeStage === "stage1" ? stageOneGroups : stageTwoGroups;
+  React.useEffect(() => {
+    if (!initialTenderId) return;
+    const match = [...stageOneGroups, ...stageTwoGroups].find(([, group]) => group.bids.some(b => String(b.tender) === initialTenderId));
+    if (match) setExpandedTender(match[0]);
+  }, [initialTenderId, stageOneGroups, stageTwoGroups]);
+
+  // When embedded scoped to a single tender (e.g. the EOI Invite detail page), every
+  // list/count below is restricted to that tender's own bids only — nothing here
+  // should ever surface another tender's submissions.
+  const scopeToInitialTender = (groups: ReturnType<typeof groupByTender>): ReturnType<typeof groupByTender> =>
+    initialTenderId ? groups.filter(([, group]) => group.bids.some(b => String(b.tender) === initialTenderId)) : groups;
+  const scopedStageOneReviewQueue = initialTenderId
+    ? stageOneReviewQueue.filter(b => String(b.tender) === initialTenderId)
+    : stageOneReviewQueue;
+  const scopedFilteredBidQueue = initialTenderId
+    ? filteredBidQueue.filter(b => String(b.tender) === initialTenderId)
+    : filteredBidQueue;
+
+  const activeStageGroups = scopeToInitialTender(activeStage === "stage1" ? stageOneGroups : stageTwoGroups);
   const activeStagePending = activeStage === "stage1"
-    ? stageOneReviewQueue.filter(item => [BidStatus.SUBMITTED, BidStatus.UNDER_REVIEW].includes(item.status)).length
-    : filteredBidQueue.filter(item => !roleScopedEvaluationsByBid.get(item.id)).length;
+    ? scopedStageOneReviewQueue.filter(item => [BidStatus.SUBMITTED, BidStatus.UNDER_REVIEW].includes(item.status)).length
+    : scopedFilteredBidQueue.filter(item => !roleScopedEvaluationsByBid.get(item.id)).length;
+
+  const getGroupPendingCount = (group: { bids: TenderBid[] }) =>
+    activeStage === "stage1"
+      ? group.bids.filter(item => [BidStatus.SUBMITTED, BidStatus.UNDER_REVIEW].includes(item.status)).length
+      : group.bids.filter(item => !roleScopedEvaluationsByBid.get(item.id)).length;
+
+  const normalizedFolderSearch = folderSearch.trim().toLowerCase();
+  const groupMatchesTender = (group: { tenderName: string; bids: TenderBid[] }) =>
+    !normalizedFolderSearch
+    || group.tenderName.toLowerCase().includes(normalizedFolderSearch)
+    || String(group.bids[0]?.tender_reference || "").toLowerCase().includes(normalizedFolderSearch);
+  const groupMatchingBids = (group: { tenderName: string; bids: TenderBid[] }) =>
+    groupMatchesTender(group)
+      ? group.bids
+      : group.bids.filter(b => (b.vendor_name || "").toLowerCase().includes(normalizedFolderSearch));
+
+  const visibleStageGroups = useMemo(() => {
+    return activeStageGroups.filter(([, group]) => {
+      if (showPendingOnly && getGroupPendingCount(group) === 0) return false;
+      if (!normalizedFolderSearch) return true;
+      return groupMatchesTender(group) || groupMatchingBids(group).length > 0;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeStageGroups, normalizedFolderSearch, showPendingOnly, activeStage, roleScopedEvaluationsByBid]);
+
+  const folderTotalPages = Math.max(1, Math.ceil(visibleStageGroups.length / FOLDER_PAGE_SIZE));
+  const paginatedStageGroups = visibleStageGroups.slice((folderPage - 1) * FOLDER_PAGE_SIZE, folderPage * FOLDER_PAGE_SIZE);
+
+  React.useEffect(() => {
+    setFolderPage(1);
+  }, [normalizedFolderSearch, showPendingOnly, activeStage]);
+
+  React.useEffect(() => {
+    if (folderPage > folderTotalPages) setFolderPage(folderTotalPages);
+  }, [folderPage, folderTotalPages]);
+
+  React.useEffect(() => {
+    setBidListPage({});
+  }, [expandedTender]);
+
+  // The tender LIST endpoint (used to bulk-populate tenderDetails) omits `lots` for
+  // every tender, so opening a folder must fetch that one tender's full detail before
+  // the bid list below can tell whether it's lot-wise and group bids accordingly.
+  React.useEffect(() => {
+    if (!expandedTender) return;
+    const group = [...stageOneGroups, ...stageTwoGroups].find(([key]) => key === expandedTender)?.[1];
+    const tenderId = group?.bids[0]?.tender;
+    if (!tenderId) return;
+    fetchTender(tenderId)
+      .then((full) => setTenderDetails((prev) => ({ ...prev, [full.id]: full })))
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expandedTender]);
+
+  // A lot-wise bid can cover more than one lot (declared_lots / lot_offers), so it
+  // belongs in every lot section it priced/declared — unlike financial evaluation
+  // rows, there is no separate per-lot bid record at the technical stage to key off.
+  const getBidLotIds = (bid: TenderBid): string[] => {
+    if (Array.isArray(bid.lot_offers) && bid.lot_offers.length > 0) {
+      return bid.lot_offers.map((o) => String(o.lot));
+    }
+    return (bid.declared_lots || []).map((id) => String(id));
+  };
+
+  const renderBidListPager = (pageKey: string, page: number, totalPages: number, total: number) => (
+    <div className="flex items-center justify-between px-6 py-3 border-t border-slate-100 bg-slate-50/60">
+      <p className="text-xs text-slate-500">
+        Showing {(page - 1) * BID_LIST_PAGE_SIZE + 1}-{Math.min(page * BID_LIST_PAGE_SIZE, total)} of {total} bid{total !== 1 ? "s" : ""}
+      </p>
+      <div className="flex items-center gap-3">
+        <button
+          onClick={() => setBidListPage((p) => ({ ...p, [pageKey]: Math.max(1, page - 1) }))}
+          disabled={page === 1}
+          className="btn-secondary text-xs py-1 px-3 disabled:opacity-50"
+        >
+          Previous
+        </button>
+        <span className="text-xs text-slate-500">Page {page} of {totalPages}</span>
+        <button
+          onClick={() => setBidListPage((p) => ({ ...p, [pageKey]: Math.min(totalPages, page + 1) }))}
+          disabled={page === totalPages}
+          className="btn-secondary text-xs py-1 px-3 disabled:opacity-50"
+        >
+          Next
+        </button>
+      </div>
+    </div>
+  );
 
   const getBidTenderStatus = (bid: TenderBid) => tenderDetails[bid.tender]?.status;
 
-  const evaluationAllowedStatuses = (bid: TenderBid) => {
-    const isStageOne = bid.stage_key !== "site_specific";
-    return isStageOne
-      ? [TenderStatus.PUBLISHED, TenderStatus.CLOSED, TenderStatus.EVALUATION]
-      : [TenderStatus.CLOSED, TenderStatus.EVALUATION];
-  };
+  // "site_specific" is a legacy stage-2 sentinel the backend no longer produces (see
+  // filteredBidQueue above) — the modern equivalent of "past EOI" is stage_key being
+  // technical/financial/combined rather than eoi (or unset, for very old bids).
+  const isPastEoiStage = (bid: TenderBid) => bid.stage_key === "technical" || bid.stage_key === "financial" || bid.stage_key === "combined";
+
+  // Technical/Financial submissions unlock per-bid via the staged EOI -> Technical ->
+  // Financial workflow (each stage has its own deadline), not by the tender's overall
+  // status reaching Closed — that only happens once the *last* staged deadline passes,
+  // which would be after Financial too. Requiring Closed here would make it impossible
+  // to evaluate Technical proposals in time to open Financial for shortlisted vendors,
+  // so every stage allows evaluation while the tender is still live (Published),
+  // Closed, or already in Evaluation — mirroring what Stage 1 review already allows.
+  const evaluationAllowedStatuses = (_bid: TenderBid) => [TenderStatus.PUBLISHED, TenderStatus.CLOSED, TenderStatus.EVALUATION];
 
   const canEvaluateBid = (bid: TenderBid) => {
     const status = getBidTenderStatus(bid);
@@ -21418,12 +25333,7 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
   const handleStartEvaluation = (bid: TenderBid) => {
     const status = getBidTenderStatus(bid);
     if (status !== undefined && !evaluationAllowedStatuses(bid).includes(status)) {
-      const isStageOne = bid.stage_key !== "site_specific";
-      showNotification(
-        isStageOne
-          ? `Stage 1 evaluation requires the tender to be Published, Closed, or in Evaluation. This tender is ${status}.`
-          : `Evaluation can only start when the tender status is Closed. This tender is ${status}.`
-      );
+      showNotification(`Evaluation requires the tender to be Published, Closed, or in Evaluation. This tender is ${status}.`);
       return;
     }
     const existing = roleScopedEvaluationsByBid.get(bid.id);
@@ -21431,6 +25341,9 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
       bid,
       evaluationId: existing?.id,
       comments: existing?.comments ?? "",
+      justifications: existing?.justifications ? { ...existing.justifications } : {},
+      submissionStatus: existing?.submissionStatus,
+      submittedAt: existing?.submittedAt,
       criteria: {
         technical: existing?.technicalScore ?? 0,
         financial: isFinancialEvaluationMode ? existing?.financialScore ?? 0 : 0,
@@ -21443,13 +25356,29 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
       },
     });
     navigateView("evaluate");
+    setDeclaredCoiVendorId(null);
+    // Fresh conflict-of-interest posture every time an evaluator opens a bid, so the
+    // attestation gate and any unresolved declarations are always current.
+    fetchEvaluationCoIStatus(bid.tender)
+      .then((statusBody) => {
+        setCoiStatus(statusBody);
+        const declaration = statusBody.declarations.find((d) => d.vendorId === String(bid.vendor_id) && !d.resolved);
+        setDeclaredCoiVendorId(declaration?.vendorId ?? null);
+      })
+      .catch(() => setCoiStatus(null));
+    // The tender list endpoint (used to populate tenderDetails) omits required_documents
+    // and lots — fetch the full tender so the review screen can show what was actually
+    // required and cross-reference it against what the bidder submitted.
+    fetchTender(bid.tender)
+      .then(full => setTenderDetails(prev => ({ ...prev, [full.id]: full })))
+      .catch(() => {});
   };
 
-  const handleStageOneDecision = async (decision: "shortlist" | "reject") => {
+  const handleStageOneDecision = async (decision: "shortlist" | "reject" | "revise") => {
     if (!selectedEval || isStageOneDecisionSubmitting) return;
     const reason = selectedEval.comments.trim();
-    if (decision === "reject" && !reason) {
-      showNotification("Feedback is required for rejection.");
+    if ((decision === "reject" || decision === "revise") && !reason) {
+      showNotification("Feedback is required for rejection or a revision request.");
       return;
     }
     setIsStageOneDecisionSubmitting(true);
@@ -21457,6 +25386,9 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
       if (decision === "shortlist") {
         await acceptTenderBid(selectedEval.bid.id);
         showNotification(`Shortlisted ${selectedEval.bid.vendor_name} for Stage 2.`);
+      } else if (decision === "revise") {
+        await markTenderBidPartialConformity(selectedEval.bid.id, reason);
+        showNotification(`Requested revision from ${selectedEval.bid.vendor_name}.`);
       } else {
         await rejectTenderBid(selectedEval.bid.id, reason);
         showNotification(`Rejected ${selectedEval.bid.vendor_name} for this tender.`);
@@ -21477,15 +25409,17 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
     if (!selectedEval) return;
     const payload = {
       bid: selectedEval.bid.id,
-      technicalScore: selectedEval.criteria.technical,
-      financialScore: isFinancialEvaluationMode ? selectedEval.criteria.financial : 0,
-      feasibilityScore: selectedEval.criteria.feasibility,
-      kpiScore: selectedEval.criteria.kpi,
-      genderScore: selectedEval.criteria.gender,
+      stage: (isFinancialEvaluationMode ? "financial" : "technical") as "technical" | "financial",
+      technicalScore: isFinancialEvaluationMode ? 0 : selectedEval.criteria.technical,
+      financialScore: 0,
+      feasibilityScore: isFinancialEvaluationMode ? 0 : selectedEval.criteria.feasibility,
+      kpiScore: isFinancialEvaluationMode ? 0 : selectedEval.criteria.kpi,
+      genderScore: isFinancialEvaluationMode ? 0 : selectedEval.criteria.gender,
       environmentalScore: isFinancialEvaluationMode ? 0 : selectedEval.criteria.environmental,
       omScore: isFinancialEvaluationMode ? 0 : selectedEval.criteria.om,
       inclusivityScore: 0,
       comments: selectedEval.comments,
+      justifications: isFinancialEvaluationMode ? undefined : selectedEval.justifications,
     };
     let reviewedBid: TenderBid | null = null;
     try {
@@ -21505,21 +25439,89 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
       });
       await loadEvaluations();
       window.dispatchEvent(new Event("rbf-bid-updated"));
-      navigateView("list");
-      showNotification(`${isFinancialEvaluationMode ? "Financial" : "Technical"} evaluation saved for ${selectedEval.bid.vendor_name}.`);
+      setSelectedEval(prev => prev ? { ...prev, evaluationId: saved.id, submissionStatus: saved.submissionStatus, submittedAt: saved.submittedAt } : prev);
+      showNotification(`${isFinancialEvaluationMode ? "Financial" : "Technical"} evaluation draft saved for ${selectedEval.bid.vendor_name}.`);
     } catch (err: any) {
       const raw = String(err?.message || "");
       showNotification(toFriendlyApiMessage(raw) || "Failed to save evaluation.");
     }
   };
 
+  const handleAttestCoi = async () => {
+    if (!selectedEval) return;
+    setIsAttestingCoi(true);
+    try {
+      await attestEvaluationCoI(selectedEval.bid.tender);
+      await fetchEvaluationCoIStatus(selectedEval.bid.tender)
+        .then(setCoiStatus)
+        .catch(() => {});
+      showNotification("Conflict-of-interest attestation recorded for this tender.");
+    } catch (err: any) {
+      showNotification(toFriendlyApiMessage(String(err?.message || "")) || "Failed to record attestation.");
+    } finally {
+      setIsAttestingCoi(false);
+    }
+  };
+
+  const handleSubmitScore = async () => {
+    if (!selectedEval) return;
+    if (!selectedEval.evaluationId) {
+      showNotification("Save a draft first, then submit it to the record.");
+      return;
+    }
+    const missing = !isFinancialEvaluationMode
+      ? stageTwoTechnicalCriteria
+          .map((criterion) => `${criterion.key}_score`)
+          .filter((scoreKey) => !String(selectedEval.justifications[scoreKey] || "").trim())
+      : [];
+    if (missing.length > 0) {
+      showNotification(`A written rationale is required for every criterion before submitting: ${missing.join(", ")}.`);
+      return;
+    }
+    setIsSubmitScoreSubmitting(true);
+    try {
+      const saved = await submitBidEvaluation(selectedEval.evaluationId, {
+        comments: selectedEval.comments,
+        justifications: isFinancialEvaluationMode ? undefined : selectedEval.justifications,
+      });
+      setEvaluations(prev => {
+        const next = prev.filter(ev => ev.id !== saved.id);
+        next.push(saved);
+        return next;
+      });
+      await loadEvaluations();
+      window.dispatchEvent(new Event("rbf-bid-updated"));
+      setSelectedEval(prev => prev ? { ...prev, evaluationId: saved.id, submissionStatus: saved.submissionStatus, submittedAt: saved.submittedAt } : prev);
+      showNotification(`${isFinancialEvaluationMode ? "Financial" : "Technical"} evaluation submitted and locked for ${selectedEval.bid.vendor_name}.`);
+    } catch (err: any) {
+      const raw = String(err?.message || "");
+      showNotification(toFriendlyApiMessage(raw) || "Failed to submit evaluation.");
+    } finally {
+      setIsSubmitScoreSubmitting(false);
+    }
+  };
+
+  const handleUnlockScore = async () => {
+    if (!selectedEval?.evaluationId) return;
+    try {
+      const unlocked = await unlockBidEvaluation(selectedEval.evaluationId);
+      setSelectedEval(prev => prev ? { ...prev, evaluationId: unlocked.id, submissionStatus: unlocked.submissionStatus, submittedAt: unlocked.submittedAt } : prev);
+      await loadEvaluations();
+      showNotification("Evaluation reopened. Adjust the marks and re-submit when ready.");
+    } catch (err: any) {
+      showNotification(toFriendlyApiMessage(String(err?.message || "")) || "Failed to unlock evaluation.");
+    }
+  };
+
   if (view === "evaluate" && selectedEval) {
-    const isStageOneBid = selectedEval.bid.stage_key !== "site_specific" && !String(selectedEval.bid.stage || "").includes("Stage 2");
+    const isStageOneBid = !isPastEoiStage(selectedEval.bid);
+    const currentCoiAttested = coiStatus?.committee.find((m) => m.memberId === currentUserId)?.coiAttested;
+    const coiGateBlocked = Boolean(coiStatus && currentCoiAttested === false) || declaredCoiVendorId != null;
     const canDecideStageOne = [BidStatus.SUBMITTED, BidStatus.UNDER_REVIEW].includes(selectedEval.bid.status);
     const technicalTotal = selectedEval.criteria.technical + selectedEval.criteria.feasibility + selectedEval.criteria.om + selectedEval.criteria.kpi + selectedEval.criteria.gender + selectedEval.criteria.environmental;
     const financialTotal = selectedEval.criteria.technical + selectedEval.criteria.feasibility + selectedEval.criteria.kpi + selectedEval.criteria.gender;
     const technicalThreshold = tenderThresholds[selectedEval.bid.tender] ?? 70;
-    const technicalThresholdScore = Math.round((technicalThreshold / 100) * 70);
+    const technicalThresholdScore = Math.round((technicalThreshold / 100) * technicalScoreTotal);
     const totalScore = isFinancialEvaluationMode ? financialTotal : technicalTotal;
     const totalProjectCost = Number(selectedEval.bid.bid_amount || 0);
     const subsidyRequested = Number(selectedEval.bid.subsidy_requested || 0);
@@ -21529,7 +25531,7 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
     );
     const coFinancingRatio = totalProjectCost > 0 ? (coFinancingAmount / totalProjectCost) * 100 : 0;
     const totalHouseholds = (selectedEval.bid.sites || []).reduce(
-      (sum, site) => sum + Number(site.estimatedHouseholds || site.numberOfHouseholds || 0),
+      (sum, site) => sum + Number(site.numberOfHouseholds || 0),
       0
     );
     const costPerConnection = subsidyRequested > 0 && totalHouseholds > 0 ? subsidyRequested / totalHouseholds : null;
@@ -21537,7 +25539,14 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
     const systemCapacityUnit = selectedEval.bid.system_configuration?.system_capacity_unit;
     const gpsValidatedSiteCount = (selectedEval.bid.sites || []).filter(site => site.latitude != null && site.longitude != null).length;
     const allSitesHaveGps = (selectedEval.bid.sites || []).length > 0 && gpsValidatedSiteCount === (selectedEval.bid.sites || []).length;
-    const isStageTwoBid = selectedEval.bid.stage_key === "site_specific" || String(selectedEval.bid.stage || "").includes("Stage 2");
+    // Lot pricing (lot_offers) only exists once a bid reaches Financial/Combined — before
+    // that, declared_lots (set at EOI) is the only record of which lots a vendor is
+    // bidding on, so prefer the priced list when it exists and fall back to the declared one.
+    const evalLotNameById: Record<string, string> = Object.fromEntries((tenderDetails[selectedEval.bid.tender]?.lots || []).map((l) => [String(l.id || ""), l.name]));
+    const evalBiddingOnLotNames = Array.isArray(selectedEval.bid.lot_offers) && selectedEval.bid.lot_offers.length > 0
+      ? selectedEval.bid.lot_offers.map((offer, i) => offer.lot_name || evalLotNameById[String(offer.lot)] || `Lot ${i + 1}`)
+      : (selectedEval.bid.declared_lots || []).map((id) => evalLotNameById[String(id)] || `Lot ${id}`);
+    const isStageTwoBid = isPastEoiStage(selectedEval.bid);
     const technicalReferenceBidId = selectedEval.bid.stage_two_source_bid || selectedEval.bid.id;
     const technicalReferenceEvaluation = technicalEvaluationsByBid.get(technicalReferenceBidId);
     const technicalDocumentLinks = [
@@ -21559,7 +25568,7 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
     const techTierCompliant = techTierNumber >= 3;
     const technicalDecisionGuidance =
       techTierCompliant && allSitesHaveGps
-        ? "Technology tier and field-readiness evidence support a positive TAC technical review."
+        ? "Technology tier and field-readiness evidence support a positive technical review."
         : "Review the proposed tier or field-readiness evidence before endorsing the technical score.";
 
     if (isFinancialEvaluationMode && isStageOneBid) {
@@ -21567,11 +25576,32 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
       const subsidyRequested = Number(selectedEval.bid.subsidy_requested || 0);
       const coFinancing = Number(selectedEval.bid.system_configuration?.co_financing_amount_lsl ?? Math.max(0, proposedBudget - subsidyRequested));
       const bidTenderDetails = tenderDetails[selectedEval.bid.tender];
+      const lotNameById = evalLotNameById;
       const tenderTechTypes = bidTenderDetails?.technologyTypes || [];
       const tenderTargetDistricts = bidTenderDetails?.targetDistricts || [];
       const bidSiteDistricts = (selectedEval.bid.sites || []).map(s => s.district).filter(Boolean);
       const districtMatch = tenderTargetDistricts.length === 0 || bidSiteDistricts.some(d => tenderTargetDistricts.includes(d));
-      const totalHouseholds = (selectedEval.bid.sites || []).reduce((sum, s) => sum + Number(s.estimatedHouseholds || 0), 0);
+      const totalHouseholds = (selectedEval.bid.sites || []).reduce((sum, s) => sum + Number(s.numberOfHouseholds || 0), 0);
+      const bidAny = selectedEval.bid as any;
+      const structuredEoiFieldMap: Record<string, { url?: string; summary?: string }> = {
+        company_credentials_file: { url: bidAny.company_credentials_file },
+        financial_standing_file: { url: bidAny.financial_standing_file, summary: bidAny.financial_standing_summary },
+        technical_experience_file: { url: bidAny.technical_experience_file, summary: bidAny.technical_experience_summary },
+        track_record_file: { url: bidAny.track_record_file, summary: bidAny.track_record_summary },
+      };
+      const customEoiDocs: { name: string; file_url?: string; file_name?: string }[] = Array.isArray(bidAny.custom_documents) ? bidAny.custom_documents : [];
+      const eoiRequiredDocs = (bidTenderDetails?.requiredDocuments || []).filter(d => (d.bid_stage || "eoi") === "eoi" || d.bid_stage === "combined");
+      const eoiDocumentChecklist = eoiRequiredDocs.map(doc => {
+        if (doc.field_key && structuredEoiFieldMap[doc.field_key]) {
+          return { key: doc.field_key, label: doc.name, required: true, url: structuredEoiFieldMap[doc.field_key].url, summary: structuredEoiFieldMap[doc.field_key].summary };
+        }
+        const match = customEoiDocs.find(c => c.name === doc.name);
+        return { key: doc.id || doc.name, label: doc.name, required: true, url: match?.file_url, summary: undefined as string | undefined };
+      });
+      // Anything the vendor uploaded that isn't part of this tender's configured checklist
+      // (e.g. a leftover from an older configuration) still deserves to be visible.
+      const checklistedNames = new Set(eoiDocumentChecklist.map(d => d.label));
+      const extraCustomDocs = customEoiDocs.filter(c => !checklistedNames.has(c.name) && c.file_url);
       const statusLabel = selectedEval.bid.status === BidStatus.UNDER_REVIEW ? "Under Review"
         : selectedEval.bid.status === BidStatus.REVISION_REQUIRED ? "Revision Required"
         : selectedEval.bid.status === BidStatus.ACCEPTED ? "Shortlisted"
@@ -21598,14 +25628,22 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
               </motion.div>
             )}
           </AnimatePresence>
-          <div className="space-y-6 max-w-6xl mx-auto">
+          <div className="space-y-6 max-w-[90rem] mx-auto">
             <div className="flex items-center gap-4 mb-4">
               <button onClick={() => navigateView("list")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
                 <X size={20} />
               </button>
               <div className="min-w-0 flex-1">
-                <h1 className="text-2xl font-bold text-slate-900">Stage 1 Evaluation</h1>
+                <h1 className="text-2xl font-bold text-slate-900">Stage 1 Review</h1>
                 <p className="text-sm text-slate-500 truncate">{selectedEval.bid.tender_name || selectedEval.bid.tender} • {selectedEval.bid.vendor_name}</p>
+                {evalBiddingOnLotNames.length > 0 && (
+                  <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                    <span className="text-xs font-semibold text-slate-500">Bidding on:</span>
+                    {evalBiddingOnLotNames.map((name, i) => (
+                      <span key={i} className="badge bg-blue-50 text-blue-700">{name}</span>
+                    ))}
+                  </div>
+                )}
               </div>
               <span className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-bold shrink-0 ${
                 selectedEval.bid.status === BidStatus.ACCEPTED ? "bg-emerald-100 text-emerald-700" :
@@ -21618,9 +25656,52 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
             <div className="grid gap-6 lg:grid-cols-[1fr,380px]">
               <div className="space-y-6 min-w-0">
                 <div className="card p-6">
-                  <h3 className="text-lg font-bold text-slate-900">Concept Note</h3>
-                  <p className="mt-4 whitespace-pre-wrap text-sm text-slate-700 break-words">{selectedEval.bid.concept_note || "No concept note submitted."}</p>
+                  <h3 className="text-lg font-bold text-slate-900">EOI Narrative</h3>
+                  <p className="mt-4 whitespace-pre-wrap text-sm text-slate-700 break-words">{bidAny.eoi_narrative || selectedEval.bid.concept_note || "No EOI narrative submitted."}</p>
                 </div>
+
+                {(eoiDocumentChecklist.length > 0 || extraCustomDocs.length > 0) && (
+                  <div className="card p-6">
+                    <div className="flex items-center justify-between gap-4 mb-4">
+                      <h3 className="text-lg font-bold text-slate-900">Submitted Documents</h3>
+                      <span className="text-sm text-slate-500">
+                        {eoiDocumentChecklist.filter(d => d.url).length}/{eoiDocumentChecklist.length} required uploaded
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      {eoiDocumentChecklist.map(doc => (
+                        <div key={doc.key} className={`rounded-xl border p-4 ${doc.url ? "border-slate-200 bg-slate-50" : "border-rose-200 bg-rose-50"}`}>
+                          <div className="flex items-start justify-between gap-2">
+                            <p className="font-semibold text-slate-900 text-sm">{doc.label}</p>
+                            <span className="badge bg-slate-100 text-slate-600 shrink-0">Required</span>
+                          </div>
+                          <div className="mt-2">
+                            {doc.url ? (
+                              <a href={doc.url} target="_blank" rel="noreferrer" className="text-emerald-600 hover:text-emerald-700 text-xs font-bold">
+                                Download →
+                              </a>
+                            ) : (
+                              <span className="text-xs font-bold text-rose-600">Not provided</span>
+                            )}
+                          </div>
+                          {doc.summary && (
+                            <p className="mt-2 text-xs text-slate-600 whitespace-pre-wrap break-words">{doc.summary}</p>
+                          )}
+                        </div>
+                      ))}
+                      {extraCustomDocs.map((doc, i) => (
+                        <div key={`extra-${i}`} className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                          <p className="font-semibold text-slate-900 text-sm">{doc.name}</p>
+                          <div className="mt-2">
+                            <a href={doc.file_url} target="_blank" rel="noreferrer" className="text-emerald-600 hover:text-emerald-700 text-xs font-bold">
+                              Download →
+                            </a>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
                 <div className="card p-6">
                   <div className="flex items-center justify-between gap-4 mb-4">
@@ -21644,11 +25725,12 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
                                 )}
                                 {!site.district && <span className="text-xs text-rose-600 font-medium">No district</span>}
                                 {site.villageSubDistrict && <span className="text-xs text-slate-500">• {site.villageSubDistrict}</span>}
+                                {site.lot && <span className="badge bg-blue-50 text-blue-700">{lotNameById[String(site.lot)] || `Lot ${site.lot}`}</span>}
                               </div>
                             </div>
                           </div>
                           <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
-                            {site.estimatedHouseholds != null && <span>{site.estimatedHouseholds} households</span>}
+                            {site.numberOfHouseholds != null && <span>{site.numberOfHouseholds} households</span>}
                             {site.targetBeneficiaryType && <span className="capitalize">{site.targetBeneficiaryType.replace(/_/g, " ")}</span>}
                             {site.latitude != null && site.longitude != null && <span>GPS: {site.latitude}, {site.longitude}</span>}
                             {site.latitude == null && <span className="text-amber-600">GPS not provided</span>}
@@ -21665,13 +25747,35 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
 
               <div className="space-y-6">
                 <div className="card p-5">
-                  <h3 className="text-base font-bold text-slate-900 mb-4">Financial Summary</h3>
-                  <div className="space-y-2 text-sm">
-                    <div className="flex justify-between"><span className="text-slate-500">Bid Amount</span><span className="font-semibold text-slate-900">LSL {proposedBudget.toLocaleString()}</span></div>
-                    <div className="flex justify-between"><span className="text-slate-500">Subsidy Requested</span><span className="font-semibold text-slate-900">LSL {subsidyRequested.toLocaleString()}</span></div>
-                    <div className="flex justify-between"><span className="text-slate-500">Co-financing</span><span className="font-semibold text-slate-900">LSL {coFinancing.toLocaleString()}</span></div>
-                    {totalHouseholds > 0 && <div className="flex justify-between"><span className="text-slate-500">Cost/connection</span><span className="font-semibold text-slate-900">LSL {subsidyRequested > 0 ? Math.round(subsidyRequested / totalHouseholds).toLocaleString() : "—"}</span></div>}
-                  </div>
+                  <h3 className="text-base font-bold text-slate-900">Financial Summary</h3>
+                  <p className="text-xs text-slate-500 mb-4">Indicative only — not binding. The final price is locked in at the Financial stage.</p>
+                  {Array.isArray(selectedEval.bid.lot_offers) && selectedEval.bid.lot_offers.length > 0 ? (
+                    <div className="space-y-3 text-sm">
+                      <p className="text-xs text-slate-500">Lot-wise bid — priced per lot rather than as a single figure.</p>
+                      {selectedEval.bid.lot_offers.map((offer, i) => {
+                        const offerAmount = Number(offer.bid_amount || 0);
+                        const offerSubsidy = Number(offer.subsidy_requested || 0);
+                        return (
+                          <div key={offer.lot ?? i} className="rounded-lg border border-slate-100 bg-slate-50 p-3 space-y-1">
+                            <p className="font-semibold text-slate-900">{offer.lot_name || `Lot ${i + 1}`}</p>
+                            <div className="flex justify-between"><span className="text-slate-500">Indicative Bid Amount</span><span className="font-medium text-slate-900">LSL {offerAmount.toLocaleString()}</span></div>
+                            <div className="flex justify-between"><span className="text-slate-500">Indicative Subsidy Requested</span><span className="font-medium text-slate-900">LSL {offerSubsidy.toLocaleString()}</span></div>
+                          </div>
+                        );
+                      })}
+                      <div className="flex justify-between border-t border-slate-100 pt-2 font-bold text-slate-900">
+                        <span>Total ({selectedEval.bid.lot_offers.length} lots)</span>
+                        <span>LSL {selectedEval.bid.lot_offers.reduce((sum, o) => sum + Number(o.bid_amount || 0), 0).toLocaleString()}</span>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="space-y-2 text-sm">
+                      <div className="flex justify-between"><span className="text-slate-500">Indicative Bid Amount</span><span className="font-semibold text-slate-900">LSL {proposedBudget.toLocaleString()}</span></div>
+                      <div className="flex justify-between"><span className="text-slate-500">Indicative Subsidy Requested</span><span className="font-semibold text-slate-900">LSL {subsidyRequested.toLocaleString()}</span></div>
+                      <div className="flex justify-between"><span className="text-slate-500">Co-financing</span><span className="font-semibold text-slate-900">LSL {coFinancing.toLocaleString()}</span></div>
+                      {totalHouseholds > 0 && <div className="flex justify-between"><span className="text-slate-500">Cost/connection</span><span className="font-semibold text-slate-900">LSL {subsidyRequested > 0 ? Math.round(subsidyRequested / totalHouseholds).toLocaleString() : "—"}</span></div>}
+                    </div>
+                  )}
                 </div>
 
                 <div className="card p-5">
@@ -21716,12 +25820,12 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
                   <h3 className="text-base font-bold text-slate-900 mb-3">Review Decision</h3>
                   <textarea
                     className="input-field min-h-[100px] text-sm"
-                    placeholder="Add feedback (required for rejection)."
+                    placeholder="Add feedback (required for rejection or a revision request)."
                     value={selectedEval.comments}
                     onChange={(e) => setSelectedEval({ ...selectedEval, comments: e.target.value })}
                   />
                   {canDecideStageOne ? (
-                    <div className="mt-3 grid grid-cols-2 gap-3">
+                    <div className="mt-3 grid grid-cols-3 gap-3">
                       <button
                         type="button"
                         onClick={() => void handleStageOneDecision("shortlist")}
@@ -21729,6 +25833,14 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
                         className="btn-primary disabled:opacity-60"
                       >
                         {isStageOneDecisionSubmitting ? "Saving..." : "Shortlist"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleStageOneDecision("revise")}
+                        disabled={isStageOneDecisionSubmitting}
+                        className="btn-secondary border-amber-200 text-amber-700 disabled:opacity-60"
+                      >
+                        Request Revision
                       </button>
                       <button
                         type="button"
@@ -21755,7 +25867,7 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
 
     return (
       <>
-          <div className="space-y-6 max-w-4xl mx-auto">
+          <div className="space-y-6 max-w-7xl mx-auto">
             <div className="flex items-center gap-4 mb-8">
               <button onClick={() => navigateView("list")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
                 <X size={20} />
@@ -21763,6 +25875,14 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
               <div>
                 <h1 className="text-2xl font-bold text-slate-900">{isFinancialEvaluationMode ? "Financial Evaluation" : "Technical Evaluation"}</h1>
               <p className="text-slate-500">{selectedEval.bid.vendor_name} • {selectedEval.bid.tender}</p>
+              {evalBiddingOnLotNames.length > 0 && (
+                <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                  <span className="text-xs font-semibold text-slate-500">Bidding on:</span>
+                  {evalBiddingOnLotNames.map((name, i) => (
+                    <span key={i} className="badge bg-blue-50 text-blue-700">{name}</span>
+                  ))}
+                </div>
+              )}
             </div>
             <div className="ml-auto">
               <button onClick={() => setSubmittedBidOpen(true)} className="btn-secondary text-sm">
@@ -21774,7 +25894,12 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
           {!isFinancialEvaluationMode && (
             <>
               <div className="rounded-2xl border border-blue-200 bg-blue-50 px-5 py-4 text-sm text-blue-900">
-                TAC reviews technical feasibility and readiness only. Financial details do not drive the technical endorsement decision on this screen.
+                The committee reviews technical feasibility and readiness only — financial details don't drive this score.
+                {(technicalScoredCountByBid.get(selectedEval.bid.id) || 0) > 0 && (
+                  <span className="block mt-1 font-semibold">
+                    {technicalScoredCountByBid.get(selectedEval.bid.id)} committee member{(technicalScoredCountByBid.get(selectedEval.bid.id) || 0) === 1 ? "" : "s"} scored this bid so far.
+                  </span>
+                )}
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
                 <div className={`rounded-2xl border p-4 ${techTierCompliant ? "border-emerald-200 bg-emerald-50" : "border-amber-200 bg-amber-50"}`}>
@@ -21793,7 +25918,7 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
                   <p className="mt-1 text-xs text-slate-600">Sites with GPS coordinates ready for verification.</p>
                 </div>
                 <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                  <p className="text-[11px] uppercase tracking-wide text-slate-500">TAC Guidance</p>
+                  <p className="text-[11px] uppercase tracking-wide text-slate-500">Review Guidance</p>
                   <p className="mt-2 text-sm font-semibold text-slate-900">{technicalDecisionGuidance}</p>
                 </div>
               </div>
@@ -21922,25 +26047,143 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
                 </div>
 
               <div className="space-y-4">
-                <h3 className="font-bold text-slate-900 border-b border-slate-100 pb-2">Justification & Comments</h3>
-                {!isFinancialEvaluationMode && (
-                  <div className="rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900">
-                    TAC can only submit technical scoring in this workflow. Financial scoring is reserved for the RMT after technical clearance.
+                {coiStatus && currentCoiAttested === false && (
+                  <div className="rounded-2xl border border-amber-300 bg-amber-50 px-4 py-4 text-sm text-amber-900">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <p className="font-bold">Conflict-of-interest attestation required</p>
+                        <p className="mt-1 text-xs text-amber-700">
+                          You cannot save or submit an evaluation on this tender until you attest that you have no
+                          conflict of interest with any bidder (or have declared any you do have).
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => void handleAttestCoi()}
+                        disabled={isAttestingCoi}
+                        className="btn-primary py-1.5 px-4 text-sm disabled:opacity-50"
+                      >
+                        {isAttestingCoi ? "Attesting..." : "Attest to No Conflict of Interest"}
+                      </button>
+                    </div>
                   </div>
                 )}
-                <textarea 
-                  rows={4} 
-                  placeholder={isFinancialEvaluationMode ? "Evaluation notes..." : "Evaluation notes..."} 
-                  className="input-field"
-                    value={selectedEval.comments}
-                    onChange={(e) => setSelectedEval({ ...selectedEval, comments: e.target.value })}
-                  />
-                </div>
 
-                <div className="flex justify-end gap-3 pt-6 border-t border-slate-100">
-                  <button onClick={() => navigateView("list")} className="btn-secondary">Cancel</button>
-                  <button onClick={handleSaveScore} className="btn-primary">Save Score</button>
-                </div>
+                {declaredCoiVendorId != null && (
+                  <div className="rounded-2xl border border-rose-300 bg-rose-50 px-4 py-3 text-sm text-rose-800">
+                    <p className="font-bold">Declared conflict of interest with this bidder</p>
+                    <p className="mt-1 text-xs text-rose-700">
+                      You have declared a conflict of interest with {selectedEval.bid.vendor_name} and cannot score their
+                      bids until a Super Admin resolves the declaration.
+                    </p>
+                  </div>
+                )}
+
+                {selectedEval.submissionStatus === "submitted" && (
+                  <div className="rounded-2xl border border-emerald-300 bg-emerald-50 px-4 py-4 text-sm text-emerald-900">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <p className="font-bold inline-flex items-center gap-2"><Lock size={14} /> Evaluation submitted & locked</p>
+                        <p className="mt-1 text-xs text-emerald-700">
+                          This evaluation was finalized{selectedEval.submittedAt ? ` on ${new Date(selectedEval.submittedAt).toLocaleString()}` : ""}. Only a Super Admin can reopen it for corrections.
+                        </p>
+                      </div>
+                      {currentUser?.role === UserRole.ADMIN && (
+                        <button onClick={() => void handleUnlockScore()} className="btn-secondary py-1.5 px-4 text-sm">
+                          Unlock for Correction
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                <h3 className="font-bold text-slate-900 border-b border-slate-100 pb-2">Justification & Comments</h3>
+                {selectedEval.submissionStatus === "submitted" && (
+                  <div className="rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900">
+                    This evaluation is locked. Reopen it (Super Admin) before editing the marks or rationale.
+                  </div>
+                )}
+                {!isFinancialEvaluationMode && selectedEval.submissionStatus !== "submitted" && (
+                  <div className="rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900">
+                    Every mark must carry a written rationale before you can submit. Financial scoring happens separately, once a majority of the committee clears this bid — see the Financial Evaluation tab.
+                  </div>
+                )}
+
+                {!isFinancialEvaluationMode && (
+                  <div className="space-y-3">
+                    {stageTwoTechnicalCriteria.map((criterion) => {
+                      const justKey = `${criterion.key}_score`;
+                      const justFilled = String(selectedEval.justifications[justKey] || "").trim().length > 0;
+                      return (
+                        <div key={justKey} className="rounded-xl border border-slate-200 p-3">
+                          <div className="flex items-center justify-between text-sm">
+                            <span className="font-semibold text-slate-700">
+                              {criterion.label}
+                              {Number(selectedEval.criteria[criterion.key] || 0) > 0 && (
+                                <span className="ml-2 text-xs text-emerald-600 font-bold">score {selectedEval.criteria[criterion.key]} / {criterion.max}</span>
+                              )}
+                            </span>
+                            <span className={`badge ${justFilled ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700"}`}>
+                              {justFilled ? "Justified" : "Rationale required"}
+                            </span>
+                          </div>
+                          <textarea
+                            rows={2}
+                            disabled={selectedEval.submissionStatus === "submitted"}
+                            placeholder={`Why did you give this criterion ${selectedEval.criteria[criterion.key]}/${criterion.max}?`}
+                            className="input-field mt-2 text-sm"
+                            value={selectedEval.justifications[justKey] ?? ""}
+                            onChange={(e) =>
+                              setSelectedEval({
+                                ...selectedEval,
+                                justifications: { ...selectedEval.justifications, [justKey]: e.target.value },
+                              })
+                            }
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                <textarea
+                  rows={4}
+                  placeholder={isFinancialEvaluationMode ? "Evaluation notes..." : "Evaluation notes..."}
+                  className="input-field"
+                  value={selectedEval.comments}
+                  onChange={(e) => setSelectedEval({ ...selectedEval, comments: e.target.value })}
+                  disabled={selectedEval.submissionStatus === "submitted"}
+                />
+              </div>
+
+              <div className="flex justify-end gap-3 pt-6 border-t border-slate-100">
+                <button onClick={() => navigateView("list")} className="btn-secondary">Cancel</button>
+                {selectedEval.submissionStatus === "submitted" ? (
+                  currentUser?.role === UserRole.ADMIN ? (
+                    <button onClick={() => void handleUnlockScore()} className="btn-secondary">
+                      Unlock for Correction
+                    </button>
+                  ) : (
+                    <span className="inline-flex items-center gap-2 text-xs font-bold text-emerald-700">
+                      <Lock size={14} /> Submitted & locked
+                    </span>
+                  )
+                ) : (
+                  <>
+                    <button
+                      onClick={handleSaveScore}
+                      disabled={coiGateBlocked || isSubmitScoreSubmitting}
+                      className="btn-secondary disabled:opacity-50"
+                    >
+                      Save Draft
+                    </button>
+                    <button
+                      onClick={() => void handleSubmitScore()}
+                      disabled={coiGateBlocked || !selectedEval.evaluationId || isSubmitScoreSubmitting}
+                      className="btn-primary disabled:opacity-50"
+                    >
+                      {isSubmitScoreSubmitting ? "Submitting..." : "Submit & Lock"}
+                    </button>
+                  </>
+                )}
               </div>
             </div>
 
@@ -21949,12 +26192,10 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
                 <h3 className="text-sm font-bold text-slate-400 uppercase mb-4">Submitted Form Review</h3>
                 <div className="space-y-3">
                   <button onClick={() => setSubmittedBidOpen(true)} className="btn-secondary w-full text-sm">
-                    {isFinancialEvaluationMode ? "View Submitted Stage 2 Form" : "View Submitted Stage 1 Form"}
+                    View Submitted Technical Form
                   </button>
                   <p className="text-xs text-slate-500">
-                    {isFinancialEvaluationMode
-                      ? "Open the vendor's detailed Stage 2 submission to review all completed fields, sites, and uploads while assigning the financial score."
-                      : "Open the vendor's detailed Stage 2 submission to review all completed fields, sites, and uploads while assigning the technical score."}
+                    Open the vendor's detailed submission to review all completed fields, sites, and uploads while assigning the technical score.
                   </p>
                 </div>
               </div>
@@ -21992,7 +26233,7 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
                   <p className="text-5xl font-bold text-emerald-400">
                     {totalScore}
                   </p>
-                  <p className="text-xs text-slate-400 mt-2 uppercase tracking-widest">{isFinancialEvaluationMode ? "Financial Score / 30" : `Technical Score / 70 • Threshold ${technicalThresholdScore}`}</p>
+                  <p className="text-xs text-slate-400 mt-2 uppercase tracking-widest">{isFinancialEvaluationMode ? "Financial Score / 30" : `Technical Score / ${technicalScoreTotal} • Threshold ${technicalThresholdScore}`}</p>
                   {isFinancialEvaluationMode && technicalReferenceEvaluation && (
                     <p className="mt-3 text-xs text-slate-400">Total Score: {getTechnicalComposite(technicalReferenceEvaluation) + financialTotal} / 100</p>
                   )}
@@ -22001,6 +26242,7 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
             </div>
           </div>
         </div>
+          </div>
         {renderSubmittedBidModal()}
       </>
     );
@@ -22009,238 +26251,15 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
   function renderSubmittedBidModal() {
     if (!submittedBidOpen || !selectedEval) return null;
     const bid = selectedEval.bid;
-    const totalProjectCost = Number(bid.bid_amount || 0);
-    const subsidyRequested = Number(bid.subsidy_requested || 0);
-    const coFinancingAmount = Math.max(
-      0,
-      Number(bid.system_configuration?.co_financing_amount_lsl ?? (totalProjectCost - subsidyRequested))
-    );
-    const totalHouseholds = (bid.sites || []).reduce(
-      (sum, site) => sum + Number(site.estimatedHouseholds || site.numberOfHouseholds || 0),
-      0
-    );
-    const costPerConnection = subsidyRequested > 0 && totalHouseholds > 0 ? subsidyRequested / totalHouseholds : null;
-    const isStageTwoBid = bid.stage_key === "site_specific" || String(bid.stage || "").includes("Stage 2");
-    const allDocuments = [
-      { label: "Technical Proposal", url: bid.technical_proposal_file },
-      { label: "Financial Proposal", url: bid.financial_proposal_file },
-      { label: "Bill of Quantities", url: bid.boq_file },
-      { label: "Implementation Plan", url: bid.implementation_plan_file },
-      { label: "O&M Plan", url: bid.om_plan_file },
-      { label: "Gender Action Plan", url: bid.gender_action_plan_file },
-      { label: "Reporting Templates", url: bid.reporting_templates_file },
-      { label: "Distribution Map", url: bid.distribution_map_file },
-      ...(tenderSecurityRequired[bid.tender] ? [{ label: "Tender Security", url: bid.tender_security_file }] : []),
-    ].filter(doc => Boolean(doc.url));
-
+    const modalTenderLots = tenderDetails[bid.tender]?.lots || [];
+    const modalLotNameById: Record<string, string> = Object.fromEntries(modalTenderLots.map((l) => [String(l.id || ""), l.name]));
     return (
-      <AnimatePresence>
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          className="fixed inset-0 z-[220] bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4"
-          onClick={() => setSubmittedBidOpen(false)}
-        >
-          <motion.div
-            initial={{ scale: 0.96, opacity: 0 }}
-            animate={{ scale: 1, opacity: 1 }}
-            exit={{ scale: 0.96, opacity: 0 }}
-            className="bg-white rounded-3xl shadow-2xl w-full max-w-6xl max-h-[88vh] overflow-y-auto"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="sticky top-0 z-10 border-b border-slate-200 bg-white/95 backdrop-blur px-6 py-4 flex items-start justify-between gap-4">
-              <div>
-                <h2 className="text-xl font-bold text-slate-900">Submitted Bid Review</h2>
-                <p className="text-sm text-slate-500">
-                  {bid.vendor_name} • {bid.tender_name || bid.tender_reference || bid.tender} • {bid.stage_badge || bid.stage || "Bid"}
-                </p>
-              </div>
-              <button onClick={() => setSubmittedBidOpen(false)} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
-                <X size={18} />
-              </button>
-            </div>
-
-            <div className="p-6 space-y-6">
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-                <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
-                  <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Vendor</p>
-                  <p className="mt-2 text-sm font-semibold text-slate-900">{bid.vendor_name}</p>
-                </div>
-                <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
-                  <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Status</p>
-                  <p className="mt-2 text-sm font-semibold text-slate-900">{bid.status}</p>
-                </div>
-                <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
-                  <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Version</p>
-                  <p className="mt-2 text-sm font-semibold text-slate-900">{bid.version_number}</p>
-                </div>
-                <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
-                  <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Submitted</p>
-                  <p className="mt-2 text-sm font-semibold text-slate-900">{bid.submitted_at ? new Date(bid.submitted_at).toLocaleString() : "Draft"}</p>
-                </div>
-              </div>
-
-              <div className="rounded-3xl border border-slate-200 overflow-hidden">
-                <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
-                  <h3 className="text-lg font-bold text-slate-900">Section A: Financial Proposal</h3>
-                </div>
-                <div className="p-6 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
-                  <div className="rounded-2xl border border-slate-100 bg-white px-4 py-4">
-                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Total Project Cost</p>
-                    <p className="mt-2 text-sm font-semibold text-slate-900">LSL {totalProjectCost.toLocaleString()}</p>
-                  </div>
-                  <div className="rounded-2xl border border-slate-100 bg-white px-4 py-4">
-                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Subsidy Requested</p>
-                    <p className="mt-2 text-sm font-semibold text-slate-900">LSL {subsidyRequested.toLocaleString()}</p>
-                  </div>
-                  <div className="rounded-2xl border border-slate-100 bg-white px-4 py-4">
-                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Co-financing</p>
-                    <p className="mt-2 text-sm font-semibold text-slate-900">LSL {coFinancingAmount.toLocaleString()}</p>
-                  </div>
-                  <div className="rounded-2xl border border-slate-100 bg-white px-4 py-4">
-                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Cost Per Connection</p>
-                    <p className="mt-2 text-sm font-semibold text-slate-900">{costPerConnection != null ? `LSL ${costPerConnection.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : "Not enough data"}</p>
-                  </div>
-                </div>
-              </div>
-
-              {isStageTwoBid && (
-                <div className="rounded-3xl border border-slate-200 overflow-hidden">
-                  <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
-                    <h3 className="text-lg font-bold text-slate-900">Section B: Technical Specification</h3>
-                  </div>
-                  <div className="p-6 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
-                    <div className="rounded-2xl border border-slate-100 bg-white px-4 py-4">
-                      <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Technology Type</p>
-                      <p className="mt-2 text-sm font-semibold text-slate-900">{bid.system_configuration?.technology_type || bid.technology_type || "Not provided"}</p>
-                    </div>
-                    <div className="rounded-2xl border border-slate-100 bg-white px-4 py-4">
-                      <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Brand & Model</p>
-                      <p className="mt-2 text-sm font-semibold text-slate-900">{bid.device_brand_model || "Not provided"}</p>
-                    </div>
-                    <div className="rounded-2xl border border-slate-100 bg-white px-4 py-4">
-                      <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Technology Tier</p>
-                      <p className="mt-2 text-sm font-semibold text-slate-900">{bid.tech_tier || "Not provided"}</p>
-                    </div>
-                    <div className="rounded-2xl border border-slate-100 bg-white px-4 py-4">
-                      <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Energy Target</p>
-                      <p className="mt-2 text-sm font-semibold text-slate-900">{bid.energy_target || bid.energy_target_kwh_month ? `${bid.energy_target || bid.energy_target_kwh_month} kWh/month` : "Not provided"}</p>
-                    </div>
-                    <div className="rounded-2xl border border-slate-100 bg-white px-4 py-4">
-                      <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Warranty Period</p>
-                      <p className="mt-2 text-sm font-semibold text-slate-900">{bid.warranty_period || bid.warranty_period_months ? `${bid.warranty_period || bid.warranty_period_months} months` : "Not provided"}</p>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              <div className="rounded-3xl border border-slate-200 overflow-hidden">
-                <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
-                  <h3 className="text-lg font-bold text-slate-900">Section C: Project Sites & Scope</h3>
-                </div>
-                <div className="p-6 space-y-4">
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div className="rounded-2xl border border-slate-100 bg-white px-4 py-4">
-                      <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Primary District</p>
-                      <p className="mt-2 text-sm font-semibold text-slate-900">{bid.sites?.find(site => site.district)?.district || "Not provided"}</p>
-                    </div>
-                    <div className="rounded-2xl border border-slate-100 bg-white px-4 py-4">
-                      <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Installation Target</p>
-                      <p className="mt-2 text-sm font-semibold text-slate-900">{totalHouseholds.toLocaleString()} households</p>
-                    </div>
-                  </div>
-                  <div className="overflow-x-auto rounded-2xl border border-slate-100">
-                    <table className="min-w-full text-sm">
-                      <thead className="bg-slate-50 text-slate-500">
-                        <tr>
-                          {["Village", "District", "Latitude", "Longitude", "Households", "Target Technology"].map(label => (
-                            <th key={label} className="px-4 py-3 text-left font-semibold">{label}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {(bid.sites || []).map((site, index) => (
-                          <tr key={`${site.siteName}-${index}`} className="border-t border-slate-100">
-                            <td className="px-4 py-3 text-slate-700">{site.siteName || "N/A"}</td>
-                            <td className="px-4 py-3 text-slate-700">{site.district || "N/A"}</td>
-                            <td className="px-4 py-3 text-slate-700">{site.latitude != null ? site.latitude : "N/A"}</td>
-                            <td className="px-4 py-3 text-slate-700">{site.longitude != null ? site.longitude : "N/A"}</td>
-                            <td className="px-4 py-3 text-slate-700">{site.estimatedHouseholds || site.numberOfHouseholds || "N/A"}</td>
-                            <td className="px-4 py-3 text-slate-700">{site.targetTechnology || "N/A"}</td>
-                          </tr>
-                        ))}
-                        {(bid.sites || []).length === 0 && (
-                          <tr>
-                            <td colSpan={6} className="px-4 py-6 text-center text-slate-500">No site rows submitted.</td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              </div>
-
-              <div className="rounded-3xl border border-slate-200 overflow-hidden">
-                <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
-                  <h3 className="text-lg font-bold text-slate-900">Section D: Social Inclusion Commitments</h3>
-                </div>
-                <div className="p-6 grid grid-cols-1 md:grid-cols-3 gap-4">
-                  <div className="rounded-2xl border border-slate-100 bg-white px-4 py-4">
-                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Female-Headed Target</p>
-                    <p className="mt-2 text-sm font-semibold text-slate-900">{bid.female_target_pct ?? 0}%</p>
-                  </div>
-                  <div className="rounded-2xl border border-slate-100 bg-white px-4 py-4">
-                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Vulnerable Group Target</p>
-                    <p className="mt-2 text-sm font-semibold text-slate-900">{bid.vulnerable_target_pct ?? 0}%</p>
-                  </div>
-                  <div className="rounded-2xl border border-slate-100 bg-white px-4 py-4">
-                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Low-Income Target</p>
-                    <p className="mt-2 text-sm font-semibold text-slate-900">{bid.low_income_target_pct ?? 0}%</p>
-                  </div>
-                </div>
-              </div>
-
-              <div className="rounded-3xl border border-slate-200 overflow-hidden">
-                <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
-                  <h3 className="text-lg font-bold text-slate-900">Section E: Project Narrative</h3>
-                </div>
-                <div className="p-6">
-                  <div className="rounded-2xl border border-slate-100 bg-white px-4 py-4">
-                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Implementation Strategy</p>
-                    <p className="mt-3 text-sm text-slate-700 whitespace-pre-wrap">{bid.concept_note || "Not provided"}</p>
-                  </div>
-                </div>
-              </div>
-
-              <div className="rounded-3xl border border-slate-200 overflow-hidden">
-                <div className="border-b border-slate-200 bg-slate-50 px-6 py-4">
-                  <h3 className="text-lg font-bold text-slate-900">Uploaded Documents</h3>
-                </div>
-                <div className="p-6 space-y-3">
-                  {allDocuments.map(doc => (
-                    <a
-                      key={doc.label}
-                      href={String(doc.url)}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-slate-50 border border-transparent hover:border-slate-100 transition-all text-left group"
-                    >
-                      <div className="p-2 rounded-lg bg-slate-100 text-slate-400 group-hover:bg-emerald-50 group-hover:text-emerald-600">
-                        <FileText size={18} />
-                      </div>
-                      <span className="text-sm font-medium text-slate-700 truncate">{doc.label}</span>
-                    </a>
-                  ))}
-                  {allDocuments.length === 0 && (
-                    <p className="text-sm text-slate-500">No documents uploaded for this bid.</p>
-                  )}
-                </div>
-              </div>
-            </div>
-          </motion.div>
-        </motion.div>
-      </AnimatePresence>
+      <SubmittedBidModal
+        bid={bid}
+        lotNameById={modalLotNameById}
+        securityRequired={tenderSecurityRequired[bid.tender] || false}
+        onClose={() => setSubmittedBidOpen(false)}
+      />
     );
   }
 
@@ -22262,15 +26281,19 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
 
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">{isFinancialEvaluationMode ? "RMT Evaluation Screens" : "TAC Stage 2 Technical Evaluation"}</h1>
-          <p className="text-slate-500">{isFinancialEvaluationMode ? "Review Stage 1 submissions, then score Stage 2 financial proposals after technical clearance." : "Assess Stage 2 technical submissions with emphasis on technology tier, GPS readiness, implementation feasibility, and technical KPI commitments."}</p>
+          <h1 className="text-2xl font-bold text-slate-900">{mode === "eoi" ? "EOI Review" : isFinancialEvaluationMode ? "Financial Evaluation" : "Technical Evaluation"}</h1>
+          <p className="text-slate-500">
+            {mode === "eoi"
+              ? "Review Expression of Interest submissions — company credentials, financial standing, technical experience, track record, and inclusion commitments — before shortlisting a vendor into Stage 2 (Technical)."
+              : "Assess technical submissions with emphasis on technology tier, GPS readiness, implementation feasibility, and technical KPI commitments."}
+          </p>
         </div>
       </div>
 
       {!isFinancialEvaluationMode && (
         <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
           <div className="card p-5 bg-emerald-50 border-emerald-100">
-            <p className="text-xs font-bold uppercase text-emerald-700">Pending TAC Reviews</p>
+            <p className="text-xs font-bold uppercase text-emerald-700">Pending Reviews</p>
             <p className="mt-2 text-2xl font-bold text-slate-900">{filteredBidQueue.filter((item) => !roleScopedEvaluationsByBid.get(item.id)).length}</p>
           </div>
           <div className="card p-5 bg-blue-50 border-blue-100">
@@ -22301,15 +26324,41 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
       <div className="card">
         <div className="p-6 border-b border-slate-100 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
           <div>
-            <h3 className="text-lg font-bold">{isFinancialEvaluationMode ? "Bid List - Evaluation Folders" : "Bid List - Stage 2 Technical Review"}</h3>
-            <p className="text-sm text-slate-500 mt-1">Select a stage below to view its tenders as folders, then open a folder to review its submissions.</p>
+            <h3 className="text-lg font-bold">{mode === "eoi" ? "Bid List — EOI Review" : isFinancialEvaluationMode ? "Bid List — Financial Review" : "Bid List — Technical Review"}</h3>
+            {!initialTenderId && (
+              <p className="text-sm text-slate-500 mt-1">Tenders are grouped as folders — open one to review its submissions.</p>
+            )}
           </div>
-          <span className="badge bg-rose-100 text-rose-700 self-start lg:self-auto">
-            {activeStagePending} Pending {activeStage === "stage1" ? "Stage 1 Reviews" : "Reviews"}
-          </span>
+          <div className="flex items-center gap-3 self-start lg:self-auto">
+            <span className="badge bg-rose-100 text-rose-700">
+              {activeStagePending} Pending {activeStage === "stage1" ? "Stage 1 Reviews" : "Reviews"}
+            </span>
+            {!initialTenderId && (
+              <div className="inline-flex items-center rounded-lg border border-slate-200 bg-white p-0.5">
+                <button
+                  type="button"
+                  onClick={() => setFolderViewMode("grid")}
+                  title="Grid view"
+                  aria-label="Grid view"
+                  className={`p-1.5 rounded-md transition-colors ${folderViewMode === "grid" ? "bg-slate-900 text-white" : "text-slate-400 hover:text-slate-700"}`}
+                >
+                  <LayoutGrid size={16} />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFolderViewMode("list")}
+                  title="List view"
+                  aria-label="List view"
+                  className={`p-1.5 rounded-md transition-colors ${folderViewMode === "list" ? "bg-slate-900 text-white" : "text-slate-400 hover:text-slate-700"}`}
+                >
+                  <List size={16} />
+                </button>
+              </div>
+            )}
+          </div>
         </div>
 
-        {isFinancialEvaluationMode && (
+        {mode === "financial" && (
           <div className="px-6 pt-5 flex flex-wrap gap-3">
             <button
               onClick={() => setActiveStage("stage1")}
@@ -22342,6 +26391,40 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
           </div>
         )}
 
+        {!initialTenderId && (
+        <div className="px-6 pt-5 flex flex-col sm:flex-row gap-3 sm:items-center">
+          <div className="relative flex-1">
+            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+            <input
+              type="text"
+              value={folderSearch}
+              onChange={(e) => setFolderSearch(e.target.value)}
+              placeholder="Search by tender name, reference, or vendor name..."
+              className="input-field pl-9"
+            />
+            {folderSearch && (
+              <button
+                type="button"
+                onClick={() => setFolderSearch("")}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                aria-label="Clear search"
+              >
+                <X size={16} />
+              </button>
+            )}
+          </div>
+          <label className="flex items-center gap-2 text-sm font-medium text-slate-600 whitespace-nowrap select-none cursor-pointer">
+            <input
+              type="checkbox"
+              className="w-4 h-4 rounded text-emerald-600"
+              checked={showPendingOnly}
+              onChange={(e) => setShowPendingOnly(e.target.checked)}
+            />
+            Needs review only
+          </label>
+        </div>
+        )}
+
         <div className="p-6">
           {isLoading && (
             <div className="p-6 text-sm text-slate-500">Loading evaluations...</div>
@@ -22357,14 +26440,50 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
             </div>
           )}
 
-          {!isLoading && activeStageGroups.length > 0 && (
+          {!isLoading && activeStageGroups.length > 0 && visibleStageGroups.length === 0 && (
+            <div className="p-6 text-sm text-slate-500">
+              No tenders or vendors match{folderSearch ? ` "${folderSearch}"` : ""}{showPendingOnly ? " with pending reviews" : ""}.
+            </div>
+          )}
+
+          {!isLoading && visibleStageGroups.length > 0 && (
             <>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-                {activeStageGroups.map(([key, group]) => {
+              <div className={folderViewMode === "grid" ? "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4" : "space-y-2"}>
+                {paginatedStageGroups.map(([key, group]) => {
                   const isExpanded = expandedTender === key;
-                  const pending = activeStage === "stage1"
-                    ? group.bids.filter(item => [BidStatus.SUBMITTED, BidStatus.UNDER_REVIEW].includes(item.status)).length
-                    : group.bids.filter(item => !roleScopedEvaluationsByBid.get(item.id)).length;
+                  const pending = getGroupPendingCount(group);
+                  const pendingBadge = (
+                    <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-bold shrink-0 ${activeStage === "stage1" ? "bg-amber-100 text-amber-700" : "bg-rose-100 text-rose-700"}`}>
+                      {pending} pending
+                    </span>
+                  );
+                  if (folderViewMode === "list") {
+                    return (
+                      <button
+                        key={key}
+                        onClick={() => setExpandedTender(isExpanded ? null : key)}
+                        className={`w-full flex items-center gap-4 text-left rounded-xl border p-4 transition-all hover:shadow-sm ${
+                          isExpanded
+                            ? "border-amber-400 bg-amber-50 ring-2 ring-amber-200"
+                            : "border-slate-200 bg-white hover:border-slate-300"
+                        }`}
+                      >
+                        <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${isExpanded ? "bg-amber-500 text-white" : "bg-[#0b1530] text-white"}`}>
+                          <FolderOpen size={18} />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="font-bold text-slate-900 truncate">{group.tenderName}</p>
+                          <p className="text-xs text-slate-500">
+                            Ref: {group.bids[0]?.tender_reference || group.bids[0]?.tender || "N/A"} • {group.bids.length} bid{group.bids.length !== 1 ? "s" : ""}{activeStage === "stage2" ? " • Financial" : ""}
+                          </p>
+                        </div>
+                        {pendingBadge}
+                        <span className="text-xs font-bold text-slate-400 shrink-0 w-24 text-right">
+                          {isExpanded ? "Close folder" : "Open folder"}
+                        </span>
+                      </button>
+                    );
+                  }
                   return (
                     <button
                       key={key}
@@ -22385,9 +26504,7 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
                         </div>
                       </div>
                       <div className="mt-4 flex items-center justify-between">
-                        <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-bold ${activeStage === "stage1" ? "bg-amber-100 text-amber-700" : "bg-rose-100 text-rose-700"}`}>
-                          {pending} pending
-                        </span>
+                        {pendingBadge}
                         <span className="text-xs font-bold text-slate-400 group-hover:text-slate-600 transition-colors">
                           {isExpanded ? "Close folder" : "Open folder"}
                         </span>
@@ -22406,11 +26523,39 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
                 })}
               </div>
 
+              {folderTotalPages > 1 && (
+                <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-4">
+                  <p className="text-xs text-slate-500">
+                    Showing {(folderPage - 1) * FOLDER_PAGE_SIZE + 1}-{Math.min(folderPage * FOLDER_PAGE_SIZE, visibleStageGroups.length)} of {visibleStageGroups.length} tenders
+                  </p>
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={() => setFolderPage(p => Math.max(1, p - 1))}
+                      disabled={folderPage === 1}
+                      className="btn-secondary text-sm py-1.5 disabled:opacity-50"
+                    >
+                      Previous
+                    </button>
+                    <span className="text-sm text-slate-500">Page {folderPage} of {folderTotalPages}</span>
+                    <button
+                      onClick={() => setFolderPage(p => Math.min(folderTotalPages, p + 1))}
+                      disabled={folderPage === folderTotalPages}
+                      className="btn-secondary text-sm py-1.5 disabled:opacity-50"
+                    >
+                      Next
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {expandedTender && (
                 <div className="mt-6 rounded-2xl border border-slate-200 overflow-hidden">
                   {activeStageGroups
                     .filter(([key]) => key === expandedTender)
-                    .map(([key, group]) => (
+                    .map(([key, group]) => {
+                      const isVendorOnlyMatch = Boolean(normalizedFolderSearch) && !groupMatchesTender(group);
+                      const displayBids = isVendorOnlyMatch ? groupMatchingBids(group) : group.bids;
+                      return (
                       <div key={key}>
                         <div className="px-6 py-4 bg-slate-50 border-b border-slate-100 flex items-center justify-between">
                           <div className="flex items-center gap-3">
@@ -22418,28 +26563,18 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
                             <p className="font-bold text-slate-900">{group.tenderName}</p>
                             {activeStage === "stage2" && <span className="badge bg-rose-100 text-rose-700">Financial</span>}
                           </div>
-                          <span className="text-xs text-slate-500">{group.bids.length} bid{group.bids.length !== 1 ? "s" : ""}</span>
+                          <span className="text-xs text-slate-500">
+                            {isVendorOnlyMatch
+                              ? `${displayBids.length} of ${group.bids.length} bid${group.bids.length !== 1 ? "s" : ""} match "${folderSearch}"`
+                              : `${group.bids.length} bid${group.bids.length !== 1 ? "s" : ""}`}
+                          </span>
                         </div>
-                        <div className="divide-y divide-slate-100">
-                          {activeStage === "stage1" ? group.bids.map((item) => {
-                            const needsStage1Review = item.status === BidStatus.SUBMITTED || item.status === BidStatus.UNDER_REVIEW;
-                            return (
-                            <div key={item.id} className={`p-6 flex items-center justify-between transition-colors ${needsStage1Review ? "bg-amber-50/50 border-l-4 border-amber-400" : "hover:bg-slate-50"}`}>
-                              <div>
-                                <p className="font-bold text-slate-900">{item.vendor_name}</p>
-                                <p className="text-xs text-slate-500">Submitted {item.submitted_at ? new Date(item.submitted_at).toLocaleDateString() : "N/A"}</p>
-                              </div>
-                              <div className="flex items-center gap-4">
-                                <span className={`inline-flex rounded-full px-3 py-1 text-xs font-bold ${queueStatusTone(item)}`}>{item.status === BidStatus.ACCEPTED ? "Shortlisted" : item.status}</span>
-                                <button
-                                  onClick={() => handleStartEvaluation(item)}
-                                  disabled={!canEvaluateBid(item)}
-                                  title={canEvaluateBid(item) ? undefined : "The tender must be Published, Closed, or in Evaluation before starting Stage 1 evaluation."}
-                                  className="btn-primary py-1.5 px-4 text-sm disabled:opacity-40 disabled:cursor-not-allowed"
-                                >{!canEvaluateBid(item) ? "Tender must be Published" : item.status === BidStatus.ACCEPTED ? "View" : "Review"}</button>
-                              </div>
-                            </div>);
-                          }) : group.bids.map((item) => {
+                        {(() => {
+                          const expandedTenderId = group.bids[0]?.tender;
+                          const expandedLots = activeStage === "stage2" ? (tenderDetails[expandedTenderId]?.lots || []) : [];
+                          const isExpandedLotWise = expandedLots.length > 0;
+
+                          const renderBidRow = (item: TenderBid) => {
                             const existing = roleScopedEvaluationsByBid.get(item.id);
                             const needsEval = !existing;
                             const technicalExisting = technicalEvaluationsByBid.get(item.id);
@@ -22459,15 +26594,29 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
                                     <FileText size={24} />
                                   </div>
                                   <div>
-                                    <p className="font-bold text-slate-900">{item.vendor_name}</p>
+                                    <p className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
+                                      <span className="font-bold text-slate-900">{item.vendor_name}</span>
+                                      {!isFinancialEvaluationMode && (existing ? (
+                                        existing.submissionStatus === "submitted" ? (
+                                          <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2.5 py-0.5 text-[11px] font-bold text-emerald-700"><CheckCircle2 size={12} /> Scored by you — locked</span>
+                                        ) : (
+                                          <span className="inline-flex items-center gap-1 rounded-full bg-sky-100 px-2.5 py-0.5 text-[11px] font-bold text-sky-700"><PenLine size={12} /> Scored by you — draft</span>
+                                        )
+                                      ) : (
+                                        <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-0.5 text-[11px] font-bold text-slate-500"><CircleDashed size={12} /> Not scored by you yet</span>
+                                      ))}
+                                    </p>
                                     <p className="text-xs text-slate-500">Tender: {item.tender_reference || item.tender}</p>
                                     {!isFinancialEvaluationMode && (
                                       <p className="text-xs text-slate-500">
                                         Tier {item.tech_tier || item.service_tier || "N/A"} • GPS {(item.sites || []).filter((site) => site.latitude != null && site.longitude != null).length}/{(item.sites || []).length} • Energy {item.energy_target || item.energy_target_kwh_month ? `${item.energy_target || item.energy_target_kwh_month} kWh/mo` : "N/A"}
                                       </p>
                                     )}
+                                    {!isFinancialEvaluationMode && (technicalScoredCountByBid.get(item.id) || 0) > 0 && (
+                                      <p className="text-xs text-blue-700 mt-0.5">{technicalScoredCountByBid.get(item.id)} committee member{(technicalScoredCountByBid.get(item.id) || 0) === 1 ? "" : "s"} scored{existing ? " (including you)" : ""}</p>
+                                    )}
                                     {isFinancialEvaluationMode && (
-                                      <p className="text-xs text-emerald-700">Technical gate: {technicalScore}/{Math.round((threshold / 100) * 70)}</p>
+                                      <p className="text-xs text-emerald-700">Technical gate: {technicalScore}/{Math.round((threshold / 100) * technicalScoreTotal)}</p>
                                     )}
                                   </div>
                                 </div>
@@ -22501,10 +26650,93 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
                                 </div>
                               </div>
                             );
-                          })}
-                        </div>
+                          };
+
+                          if (activeStage === "stage1") {
+                            return (
+                              <div className="divide-y divide-slate-100">
+                                {displayBids.map((item) => {
+                                  const needsStage1Review = item.status === BidStatus.SUBMITTED || item.status === BidStatus.UNDER_REVIEW;
+                                  return (
+                                  <div key={item.id} className={`p-6 flex items-center justify-between transition-colors ${needsStage1Review ? "bg-amber-50/50 border-l-4 border-amber-400" : "hover:bg-slate-50"}`}>
+                                    <div>
+                                      <p className="font-bold text-slate-900">{item.vendor_name}</p>
+                                      <p className="text-xs text-slate-500">Submitted {item.submitted_at ? new Date(item.submitted_at).toLocaleDateString() : "N/A"}</p>
+                                    </div>
+                                    <div className="flex items-center gap-4">
+                                      <span className={`inline-flex rounded-full px-3 py-1 text-xs font-bold ${queueStatusTone(item)}`}>{item.status === BidStatus.ACCEPTED ? "Shortlisted" : item.status}</span>
+                                      <button
+                                        onClick={() => handleStartEvaluation(item)}
+                                        disabled={!canEvaluateBid(item)}
+                                        title={canEvaluateBid(item) ? undefined : "The tender must be Published, Closed, or in Evaluation before starting Stage 1 review."}
+                                        className="btn-primary py-1.5 px-4 text-sm disabled:opacity-40 disabled:cursor-not-allowed"
+                                      >{!canEvaluateBid(item) ? "Tender must be Published" : item.status === BidStatus.ACCEPTED ? "View" : "Review"}</button>
+                                    </div>
+                                  </div>);
+                                })}
+                              </div>
+                            );
+                          }
+
+                          if (isExpandedLotWise) {
+                            const unassigned = displayBids.filter((item) => getBidLotIds(item).length === 0);
+                            return (
+                              <div>
+                                {expandedLots.map((lot) => {
+                                  const lotId = String(lot.id || "");
+                                  const lotBids = displayBids.filter((item) => getBidLotIds(item).includes(lotId));
+                                  const pageKey = `${key}:${lotId}`;
+                                  const page = bidListPage[pageKey] || 1;
+                                  const totalPages = Math.max(1, Math.ceil(lotBids.length / BID_LIST_PAGE_SIZE));
+                                  const pageBids = lotBids.slice((page - 1) * BID_LIST_PAGE_SIZE, page * BID_LIST_PAGE_SIZE);
+                                  return (
+                                    <div key={lotId} className="border-b border-slate-100 last:border-b-0">
+                                      <div className="px-6 py-3 bg-slate-50/70 flex items-center justify-between">
+                                        <p className="text-sm font-bold text-slate-700">{lot.name}</p>
+                                        <span className="text-xs text-slate-500">{lotBids.length} bid{lotBids.length !== 1 ? "s" : ""}</span>
+                                      </div>
+                                      {lotBids.length === 0 ? (
+                                        <p className="px-6 py-4 text-sm text-slate-500">No bids declared for this lot yet.</p>
+                                      ) : (
+                                        <div className="divide-y divide-slate-100">{pageBids.map(renderBidRow)}</div>
+                                      )}
+                                      {totalPages > 1 && renderBidListPager(pageKey, page, totalPages, lotBids.length)}
+                                    </div>
+                                  );
+                                })}
+                                {unassigned.length > 0 && (() => {
+                                  const pageKey = `${key}:unassigned`;
+                                  const page = bidListPage[pageKey] || 1;
+                                  const totalPages = Math.max(1, Math.ceil(unassigned.length / BID_LIST_PAGE_SIZE));
+                                  const pageBids = unassigned.slice((page - 1) * BID_LIST_PAGE_SIZE, page * BID_LIST_PAGE_SIZE);
+                                  return (
+                                    <div>
+                                      <div className="px-6 py-3 bg-slate-50/70">
+                                        <p className="text-sm font-bold text-slate-700">Lot Not Specified</p>
+                                      </div>
+                                      <div className="divide-y divide-slate-100">{pageBids.map(renderBidRow)}</div>
+                                      {totalPages > 1 && renderBidListPager(pageKey, page, totalPages, unassigned.length)}
+                                    </div>
+                                  );
+                                })()}
+                              </div>
+                            );
+                          }
+
+                          const pageKey = `${key}:all`;
+                          const page = bidListPage[pageKey] || 1;
+                          const totalPages = Math.max(1, Math.ceil(displayBids.length / BID_LIST_PAGE_SIZE));
+                          const pageBids = displayBids.slice((page - 1) * BID_LIST_PAGE_SIZE, page * BID_LIST_PAGE_SIZE);
+                          return (
+                            <div>
+                              <div className="divide-y divide-slate-100">{pageBids.map(renderBidRow)}</div>
+                              {totalPages > 1 && renderBidListPager(pageKey, page, totalPages, displayBids.length)}
+                            </div>
+                          );
+                        })()}
                       </div>
-                    ))}
+                      );
+                    })}
                 </div>
               )}
             </>
@@ -22513,6 +26745,194 @@ const TACView = ({ mode, onNavigate }: { mode: "technical" | "financial"; onNavi
       </div>
       {renderSubmittedBidModal()}
     </div>
+  );
+};
+
+type EvaluationTabKey = "eoi" | "technical" | "financial" | "scores";
+const EVALUATION_TAB_META: Record<EvaluationTabKey, { label: string }> = {
+  eoi: { label: "EOI Review" },
+  technical: { label: "Technical Evaluation" },
+  financial: { label: "Financial Evaluation" },
+  scores: { label: "Committee Scores" },
+};
+
+export const EvaluationCommitteeView = ({
+  onNavigate,
+  allowedTabs = ["eoi", "technical", "financial", "scores"],
+  initialTenderId,
+}: {
+  onNavigate?: (action: string, id?: string) => void;
+  // Which role sees which tab: RBF Officials decide EOI shortlisting and review the
+  // Committee's scores + the RBF comment (Technical/Financial scoring is the Evaluation
+  // Committee's job); the Evaluation Committee scores Technical/Financial only (EOI
+  // shortlisting is the RBF Official's job, Committee Scores are for RMT/Admin
+  // oversight); Admin sees all four. Restricting this hides the tab entirely rather
+  // than just defaulting away from it.
+  allowedTabs?: EvaluationTabKey[];
+  // Pre-expands a single tender's bid folder — used when arriving scoped to one EOI
+  // Invite (only meaningful for the "eoi" tab).
+  initialTenderId?: string;
+}) => {
+  const [tab, setTab] = useState<EvaluationTabKey>(allowedTabs[0]);
+  const activeTab = allowedTabs.includes(tab) ? tab : allowedTabs[0];
+  return (
+    <div className="space-y-4">
+      {allowedTabs.length > 1 && (
+        <div className="flex gap-2 border-b border-slate-200">
+          {allowedTabs.map((key) => (
+            <button
+              key={key}
+              onClick={() => setTab(key)}
+              className={`px-4 py-2.5 text-sm font-bold border-b-2 -mb-px transition-colors ${activeTab === key ? "border-emerald-600 text-emerald-700" : "border-transparent text-slate-500 hover:text-slate-700"}`}
+            >
+              {EVALUATION_TAB_META[key].label}
+            </button>
+          ))}
+        </div>
+      )}
+      {activeTab === "eoi" ? <TACView mode="eoi" onNavigate={onNavigate} initialTenderId={initialTenderId} /> : activeTab === "technical" ? <TACView mode="technical" onNavigate={onNavigate} /> : activeTab === "scores" ? <CommitteeScoresView /> : <FinancialEvaluationView />}
+    </div>
+  );
+};
+
+// EOI Invite detail/shortlist view — deliberately NOT the Tender details page. It
+// wraps the real, already-tested EOI bid-review engine (TACView, scoped to this one
+// tender via initialTenderId) in mockup-styled chrome instead of re-implementing
+// shortlisting. Co-located here (rather than in components/EoiInvites.tsx) so it can
+// reference TACView directly without a circular import between this file and that one.
+const EoiInviteDetail = ({
+  tenderId,
+  onBack,
+  onConvertToTender,
+  onEdit,
+}: {
+  tenderId: string;
+  onBack: () => void;
+  onConvertToTender: (eoiTenderId: string) => void;
+  onEdit: (eoiTenderId: string) => void;
+}) => {
+  const [tender, setTender] = useState<Tender | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    setIsLoading(true);
+    (async () => {
+      try {
+        const data = await fetchTender(tenderId);
+        if (!cancelled) setTender(data);
+      } finally {
+        if (!cancelled) setIsLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [tenderId]);
+
+  const shortlistedCount = tender?.invitedVendorCount ?? 0;
+  const linkedCount = tender?.linkedTendersSummary?.length ?? 0;
+  const isAlreadyLinked = linkedCount > 0;
+
+  return (
+    <FormKitShell>
+      <Crumb onBack={onBack} trail="EOI Invites" />
+      {isLoading || !tender ? (
+        <p className="text-sm text-slate-500">Loading...</p>
+      ) : (
+        <>
+          <div className="flex items-center justify-between flex-wrap gap-3 mb-1">
+            <div className="flex items-center gap-2.5">
+              <h1 className="text-2xl font-bold text-slate-900">{tender.name}</h1>
+              <span className="font-mono text-xs text-slate-500 bg-slate-100 rounded px-1.5 py-0.5">
+                {tender.referenceNumber}
+              </span>
+            </div>
+            <div className="flex items-center gap-3">
+              <StatusChip color={AMBER} bg={AMBER_SOFT}>
+                {tender.status === TenderStatus.PUBLISHED ? "Submission open · shortlisting" : tender.status}
+              </StatusChip>
+              <button onClick={() => onEdit(tenderId)} className="btn-secondary text-sm py-1.5">
+                Edit
+              </button>
+            </div>
+          </div>
+          <p className="text-sm text-slate-500 mb-5">
+            {tender.eoiDeadline ? `Deadline ${new Date(tender.eoiDeadline).toLocaleDateString()}` : "No deadline set"} &middot; {shortlistedCount} shortlisted
+          </p>
+
+          <div className="card p-6 mb-6 space-y-4">
+            <p className="text-xs font-bold uppercase tracking-widest text-slate-400">Purpose &amp; Scope</p>
+            <p className="text-sm text-slate-700 whitespace-pre-wrap -mt-2">{tender.instruction || tender.biddersEligibility || "—"}</p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div>
+                <p className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-1">Technology Type(s)</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {(tender.technologyTypes || []).length > 0
+                    ? (tender.technologyTypes || []).map(t => <span key={t} className="badge bg-slate-100 text-slate-600">{t}</span>)
+                    : <span className="text-sm text-slate-400">—</span>}
+                </div>
+              </div>
+              <div>
+                <p className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-1">Target District(s)</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {(tender.targetDistricts || []).length > 0
+                    ? (tender.targetDistricts || []).map(d => <span key={d} className="badge bg-slate-100 text-slate-600">{d}</span>)
+                    : <span className="text-sm text-slate-400">—</span>}
+                </div>
+              </div>
+              <div>
+                <p className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-1">Approximate Installation Target</p>
+                <p className="text-sm text-slate-700">{tender.approximateInstallationTarget != null ? `${tender.approximateInstallationTarget.toLocaleString()} units (indicative)` : "—"}</p>
+              </div>
+              <div>
+                <p className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-1">Indicative Timeline</p>
+                <p className="text-sm text-slate-700">{tender.timeForCompletion || "—"}</p>
+              </div>
+              <div>
+                <p className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-1">Max Vendors to Shortlist</p>
+                <p className="text-sm text-slate-700">{tender.maxVendorsToShortlist != null ? tender.maxVendorsToShortlist : "No cap"}</p>
+              </div>
+              <div>
+                <p className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-1">Contact Details</p>
+                <p className="text-sm text-slate-700">{tender.contactDetails || "—"}</p>
+              </div>
+              {(tender.advertisementChannels || []).length > 0 && (
+                <div className="md:col-span-2">
+                  <p className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-1">Advertisement Channels</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {(tender.advertisementChannels || []).map(c => <span key={c} className="badge bg-slate-100 text-slate-600">{c}</span>)}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <InfoBanner color={AMBER} bg={AMBER_SOFT}>
+            Select which respondents move forward. Only shortlisted vendors will be automatically invited once this is converted into a tender — everyone else is notified of closure.
+          </InfoBanner>
+
+          {isAlreadyLinked && (
+            <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600 font-medium">
+              This EOI Invite has already been linked to {linkedCount} tender{linkedCount > 1 ? "s" : ""} (
+              {tender.linkedTendersSummary!.map((t) => t.referenceNumber || t.name).join(", ")}). It can no longer
+              be converted into another tender.
+            </div>
+          )}
+
+          <TACView mode="eoi" initialTenderId={tenderId} />
+
+          <div className="flex items-center justify-end mt-5">
+            <button
+              disabled={shortlistedCount === 0 || isAlreadyLinked}
+              onClick={() => onConvertToTender(tenderId)}
+              className="btn-primary flex items-center gap-1.5 disabled:opacity-40"
+              title={isAlreadyLinked ? "Already linked to a tender — conversion blocked." : undefined}
+            >
+              {isAlreadyLinked ? "Already Converted to Tender" : "Convert to Tender"} <ArrowRight size={14} />
+            </button>
+          </div>
+        </>
+      )}
+    </FormKitShell>
   );
 };
 
@@ -23359,7 +27779,7 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
       "Not provided";
 
     return (
-      <div className="space-y-6 max-w-5xl mx-auto pb-20">
+      <div className="space-y-6 max-w-[90rem] mx-auto pb-20">
           <div className="flex items-center justify-between gap-4 mb-8">
             <div className="flex items-center gap-4">
               <button onClick={() => navigateView("dashboard")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
@@ -24902,7 +29322,7 @@ const DoEOfficerView = () => {
 
   if (view === "review" && selectedProject) {
     return (
-      <div className="space-y-6 max-w-4xl mx-auto">
+      <div className="space-y-6 max-w-7xl mx-auto">
         <div className="flex items-center gap-4 mb-8">
           <button onClick={() => setView("list")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
             <ChevronRight className="rotate-180" size={20} />
@@ -25374,19 +29794,27 @@ const PublicPortal = ({ onBack, onRegisterClick, publicSubView, publicTenderId, 
   onSubViewChange?: (view: null | "faq" | "tender", id?: string | null) => void;
 }) => {
   const [tenders, setTenders] = useState<Tender[]>([]);
+  const [eoiInvites, setEoiInvites] = useState<Tender[]>([]);
   const [selected, setSelected] = useState<Tender | null>(null);
   const [page, setPage] = useState(1);
+  const [eoiPage, setEoiPage] = useState(1);
   const [kpiData, setKpiData] = useState<any>(null);
   const [kpiLoading, setKpiLoading] = useState(true);
   const [showFaq, setShowFaq] = useState(false);
   const perPage = 10;
 
-  React.useEffect(() => { 
+  React.useEffect(() => {
     fetchTenders().then((d: Tender[]) => {
       const published = d.filter(t => t.status === "Published" && t.procurementMethod === "Open Tendering");
       const sorted = published.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
       setTenders(sorted);
-    }).catch(() => {}) 
+      // EOI Invites are always Restricted-tendering (so excluded by the filter above)
+      // but are deliberately meant for broad public advertisement — shown in their own
+      // section below rather than merged into the tender list.
+      const openEois = d.filter(t => t.status === "Published" && t.isEoiInviteOnly);
+      openEois.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+      setEoiInvites(openEois);
+    }).catch(() => {})
   }, []);
 
   React.useEffect(() => {
@@ -25406,18 +29834,25 @@ const PublicPortal = ({ onBack, onRegisterClick, publicSubView, publicTenderId, 
     if (publicSubView === "faq") {
       setShowFaq(true);
       setSelected(null);
-    } else if (publicSubView === "tender" && publicTenderId && tenders.length > 0) {
-      const t = tenders.find(t => t.id === publicTenderId);
-      if (t) setSelected(t);
+    } else if (publicSubView === "tender" && publicTenderId && (tenders.length > 0 || eoiInvites.length > 0)) {
+      const t = tenders.find(t => t.id === publicTenderId) || eoiInvites.find(t => t.id === publicTenderId);
+      if (t) {
+        setSelected(t);
+        // The list endpoint omits several fields (lots, required documents, etc.) —
+        // fetch the full detail so the redesigned modal has everything it needs.
+        fetchTender(t.id).then(full => setSelected(full)).catch(() => {});
+      }
       setShowFaq(false);
     } else if (!publicSubView) {
       setSelected(null);
       setShowFaq(false);
     }
-  }, [publicSubView, publicTenderId, tenders]);
+  }, [publicSubView, publicTenderId, tenders, eoiInvites]);
 
   const totalPages = Math.ceil(tenders.length / perPage);
   const paginatedTenders = tenders.slice((page - 1) * perPage, page * perPage);
+  const eoiTotalPages = Math.ceil(eoiInvites.length / perPage);
+  const paginatedEoiInvites = eoiInvites.slice((eoiPage - 1) * perPage, eoiPage * perPage);
 
   const householdsWithEnergy = kpiData?.total_verified || 0;
   const femaleHeaded = Math.round((kpiData?.total_verified || 0) * (kpiData?.overall_female_pct || 0) / 100);
@@ -25730,6 +30165,91 @@ const PublicPortal = ({ onBack, onRegisterClick, publicSubView, publicTenderId, 
           )}
         </div>
 
+        {/* Open Expressions of Interest — kept separate from Published Tenders: an EOI
+            Invite has no budget/technical detail to show yet, only a call to respond. */}
+        {eoiInvites.length > 0 && (
+          <div className="space-y-6">
+            <div className="flex items-end justify-between flex-wrap gap-4">
+              <div>
+                <span className="text-xs font-bold text-indigo-600 uppercase tracking-widest">Broad Call for Interest</span>
+                <h3 className="text-3xl md:text-4xl font-black text-slate-900 mt-2 tracking-tight">Open Expressions of Interest</h3>
+              </div>
+              <span className="text-sm text-slate-500">{eoiInvites.length} open invite{eoiInvites.length === 1 ? "" : "s"}</span>
+            </div>
+            <div className="space-y-4">
+              {paginatedEoiInvites.map((t, idx) => (
+                <motion.div
+                  key={t.id}
+                  initial={{ opacity: 0, y: 20 }}
+                  whileInView={{ opacity: 1, y: 0 }}
+                  viewport={{ once: true }}
+                  transition={{ duration: 0.4, delay: idx * 0.05 }}
+                  className="group bg-white rounded-2xl border border-slate-200 hover:border-indigo-300 hover:shadow-xl hover:shadow-indigo-500/10 transition-all cursor-pointer overflow-hidden"
+                  onClick={() => {
+                    setSelected(t);
+                    onSubViewChange?.("tender", t.id);
+                    window.history.replaceState({ __app: "rbf-spa", showPublicPortal: true, publicView: "tender", publicViewId: t.id }, "", `/public/tender/${t.id}`);
+                  }}
+                >
+                  <div className="p-6">
+                    <div className="flex items-start justify-between gap-4 mb-3">
+                      <div className="flex items-center gap-3 flex-wrap">
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-indigo-50 text-indigo-700 text-xs font-bold rounded-full">
+                          <span className="w-1.5 h-1.5 bg-indigo-500 rounded-full animate-pulse" />
+                          Open for EOI
+                        </span>
+                        {(t.technologyTypes || []).slice(0, 2).map(tech => (
+                          <span key={tech} className="px-2.5 py-1 bg-slate-100 text-slate-600 text-xs font-bold rounded-full">{tech}</span>
+                        ))}
+                      </div>
+                      <ArrowUpRight size={18} className="text-slate-400 group-hover:text-indigo-600 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-transform shrink-0" />
+                    </div>
+                    <div className="mb-2">
+                      <span className="text-xs font-mono font-bold text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded">{t.referenceNumber}</span>
+                    </div>
+                    <h4 className="text-lg font-bold text-slate-900 mb-1 leading-snug">{t.name}</h4>
+                    <p className="text-sm text-slate-500 mb-3">{t.department}</p>
+                    <div className="grid grid-cols-2 gap-3 pt-4 border-t border-slate-100">
+                      <div>
+                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Respond By</p>
+                        <p className="text-sm font-bold text-rose-600 flex items-center gap-1 mt-0.5">
+                          <Clock size={12} />
+                          {t.eoiDeadline ? new Date(t.eoiDeadline).toLocaleDateString() : "N/A"}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Districts</p>
+                        <p className="text-sm font-bold text-slate-900 mt-0.5 truncate" title={(t.targetDistricts || []).join(", ")}>
+                          {t.targetDistricts && t.targetDistricts.length > 0 ? `${t.targetDistricts[0]}${t.targetDistricts.length > 1 ? ` +${t.targetDistricts.length - 1}` : ""}` : "N/A"}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </motion.div>
+              ))}
+            </div>
+            {eoiTotalPages > 1 && (
+              <div className="flex items-center justify-between pt-4">
+                <button
+                  onClick={() => setEoiPage(p => Math.max(1, p - 1))}
+                  disabled={eoiPage === 1}
+                  className="px-5 py-2 rounded-full bg-white border border-slate-200 text-sm font-medium hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed transition"
+                >
+                  Previous
+                </button>
+                <span className="text-sm text-slate-500">Page {eoiPage} of {eoiTotalPages}</span>
+                <button
+                  onClick={() => setEoiPage(p => Math.min(eoiTotalPages, p + 1))}
+                  disabled={eoiPage === eoiTotalPages}
+                  className="px-5 py-2 rounded-full bg-white border border-slate-200 text-sm font-medium hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed transition"
+                >
+                  Next
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
         {tenders.length > 0 && (
           <div className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-emerald-600 via-teal-600 to-emerald-700 p-8 md:p-12 text-center">
             <div className="absolute inset-0 opacity-20" style={{
@@ -25910,6 +30430,28 @@ const PublicPortal = ({ onBack, onRegisterClick, publicSubView, publicTenderId, 
                     </div>
                   </div>
 
+                  {Array.isArray(selected.lots) && selected.lots.length > 0 && (
+                    <div className="rounded-2xl border border-slate-200 p-5">
+                      <h5 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-2">Lots</h5>
+                      <p className="text-sm text-slate-600 mb-4">This tender is divided into {selected.lots.length} lots — vendors may bid on one or more.</p>
+                      <div className="space-y-2">
+                        {selected.lots.map((lot, i) => (
+                          <div key={lot.id ?? i} className="flex items-center justify-between gap-3 py-2 border-b border-slate-100 last:border-0">
+                            <span className="text-sm font-bold text-slate-900">{lot.name}</span>
+                            <div className="flex items-center gap-3 text-xs text-slate-500">
+                              {Array.isArray(lot.targetDistricts) && lot.targetDistricts.length > 0 && (
+                                <span>{lot.targetDistricts.join(", ")}</span>
+                              )}
+                              {lot.budget != null && (
+                                <span className="font-semibold text-slate-700">LSL {Number(lot.budget).toLocaleString()}</span>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
                   {selected.budget && (
                     <div className="rounded-2xl border border-emerald-200 p-5 bg-gradient-to-br from-emerald-50 to-white">
                       <h5 className="text-xs font-bold text-emerald-600 uppercase tracking-widest mb-4">Financial Information</h5>
@@ -26000,7 +30542,7 @@ const PublicPortal = ({ onBack, onRegisterClick, publicSubView, publicTenderId, 
                   )}
 
                   <div className="rounded-2xl border border-slate-200 p-5">
-                    <h5 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3">Public Documents</h5>
+                    <h5 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3">Reference Documents</h5>
                     <div className="space-y-2">
                       {selected.scheduleFile ? (
                         <a href={selected.scheduleFile} target="_blank" rel="noopener noreferrer" className="flex items-center gap-3 p-4 rounded-2xl border border-slate-200 hover:border-emerald-300 hover:bg-emerald-50/50 transition group">
@@ -26068,7 +30610,57 @@ const PublicPortal = ({ onBack, onRegisterClick, publicSubView, publicTenderId, 
                           </div>
                         </div>
                       )}
+                      {Array.isArray(selected.governingDocuments) && selected.governingDocuments.filter(d => d.file_url).map((doc, i) => (
+                        <a key={i} href={doc.file_url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-3 p-4 rounded-2xl border border-slate-200 hover:border-emerald-300 hover:bg-emerald-50/50 transition group">
+                          <div className="w-10 h-10 rounded-xl bg-slate-100 text-slate-600 flex items-center justify-center group-hover:bg-emerald-600 group-hover:text-white transition">
+                            <FileText size={18} />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="font-bold text-slate-900 text-sm">{doc.label || "Additional Document"}</p>
+                            <p className="text-xs text-slate-500">Download</p>
+                          </div>
+                          <Download size={16} className="text-slate-400 group-hover:text-emerald-600" />
+                        </a>
+                      ))}
                     </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-slate-200 p-5">
+                    <h5 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-1">Bid Documents</h5>
+                    <p className="text-sm text-slate-500 mb-4">What a vendor must submit at each bidding stage.</p>
+                    {(() => {
+                      const docs = selected.requiredDocuments || [];
+                      const stages: { key: string; label: string }[] = [
+                        { key: "eoi", label: "EOI (Expression of Interest)" },
+                        { key: "technical", label: "Technical" },
+                        { key: "financial", label: "Financial" },
+                        { key: "combined", label: "Combined" },
+                      ];
+                      const stageDocs = (key: string) => docs.filter(d => (d.bid_stage || "eoi") === key);
+                      if (docs.length === 0) {
+                        return <p className="text-sm text-slate-500">No required bid documents have been defined for this tender.</p>;
+                      }
+                      return (
+                        <div className="space-y-4">
+                          {stages.map(stage => {
+                            const items = stageDocs(stage.key);
+                            if (items.length === 0) return null;
+                            return (
+                              <div key={stage.key}>
+                                <p className="text-xs font-bold text-slate-500 mb-2">{stage.label}</p>
+                                <div className="flex flex-wrap gap-2">
+                                  {items.map(doc => (
+                                    <span key={doc.id} className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-slate-50 border border-slate-200 rounded-full text-xs font-semibold text-slate-700">
+                                      <FileText size={12} className="text-slate-400" /> {doc.name}
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      );
+                    })()}
                   </div>
 
                   {(selected.tenderSecurityRequired || selected.biddersSchedulePurchase || selected.coolingOffDays) && (
@@ -26109,8 +30701,12 @@ const PublicPortal = ({ onBack, onRegisterClick, publicSubView, publicTenderId, 
                       backgroundImage: "radial-gradient(circle at 90% 10%, rgba(255,255,255,0.4) 0%, transparent 50%)"
                     }} />
                     <div className="relative space-y-2">
-                      <p className="font-black text-white text-lg">Ready to submit a bid?</p>
-                      <p className="text-emerald-50 text-sm">Login or register to access full tender details and submit your proposal</p>
+                      <p className="font-black text-white text-lg">{selected.isEoiInviteOnly ? "Ready to respond?" : "Ready to submit a bid?"}</p>
+                      <p className="text-emerald-50 text-sm">
+                        {selected.isEoiInviteOnly
+                          ? "Register as a vendor to submit your Expression of Interest."
+                          : "Login or register to access full tender details and submit your proposal"}
+                      </p>
                       <button
                         onClick={() => {
                           setSelected(null);
@@ -26119,7 +30715,7 @@ const PublicPortal = ({ onBack, onRegisterClick, publicSubView, publicTenderId, 
                         }}
                         className="mt-3 px-6 py-2.5 bg-white text-emerald-700 font-bold rounded-full hover:bg-emerald-50 transition shadow-lg"
                       >
-                        Login / Register to Bid
+                        {selected.isEoiInviteOnly ? "Login / Register to Respond" : "Login / Register to Bid"}
                       </button>
                     </div>
                   </div>
@@ -26817,7 +31413,7 @@ const AuditorView = () => {
 
   if (view === "review" && selectedAudit) {
     return (
-      <div className="space-y-6 max-w-5xl mx-auto pb-20">
+      <div className="space-y-6 max-w-[90rem] mx-auto pb-20">
         <div className="flex items-center gap-4 mb-8">
           <button onClick={() => setView("dashboard")} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
             <ChevronRight className="rotate-180" size={20} />
@@ -27465,26 +32061,24 @@ export default function App() {
 
         setSidebarBadges({
           tenders: fmt(draftTenders),
-          evaluations: fmt(pendingBids),
           prequal: fmt(pendingPrequal),
           payments: fmt(pendingClaims),
           rbf_projects: fmt(setupReview),
         });
 
       } else if (r === UserRole.TAC) {
-        const [bids, claims] = await Promise.all([
-          fetchTenderBids(undefined, 100),
-          fetchPaymentClaims({ pageSize: 100 }),
-        ]);
-        const bidList   = bids;
-        const claimList = claims;
-
-        const pendingBids   = bidList.filter(b => b.status === BidStatus.SUBMITTED || b.status === BidStatus.UNDER_REVIEW).length;
-        const pendingClaims = claimList.filter(c => c.status === "Submitted" || c.status === "RMT Approved").length;
+        const claims = await fetchPaymentClaims({ pageSize: 100 });
+        const pendingClaims = claims.filter(c => c.status === "Submitted" || c.status === "RMT Approved").length;
 
         setSidebarBadges({
-          evaluations: fmt(pendingBids),
           payments: fmt(pendingClaims),
+        });
+
+      } else if (r === UserRole.EVALUATION_COMMITTEE) {
+        const bidList = await fetchTenderBids(undefined, 100);
+        const pendingBids = bidList.filter(b => b.status === BidStatus.SUBMITTED || b.status === BidStatus.UNDER_REVIEW).length;
+        setSidebarBadges({
+          evaluations: fmt(pendingBids),
         });
 
       } else if (r === UserRole.ADMIN) {
@@ -27692,6 +32286,7 @@ export default function App() {
     users: "users",
     all_vendors: "vendors",
     tenders: "tenders",
+    eoi_invites: "tenders",
     notice_board: "notifications",
     evaluations: "evaluations",
     prequal: "prequalification",
@@ -27714,6 +32309,10 @@ export default function App() {
     regional: "projects",
     kpis: "reports",
     kpi_dashboard: "reports",
+    inspections: "projects",
+    anomaly_report: "audit_logs",
+    claims_audit: "audit_logs",
+    portfolio: "projects",
   };
 
   const canViewSidebarItem = (tab: string) => {
@@ -27851,6 +32450,15 @@ export default function App() {
             onNavigate={(action, id) => navigateTo("tenders", action, id)}
           />
         );
+        case "eoi_invites": return (
+          <VendorEoiInvites
+            onSubmitEoi={(tenderId) => {
+              setPendingBidTenderId(tenderId);
+              setPendingBidId(null);
+              navigateTo("dashboard", "bid", tenderId);
+            }}
+          />
+        );
         case "applications": return (
           <VendorApplications
             currentUser={currentUser}
@@ -27885,8 +32493,6 @@ export default function App() {
           return <ProjectsHub mode="tac" externalProjectId={selectedProjectId} externalProjectTab={selectedProjectTab} />;
         case "payments":
           return <Disbursements onOpenProjectKpi={openProjectKpiView} onOpenProject={openProjectHubView} />;
-        case "evaluations":
-          return <TACView mode="technical" onNavigate={(action, id) => navigateTo("evaluations", action, id)} />;
         case "blacklisting":
           return <Blacklisting currentUser={currentUser} />;
         case "all_vendors":
@@ -27895,6 +32501,17 @@ export default function App() {
           return <TacReports />;
         default:
           return <TacDashboard currentUser={currentUser} onNavigate={(action) => navigateTo(action)} />;
+      }
+    }
+    if (role === UserRole.EVALUATION_COMMITTEE) {
+      switch (activeTab) {
+        case "evaluations":
+          return <EvaluationCommitteeView allowedTabs={["technical", "financial"]} onNavigate={(action, id) => navigateTo("evaluations", action, id)} />;
+        case "notifications":
+          return <NotificationLogs logs={notifications} onSelect={handleNotificationSelect} />;
+        case "dashboard":
+        default:
+          return <EvaluationCommitteeDashboard onNavigate={(action, id) => navigateTo(action, undefined, id)} />;
       }
     }
     if (role === UserRole.FIELD_VERIFIER) {
@@ -27916,10 +32533,25 @@ export default function App() {
     }
     if (role === UserRole.ADMIN) {
       switch (activeTab) {
-        case "tenders": return <Tenders initialView={routerAction && ["list", "create", "details", "verify", "publish", "award", "edit"].includes(routerAction) ? routerAction as any : "list"} initialTenderId={routerId || pendingTenderId} onTenderOpened={() => setPendingTenderId(null)} onNavigate={(action, id) => navigateTo("tenders", action, id)} />;
+        case "tenders": return <Tenders initialView={routerAction && ["list", "start", "create", "details", "verify", "publish", "award", "edit"].includes(routerAction) ? routerAction as any : "list"} initialTenderId={routerId || pendingTenderId} onTenderOpened={() => setPendingTenderId(null)} onNavigate={(action, id) => navigateTo("tenders", action, id)} onOpenEoiInvite={(eoiTenderId) => navigateTo("eoi_invites", "details", eoiTenderId)} />;
+        case "eoi_invites": return routerAction === "details" && (routerId || pendingTenderId) ? (
+          <EoiInviteDetail
+            tenderId={(routerId || pendingTenderId)!}
+            onBack={() => navigateTo("eoi_invites")}
+            onConvertToTender={(eoiTenderId) => { setPendingTenderId(null); navigateTo("tenders", "create", eoiTenderId); }}
+            onEdit={(eoiTenderId) => navigateTo("eoi_invites", "edit", eoiTenderId)}
+          />
+        ) : (
+          <EoiInvites
+            initialView={routerAction && ["list", "create", "edit"].includes(routerAction) ? routerAction as any : "list"}
+            initialTenderId={routerId || pendingTenderId}
+            onTenderOpened={() => setPendingTenderId(null)}
+            onNavigate={(action, id) => navigateTo("eoi_invites", action, id)}
+          />
+        );
         case "publish_approvals": return <PublishApprovals onOpenTender={(tenderId) => { setPendingTenderId(tenderId); navigateTo("tenders", "details", tenderId); }} />;
         case "notice_board": return <RmtNoticeManagement currentUser={currentUser} />;
-        case "evaluations": return <TACView mode="financial" onNavigate={(action, id) => navigateTo("evaluations", action, id)} />;
+        case "evaluations": return <EvaluationCommitteeView onNavigate={(action, id) => navigateTo("evaluations", action, id)} />;
         case "prequal": return <PreQualification />;
         case "rbf_projects": return <ProjectsHub mode="rbf" externalProjectId={selectedProjectId} externalProjectTab={selectedProjectTab} />;
         case "blacklisting": return <Blacklisting currentUser={currentUser} />;
@@ -27929,6 +32561,7 @@ export default function App() {
          case "users":
          case "permissions":
          case "system_configuration":
+         case "master_data":
         case "prospect_sync":
         case "audit_logs":
         case "notifications":
@@ -28087,17 +32720,33 @@ if (activeTab === "reports") {
             portalType="rbf"
           />
         );
-      case "evaluations": return <TACView mode="financial" onNavigate={(action, id) => navigateTo("evaluations", action, id)} />;
       case "tenders": return (
         <Tenders
-          initialView={routerAction && ["list","create","details","verify","publish","award","edit"].includes(routerAction) ? routerAction as "list"|"create"|"details"|"verify"|"publish"|"award"|"edit" : "list"}
+          initialView={routerAction && ["list","start","create","details","verify","publish","award","edit"].includes(routerAction) ? routerAction as "list"|"start"|"create"|"details"|"verify"|"publish"|"award"|"edit" : "list"}
           initialTenderId={routerId || pendingTenderId}
           onTenderOpened={() => setPendingTenderId(null)}
           onNavigate={(action, id) => navigateTo("tenders", action, id)}
+          onOpenEoiInvite={(eoiTenderId) => navigateTo("eoi_invites", "details", eoiTenderId)}
+        />
+      );
+      case "eoi_invites": return routerAction === "details" && (routerId || pendingTenderId) ? (
+        <EoiInviteDetail
+          tenderId={(routerId || pendingTenderId)!}
+          onBack={() => navigateTo("eoi_invites")}
+          onConvertToTender={(eoiTenderId) => { setPendingTenderId(null); navigateTo("tenders", "create", eoiTenderId); }}
+          onEdit={(eoiTenderId) => navigateTo("eoi_invites", "edit", eoiTenderId)}
+        />
+      ) : (
+        <EoiInvites
+          initialView={routerAction && ["list", "create", "edit"].includes(routerAction) ? routerAction as any : "list"}
+          initialTenderId={routerId || pendingTenderId}
+          onTenderOpened={() => setPendingTenderId(null)}
+          onNavigate={(action, id) => navigateTo("eoi_invites", action, id)}
         />
       );
       case "notice_board": return <RmtNoticeManagement currentUser={currentUser} />;
       case "prequal": return <PreQualification />;
+      case "evaluations": return <EvaluationCommitteeView allowedTabs={["eoi", "scores"]} onNavigate={(action, id) => navigateTo("evaluations", action, id)} />;
       case "rbf_projects": return <ProjectsHub mode="rbf" externalProjectId={selectedProjectId} externalProjectTab={selectedProjectTab} />;
       case "blacklisting": return <Blacklisting currentUser={currentUser} />;
       case "payments": return <Disbursements onOpenProjectKpi={openProjectKpiView} onOpenProject={openProjectHubView} />;
@@ -28131,6 +32780,7 @@ if (activeTab === "reports") {
         { id: "my_profile", icon: UserCircle, label: "My Profile" },
         { id: "prequal", icon: ClipboardCheck, label: "Pre-Qualification", ...ab("prequal") },
         { id: "tenders", icon: FileText, label: "Published Tenders" },
+        { id: "eoi_invites", icon: Users, label: "EOI Invites" },
         { id: "my_bids", icon: FileSearch, label: "My Bids", ...ab("my_bids") },
         { id: "contracting", icon: FileText, label: "Contracting", ...ab("contracting") },
         { id: "applications", icon: ClipboardCheck, label: "My Applications", ...ab("applications") },
@@ -28146,8 +32796,15 @@ if (activeTab === "reports") {
         { id: "all_vendors", icon: Users, label: "All Vendors" },
         { id: "projects", icon: FolderKanban, label: "Projects" },
         { id: "payments", icon: CreditCard, label: "Claim Reviews", ...ab("payments") },
-        { id: "evaluations", icon: ClipboardCheck, label: "Evaluations", ...ab("evaluations") },
         { id: "blacklisting", icon: FileWarning, label: "Blacklisting" },
+      ];
+    }
+
+    if (role === UserRole.EVALUATION_COMMITTEE) {
+      return [
+        ...common,
+        { id: "evaluations", icon: ClipboardCheck, label: "Evaluations", ...ab("evaluations") },
+        { id: "notifications", icon: Bell, label: "Notifications" },
       ];
     }
 
@@ -28172,6 +32829,7 @@ if (activeTab === "reports") {
         ...common,
          { id: "all_vendors", icon: Users, label: "All Vendors" },
          { id: "tenders", icon: FileText, label: "Tender Management", ...ab("tenders") },
+         { id: "eoi_invites", icon: Users, label: "EOI Invites", ...ab("eoi_invites") },
          { id: "publish_approvals", icon: ClipboardCheck, label: "Publish Approvals" },
          { id: "notice_board", icon: Bell, label: "Notice Board" },
          { id: "evaluations", icon: ClipboardCheck, label: "Evaluations", ...ab("evaluations") },
@@ -28181,8 +32839,7 @@ if (activeTab === "reports") {
          { id: "blacklisting", icon: FileWarning, label: "Blacklisting" },
          { id: "issues_findings", icon: AlertTriangle, label: "Issues & Findings" },
          { id: "users", icon: Users, label: "User Management", ...ab("users") },
-         { id: "permissions", icon: ShieldCheck, label: "Role Permissions" },
-         { id: "system_configuration", icon: Settings, label: "System Configuration" },
+         { id: "master_data", icon: Database, label: "Master Data" },
         { id: "prospect_sync", icon: History, label: "Prospect Sync" },
         { id: "audit_logs", icon: FileText, label: "Audit Logs" },
         { id: "notifications", icon: Bell, label: "Notifications" },
@@ -28234,9 +32891,10 @@ if (activeTab === "reports") {
       ...common,
       { id: "all_vendors", icon: Users, label: "All Vendors" },
       { id: "tenders", icon: FileText, label: "Tender Management", ...ab("tenders") },
+      { id: "eoi_invites", icon: Users, label: "EOI Invites", ...ab("eoi_invites") },
       { id: "notice_board", icon: Bell, label: "Notice Board" },
-      { id: "evaluations", icon: ClipboardCheck, label: "Evaluations", ...ab("evaluations") },
       { id: "prequal", icon: ClipboardCheck, label: "Pre-Qualification", ...ab("prequal") },
+      { id: "evaluations", icon: ClipboardCheck, label: "Evaluations", ...ab("evaluations") },
       { id: "rbf_projects", icon: FolderKanban, label: "Projects Hub", ...ab("rbf_projects") },
       { id: "blacklisting", icon: FileWarning, label: "Blacklisting" },
       { id: "gis", icon: MapIcon, label: "GIS Mapping" },

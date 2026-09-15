@@ -424,7 +424,7 @@ def _main_agreement_html(contract, tender, bid, vendor, project) -> str:
     tech_type = (project.tech_type if project else "") or (
         tender.technology_types[0] if isinstance(tender.technology_types, list) and tender.technology_types else tender.category
     )
-    total_award = bid.bid_amount or tender.budget or 0
+    total_award = contract.resolved_award_value()
     project_location = ", ".join(
         part for part in [
             project.region if project else "",
@@ -823,7 +823,7 @@ def _pdfa_merge(parts: list[Path], output_path: Path):
 def generate_contract_pdf(contract, tender, bid, vendor, project=None):
     with tempfile.TemporaryDirectory(prefix="pba_pdf_") as tmp_dir_name:
         tmp_dir = Path(tmp_dir_name)
-        total_award = bid.bid_amount or tender.budget or 0
+        total_award = contract.resolved_award_value()
         project = project or _resolve_contract_project(contract)
 
         main_pdf = tmp_dir / "01_main_agreement.pdf"

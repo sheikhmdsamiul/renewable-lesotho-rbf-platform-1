@@ -14,6 +14,8 @@ from .models import (
     PasswordResetRequest,
     PasswordResetRequestStatus,
     PlatformConfiguration,
+    PROCUREMENT_METHOD_BUILTINS,
+    PROCUREMENT_VISIBILITY_MODES,
     BlacklistedIdentifier,
     BlacklistAppeal,
     BlacklistAppealStatus,
@@ -43,6 +45,8 @@ ADMIN_CREATE_ROLE_ALIASES = {
     'Project Steering Committee': UserRole.UNDP_DONOR,
     'UNDP': UserRole.UNDP_DONOR,
     'Auditor': UserRole.AUDITOR,
+    'EC': UserRole.EVALUATION_COMMITTEE,
+    'Evaluation Committee': UserRole.EVALUATION_COMMITTEE,
 }
 
 
@@ -72,9 +76,10 @@ class UserSerializer(serializers.ModelSerializer):
             UserRole.TAC: {'dashboard', 'vendors', 'projects', 'payments', 'evaluations', 'blacklisting', 'reports', 'notifications'},
             UserRole.DOE_OFFICER: {'dashboard', 'vendors', 'projects', 'blacklisting', 'reports', 'notifications'},
             UserRole.FIELD_VERIFIER: {'dashboard', 'projects', 'notifications', 'reports'},
-            UserRole.UNDP_DONOR: {'dashboard', 'vendors', 'projects', 'payments', 'reports', 'notifications'},
+            UserRole.UNDP_DONOR: {'dashboard', 'vendors', 'projects', 'payments', 'issues', 'reports', 'notifications'},
             UserRole.AUDITOR: {'dashboard', 'vendors', 'projects', 'payments', 'reports', 'audit_logs', 'prospect_sync', 'notifications'},
             UserRole.VENDOR: {'dashboard', 'vendors', 'tenders', 'prequalification', 'bids', 'projects', 'payments', 'notifications', 'my_profile', 'my_bids', 'contracting', 'applications', 'blacklisting'},
+            UserRole.EVALUATION_COMMITTEE: {'dashboard', 'evaluations', 'notifications'},
         }.get(obj.role, {'dashboard'})
         default_actions = {
             UserRole.RBF_OFFICIAL: ['view', 'create', 'edit', 'submit', 'upload', 'download', 'review', 'verify', 'publish', 'approve', 'reject', 'confirm', 'endorse', 'pay', 'mark_paid', 'assign', 'resolve', 'reinstate', 'export', 'view_sensitive', 'view_bank_details', 'run_sync', 'retry_sync', 'generate_report', 'respond', 'flag_issue'],
@@ -84,6 +89,7 @@ class UserSerializer(serializers.ModelSerializer):
             UserRole.UNDP_DONOR: ['view', 'review', 'approve', 'reject', 'export', 'respond', 'flag_issue'],
             UserRole.AUDITOR: ['view', 'create', 'edit', 'review', 'download', 'export', 'generate_report', 'respond', 'flag_issue'],
             UserRole.VENDOR: ['view', 'create', 'edit', 'submit', 'upload', 'download', 'sign', 'appeal'],
+            UserRole.EVALUATION_COMMITTEE: ['view', 'review', 'approve', 'export', 'respond'],
         }.get(obj.role, ['view'])
         return {module: default_actions for module in default_modules}
 
@@ -352,7 +358,7 @@ class AdminManagedUserSerializer(serializers.ModelSerializer):
         normalized = ADMIN_CREATE_ROLE_ALIASES.get(str(value).strip(), value)
         if normalized in {UserRole.VENDOR, UserRole.ADMIN}:
             raise serializers.ValidationError('Role cannot be Vendor or Super Admin for admin-created users.')
-        if normalized not in {UserRole.RBF_OFFICIAL, UserRole.TAC, UserRole.DOE_OFFICER, UserRole.FIELD_VERIFIER, UserRole.UNDP_DONOR, UserRole.AUDITOR}:
+        if normalized not in {UserRole.RBF_OFFICIAL, UserRole.TAC, UserRole.DOE_OFFICER, UserRole.FIELD_VERIFIER, UserRole.UNDP_DONOR, UserRole.AUDITOR, UserRole.EVALUATION_COMMITTEE}:
             raise serializers.ValidationError('Unsupported admin-managed role.')
         return normalized
 
@@ -461,10 +467,46 @@ class OrganizationSerializer(serializers.ModelSerializer):
 
 
 class PlatformConfigurationSerializer(serializers.ModelSerializer):
+    TECHNICAL_CRITERION_KEYS = (
+        'technical_score',
+        'feasibility_score',
+        'om_score',
+        'kpi_score',
+        'gender_score',
+        'environmental_score',
+    )
+
     class Meta:
         model = PlatformConfiguration
         fields = '__all__'
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def validate_technical_scoring_criteria(self, value):
+        if not isinstance(value, list):
+            raise serializers.ValidationError('Must be a list of scoring criteria.')
+        by_key = {}
+        for entry in value:
+            if not isinstance(entry, dict):
+                raise serializers.ValidationError('Each criterion must be an object with key, label, and max_score.')
+            key = entry.get('key')
+            if key not in self.TECHNICAL_CRITERION_KEYS:
+                raise serializers.ValidationError(f'Unknown criterion key: {key!r}.')
+            if key in by_key:
+                raise serializers.ValidationError(f'Duplicate criterion key: {key!r}.')
+            label = str(entry.get('label') or '').strip()
+            if not label:
+                raise serializers.ValidationError(f'Criterion {key!r} needs a label.')
+            try:
+                max_score = int(entry.get('max_score'))
+            except (TypeError, ValueError):
+                raise serializers.ValidationError(f'Criterion {key!r} needs a numeric max_score.')
+            if max_score < 0 or max_score > 100:
+                raise serializers.ValidationError(f'Criterion {key!r} max_score must be between 0 and 100.')
+            by_key[key] = {'key': key, 'label': label[:80], 'max_score': max_score}
+        missing = [key for key in self.TECHNICAL_CRITERION_KEYS if key not in by_key]
+        if missing:
+            raise serializers.ValidationError(f'Missing criteria: {", ".join(missing)}.')
+        return [by_key[key] for key in self.TECHNICAL_CRITERION_KEYS]
 
     def validate_allowed_file_types(self, value):
         if value in (None, ''):
@@ -472,6 +514,61 @@ class PlatformConfigurationSerializer(serializers.ModelSerializer):
         if isinstance(value, str):
             return [item.strip().upper() for item in value.split('/') if item.strip()]
         return [str(item).strip().upper() for item in value if str(item).strip()]
+
+    def validate_procurement_methods(self, value):
+        """Stores only the CUSTOM procurement methods added beyond the two permanent
+        built-ins (Open Tendering / Restricted Tendering) — see
+        PROCUREMENT_METHOD_BUILTINS and procurement_methods_normalized()."""
+        if not isinstance(value, list):
+            raise serializers.ValidationError('Must be a list of procurement methods.')
+        builtin_values = {b['value'] for b in PROCUREMENT_METHOD_BUILTINS}
+        seen = set()
+        cleaned = []
+        for entry in value:
+            if not isinstance(entry, dict):
+                raise serializers.ValidationError('Each procurement method must be an object with value and visibilityMode.')
+            method_value = str(entry.get('value') or '').strip()
+            if not method_value:
+                raise serializers.ValidationError('Each procurement method needs a name.')
+            if method_value in builtin_values:
+                raise serializers.ValidationError(f'{method_value!r} is a built-in procurement method and cannot be re-added.')
+            if method_value in seen:
+                raise serializers.ValidationError(f'Duplicate procurement method: {method_value!r}.')
+            mode = entry.get('visibilityMode')
+            if mode not in PROCUREMENT_VISIBILITY_MODES:
+                raise serializers.ValidationError(
+                    f'Invalid visibility mode for {method_value!r}: {mode!r}. '
+                    f'Must be one of: {", ".join(PROCUREMENT_VISIBILITY_MODES)}.'
+                )
+            seen.add(method_value)
+            cleaned.append({'value': method_value[:64], 'visibilityMode': mode})
+        return cleaned
+
+    def validate_currencies(self, value):
+        """The full, Super-Admin-owned currency list (no locked built-ins, unlike
+        procurement methods) — must have at least one entry; exactly one
+        isDefault=True is enforced by normalizing rather than erroring, so a
+        forgetful Super Admin submission still saves cleanly."""
+        if not isinstance(value, list) or not value:
+            raise serializers.ValidationError('Must be a non-empty list of currencies.')
+        seen = set()
+        cleaned = []
+        for entry in value:
+            if not isinstance(entry, dict):
+                raise serializers.ValidationError('Each currency must be an object with value and isDefault.')
+            currency_value = str(entry.get('value') or '').strip()
+            if not currency_value:
+                raise serializers.ValidationError('Each currency needs a name.')
+            if currency_value in seen:
+                raise serializers.ValidationError(f'Duplicate currency: {currency_value!r}.')
+            seen.add(currency_value)
+            cleaned.append({'value': currency_value[:64], 'isDefault': bool(entry.get('isDefault'))})
+        default_entries = [c for c in cleaned if c['isDefault']]
+        if len(default_entries) != 1:
+            for c in cleaned:
+                c['isDefault'] = False
+            cleaned[0]['isDefault'] = True
+        return cleaned
 
     def validate_national_main_program_budget(self, value):
         if value is None:

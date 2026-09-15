@@ -16,6 +16,9 @@ from .views import (
     PlatformConfigurationView,
     PlatformConfigurationBoundaryRefreshView,
     PlatformConfigurationBoundaryUploadView,
+    EvaluationScoringConfigView,
+    ProcurementMethodsConfigView,
+    CurrenciesConfigView,
     SystemHealthView,
     SuperAdminDashboardView,
     RolePermissionsView,
@@ -41,6 +44,9 @@ urlpatterns = [
     path('platform-configuration/', PlatformConfigurationView.as_view(), name='platform_configuration'),
     path('platform-configuration/refresh-boundary/', PlatformConfigurationBoundaryRefreshView.as_view(), name='platform_configuration_refresh_boundary'),
     path('platform-configuration/upload-boundary/', PlatformConfigurationBoundaryUploadView.as_view(), name='platform_configuration_upload_boundary'),
+    path('platform-configuration/evaluation-scoring/', EvaluationScoringConfigView.as_view(), name='evaluation_scoring_config'),
+    path('platform-configuration/procurement-methods/', ProcurementMethodsConfigView.as_view(), name='procurement_methods_config'),
+    path('platform-configuration/currencies/', CurrenciesConfigView.as_view(), name='currencies_config'),
     path('system-health/', SystemHealthView.as_view(), name='system_health'),
 ]
 urlpatterns += router.urls

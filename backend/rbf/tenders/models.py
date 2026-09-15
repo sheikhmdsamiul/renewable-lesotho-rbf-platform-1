@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from django.db import models
 from django.conf import settings
 from django.utils import timezone
@@ -19,6 +21,7 @@ class PublishApprovalStatus(models.TextChoices):
     PENDING = 'pending', 'Pending'
     APPROVED = 'approved', 'Approved'
     REJECTED = 'rejected', 'Rejected'
+    CHANGES_REQUESTED = 'changes_requested', 'Changes Requested'
 
 
 class BidStatus(models.TextChoices):
@@ -48,8 +51,15 @@ class BidStage2Status(models.TextChoices):
 
 
 class ProcurementWorkflow(models.TextChoices):
-    """How the Technical and Financial stages are handled after EOI shortlisting."""
-    COMBINED = 'combined', 'Combined'          # Tech + Fin submitted together, evaluated tech-then-fin that financial is sealed until technical clearance
+    """How the Technical and Financial stages are handled."""
+    # EOI -> Combined: an Expression of Interest stage first; willing vendors submit an
+    # EOI, the RBF shortlists, and the shortlisted vendors are invited to bid in a single
+    # Combined (Technical + Financial) stage. Auto-locks the procurement method to
+    # Restricted Tendering.
+    EOI_COMBINED = 'eoi_combined', 'EOI → Combined'
+    COMBINED = 'combined', 'Combined'          # Direct single-stage Combined (Tech + Fin together); no EOI required. Evaluated tech-then-fin such that financial is sealed until technical clearance.
+    # SEQUENTIAL is retained as a legacy value so historical tenders (EOI -> Technical ->
+    # Financial) keep working; it is no longer offered in the tender-creation UI.
     SEQUENTIAL = 'sequential', 'Sequential'    # Tech submission -> Tech eval -> if cleared -> Fin submission -> Fin eval
 
 
@@ -59,6 +69,24 @@ class BidStage(models.TextChoices):
     TECHNICAL = 'technical', 'Technical'
     FINANCIAL = 'financial', 'Financial'
     COMBINED = 'combined', 'Combined'
+
+
+class ProcurementMethod(models.TextChoices):
+    """Values use the existing long display strings as both value and label —
+    matches what tenders already had stored before this field gained choices=,
+    so no backfill/migration of existing data is needed."""
+    OPEN = 'Open Tendering', 'Open Tendering'
+    RESTRICTED = 'Restricted Tendering', 'Restricted Tendering'
+
+
+class BudgetDisclosure(models.TextChoices):
+    CONFIDENTIAL = 'confidential', 'Confidential'
+    PUBLISHED = 'published', 'Published'
+
+
+class SubmissionMethod(models.TextChoices):
+    ONLINE_ONLY = 'online_only', 'Online Only'
+    HYBRID = 'hybrid', 'Hybrid (Online + Physical)'
 
 
 class Tender(models.Model):
@@ -82,7 +110,23 @@ class Tender(models.Model):
 
     application_type = models.CharField(max_length=64, blank=True)
     stage_type = models.CharField(max_length=64, blank=True)
+    # Free text, not choices=ProcurementMethod.choices — existing tenders/tests already
+    # store other values here (e.g. "National") beyond the frontend's two options, so a
+    # hard DB-level constraint would reject legitimate existing data. ProcurementMethod
+    # is only used for comparisons (== ProcurementMethod.RESTRICTED) in views.py.
     procurement_method = models.CharField(max_length=64, blank=True)
+    # A tender that exists solely to run an EOI stage and shortlist vendors — it never
+    # itself collects a Combined bid. Workflow is forced to eoi_combined and its own
+    # technical_deadline is not required (see TenderSerializer.validate). Mutually
+    # exclusive with linked_eoi_tender below (enforced in the serializer, not the DB).
+    is_eoi_invite_only = models.BooleanField(default=False)
+    # When set, this tender's own vendor bids skip the EOI stage entirely and open
+    # directly at Combined (see _bid_stage_spec); the invited-vendor roster is copied
+    # from linked_eoi_tender (see TenderSerializer._sync_linked_eoi_vendors), and name
+    # is kept forced equal to linked_eoi_tender.name.
+    linked_eoi_tender = models.ForeignKey(
+        'self', null=True, blank=True, on_delete=models.SET_NULL, related_name='linked_tenders',
+    )
     address_for_document = models.CharField(max_length=255, blank=True)
     address_for_security = models.CharField(max_length=255, blank=True)
     place_for_opening = models.CharField(max_length=255, blank=True)
@@ -90,11 +134,37 @@ class Tender(models.Model):
     time_for_completion = models.CharField(max_length=128, blank=True)
     invited_by = models.CharField(max_length=255, blank=True)
     bidding_currency = models.CharField(max_length=64, blank=True)
+    # Additional currencies this tender accepts beyond its base (bidding_currency), each
+    # mapped to a fixed exchange rate INTO the base currency, e.g. {"USD": "19.50"} means
+    # 1 USD = 19.50 units of bidding_currency. Empty (default) = single-currency tender,
+    # identical to legacy behavior. Set once at tender creation and never changes.
+    currency_rates = models.JSONField(default=dict, blank=True)
     instruction = models.TextField(blank=True)
     pre_tender_meeting_info = models.TextField(blank=True)
     bidders_schedule_purchase = models.BooleanField(default=False)
+    document_fee_amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    document_fee_type = models.CharField(max_length=32, blank=True)
+    document_fee_refundable = models.BooleanField(default=False)
     tender_security_required = models.BooleanField(default=False)
+    # The following are informational/display-only procurement metadata — nothing in the
+    # bidding, evaluation, or award engines reads them (deliberately, per scope: these
+    # record real-world procurement detail without changing any enforcement logic).
+    language_of_bid_submission = models.CharField(max_length=64, blank=True)
+    budget_disclosure = models.CharField(max_length=16, choices=BudgetDisclosure.choices, blank=True)
+    clarification_deadline = models.DateTimeField(null=True, blank=True)
+    site_visit_date = models.DateTimeField(null=True, blank=True)
+    bid_validity_period_days = models.PositiveIntegerField(null=True, blank=True)
+    # Distinct from TenderBid.warranty_period_months (the vendor's own offered warranty on
+    # their bid) — this is the RFP's minimum required floor, set by the RBF.
+    minimum_warranty_period_months = models.PositiveIntegerField(null=True, blank=True)
+    submission_method = models.CharField(max_length=16, choices=SubmissionMethod.choices, default=SubmissionMethod.ONLINE_ONLY)
+    digital_signature_required = models.BooleanField(default=True)
+    # EOI Invite-only concepts. Advisory: never enforced against the actual number of
+    # vendors shortlisted during EOI Review.
+    max_vendors_to_shortlist = models.PositiveIntegerField(null=True, blank=True)
+    advertisement_channels = models.JSONField(default=list, blank=True)
     contact_details = models.CharField(max_length=255, blank=True)
+    governing_documents = models.JSONField(default=list, blank=True)
     technology_types = models.JSONField(default=list, blank=True)
     target_districts = models.JSONField(default=list, blank=True)
     target_site_type = models.CharField(max_length=64, blank=True)
@@ -109,6 +179,10 @@ class Tender(models.Model):
     funding_source = models.CharField(max_length=128, blank=True)
     minimum_service_tier = models.CharField(max_length=64, blank=True)
     approximate_installation_target = models.PositiveIntegerField(null=True, blank=True)
+    # Lot-wise tendering: a tender with no TenderLot rows behaves exactly as a normal
+    # single-award tender. One with lots lets bidders price any subset of lots (subject
+    # to this optional cap) and lets RMT award each lot to a different vendor.
+    max_lots_per_bidder = models.PositiveIntegerField(null=True, blank=True)
     technical_weight = models.PositiveIntegerField(default=70)
     financial_weight = models.PositiveIntegerField(default=30)
     technical_threshold = models.PositiveIntegerField(default=70)
@@ -125,6 +199,14 @@ class Tender(models.Model):
     intent_to_award_at = models.DateTimeField(null=True, blank=True)
     cooling_off_until = models.DateTimeField(null=True, blank=True)
     dispute_started_at = models.DateTimeField(null=True, blank=True)
+
+    # RBF Official's comment, written only once the committee's evaluation for the
+    # tender is complete (quorum technical scores + finalized financial scores). Filled
+    # through the /evaluation_comment/ action on TenderViewSet, which enforces the gate.
+    evaluation_comment = models.TextField(blank=True)
+    evaluation_comment_author = models.CharField(max_length=255, blank=True)
+    evaluation_comment_updated_at = models.DateTimeField(null=True, blank=True)
+
     verified_at = models.DateTimeField(null=True, blank=True)
     published_at = models.DateTimeField(null=True, blank=True)
     awarded_at = models.DateTimeField(null=True, blank=True)
@@ -160,12 +242,155 @@ class Tender(models.Model):
     def __str__(self):
         return f"{self.reference_number} - {self.name}"
 
+    def currency_rate_to_base(self, currency):
+        """Exchange rate to convert `currency` INTO this tender's base currency
+        (bidding_currency). A blank currency, or one matching the base currency, is
+        already in base terms (rate 1). Falls back safely to 1 if a rate is somehow
+        missing for a currency this tender should have one for — never raises."""
+        if not currency or currency == self.bidding_currency:
+            return Decimal("1")
+        rate = (self.currency_rates or {}).get(currency)
+        try:
+            return Decimal(str(rate)) if rate else Decimal("1")
+        except Exception:
+            return Decimal("1")
+
     def master_deadline(self):
         """The overall tender deadline, derived from the staged deadlines."""
         candidates = [
             v for v in (self.eoi_deadline, self.technical_deadline, self.financial_deadline) if v
         ]
         return max(candidates) if candidates else None
+
+    def save(self, *args, **kwargs):
+        # Keep the legacy single "deadline" column (used by exports, filters, and
+        # auto-close checks) always in sync with the staged deadlines an admin actually
+        # configures, rather than trusting a client-supplied value that can drift out of
+        # sync with them.
+        computed_deadline = self.master_deadline()
+        if computed_deadline:
+            self.deadline = computed_deadline
+        super().save(*args, **kwargs)
+
+
+class TenderLot(models.Model):
+    """A separately-awardable package within a lot-wise tender.
+
+    A tender with no lots is awarded as a single whole (unchanged legacy behavior,
+    using the award fields on Tender itself). A tender with one or more TenderLot rows
+    switches into lot-wise mode: bidders price whichever lots they choose (see
+    TenderBidLotOffer), and RMT selects a winner independently for each lot, though the
+    standstill/cooling-off/dispute timeline stays shared at the tender level.
+    """
+    tender = models.ForeignKey(Tender, on_delete=models.CASCADE, related_name='lots')
+    name = models.CharField(max_length=255)
+    description = models.TextField(blank=True)
+    technology_types = models.JSONField(default=list, blank=True)
+    target_districts = models.JSONField(default=list, blank=True)
+    estimated_installation_target = models.PositiveIntegerField(null=True, blank=True)
+    budget = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    position = models.PositiveIntegerField(default=0)
+
+    # Award state — independent per lot, unlike the shared standstill/cooling-off timing.
+    awarded_vendor_id = models.CharField(max_length=64, blank=True)
+    awarded_vendor_name = models.CharField(max_length=255, blank=True)
+    intent_to_award_bid = models.ForeignKey(
+        'TenderBid', null=True, blank=True, on_delete=models.SET_NULL, related_name='lot_intent_awards',
+    )
+    intent_to_award_at = models.DateTimeField(null=True, blank=True)
+    awarded_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['position', 'id']
+        verbose_name = 'Tender Lot'
+        verbose_name_plural = 'Tender Lots'
+
+    def __str__(self):
+        return f"{self.name} ({self.tender.reference_number})"
+
+
+class TenderBoqItem(models.Model):
+    """One line of the Bill of Quantities the RBF Official designs while creating the
+    tender — description, unit, and quantity are fixed by the RMT; a bidder only ever
+    supplies a unit price against each line (see TenderBid.boq_items /
+    TenderBidLotOffer.boq_items, which are built server-side from this template plus
+    the vendor's submitted prices, never from vendor-supplied descriptions).
+
+    For a non-lot-wise tender, items have lot=None and belong to the tender directly.
+    For a lot-wise tender, each lot gets its own independent item list (lot is set,
+    tender is left in sync with lot.tender). A tender with no TenderBoqItem rows at all
+    falls back to the legacy behavior: the vendor freely authors their own BOQ.
+    """
+    tender = models.ForeignKey(Tender, on_delete=models.CASCADE, related_name='boq_template_items')
+    lot = models.ForeignKey(
+        TenderLot, null=True, blank=True, on_delete=models.CASCADE, related_name='boq_template_items',
+        help_text="Set for a lot-wise tender's per-lot BOQ; blank for a non-lot-wise tender's single BOQ.",
+    )
+    description = models.CharField(max_length=255)
+    unit = models.CharField(max_length=64, blank=True)
+    quantity = models.DecimalField(max_digits=14, decimal_places=2)
+    position = models.PositiveIntegerField(default=0)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['position', 'id']
+        verbose_name = 'Tender BOQ Item'
+        verbose_name_plural = 'Tender BOQ Items'
+
+    def __str__(self):
+        return f"{self.description} ({self.tender.reference_number})"
+
+
+class TenderEvaluationCommitteeMember(models.Model):
+    """A user (holding UserRole.EVALUATION_COMMITTEE) assigned by Super Admin to
+    evaluate this specific tender's bids. Membership is per-tender, not platform-wide —
+    an Evaluation Committee member may sit on several tenders' committees but only ones
+    they've actually been assigned to. A tender's roster must have 3-5 members (enforced
+    where it's written, not here) before evaluation can begin on that tender."""
+    tender = models.ForeignKey(Tender, on_delete=models.CASCADE, related_name='evaluation_committee_members')
+    member = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='evaluation_committee_assignments')
+    assigned_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name='+')
+    assigned_at = models.DateTimeField(auto_now_add=True)
+    # Blanket conflict-of-interest attestation: the member confirms they have no (or
+    # only already-declared) conflicts of interest with any bidder on this tender.
+    # Required before the member can score any bid — enforced in the evaluation viewset.
+    coi_attested = models.BooleanField(default=False)
+    coi_attested_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        unique_together = ('tender', 'member')
+        ordering = ['assigned_at', 'id']
+        verbose_name = 'Tender Evaluation Committee Member'
+        verbose_name_plural = 'Tender Evaluation Committee Members'
+
+    def __str__(self):
+        return f"{self.member_id} on {self.tender.reference_number}"
+
+
+class TenderInvitedVendor(models.Model):
+    """A vendor specifically invited to bid on a Restricted Tendering tender.
+    Only meaningful when Tender.procurement_method == ProcurementMethod.RESTRICTED —
+    for an Open Tendering tender this list is simply unused (any pre-qualified vendor
+    can bid). Enforced in TenderViewSet._assert_vendor_submission_access and in
+    TenderViewSet.get_queryset (a non-invited vendor never sees a Restricted tender)."""
+    tender = models.ForeignKey(Tender, on_delete=models.CASCADE, related_name='invited_vendors')
+    vendor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='tender_invitations')
+    invited_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name='+')
+    invited_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('tender', 'vendor')
+        ordering = ['invited_at', 'id']
+        verbose_name = 'Tender Invited Vendor'
+        verbose_name_plural = 'Tender Invited Vendors'
+
+    def __str__(self):
+        return f"{self.vendor_id} invited to {self.tender.reference_number}"
 
 
 class TenderViewLog(models.Model):
@@ -210,6 +435,9 @@ class TenderBid(models.Model):
     # Bid content
     bid_amount = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
     subsidy_requested = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    # Blank means "the tender's base currency" (bidding_currency) — backward-compatible
+    # default for every bid submitted before multi-currency tenders existed.
+    bid_currency = models.CharField(max_length=64, blank=True)
     proposal_file = models.FileField(upload_to='tender_bids/', null=True, blank=True)
     stage = models.CharField(max_length=64, blank=True)  # e.g., "Pre-Qualification", "Site-Specific"
     bid_stage = models.CharField(
@@ -261,6 +489,11 @@ class TenderBid(models.Model):
     preferred_district = models.CharField(max_length=128, blank=True)
     technology_types = models.JSONField(default=list, blank=True)
     custom_documents = models.JSONField(default=list, blank=True, help_text="Uploaded custom required bid documents: [{name, expected_type, file_name, file_url}]")
+    declared_lots = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Lot IDs (as strings) the vendor declared intent to bid on at EOI stage, for lot-wise tenders. Scopes which lots may be tagged to sites and priced in later stages.",
+    )
     
     # Metadata
     version_number = models.PositiveIntegerField(default=1)
@@ -310,10 +543,18 @@ class TenderBid(models.Model):
         ordering = ['-submitted_at']
         unique_together = ('tender', 'vendor_id', 'version_number')
         constraints = [
+            # Scoped per bid_stage (not just tender+vendor) because the EOI -> Technical
+            # -> Financial workflow deliberately keeps one persistent row per stage, each
+            # living out its own status independently — a Technical bid stays "Under
+            # Review" forever (there's no explicit accept action for it), so a plain
+            # tender+vendor uniqueness would make it permanently impossible to also have
+            # a "Submitted" Financial row for the same vendor once Technical has been
+            # submitted. Per-stage scoping still prevents two live rows within the same
+            # stage (a genuine duplicate submission).
             models.UniqueConstraint(
-                fields=['tender', 'vendor_id'],
+                fields=['tender', 'vendor_id', 'bid_stage'],
                 condition=~models.Q(status__in=[BidStatus.DRAFT, BidStatus.REVISION_REQUIRED, BidStatus.WITHDRAWN, BidStatus.ACCEPTED]),
-                name='uniq_tender_vendor_final_bid',
+                name='uniq_tender_vendor_stage_final_bid',
             ),
         ]
         indexes = [
@@ -332,10 +573,54 @@ class EvaluationStatus(models.TextChoices):
     SCORED = 'Scored'
 
 
+class EvaluationStage(models.TextChoices):
+    """Which pass of the evaluation this row represents. Explicit rather than inferred
+    from the evaluator's role, since a single Evaluation Committee member now submits
+    both a technical and (later) a financial row for the same bid."""
+    TECHNICAL = 'technical', 'Technical'
+    FINANCIAL = 'financial', 'Financial'
+
+
+class EvaluationSubmissionStatus(models.TextChoices):
+    """Whether an evaluator's row is still a working draft or has been formally
+    submitted (locked). Production e-tendering practice: an evaluator may iterate on a
+    DRAFT freely, but once SUBMITTED the marks are sealed — only a Super Admin can
+    reopen them, and every change is recorded as a TenderBidEvaluationRevision."""
+    DRAFT = 'draft', 'Draft'
+    SUBMITTED = 'submitted', 'Submitted'
+
+
+class EvaluationRevisionAction(models.TextChoices):
+    DRAFT_SAVED = 'draft_saved', 'Draft Saved'
+    SUBMITTED = 'submitted', 'Submitted'
+    REOPENED = 'reopened', 'Reopened by Super Admin'
+
+
 class TenderBidEvaluation(models.Model):
     bid = models.ForeignKey(TenderBid, on_delete=models.CASCADE, related_name='evaluations')
     evaluator = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL)
+    stage = models.CharField(max_length=16, choices=EvaluationStage.choices, default=EvaluationStage.TECHNICAL)
+    lot = models.ForeignKey(
+        TenderLot, null=True, blank=True, on_delete=models.CASCADE, related_name='bid_evaluations',
+        help_text="Set only for a financial-stage row on a lot-wise tender, where a single bid can have a distinct financial score per lot. Technical evaluations stay lot=None — technical merit is shared across a bid's lots.",
+    )
+    financial_score_auto_calculated = models.BooleanField(
+        default=False,
+        help_text="True when financial_score was computed from the price formula (100 x lowest bid / this bid) rather than manually typed.",
+    )
     status = models.CharField(max_length=16, choices=EvaluationStatus.choices, default=EvaluationStatus.PENDING)
+    submission_status = models.CharField(
+        max_length=16,
+        choices=EvaluationSubmissionStatus.choices,
+        default=EvaluationSubmissionStatus.DRAFT,
+        help_text="Draft = working marks, freely editable; Submitted = sealed, requires a Super Admin unlock to change.",
+    )
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    justifications = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Per-criterion rationale keyed by the technical rubric key (e.g. {'technical': '...', 'feasibility': '...'}). Required for every scored criterion before a technical evaluation can be submitted.",
+    )
     technical_score = models.PositiveIntegerField(default=0)
     financial_score = models.PositiveIntegerField(default=0)
     feasibility_score = models.PositiveIntegerField(default=0)
@@ -354,10 +639,84 @@ class TenderBidEvaluation(models.Model):
         indexes = [
             models.Index(fields=['status']),
             models.Index(fields=['bid']),
+            models.Index(fields=['evaluator', 'stage', 'status']),
+        ]
+        constraints = [
+            # One technical row per (bid, evaluator) — lot is always NULL for technical.
+            models.UniqueConstraint(
+                fields=['bid', 'evaluator', 'stage', 'lot'],
+                condition=~models.Q(lot__isnull=True),
+                name='uniq_bid_evaluator_stage_lot',
+            ),
+            models.UniqueConstraint(
+                fields=['bid', 'evaluator', 'stage'],
+                condition=models.Q(lot__isnull=True),
+                name='uniq_bid_evaluator_stage_no_lot',
+            ),
         ]
 
     def __str__(self):
         return f"Evaluation for bid {self.bid_id} ({self.status})"
+
+
+class TenderBidEvaluationRevision(models.Model):
+    """Immutable before/after snapshot of a TenderBidEvaluation, written whenever a
+    draft is saved, submitted, or reopened by a Super Admin. This is the audit trail
+    that proves who marked what, when, and how the marks evolved."""
+    evaluation = models.ForeignKey(TenderBidEvaluation, on_delete=models.CASCADE, related_name='revisions')
+    changed_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL)
+    action = models.CharField(max_length=16, choices=EvaluationRevisionAction.choices, default=EvaluationRevisionAction.DRAFT_SAVED)
+    reason = models.TextField(blank=True)
+    before = models.JSONField(default=dict, blank=True)
+    after = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['created_at']
+        indexes = [
+            models.Index(fields=['evaluation', 'created_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.get_action_display()} for evaluation {self.evaluation_id} by {self.changed_by_id}"
+
+
+class ConflictOfInterestRelationship(models.TextChoices):
+    FAMILY = 'family', 'Family member of bidder'
+    BUSINESS = 'business', 'Business relationship with bidder'
+    FORMER_EMPLOYER = 'former_employer', 'Former employee of bidder'
+    HOLDING = 'holding', 'Holdings / financial interest in bidder'
+    OTHER = 'other', 'Other'
+
+
+class EvaluationConflictOfInterest(models.Model):
+    """A declared or administered conflict of interest between an Evaluation Committee
+    member and a specific bidder on a tender. An unresolved declaration blocks that
+    member from scoring the bidder's bids. Every committee member must also complete a
+    blanket attestation (TenderEvaluationCommitteeMember.coi_attested) before scoring
+    anything on the tender."""
+    evaluator = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='declared_conflicts')
+    tender = models.ForeignKey(Tender, on_delete=models.CASCADE, related_name='conflict_of_interests')
+    vendor_id = models.CharField(max_length=64, blank=True)
+    vendor_name = models.CharField(max_length=255, blank=True)
+    relationship = models.CharField(max_length=32, choices=ConflictOfInterestRelationship.choices, default=ConflictOfInterestRelationship.OTHER)
+    details = models.TextField(blank=True)
+    declared_at = models.DateTimeField(auto_now_add=True)
+    resolved = models.BooleanField(default=False)
+    resolved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name='resolved_conflicts'
+    )
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    resolution_notes = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ['-declared_at']
+        indexes = [
+            models.Index(fields=['evaluator', 'tender', 'resolved']),
+        ]
+
+    def __str__(self):
+        return f"COI: {self.evaluator_id} vs {self.vendor_name or self.vendor_id} on {self.tender_id}"
 
 
 class ChallengeCategory(models.TextChoices):
@@ -521,6 +880,9 @@ class ContractSignatureStatus(models.TextChoices):
 class TenderContract(models.Model):
     tender = models.ForeignKey(Tender, on_delete=models.CASCADE, related_name='contracts')
     bid = models.ForeignKey(TenderBid, null=True, blank=True, on_delete=models.SET_NULL, related_name='contracts')
+    # Set only for lot-wise tenders — a vendor can win several lots with the same bid,
+    # so (tender, bid) alone is no longer enough to tell contracts apart.
+    lot = models.ForeignKey('TenderLot', null=True, blank=True, on_delete=models.SET_NULL, related_name='contracts')
     vendor_id = models.CharField(max_length=64)
     vendor_name = models.CharField(max_length=255)
     vendor_email = models.EmailField(blank=True)
@@ -558,9 +920,34 @@ class TenderContract(models.Model):
     def __str__(self):
         return f"Contract {self.reference_number} ({self.status})"
 
+    def resolved_award_value(self) -> Decimal:
+        """The actual awarded price for this contract, converted into the tender's base
+        currency (what the RBF actually tracks/disburses in) — the specific lot's
+        winning bid amount for a lot-wise award, otherwise the bid's own bid_amount."""
+        bid_currency = self.bid.bid_currency if self.bid_id else ''
+        if self.lot_id and self.bid_id:
+            offer = TenderBidLotOffer.objects.filter(bid_id=self.bid_id, lot_id=self.lot_id).first()
+            if offer and offer.bid_amount:
+                return Decimal(str(offer.bid_amount)) * self.tender.currency_rate_to_base(bid_currency)
+        if self.bid_id and self.bid.bid_amount:
+            return Decimal(str(self.bid.bid_amount)) * self.tender.currency_rate_to_base(bid_currency)
+        if self.lot_id and self.lot.budget:
+            return Decimal(str(self.lot.budget))
+        if self.tender_id and self.tender.budget:
+            return Decimal(str(self.tender.budget))
+        return Decimal('0.00')
+
 
 class TenderBidSite(models.Model):
     bid = models.ForeignKey(TenderBid, on_delete=models.CASCADE, related_name='sites')
+    lot = models.ForeignKey(
+        TenderLot,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='bid_sites',
+        help_text="Which lot this site belongs to, for lot-wise tenders. Blank for non-lot-wise tenders.",
+    )
     site_name = models.CharField(max_length=255)
     district = models.CharField(max_length=128, blank=True)
     village_sub_district = models.CharField(max_length=255, blank=True)
@@ -584,6 +971,36 @@ class TenderBidSite(models.Model):
 
     def __str__(self):
         return f"{self.site_name} ({self.bid.tender.reference_number})"
+
+
+class TenderBidLotOffer(models.Model):
+    """A vendor's price for one lot of a lot-wise tender, within their single bid.
+
+    A vendor may offer on any subset of a tender's lots (one, several, or all),
+    subject to Tender.max_lots_per_bidder if the RBF Admin set a cap.
+    """
+    bid = models.ForeignKey(TenderBid, on_delete=models.CASCADE, related_name='lot_offers')
+    lot = models.ForeignKey(TenderLot, on_delete=models.CASCADE, related_name='bid_offers')
+    bid_amount = models.DecimalField(max_digits=14, decimal_places=2)
+    subsidy_requested = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    # Populated (server-side, from the lot's TenderBoqItem template + this vendor's unit
+    # prices) only when the lot actually has a designed BOQ — see
+    # TenderBidSerializer.validate(). When present, bid_amount is derived from this
+    # rather than trusted from the client. Blank list for a lot with no BOQ template,
+    # where bid_amount is still just a plain vendor-typed number (legacy behavior).
+    boq_items = models.JSONField(default=list, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['lot__position', 'lot_id']
+        constraints = [
+            models.UniqueConstraint(fields=['bid', 'lot'], name='uniq_bid_lot_offer'),
+        ]
+
+    def __str__(self):
+        return f"{self.bid.vendor_name} — {self.lot.name}: {self.bid_amount}"
 
 
 class NoticeCategory(models.TextChoices):
@@ -624,12 +1041,36 @@ class Notice(models.Model):
         return f"{self.notice_id} - {self.title}"
 
 
+class RequiredDocumentFieldKey(models.TextChoices):
+    """Canonical TenderBid file fields a configured required-document row can bind to.
+
+    When a TenderRequiredDocument specifies one of these, the vendor wizard uploads
+    directly into that structured field on TenderBid (so BOQ line-items, contract-annex
+    generation, and evaluator screens that reference these fields by name keep working).
+    A blank field_key means the document is fully custom, stored in TenderBid.custom_documents.
+    """
+    COMPANY_CREDENTIALS = 'company_credentials_file', 'Company Credentials'
+    FINANCIAL_STANDING = 'financial_standing_file', 'Financial Standing'
+    TECHNICAL_EXPERIENCE = 'technical_experience_file', 'Technical Experience'
+    TRACK_RECORD = 'track_record_file', 'Track Record'
+    TECHNICAL_PROPOSAL = 'technical_proposal_file', 'Technical Proposal'
+    BOQ = 'boq_file', 'Bill of Quantities'
+    GENDER_ACTION_PLAN = 'gender_action_plan_file', 'Gender Action Plan'
+    IMPLEMENTATION_PLAN = 'implementation_plan_file', 'Implementation Plan'
+    OM_PLAN = 'om_plan_file', 'O&M Plan'
+    REPORTING_TEMPLATES = 'reporting_templates_file', 'Reporting Templates'
+    DISTRIBUTION_MAP = 'distribution_map_file', 'Distribution Map'
+    FINANCIAL_PROPOSAL = 'financial_proposal_file', 'Financial Proposal'
+    TENDER_SECURITY = 'tender_security_file', 'Tender Security'
+
+
 class TenderRequiredDocument(models.Model):
     """A supporting document the RBF requires from bidders, configurable per tender and bid stage."""
     tender = models.ForeignKey(Tender, on_delete=models.CASCADE, related_name="required_documents")
     name = models.CharField(max_length=255)
     expected_type = models.CharField(max_length=64, blank=True, default='')
     bid_stage = models.CharField(max_length=32, choices=BidStage.choices, default=BidStage.EOI)
+    field_key = models.CharField(max_length=64, blank=True, default='', choices=RequiredDocumentFieldKey.choices)
     position = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

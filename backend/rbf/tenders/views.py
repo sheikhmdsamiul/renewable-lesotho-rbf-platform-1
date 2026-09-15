@@ -5,11 +5,16 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
+import json
+import re
 from django.utils import timezone
 from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
+from math import ceil
 from django.conf import settings
 from django.db import transaction
+from django.db import IntegrityError
+from django.db.models import Q, Count
 from django.db.models.functions import Coalesce
 from django.urls import reverse
 from rest_framework.parsers import MultiPartParser, FormParser
@@ -24,6 +29,11 @@ from .models import (
     BidStatus,
     TenderBidEvaluation,
     EvaluationStatus,
+    EvaluationSubmissionStatus,
+    EvaluationRevisionAction,
+    TenderBidEvaluationRevision,
+    EvaluationConflictOfInterest,
+    ConflictOfInterestRelationship,
     TenderContract,
     ContractStatus,
     ContractSignatureStatus,
@@ -36,6 +46,12 @@ from .models import (
     BidStage,
     ProcurementWorkflow,
     PublishApprovalStatus,
+    TenderLot,
+    TenderBidLotOffer,
+    TenderEvaluationCommitteeMember,
+    TenderInvitedVendor,
+    ProcurementMethod,
+    EvaluationStage,
 )
 from .serializers import (
     TenderSerializer,
@@ -47,6 +63,8 @@ from .serializers import (
     normalize_tender_stage,
     normalize_bid_stage,
     bid_stage_label,
+    workflow_has_eoi_stage,
+    workflow_is_combined_style,
     is_site_specific_stage,
     tender_stage_label,
     NoticeSerializer,
@@ -55,10 +73,12 @@ from .serializers import (
     ChallengeDocumentSerializer,
     ChallengeEventSerializer,
     ChallengeCreateSerializer,
+    TenderEvaluationCommitteeMemberSerializer,
+    TenderInvitedVendorSerializer,
 )
 from .pba_pdf import generate_contract_pdf
 from rbf.users.models import UserRole, VendorPrequalification, PrequalificationStatus
-from rbf.users.models import User
+from rbf.users.models import User, PlatformConfiguration, FinancialScoringFormula
 from rbf.users.blacklisting import is_vendor_restricted
 from rbf.common.urls import build_frontend_url
 from rbf.projects.models import Project, Milestone, MilestoneStatus, ProjectStatus, VerificationMethod, AuditLog
@@ -84,6 +104,54 @@ LESOTHO_DISTRICTS = [
 
 APPLICATION_WINDOW = 'application window'
 ACCESS_WINDOW = 'access window'
+
+
+def _invite_gated_procurement_values() -> set:
+    """Every procurement method value (built-in or Super-Admin-added custom) whose
+    vendor pool is a hand-picked invite list — Restricted, Limited/Single-Source,
+    and RFQ all share the same TenderInvitedVendor gate."""
+    config = PlatformConfiguration.objects.order_by('id').first()
+    if config is None:
+        return {ProcurementMethod.RESTRICTED}
+    return config.invite_gated_procurement_method_values()
+
+
+def _framework_procurement_values() -> set:
+    """Every procurement method value whose vendor pool is gated by pre-qualification
+    tier/technology match instead of an invite list (Framework / Pre-Qualified Pool)."""
+    return _platform_configuration().framework_procurement_method_values()
+
+
+def _limited_procurement_values() -> set:
+    """Every procurement method value capped to exactly one invited vendor
+    (Limited Tendering / Single-Source / Direct Contracting)."""
+    return _platform_configuration().limited_procurement_method_values()
+
+
+def _vendor_tier_number(tier: str):
+    match = re.search(r'\d+', str(tier or ''))
+    return int(match.group()) if match else None
+
+
+def _vendor_meets_framework_requirements(tender: Tender, prequalification) -> bool:
+    """Framework/Pre-Qualified Pool eligibility: the vendor's own approved
+    pre-qualification tier must be at least the tender's minimum_service_tier
+    (blank = no requirement), and if the tender lists technology_types, the
+    vendor's own technology_types must overlap it (blank tender list = no
+    requirement)."""
+    if prequalification is None:
+        return False
+    min_tier = _vendor_tier_number(getattr(tender, 'minimum_service_tier', ''))
+    if min_tier is not None:
+        vendor_tier = _vendor_tier_number(getattr(prequalification, 'tech_tier', ''))
+        if vendor_tier is None or vendor_tier < min_tier:
+            return False
+    tender_tech_types = set(getattr(tender, 'technology_types', None) or [])
+    if tender_tech_types:
+        vendor_tech_types = set(getattr(prequalification, 'technology_types', None) or [])
+        if not (tender_tech_types & vendor_tech_types):
+            return False
+    return True
 
 
 def _normalized_application_type(tender: Tender) -> str:
@@ -116,16 +184,18 @@ def _auto_close_tender_on_deadline(tender: Tender) -> bool:
 
 
 def _assert_evaluation_window_open(tender: Tender) -> None:
-    """Evaluation may only start once the tender is closed.
-
-    A published application-window tender whose submission deadline has passed
-    is automatically closed first. Raises ValidationError if evaluation is
-    attempted before the tender is closed.
+    """Technical/Financial submissions unlock per-bid via the staged EOI -> Technical ->
+    Financial workflow (each stage has its own deadline) — the tender's overall status
+    only reaches CLOSED once the *last* staged deadline passes, which is after Financial
+    too. Requiring CLOSED here would make it impossible to evaluate Technical proposals
+    in time to open Financial for shortlisted vendors, so evaluation is allowed while the
+    tender is still live (PUBLISHED), CLOSED, or already in EVALUATION — mirroring the
+    check EOI (Stage 1) review already uses.
     """
     _auto_close_tender_on_deadline(tender)
-    if tender.status not in {TenderStatus.CLOSED, TenderStatus.EVALUATION}:
+    if tender.status not in {TenderStatus.PUBLISHED, TenderStatus.CLOSED, TenderStatus.EVALUATION}:
         raise ValidationError(
-            {'detail': 'Evaluation can only start when the tender status is Closed. Close the tender before starting evaluation.'}
+            {'detail': 'Evaluation requires the tender to be Published, Closed, or in Evaluation.'}
         )
     if tender.status == TenderStatus.CLOSED:
         tender.status = TenderStatus.EVALUATION
@@ -309,11 +379,7 @@ def _assignment_technology_choices(contract: TenderContract) -> list[str]:
 
 
 def _contract_value(contract: TenderContract) -> Decimal:
-    if contract.bid and contract.bid.bid_amount:
-        return Decimal(str(contract.bid.bid_amount))
-    if contract.tender and contract.tender.budget:
-        return Decimal(str(contract.tender.budget))
-    return Decimal('0.00')
+    return contract.resolved_award_value()
 
 
 def _normalize_technology_type(value: str) -> str:
@@ -464,16 +530,41 @@ def _latest_vendor_prequalification(vendor_id: str):
     )
 
 
-TECHNICAL_EVALUATOR_ROLES = {UserRole.TAC, UserRole.ADMIN}
-FINANCIAL_EVALUATOR_ROLES = {UserRole.RBF_OFFICIAL, UserRole.ADMIN}
-TECHNICAL_SCORE_LIMITS = {
-    'technical_score': 20,
-    'feasibility_score': 15,
-    'om_score': 10,
-    'kpi_score': 10,
-    'gender_score': 10,
-    'environmental_score': 5,
-}
+def _platform_configuration() -> PlatformConfiguration:
+    return PlatformConfiguration.objects.order_by('id').first() or PlatformConfiguration()
+
+
+def _technical_score_limits() -> dict[str, int]:
+    """Super-Admin-configurable technical rubric (PlatformConfiguration.technical_scoring_criteria)."""
+    return _platform_configuration().technical_score_limits()
+
+
+def _technical_score_total() -> int:
+    return sum(_technical_score_limits().values()) or 70
+
+
+def _financial_scoring_formula() -> str:
+    return _platform_configuration().financial_scoring_formula
+
+
+def _score_from_price(lowest: Decimal, price: Decimal) -> Decimal:
+    """The two Super-Admin-selectable financial formulas — the lowest qualifying
+    price is always the reference point, either proportionally (QCBS-style) or
+    via a linear deviation from it."""
+    if _financial_scoring_formula() == FinancialScoringFormula.LINEAR_DEVIATION_100:
+        score = Decimal("100") - ((price - lowest) / lowest) * Decimal("100")
+        return max(score, Decimal("0"))
+    return (lowest / price) * Decimal("100")
+
+
+def _to_base_currency(tender: Tender, amount, currency: str | None) -> Decimal | None:
+    """Convert `amount` (in `currency`) into the tender's base currency, for any
+    comparison across bids that might be priced in different currencies."""
+    if amount is None:
+        return None
+    return Decimal(str(amount)) * tender.currency_rate_to_base(currency)
+
+
 FINANCIAL_SCORE_COMPONENT_LIMITS = {
     'technical_score': 10,
     'feasibility_score': 10,
@@ -496,9 +587,10 @@ def _fits_score_matrix(evaluation: TenderBidEvaluation, score_limits: dict[str, 
 
 
 def _technical_evaluation_score(evaluation: TenderBidEvaluation) -> Decimal:
-    if _fits_score_matrix(evaluation, TECHNICAL_SCORE_LIMITS):
-        raw_total = _sum_score_fields(evaluation, TECHNICAL_SCORE_LIMITS)
-        return (raw_total / Decimal("70")) * Decimal("100")
+    limits = _technical_score_limits()
+    if _fits_score_matrix(evaluation, limits):
+        raw_total = _sum_score_fields(evaluation, limits)
+        return (raw_total / Decimal(str(_technical_score_total()))) * Decimal("100")
 
     values = [
         Decimal(str(evaluation.technical_score or 0)),
@@ -516,13 +608,14 @@ def _technical_evaluation_score(evaluation: TenderBidEvaluation) -> Decimal:
 
 
 def _technical_threshold_passed(technical_evaluations, threshold: int) -> bool:
+    limits = _technical_score_limits()
     compatible_evaluations = [
         ev for ev in technical_evaluations
-        if _fits_score_matrix(ev, TECHNICAL_SCORE_LIMITS)
+        if _fits_score_matrix(ev, limits)
     ]
     if compatible_evaluations:
-        raw_total = sum(_sum_score_fields(ev, TECHNICAL_SCORE_LIMITS) for ev in compatible_evaluations) / Decimal(len(compatible_evaluations))
-        minimum_raw_total = (Decimal(str(threshold)) / Decimal("100")) * Decimal("70")
+        raw_total = sum(_sum_score_fields(ev, limits) for ev in compatible_evaluations) / Decimal(len(compatible_evaluations))
+        minimum_raw_total = (Decimal(str(threshold)) / Decimal("100")) * Decimal(str(_technical_score_total()))
         return raw_total >= minimum_raw_total
 
     technical_score = sum(_technical_evaluation_score(ev) for ev in technical_evaluations) / Decimal(len(technical_evaluations))
@@ -530,20 +623,90 @@ def _technical_threshold_passed(technical_evaluations, threshold: int) -> bool:
 
 
 def _financial_evaluation_score(evaluation: TenderBidEvaluation) -> Decimal:
+    # New rows carry an auto-calculated 0-100 score already (see _compute_auto_financial_score).
+    # Legacy rows (pre-Evaluation-Committee) stored a manually-typed 0-30 component instead.
+    if evaluation.financial_score_auto_calculated:
+        return Decimal(str(evaluation.financial_score or 0))
     if _fits_score_matrix(evaluation, FINANCIAL_SCORE_COMPONENT_LIMITS):
         raw_total = Decimal(str(evaluation.financial_score or 0))
         return (raw_total / Decimal("30")) * Decimal("100")
     return Decimal(str(evaluation.financial_score or 0))
 
 
+def _evaluation_committee_quorum(tender: Tender) -> int:
+    """Majority of the tender's assigned Evaluation Committee roster (0 if none assigned
+    yet). A committee's decision only counts as final once this many members have
+    scored — one member's click isn't a committee decision."""
+    assigned_count = TenderEvaluationCommitteeMember.objects.filter(tender=tender).count()
+    return ceil(assigned_count / 2) if assigned_count else 0
+
+
+def _quorum_met_evaluations(bid: TenderBid, stage: str, evaluations=None) -> list | None:
+    """Scored evaluations for this bid+stage if the committee's majority quorum has been
+    reached, else None. A Super Admin (ADMIN role)-authored score is an override and
+    always counts as decisive, bypassing quorum."""
+    pool = evaluations if evaluations is not None else bid.evaluations.all()
+    scored = [ev for ev in pool if ev.status == EvaluationStatus.SCORED and ev.stage == stage]
+    if not scored:
+        return None
+    has_admin_override = any(getattr(getattr(ev, 'evaluator', None), 'role', None) == UserRole.ADMIN for ev in scored)
+    quorum = _evaluation_committee_quorum(bid.tender)
+    if not has_admin_override and quorum and len(scored) < quorum:
+        return None
+    return scored
+
+
 def _technical_score_for_bid(bid: TenderBid) -> Decimal | None:
-    technical_evaluations = [
-        ev for ev in bid.evaluations.all()
-        if ev.status == EvaluationStatus.SCORED and getattr(getattr(ev, 'evaluator', None), 'role', None) in TECHNICAL_EVALUATOR_ROLES
-    ]
+    technical_evaluations = _quorum_met_evaluations(bid, EvaluationStage.TECHNICAL)
     if not technical_evaluations:
         return None
     return sum(_technical_evaluation_score(ev) for ev in technical_evaluations) / Decimal(len(technical_evaluations))
+
+
+def _lowest_qualifying_bid_amount(tender: Tender, exclude_bid_id=None) -> Decimal | None:
+    """Lowest bid_amount (converted to the tender's base currency) among this
+    (non-lot-wise) tender's technically-qualified bids — the basis for the QCBS
+    financial formula (100 x lowest / this bid's price)."""
+    amounts = []
+    for bid in _financial_bids_for_tender(tender):
+        if exclude_bid_id is not None and bid.id == exclude_bid_id:
+            continue
+        if bid.bid_amount and Decimal(str(bid.bid_amount)) > 0:
+            amounts.append(_to_base_currency(tender, bid.bid_amount, bid.bid_currency))
+    return min(amounts) if amounts else None
+
+
+def _compute_auto_financial_score(bid: TenderBid, lowest_amount: Decimal | None = None) -> Decimal:
+    """QCBS-style financial score: the lowest technically-qualified bid (in base-currency
+    terms) scores 100; every other qualifying bid is scored proportionally against it."""
+    if not bid.bid_amount or Decimal(str(bid.bid_amount)) <= 0:
+        return Decimal("0")
+    lowest = lowest_amount if lowest_amount is not None else _lowest_qualifying_bid_amount(bid.tender)
+    if not lowest:
+        return Decimal("0")
+    return _score_from_price(lowest, _to_base_currency(bid.tender, bid.bid_amount, bid.bid_currency))
+
+
+def _lowest_qualifying_lot_offer_amount(lot, exclude_offer_id=None) -> Decimal | None:
+    """Lowest offered price for one lot (converted to the tender's base currency) among
+    offers from technically-qualified bids."""
+    passing_bid_ids = {bid.id for bid in _financial_bids_for_tender(lot.tender)}
+    amounts = []
+    for offer in lot.bid_offers.filter(bid_id__in=passing_bid_ids).select_related('bid'):
+        if exclude_offer_id is not None and offer.id == exclude_offer_id:
+            continue
+        if offer.bid_amount and Decimal(str(offer.bid_amount)) > 0:
+            amounts.append(_to_base_currency(lot.tender, offer.bid_amount, offer.bid.bid_currency))
+    return min(amounts) if amounts else None
+
+
+def _compute_auto_financial_score_for_offer(offer, lowest_amount: Decimal | None = None) -> Decimal:
+    if not offer.bid_amount or Decimal(str(offer.bid_amount)) <= 0:
+        return Decimal("0")
+    lowest = lowest_amount if lowest_amount is not None else _lowest_qualifying_lot_offer_amount(offer.lot)
+    if not lowest:
+        return Decimal("0")
+    return _score_from_price(lowest, _to_base_currency(offer.lot.tender, offer.bid_amount, offer.bid.bid_currency))
 
 
 def _clone_sites_to_bid(source_bid: TenderBid, target_bid: TenderBid):
@@ -553,6 +716,7 @@ def _clone_sites_to_bid(source_bid: TenderBid, target_bid: TenderBid):
     TenderBidSite.objects.bulk_create([
         TenderBidSite(
             bid=target_bid,
+            lot_id=site.lot_id,
             site_name=site.site_name,
             district=site.district,
             village_sub_district=site.village_sub_district,
@@ -606,14 +770,25 @@ def _ensure_stage_draft(bid: TenderBid, stage: str):
     """Create (or return) a draft bid for a later stage (technical or financial).
 
     In combined mode the technical bid record doubles as the financial record, so
-    only sequential tenders create a distinct financial draft.
+    only sequential tenders create a distinct financial draft. That shared record is
+    persisted with bid_stage=COMBINED (not TECHNICAL), matching what a combined-workflow
+    tender's forms actually are.
     """
     stage = normalize_bid_stage(stage)
     workflow = getattr(bid.tender, 'procurement_workflow', ProcurementWorkflow.SEQUENTIAL)
+    combined_style = workflow_is_combined_style(bid.tender, workflow)
 
-    # Combined workflow: the technical bid record carries technical + financial content.
-    if stage == BidStage.FINANCIAL and workflow == ProcurementWorkflow.COMBINED:
+    # Combined-style workflow ('EOI → Combined' / 'Combined'): the technical bid record
+    # carries technical + financial content, so there is no distinct financial draft.
+    if stage == BidStage.FINANCIAL and combined_style:
         return bid
+
+    # The stage transition being unlocked (TECHNICAL/FINANCIAL) determines which
+    # unlocked_flag/source_field bookkeeping applies; persisted_stage is what actually
+    # gets written to bid_stage, which differs for a combined-style shared draft.
+    persisted_stage = stage
+    if stage == BidStage.TECHNICAL and combined_style:
+        persisted_stage = BidStage.COMBINED
 
     if stage == BidStage.TECHNICAL:
         unlocked_flag, unlocked_at, source_field = (
@@ -625,14 +800,14 @@ def _ensure_stage_draft(bid: TenderBid, stage: str):
         )
     if stage in (BidStage.EOI, BidStage.COMBINED):
         return bid
-    if getattr(bid, 'bid_stage', '') and normalize_bid_stage(bid.bid_stage) == stage and getattr(bid, 'status', None) == BidStatus.DRAFT:
+    if getattr(bid, 'bid_stage', '') and normalize_bid_stage(bid.bid_stage) == persisted_stage and getattr(bid, 'status', None) == BidStatus.DRAFT:
         return bid
 
     existing = (
         TenderBid.objects.filter(
             tender=bid.tender,
             vendor_id=bid.vendor_id,
-            bid_stage=stage,
+            bid_stage=persisted_stage,
             status=BidStatus.DRAFT,
         )
         .order_by('-version_number', '-created_at')
@@ -661,16 +836,22 @@ def _ensure_stage_draft(bid: TenderBid, stage: str):
         .first()
     )
     next_version = (latest_version or 0) + 1
+    # Indicative pricing carries forward only into the Financial draft (a starting point
+    # the vendor then finalizes there). The Technical stage never sees or edits pricing,
+    # so it stays sealed from evaluators until the technical threshold is cleared.
+    pricing_fields = (
+        {'bid_amount': bid.bid_amount, 'subsidy_requested': bid.subsidy_requested}
+        if stage == BidStage.FINANCIAL
+        else {}
+    )
     draft = TenderBid.objects.create(
         tender=bid.tender,
         vendor_id=bid.vendor_id,
         vendor_name=bid.vendor_name,
         vendor_email=bid.vendor_email,
-        bid_amount=bid.bid_amount,
-        subsidy_requested=bid.subsidy_requested,
         proposal_file=bid.proposal_file,
-        stage=bid_stage_label(stage),
-        bid_stage=stage,
+        stage=bid_stage_label(persisted_stage),
+        bid_stage=persisted_stage,
         concept_note=bid.concept_note,
         technical_proposal=bid.technical_proposal,
         financial_proposal=bid.financial_proposal,
@@ -691,8 +872,10 @@ def _ensure_stage_draft(bid: TenderBid, stage: str):
         paygo_platform=bid.paygo_platform,
         daily_payment_amount_lsl=bid.daily_payment_amount_lsl,
         collection_method=bid.collection_method,
+        declared_lots=bid.declared_lots,
         version_number=next_version,
         status=BidStatus.DRAFT,
+        **pricing_fields,
         **{unlocked_flag: True, unlocked_at: timezone.now(), source_field: bid},
         **({
             'stage_two_unlocked': True,
@@ -715,7 +898,7 @@ def _unlock_stage_for_bid(bid: TenderBid, stage: str):
         unlocked_flag, unlocked_at = 'financial_stage_unlocked', 'financial_stage_unlocked_at'
     else:
         return bid
-    if workflow == ProcurementWorkflow.COMBINED:
+    if workflow_is_combined_style(bid.tender, workflow):
         # Financial is unlocked/already carried on the technical/combined record.
         if stage == BidStage.FINANCIAL:
             bid.financial_stage_unlocked = True
@@ -741,7 +924,7 @@ def _has_stage_two_shortlist_access(bid: TenderBid | None) -> bool:
 def _has_technical_stage_access(bid: TenderBid | None) -> bool:
     if bid is None:
         return False
-    if getattr(bid, 'bid_stage', '') == BidStage.TECHNICAL:
+    if getattr(bid, 'bid_stage', '') in (BidStage.TECHNICAL, BidStage.COMBINED):
         if getattr(bid, 'technical_stage_unlocked', False):
             return True
         if getattr(bid, 'stage_two_unlocked', False):
@@ -756,12 +939,50 @@ def _has_financial_stage_access(bid: TenderBid | None) -> bool:
     return bool(getattr(bid, 'financial_stage_unlocked', False))
 
 
+def _bid_lineage_ids(bid: TenderBid) -> set:
+    """All ancestor bid ids in this bid's EOI -> Technical -> Financial stage lineage.
+
+    Each *_source_bid field only points one hop back (e.g. a Financial draft's
+    financial_stage_source_bid points at the Technical bid it was unlocked from, not at
+    the EOI bid further up the chain). Walking only one hop left the duplicate-submission
+    check below unable to see past the immediate parent, so a vendor's own earlier,
+    already-decided EOI bid would be mistaken for "an existing submitted bid" and block
+    Financial submission with "You have already submitted a bid for this tender."
+    """
+    ids = set()
+    current = bid
+    seen = {bid.id}
+    while current is not None:
+        next_id = (
+            getattr(current, 'technical_stage_source_bid_id', None)
+            or getattr(current, 'financial_stage_source_bid_id', None)
+            or getattr(current, 'stage_two_source_bid_id', None)
+        )
+        if not next_id or next_id in seen:
+            break
+        ids.add(next_id)
+        seen.add(next_id)
+        current = TenderBid.objects.filter(id=next_id).first()
+    return ids
+
+
 def _bid_stage_spec(bid: TenderBid | None, tender: Tender):
     """Resolve the stage + applicable deadline for a bid (or a new opening bid)."""
     if bid is not None and getattr(bid, 'bid_stage', ''):
         stage = normalize_bid_stage(bid.bid_stage)
     else:
-        stage = BidStage.EOI
+        # A new single-stage 'Combined' tender opens directly at the Combined stage; so
+        # does a tender linked to an EOI Invite tender (its EOI already happened on the
+        # linked tender — invited vendors were copied over at link time, see
+        # TenderSerializer._sync_linked_eoi_vendors). Every other workflow opens with an
+        # EOI stage.
+        stage = BidStage.COMBINED if (
+            (
+                getattr(tender, 'procurement_workflow', '') == ProcurementWorkflow.COMBINED
+                and not getattr(tender, 'eoi_deadline', None)
+            )
+            or getattr(tender, 'linked_eoi_tender_id', None)
+        ) else BidStage.EOI
     workflow = getattr(tender, 'procurement_workflow', ProcurementWorkflow.SEQUENTIAL)
     if stage == BidStage.FINANCIAL:
         deadline = getattr(tender, 'financial_deadline', None)
@@ -774,12 +995,26 @@ def _bid_stage_spec(bid: TenderBid | None, tender: Tender):
 
 
 def _backfill_stage_two_drafts_for_vendor(vendor_id: str):
+    """Lazily create a Stage 2 draft for legacy pre-qualification bids accepted before
+    stage_two_unlocked existed. This runs on every vendor bid list fetch (see
+    TenderBidViewSet.get_queryset), so it must be idempotent per tender: stage_two_unlocked
+    only ever gets set on the *new* draft it creates, never on the source EOI bid, so
+    re-matching on `stage_two_unlocked=False` alone would recreate a fresh blank draft on
+    every single page load. Skip any tender where the vendor already has a technical/
+    combined-stage bid (in any status) or an already-unlocked legacy record.
+    """
+    already_progressed_tender_ids = TenderBid.objects.filter(
+        vendor_id=vendor_id,
+    ).filter(
+        Q(bid_stage__in=[BidStage.TECHNICAL, BidStage.COMBINED]) | Q(stage_two_unlocked=True)
+    ).values_list('tender_id', flat=True)
     eligible_bids = (
         TenderBid.objects.filter(
             vendor_id=vendor_id,
             status=BidStatus.ACCEPTED,
             stage_two_unlocked=False,
         )
+        .exclude(tender_id__in=list(already_progressed_tender_ids))
         .select_related('tender')
     )
     for bid in eligible_bids:
@@ -806,6 +1041,79 @@ def _technical_passing_bids(tender: Tender):
     return passing
 
 
+def _financial_bid_for_technical(bid: TenderBid) -> TenderBid | None:
+    """The bid whose financial content counts for a technically-passing bid.
+
+    In a combined-workflow tender the technical record doubles as the financial record
+    (bid_stage=COMBINED) and carries the pricing itself, so it is returned unchanged.
+    In a sequential tender the financial proposal lives on a separate FINANCIAL-stage
+    bid unlocked from this technical bid, so amounts, lot offers and financial
+    evaluations must be read from that bid — the technical record never carries them.
+    Returns None if the vendor has not (yet) submitted a financial proposal.
+    """
+    stage = normalize_bid_stage(getattr(bid, 'bid_stage', ''))
+    if stage == BidStage.COMBINED:
+        return bid
+    if stage != BidStage.TECHNICAL:
+        return None
+    linked = (
+        TenderBid.objects.filter(
+            tender=bid.tender,
+            financial_stage_source_bid=bid,
+        )
+        .exclude(status=BidStatus.DRAFT)
+        .order_by('-version_number', '-submitted_at', '-id')
+        .first()
+    )
+    if linked:
+        return linked
+    distinct = (
+        TenderBid.objects.filter(
+            tender=bid.tender,
+            vendor_id=f'{bid.vendor_id}',
+            bid_stage=BidStage.FINANCIAL,
+        )
+        .exclude(status=BidStatus.DRAFT)
+        .order_by('-version_number', '-submitted_at', '-id')
+        .first()
+    )
+    if distinct:
+        return distinct
+    # Legacy direct-scoring records: a technical bid that itself carries pricing (no
+    # separate financial bid was ever created) is its own financial record. This never
+    # fires for real sequential tenders — pricing fields are never written to their
+    # technical bids (they live on the financial-stage bid only).
+    if getattr(bid, 'bid_amount', None):
+        return bid
+    return None
+
+
+def _technical_bid_for_financial(financial_bid: TenderBid) -> TenderBid:
+    """The technical/combined record that carries a (possibly distinct) financial bid's
+    technical evaluations — the reverse of _financial_bid_for_technical. For a
+    sequential tender a financial-stage bid points back at the technical bid it was
+    unlocked from via financial_stage_source_bid; combined bids carry both themselves."""
+    stage = normalize_bid_stage(getattr(financial_bid, 'bid_stage', ''))
+    if stage in (BidStage.TECHNICAL, BidStage.COMBINED):
+        return financial_bid
+    source = getattr(financial_bid, 'financial_stage_source_bid', None)
+    return source if source is not None else financial_bid
+
+
+def _financial_bids_for_tender(tender: Tender):
+    """The bids the Evaluation Committee scores financially for a tender: for each bid
+    that cleared the technical threshold its financial counterpart (itself in combined
+    mode; the vendor's latest submitted financial-stage bid in sequential mode)."""
+    financial = []
+    seen = set()
+    for bid in _technical_passing_bids(tender):
+        financial_bid = _financial_bid_for_technical(bid)
+        if financial_bid is not None and financial_bid.id not in seen:
+            seen.add(financial_bid.id)
+            financial.append(financial_bid)
+    return financial
+
+
 def _open_financial_stage_for_tender(tender: Tender):
     """Batch-open the Financial stage for every technical-passing bidder at once."""
     opened = []
@@ -813,6 +1121,211 @@ def _open_financial_stage_for_tender(tender: Tender):
         _unlock_stage_for_bid(bid, BidStage.FINANCIAL)
         opened.append(bid)
     return opened
+
+
+def _detailed_evaluation_bids(tender: Tender):
+    """The bids that entered the committee's detailed (technical/financial) evaluation:
+    the Technical/Combined-stage records a vendor has submitted for this tender, plus
+    legacy pre-EOI stage-two records. Mirrors the candidate set used by award ranking."""
+    return list(
+        TenderBid.objects.filter(
+            tender=tender,
+        )
+        .filter(
+            Q(bid_stage__in=[BidStage.TECHNICAL, BidStage.COMBINED]) | Q(stage_two_unlocked=True)
+        )
+        .filter(
+            status__in={BidStatus.SUBMITTED, BidStatus.UNDER_REVIEW, BidStatus.ACCEPTED, BidStatus.AWARDED}
+        )
+        .distinct()
+        .prefetch_related('evaluations__evaluator')
+    )
+
+
+def _tender_evaluation_status(tender: Tender) -> dict:
+    """Whether the committee's evaluation of this tender is complete enough for the RBF
+    Official to submit their post-evaluation comment. Complete means: the tender has an
+    assigned Evaluation Committee, every bid that entered detailed evaluation has a
+    technical score meeting quorum, and every bid that cleared the technical threshold
+    has a finalized financial score (quorum met; per lot, for lot-wise tenders)."""
+    reasons = []
+    quorum = _evaluation_committee_quorum(tender)
+    if quorum == 0:
+        reasons.append('No Evaluation Committee has been assigned to this tender yet.')
+
+    threshold = Decimal(str(tender.technical_threshold or 70))
+    is_lot_wise = tender.lots.exists()
+
+    technical_pending = []
+    for bid in _detailed_evaluation_bids(tender):
+        if not _quorum_met_evaluations(bid, EvaluationStage.TECHNICAL):
+            technical_pending.append(bid.vendor_name)
+    if technical_pending:
+        reasons.append(f'Technical scoring is not final (committee quorum not reached): {", ".join(sorted(set(technical_pending)))}.')
+
+    financial_pending = []
+    for bid in _financial_bids_for_tender(tender):
+        scored_financial = bid.evaluations.filter(stage=EvaluationStage.FINANCIAL, status=EvaluationStatus.SCORED)
+        if is_lot_wise:
+            offered_lot_ids = set(TenderBidLotOffer.objects.filter(bid=bid).values_list('lot_id', flat=True))
+            missing_lots = []
+            for lot_id in sorted(offered_lot_ids):
+                member_ids = set(scored_financial.filter(lot_id=lot_id).values_list('evaluator_id', flat=True))
+                if len([mid for mid in member_ids if mid is not None]) < quorum:
+                    missing_lots.append(lot_id)
+            if missing_lots:
+                lot_names = dict(TenderLot.objects.filter(id__in=missing_lots).values_list('id', 'name'))
+                financial_pending.append(f"{bid.vendor_name} (lots: {', '.join(lot_names.get(lid, str(lid)) for lid in missing_lots)})")
+        else:
+            member_ids = set(scored_financial.values_list('evaluator_id', flat=True))
+            if len([mid for mid in member_ids if mid is not None]) < quorum:
+                financial_pending.append(bid.vendor_name)
+    if financial_pending:
+        reasons.append(f'Financial scores are not yet finalized: {", ".join(financial_pending)}.')
+
+    return {
+        'complete': not reasons,
+        'reasons': reasons,
+        'committee_size': quorum,
+        'detailed_bid_count': len(_detailed_evaluation_bids(tender)),
+    }
+
+
+def _bid_financial_finalized(tender: Tender, bid: TenderBid, quorum: int) -> bool:
+    """Whether the committee has finalized the bid's financial score — quorum of distinct
+    members with a SCORED financial-stage row. For a lot-wise tender every lot the bid
+    offered on must have reached quorum independently."""
+    if quorum <= 0:
+        return False
+    financial_bid = _financial_bid_for_technical(bid) or bid
+    scored_financial = financial_bid.evaluations.filter(stage=EvaluationStage.FINANCIAL, status=EvaluationStatus.SCORED)
+    if tender.lots.exists():
+        offered_lot_ids = set(TenderBidLotOffer.objects.filter(bid=financial_bid).values_list('lot_id', flat=True))
+        if not offered_lot_ids:
+            return False
+        for lot_id in offered_lot_ids:
+            member_ids = {mid for mid in scored_financial.filter(lot_id=lot_id).values_list('evaluator_id', flat=True) if mid is not None}
+            if len(member_ids) < quorum:
+                return False
+        return True
+    member_ids = {mid for mid in scored_financial.values_list('evaluator_id', flat=True) if mid is not None}
+    return len(member_ids) >= quorum
+
+
+def _tender_evaluation_scoreboard(tender: Tender):
+    """Per-bid, per-committee-member score breakdown for the RBF Official / Super Admin
+    — the raw marks each Evaluation Committee member gave, so RMT can see exactly where
+    each score came from rather than only the averaged result."""
+    members = list(
+        TenderEvaluationCommitteeMember.objects.filter(tender=tender).select_related('member').order_by('assigned_at', 'id')
+    )
+    quorum_count = _evaluation_committee_quorum(tender)
+    score_limits = _technical_score_limits()
+    technical_total = _technical_score_total()
+    lots = list(tender.lots.all())
+    lot_by_id = {str(l.id): l for l in lots}
+
+    bid_rows = []
+    for bid in _detailed_evaluation_bids(tender):
+        financial_bid = _financial_bid_for_technical(bid) or bid
+        technical_quorum = _quorum_met_evaluations(bid, EvaluationStage.TECHNICAL)
+        technical_average = None
+        technical_raw_average = Decimal('0')
+        if technical_quorum:
+            technical_average = sum(
+                _technical_evaluation_score(ev) for ev in technical_quorum
+            ) / Decimal(len(technical_quorum))
+            technical_raw_average = (
+                sum(_sum_score_fields(ev, score_limits) for ev in technical_quorum) / Decimal(len(technical_quorum))
+            )
+
+        lot_financial_finalized = {}
+        if lots:
+            scored_financial = financial_bid.evaluations.filter(stage=EvaluationStage.FINANCIAL, status=EvaluationStatus.SCORED)
+            for lot in lots:
+                member_ids = {mid for mid in scored_financial.filter(lot_id=lot.id).values_list('evaluator_id', flat=True) if mid is not None}
+                lot_financial_finalized[str(lot.id)] = quorum_count > 0 and len(member_ids) >= quorum_count
+
+        evaluation_rows = []
+        evaluations = list(bid.evaluations.all())
+        if financial_bid is not bid:
+            evaluations.extend(financial_bid.evaluations.all())
+        evaluations.sort(key=lambda ev: (ev.stage, str(ev.lot_id) if ev.lot_id else '', ev.created_at or timezone.now()))
+        for ev in evaluations:
+            evaluator = getattr(ev, 'evaluator', None)
+            revisions = []
+            for rev in ev.revisions.all().select_related('changed_by').order_by('created_at'):
+                changes = [
+                    {'field': field, 'before': before, 'after': after}
+                    for field, before, after in _evaluation_snapshot_diff(rev.before or {}, rev.after or {})
+                ]
+                changed_by = getattr(rev, 'changed_by', None)
+                revisions.append({
+                    'action': rev.action,
+                    'reason': rev.reason or '',
+                    'changed_by': (changed_by.full_name if changed_by and changed_by.full_name else (changed_by.username if changed_by else '')) or '',
+                    'changed_at': rev.created_at.isoformat() if rev.created_at else None,
+                    'changes': changes,
+                })
+            evaluation_rows.append({
+                'evaluation_id': str(ev.id),
+                'evaluator': str(ev.evaluator_id) if ev.evaluator_id else None,
+                'evaluator_name': (evaluator.full_name if evaluator and evaluator.full_name else (evaluator.username if evaluator else '')) or 'Unknown',
+                'stage': ev.stage,
+                'lot': str(ev.lot_id) if ev.lot_id else None,
+                'lot_name': lot_by_id.get(str(ev.lot_id)).name if ev.lot_id else None,
+                'status': ev.status,
+                'submission_status': ev.submission_status,
+                'submitted_at': ev.submitted_at.isoformat() if ev.submitted_at else None,
+                'justifications': ev.justifications or {},
+                'technical_score': ev.technical_score,
+                'feasibility_score': ev.feasibility_score,
+                'kpi_score': ev.kpi_score,
+                'gender_score': ev.gender_score,
+                'environmental_score': ev.environmental_score,
+                'om_score': ev.om_score,
+                'inclusivity_score': ev.inclusivity_score,
+                'financial_score': ev.financial_score,
+                'financial_score_auto_calculated': ev.financial_score_auto_calculated,
+                'total_score': ev.total_score,
+                'comments': ev.comments or '',
+                'created_at': ev.created_at.isoformat() if ev.created_at else None,
+                'updated_at': ev.updated_at.isoformat() if ev.updated_at else None,
+                'revisions': revisions,
+            })
+
+        bid_rows.append({
+            'bid_id': str(bid.id),
+            'vendor_id': str(bid.vendor_id),
+            'vendor_name': bid.vendor_name,
+            'bid_stage': bid.bid_stage,
+            'status': bid.status,
+            'technical_quorum_met': technical_quorum is not None,
+            'technical_average_score': str(technical_average) if technical_average is not None else None,
+            'technical_raw_average': str(technical_raw_average) if technical_quorum else None,
+            'passed_technical_threshold': technical_average is not None and technical_average >= Decimal(str(tender.technical_threshold or 70)),
+            'financial_finalized': _bid_financial_finalized(tender, bid, quorum_count),
+            'lot_financial_finalized': lot_financial_finalized,
+            'evaluations': evaluation_rows,
+        })
+
+    return {
+        'committee_members': [
+            {
+                'id': str(m.member_id),
+                'name': (m.member.full_name or m.member.username),
+            }
+            for m in members
+        ],
+        'score_limits': score_limits,
+        'technical_score_total': technical_total,
+        'technical_threshold': tender.technical_threshold or 70,
+        'is_lot_wise': bool(lots),
+        'lots': [{'lot_id': str(l.id), 'lot_name': l.name} for l in lots],
+        'bids': bid_rows,
+        'committee_size': len(members),
+        'quorum': quorum_count,
+    }
 
 
 def _send_vendor_stage_one_outcome_email(bid: TenderBid, subject: str, message: str):
@@ -870,8 +1383,22 @@ def _build_award_ranking(tender: Tender):
     )
     bids_by_vendor = {}
     for bid in candidate_bids:
-        bids_by_vendor.setdefault(str(bid.vendor_id), bid)
-    bids = list(bids_by_vendor.values())
+        bids_by_vendor.setdefault(str(bid.vendor_id), []).append(bid)
+    bids = []
+    for group in bids_by_vendor.values():
+        # The vendor's detailed-evaluation record (technical/combined) is the ranking
+        # candidate: its technical marks live on it. In sequential mode the financial
+        # content is read from the linked financial bid inside the loop instead.
+        detailed = [
+            b for b in group
+            if normalize_bid_stage(getattr(b, 'bid_stage', '')) in (BidStage.TECHNICAL, BidStage.COMBINED)
+        ]
+        pool = detailed or group
+        pool.sort(
+            key=lambda b: (b.version_number or 0, b.submitted_at or b.updated_at or timezone.now(), str(b.id)),
+            reverse=True,
+        )
+        bids.append(pool[0])
     technical_threshold = tender.technical_threshold or 70
     technical_weight = Decimal(str(tender.technical_weight or 70)) / Decimal("100")
     financial_weight = Decimal(str(tender.financial_weight or 30)) / Decimal("100")
@@ -879,23 +1406,30 @@ def _build_award_ranking(tender: Tender):
     ranking_rows = []
     qualifying_rows = []
 
+    quorum = _evaluation_committee_quorum(tender)
+
     for bid in bids:
         scored_evaluations = [ev for ev in bid.evaluations.all() if ev.status == EvaluationStatus.SCORED]
-        technical_evaluations = [
-            ev for ev in scored_evaluations
-            if getattr(getattr(ev, 'evaluator', None), 'role', None) in TECHNICAL_EVALUATOR_ROLES
-        ]
+        raw_technical_evaluations = [ev for ev in scored_evaluations if ev.stage == EvaluationStage.TECHNICAL]
+        technical_evaluations = _quorum_met_evaluations(bid, EvaluationStage.TECHNICAL, scored_evaluations)
+        financial_bid = _financial_bid_for_technical(bid) or bid
         financial_evaluations = [
-            ev for ev in scored_evaluations
-            if getattr(getattr(ev, 'evaluator', None), 'role', None) in FINANCIAL_EVALUATOR_ROLES
-            and Decimal(str(ev.financial_score or 0)) > Decimal("0")
+            ev for ev in financial_bid.evaluations.all()
+            if ev.status == EvaluationStatus.SCORED and ev.stage == EvaluationStage.FINANCIAL
         ]
-        if not technical_evaluations:
+        bid_amount = financial_bid.bid_amount if financial_bid.bid_amount else bid.bid_amount
+        bid_amount_base_currency = float(
+            _to_base_currency(tender, bid_amount, financial_bid.bid_currency or bid.bid_currency) or 0
+        )
+        bid_currency = financial_bid.bid_currency or bid.bid_currency or tender.bidding_currency
+        if not raw_technical_evaluations:
             ranking_rows.append({
                 'bid_id': str(bid.id),
                 'vendor_id': str(bid.vendor_id),
                 'vendor_name': bid.vendor_name,
-                'bid_amount': float(bid.bid_amount or 0),
+                'bid_amount': float(bid_amount or 0),
+                'bid_currency': bid_currency,
+                'bid_amount_base_currency': bid_amount_base_currency,
                 'technical_score': None,
                 'financial_score': None,
                 'combined_score': None,
@@ -905,6 +1439,25 @@ def _build_award_ranking(tender: Tender):
                 'financial_opened': False,
                 'is_recommended_winner': False,
                 'disqualification_reason': 'No scored technical evaluation has been submitted yet.',
+            })
+            continue
+        if not technical_evaluations:
+            ranking_rows.append({
+                'bid_id': str(bid.id),
+                'vendor_id': str(bid.vendor_id),
+                'vendor_name': bid.vendor_name,
+                'bid_amount': float(bid_amount or 0),
+                'bid_currency': bid_currency,
+                'bid_amount_base_currency': bid_amount_base_currency,
+                'technical_score': None,
+                'financial_score': None,
+                'combined_score': None,
+                'gender_score': None,
+                'female_headed_household_target': 0,
+                'passed_technical_threshold': False,
+                'financial_opened': False,
+                'is_recommended_winner': False,
+                'disqualification_reason': f'Awaiting more committee scores ({len(raw_technical_evaluations)}/{quorum}).',
             })
             continue
 
@@ -918,7 +1471,9 @@ def _build_award_ranking(tender: Tender):
             'bid_id': str(bid.id),
             'vendor_id': str(bid.vendor_id),
             'vendor_name': bid.vendor_name,
-            'bid_amount': float(bid.bid_amount or 0),
+            'bid_amount': float(bid_amount or 0),
+            'bid_currency': bid_currency,
+            'bid_amount_base_currency': bid_amount_base_currency,
             'technical_score': _round_score(technical_score),
             'financial_score': None,
             'combined_score': None,
@@ -934,16 +1489,20 @@ def _build_award_ranking(tender: Tender):
             row['disqualification_reason'] = f'Technical score below threshold ({technical_threshold}%).'
             ranking_rows.append(row)
             continue
-        if not financial_evaluations:
-            row['disqualification_reason'] = 'Technical score passed. Awaiting RMT financial evaluation.'
-            ranking_rows.append(row)
-            continue
-        if not bid.bid_amount or Decimal(str(bid.bid_amount or 0)) <= 0:
+        if not bid_amount or Decimal(str(bid_amount or 0)) <= 0:
             row['disqualification_reason'] = 'Financial proposal is missing or invalid.'
             ranking_rows.append(row)
             continue
+        financial_quorum = _quorum_met_evaluations(financial_bid, EvaluationStage.FINANCIAL, financial_evaluations)
+        if not financial_quorum:
+            count = len(financial_evaluations)
+            row['disqualification_reason'] = (
+                f'Technical score passed. Awaiting more committee financial scores ({count}/{quorum}) for a finalized financial score.'
+            )
+            ranking_rows.append(row)
+            continue
 
-        financial_score = sum(_financial_evaluation_score(ev) for ev in financial_evaluations) / Decimal(len(financial_evaluations))
+        financial_score = sum(_financial_evaluation_score(ev) for ev in financial_quorum) / Decimal(len(financial_quorum))
         qualifying_rows.append((bid, row, financial_score))
 
     if qualifying_rows:
@@ -963,7 +1522,7 @@ def _build_award_ranking(tender: Tender):
                 -(item['combined_score'] or 0),
                 -(item['female_headed_household_target'] or 0),
                 -(item['gender_score'] or 0),
-                item['bid_amount'] or 0,
+                item['bid_amount_base_currency'] or 0,
             )
         )
         recommended_bid_id = next((row['bid_id'] for row in ranking_rows if row['combined_score'] is not None), None)
@@ -982,6 +1541,137 @@ def _build_award_ranking(tender: Tender):
         'cooling_off_days': tender.cooling_off_days,
         'rows': ranking_rows,
         'recommended': recommended_row,
+    }
+
+
+def _build_lot_award_ranking(tender: Tender, lot):
+    """Award ranking for one lot of a lot-wise tender.
+
+    Technical merit is shared across a bid's lots (a vendor's technical capability
+    doesn't change per lot), so the bid's existing technical evaluation/threshold gate
+    still applies. Financial comparison is per lot: among bids that pass the technical
+    threshold, the Evaluation Committee's per-lot financial evaluation (finalized via
+    the Financial Evaluation screen, stored as a FINANCIAL-stage TenderBidEvaluation
+    scoped to this lot) is blended with the technical score using the tender's own
+    technical_weight/financial_weight — the same weighted methodology as
+    _build_award_ranking, just scoped to one lot's offers instead of the whole bid.
+    """
+    technical_threshold = tender.technical_threshold or 70
+    technical_weight = Decimal(str(tender.technical_weight or 70)) / Decimal("100")
+    financial_weight = Decimal(str(tender.financial_weight or 30)) / Decimal("100")
+    offers = (
+        TenderBidLotOffer.objects.filter(
+            lot=lot,
+            bid__status__in={BidStatus.SUBMITTED, BidStatus.UNDER_REVIEW, BidStatus.ACCEPTED, BidStatus.AWARDED},
+        )
+        .select_related('bid')
+        .prefetch_related('bid__evaluations')
+        .order_by('-bid__version_number', '-bid__submitted_at', '-bid__id')
+    )
+    offers_by_vendor = {}
+    for offer in offers:
+        offers_by_vendor.setdefault(str(offer.bid.vendor_id), offer)
+
+    quorum = _evaluation_committee_quorum(tender)
+    rows = []
+    qualifying_rows = []
+    for offer in offers_by_vendor.values():
+        bid = offer.bid
+        tech_bid = _technical_bid_for_financial(bid)
+        tech_scored = [ev for ev in tech_bid.evaluations.all() if ev.status == EvaluationStatus.SCORED]
+        raw_technical_evaluations = [ev for ev in tech_scored if ev.stage == EvaluationStage.TECHNICAL]
+        technical_evaluations = _quorum_met_evaluations(tech_bid, EvaluationStage.TECHNICAL, tech_scored)
+        lot_scored_evaluations = [ev for ev in bid.evaluations.all() if ev.status == EvaluationStatus.SCORED and ev.lot_id == lot.id]
+        financial_evaluations = _quorum_met_evaluations(bid, EvaluationStage.FINANCIAL, lot_scored_evaluations)
+        prequal = _latest_vendor_prequalification(str(bid.vendor_id))
+        female_target = prequal.female_beneficiary_target if prequal else 0
+        row = {
+            'bid_id': str(bid.id),
+            'vendor_id': str(bid.vendor_id),
+            'vendor_name': bid.vendor_name,
+            'bid_amount': float(offer.bid_amount or 0),
+            'bid_currency': bid.bid_currency or tender.bidding_currency,
+            'bid_amount_base_currency': float(_to_base_currency(tender, offer.bid_amount, bid.bid_currency) or 0),
+            'subsidy_requested': float(offer.subsidy_requested) if offer.subsidy_requested is not None else None,
+            'technical_score': None,
+            'financial_score': None,
+            'combined_score': None,
+            'gender_score': None,
+            'female_headed_household_target': female_target,
+            'passed_technical_threshold': False,
+            'financial_opened': False,
+            'is_recommended_winner': False,
+            'disqualification_reason': '',
+        }
+        if not raw_technical_evaluations:
+            row['disqualification_reason'] = 'No scored technical evaluation has been submitted yet.'
+            rows.append(row)
+            continue
+        if not technical_evaluations:
+            row['disqualification_reason'] = f'Awaiting more committee scores ({len(raw_technical_evaluations)}/{quorum}).'
+            rows.append(row)
+            continue
+        technical_score = sum(_technical_evaluation_score(ev) for ev in technical_evaluations) / Decimal(len(technical_evaluations))
+        row['technical_score'] = _round_score(technical_score)
+        row['gender_score'] = _round_score(
+            sum(Decimal(str(ev.gender_score or 0)) for ev in technical_evaluations) / Decimal(len(technical_evaluations))
+        )
+        row['passed_technical_threshold'] = _technical_threshold_passed(technical_evaluations, technical_threshold)
+        if not row['passed_technical_threshold']:
+            row['disqualification_reason'] = f'Technical score below threshold ({technical_threshold}%).'
+            rows.append(row)
+            continue
+        if not offer.bid_amount or Decimal(str(offer.bid_amount or 0)) <= 0:
+            row['disqualification_reason'] = 'Financial proposal is missing or invalid for this lot.'
+            rows.append(row)
+            continue
+        if not financial_evaluations:
+            row['disqualification_reason'] = 'Technical score passed. Awaiting the Evaluation Committee to finalize the financial score for this lot.'
+            rows.append(row)
+            continue
+
+        financial_score = sum(_financial_evaluation_score(ev) for ev in financial_evaluations) / Decimal(len(financial_evaluations))
+        qualifying_rows.append((row, financial_score))
+
+    if qualifying_rows:
+        for row, financial_score in qualifying_rows:
+            combined_score = (
+                technical_weight * Decimal(str(row['technical_score']))
+                + financial_weight * financial_score
+            )
+            row['financial_opened'] = True
+            row['financial_score'] = _round_score(financial_score)
+            row['combined_score'] = _round_score(combined_score)
+            rows.append(row)
+
+        rows.sort(
+            key=lambda item: (
+                item['combined_score'] is None,
+                -(item['combined_score'] or 0),
+                -(item['female_headed_household_target'] or 0),
+                -(item['gender_score'] or 0),
+                item['bid_amount_base_currency'] or 0,
+            )
+        )
+        recommended_bid_id = next((row['bid_id'] for row in rows if row['combined_score'] is not None), None)
+        for index, row in enumerate(rows, start=1):
+            row['rank'] = index
+            row['is_recommended_winner'] = row['bid_id'] == recommended_bid_id
+    else:
+        for index, row in enumerate(rows, start=1):
+            row['rank'] = index
+
+    recommended_row = next((row for row in rows if row.get('is_recommended_winner')), None)
+    return {
+        'lot_id': str(lot.id),
+        'lot_name': lot.name,
+        'rows': rows,
+        'recommended': recommended_row,
+        'awarded_vendor_id': lot.awarded_vendor_id or None,
+        'awarded_vendor_name': lot.awarded_vendor_name or None,
+        'intent_to_award_bid_id': str(lot.intent_to_award_bid_id) if lot.intent_to_award_bid_id else None,
+        'intent_to_award_at': lot.intent_to_award_at.isoformat() if lot.intent_to_award_at else None,
+        'awarded_at': lot.awarded_at.isoformat() if lot.awarded_at else None,
     }
 
 
@@ -1057,6 +1747,113 @@ class IsRbfOfficialOrReadOnly(BasePermission):
         return has_module_permission(request.user, 'tenders', action)
 
 
+
+# Human-readable labels for the Activity tab's field-change diff — falls back to a
+# title-cased version of the field name for anything not listed here.
+TENDER_FIELD_LABELS = {
+    'name': 'Tender Name',
+    'department': 'Department Entity',
+    'category': 'Category',
+    'application_type': 'Application Type',
+    'procurement_method': 'Procurement Method',
+    'procurement_workflow': 'Procurement Workflow',
+    'invited_by': 'Invited By',
+    'time_for_completion': 'Time for Completion',
+    'language_of_bid_submission': 'Language of Bid Submission',
+    'budget_disclosure': 'Budget Disclosure',
+    'funding_source': 'Funding Source',
+    'budget': 'Budget Estimate',
+    'bidding_currency': 'Bidding Currency',
+    'currency_rates': 'Additional Currency Rates',
+    'tender_security_required': 'Tender Security Required',
+    'address_for_security': 'Security Address',
+    'bidders_schedule_purchase': 'Bidders Must Purchase Schedule',
+    'document_fee_amount': 'Document Fee Amount',
+    'document_fee_type': 'Document Fee Type',
+    'document_fee_refundable': 'Document Fee Refundable',
+    'minimum_warranty_period_months': 'Minimum Warranty Period',
+    'submission_method': 'Submission Method',
+    'digital_signature_required': 'Digital Signature Required',
+    'status': 'Status',
+    'deadline': 'Submission Deadline',
+    'eoi_deadline': 'EOI Deadline',
+    'technical_deadline': 'Technical Deadline',
+    'financial_deadline': 'Financial Deadline',
+    'clarification_deadline': 'Clarification / Query Deadline',
+    'site_visit_date': 'Site Visit Date',
+    'bid_validity_period_days': 'Bid Validity Period (Days)',
+    'pre_tender_meeting_info': 'Pre-Tender Meeting Info',
+    'cooling_off_days': 'Cooling-Off Period (Days)',
+    'technology_types': 'Technology Types',
+    'target_districts': 'Target Districts',
+    'target_site_type': 'Target Site Type',
+    'minimum_service_tier': 'Minimum Service Tier',
+    'approximate_installation_target': 'Approximate Installation Target',
+    'bidders_eligibility': 'Bidders Eligibility',
+    'instruction': 'Instructions',
+    'contact_details': 'Contact Details',
+    'address_for_document': 'Document Address',
+    'place_for_opening': 'Place for Opening',
+    'advertisement_channels': 'Advertisement Channels',
+    'max_vendors_to_shortlist': 'Max Vendors to Shortlist',
+    'schedule_file': 'Tender Schedule',
+    'rfp_documents_file': 'RFP / Subsidy Framework',
+    'milestone_payment_schedule_file': 'Milestone Payment Schedule',
+    'is_verified': 'Verification Status',
+    'publish_approval_status': 'Publish Approval Status',
+}
+
+# Only these are safe to snapshot/diff — concrete columns on Tender itself, excluding
+# reverse relations (lots, required_documents, invited_vendors, etc.) which aren't
+# meaningfully comparable as a single before/after value.
+_TENDER_DIFFABLE_FIELDS = {
+    f.name for f in Tender._meta.get_fields()
+    if getattr(f, 'concrete', False) and not getattr(f, 'many_to_many', False) and not getattr(f, 'one_to_many', False)
+}
+
+
+def _tender_field_display_value(tender, field):
+    """Render a Tender field's current value as a short, human-readable string (or
+    None if empty) — used to build a before/after diff for the Activity tab."""
+    try:
+        value = getattr(tender, field)
+    except Exception:
+        return None
+    if value is None or value == '':
+        return None
+    if isinstance(value, bool):
+        return 'Yes' if value else 'No'
+    if isinstance(value, (list, tuple)):
+        return ', '.join(str(v) for v in value) if value else None
+    if isinstance(value, dict):
+        return json.dumps(value, sort_keys=True, default=str) if value else None
+    if hasattr(value, 'url') and hasattr(value, 'name'):  # FileField/ImageField
+        return value.name or None
+    return str(value)
+
+
+def _tender_field_snapshot(tender, fields):
+    return {f: _tender_field_display_value(tender, f) for f in fields if f in _TENDER_DIFFABLE_FIELDS}
+
+
+def _tender_field_changes(old_snapshot, new_snapshot):
+    """Diff two snapshots into a list of {field, label, old, new} — only fields whose
+    displayed value actually changed."""
+    changes = []
+    for field in sorted(set(old_snapshot) | set(new_snapshot)):
+        old_val = old_snapshot.get(field)
+        new_val = new_snapshot.get(field)
+        if old_val == new_val:
+            continue
+        changes.append({
+            'field': field,
+            'label': TENDER_FIELD_LABELS.get(field, field.replace('_', ' ').title()),
+            'old': old_val,
+            'new': new_val,
+        })
+    return changes
+
+
 class TenderFilterSet(FilterSet):
     """Advanced filtering for tenders"""
     deadline_range = DateFromToRangeFilter(field_name='deadline')
@@ -1071,7 +1868,7 @@ class TenderFilterSet(FilterSet):
     
     class Meta:
         model = Tender
-        fields = ['status', 'category', 'department', 'is_verified', 'procurement_method']
+        fields = ['status', 'category', 'department', 'is_verified', 'procurement_method', 'is_eoi_invite_only']
 
 
 class TenderPagination(PageNumberPagination):
@@ -1104,13 +1901,37 @@ class TenderViewSet(viewsets.ModelViewSet):
         if not user.is_authenticated:
             return qs.filter(status=TenderStatus.PUBLISHED)
         if user.role == UserRole.VENDOR:
-            is_approved = VendorPrequalification.objects.filter(
+            latest_prequalification = VendorPrequalification.objects.filter(
                 vendor=user,
                 status=PrequalificationStatus.APPROVED,
-            ).exists()
-            if not is_approved:
+            ).order_by('-submitted_at', '-id').first()
+            if latest_prequalification is None:
                 return qs.none()
-            return qs.filter(status=TenderStatus.PUBLISHED)
+            invite_gated_values = _invite_gated_procurement_values()
+            framework_values = _framework_procurement_values()
+            not_open_values = invite_gated_values | framework_values
+            framework_q = Q(pk__in=[])
+            if framework_values:
+                min_tier = _vendor_tier_number(latest_prequalification.tech_tier)
+                tier_ok_q = Q(minimum_service_tier='') | Q(minimum_service_tier__isnull=True)
+                if min_tier is not None:
+                    qualifying_tiers = [t for t in ('Tier 1', 'Tier 2', 'Tier 3', 'Tier 4', 'Tier 5') if (_vendor_tier_number(t) or 0) <= min_tier]
+                    tier_ok_q |= Q(minimum_service_tier__in=qualifying_tiers)
+                tech_ok_q = Q(technology_types=[]) | Q(technology_types__isnull=True)
+                for tag in (latest_prequalification.technology_types or []):
+                    tech_ok_q |= Q(technology_types__contains=[tag])
+                framework_q = Q(procurement_method__in=framework_values) & tier_ok_q & tech_ok_q
+            return qs.filter(status=TenderStatus.PUBLISHED).filter(
+                Q(invited_vendors__vendor=user)
+                # A Restricted-family 'EOI → Combined' tender is still visible to every
+                # approved vendor so they can see and respond to the EOI invite; only the
+                # combined (actual tender) stage is limited to shortlisted/invited vendors.
+                | Q(procurement_method__in=invite_gated_values, procurement_workflow=ProcurementWorkflow.EOI_COMBINED)
+                | ~Q(procurement_method__in=not_open_values)
+                | framework_q
+            ).distinct()
+        if user.role == UserRole.EVALUATION_COMMITTEE:
+            return qs.filter(evaluation_committee_members__member=user).distinct()
         return qs
 
     def get_serializer_class(self):
@@ -1167,7 +1988,7 @@ class TenderViewSet(viewsets.ModelViewSet):
     def check_permissions(self, request):
         super().check_permissions(request)
         if request.method not in SAFE_METHODS and getattr(request.user, 'role', None) not in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}:
-            if self.action != 'create_challenge':
+            if self.action not in {'create_challenge', 'attest_coi', 'declare_coi'}:
                 self.permission_denied(request, message='Only the RBF Management Team can create or modify tenders.')
 
     def create(self, request, *args, **kwargs):
@@ -1189,7 +2010,8 @@ class TenderViewSet(viewsets.ModelViewSet):
         self._assert_write_permission()
         tender = self.get_object()
         old_status = tender.status
-        changed_fields = sorted(str(field) for field in request.data.keys())
+        submitted_fields = sorted(str(field) for field in request.data.keys())
+        old_snapshot = _tender_field_snapshot(tender, submitted_fields)
         serializer = self.get_serializer(tender, data=request.data, partial=partial)
         serializer.is_valid(raise_exception=True)
         self.perform_update(serializer)
@@ -1197,6 +2019,9 @@ class TenderViewSet(viewsets.ModelViewSet):
             tender._prefetched_objects_cache = {}
         response = Response(serializer.data)
         tender.refresh_from_db()
+        new_snapshot = _tender_field_snapshot(tender, submitted_fields)
+        field_changes = _tender_field_changes(old_snapshot, new_snapshot)
+        changed_labels = [c['label'] for c in field_changes]
         log_audit(
             request.user,
             'tender_updated',
@@ -1204,10 +2029,11 @@ class TenderViewSet(viewsets.ModelViewSet):
             {
                 'module': 'tenders',
                 'reference_number': tender.reference_number,
-                'changed_fields': changed_fields,
+                'changed_fields': [c['field'] for c in field_changes],
+                'field_changes': field_changes,
                 'old_status': old_status,
                 'new_status': tender.status,
-                'notes': f'Tender edited. Fields changed: {", ".join(changed_fields) or "none"}.',
+                'notes': f'Tender edited. Fields changed: {", ".join(changed_labels) or "none"}.',
             },
         )
         return response
@@ -1270,6 +2096,35 @@ class TenderViewSet(viewsets.ModelViewSet):
         ).order_by('-publish_approval_requested_at')
         serializer = TenderSerializer(qs, many=True, context=self.get_serializer_context())
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['get'])
+    def eoi_invite_candidates(self, request):
+        """EOI Invite tenders eligible to be linked from a new EOI → Combined tender:
+        published or closed (so their EOI window is open or has concluded), with at
+        least one shortlisted vendor."""
+        if getattr(request.user, 'role', None) not in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}:
+            raise PermissionDenied('Only the RBF Management Team can view EOI Invite candidates.')
+        qs = Tender.objects.filter(
+            is_eoi_invite_only=True,
+            status__in=[TenderStatus.PUBLISHED, TenderStatus.CLOSED],
+        ).annotate(
+            invited_count=Count('invited_vendors'),
+            linked_count=Count('linked_tenders'),  # reverse FK from Tender.linked_eoi_tender
+        ).filter(
+            invited_count__gt=0,
+            linked_count=0,  # exclude EOI invites already used for a tender
+        ).order_by('-created_at')
+        return Response([
+            {
+                'id': str(t.id),
+                'reference_number': t.reference_number,
+                'name': t.name,
+                'status': t.status,
+                'eoi_deadline': t.eoi_deadline,
+                'invited_vendor_count': t.invited_count,
+            }
+            for t in qs
+        ], status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'])
     def request_publish_approval(self, request, pk=None):
@@ -1378,16 +2233,59 @@ class TenderViewSet(viewsets.ModelViewSet):
         return Response(TenderSerializer(tender).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'])
+    def request_publish_changes(self, request, pk=None):
+        """Super Admin asks the RBF to revise the tender before it can be published.
+
+        Unlike reject_publish, this is not a final decision — the tender returns to
+        Draft with a distinct 'changes_requested' status so the RBF can see this was
+        a request for revisions (with notes explaining what to change) rather than an
+        outright rejection, then edit and resubmit for approval.
+        """
+        self._assert_admin_approval_permission()
+        tender = self.get_object()
+
+        if tender.status != TenderStatus.PENDING_PUBLISH_APPROVAL or tender.publish_approval_status != PublishApprovalStatus.PENDING:
+            return Response({'detail': 'Tender is not awaiting publish approval.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        old_status = tender.status
+        tender.publish_approval_status = PublishApprovalStatus.CHANGES_REQUESTED
+        tender.publish_approval_reviewed_at = timezone.now()
+        tender.publish_approval_reviewed_by = self._admin_reference(request.user)
+        tender.publish_approval_notes = (request.data.get('notes') or '').strip()
+        tender.status = TenderStatus.DRAFT
+        tender.save(update_fields=[
+            'publish_approval_status', 'publish_approval_reviewed_at',
+            'publish_approval_reviewed_by', 'publish_approval_notes', 'status', 'updated_at',
+        ])
+        log_audit(
+            request.user,
+            'tender_publish_changes_requested',
+            tender,
+            {
+                'reference_number': tender.reference_number,
+                'old_status': old_status,
+                'new_status': tender.status,
+                'notes': f'Tender {tender.reference_number} sent back to the RBF for changes by Super Admin.'
+                         + (f' Requested changes: {tender.publish_approval_notes}' if tender.publish_approval_notes else ''),
+            },
+        )
+        return Response(TenderSerializer(tender).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
     def publish(self, request, pk=None):
         self._assert_write_permission()
         tender = self.get_object()
 
-        if not tender.is_verified:
-            return Response({'detail': 'Tender must be verified before publishing.'}, status=status.HTTP_400_BAD_REQUEST)
         if tender.status == TenderStatus.CLOSED:
             return Response({'detail': 'Closed tender cannot be published.'}, status=status.HTTP_400_BAD_REQUEST)
-        if tender.publish_approval_status != PublishApprovalStatus.APPROVED:
-            return Response({'detail': 'This tender must be approved by the Super Admin before it can be published.'}, status=status.HTTP_400_BAD_REQUEST)
+        # An EOI Invite carries no award/financial risk (see is_eoi_invite_only) — it
+        # skips the verification + Super Admin publish-approval pipeline real tenders
+        # go through, so RBF Officials can publish one directly.
+        if not tender.is_eoi_invite_only:
+            if not tender.is_verified:
+                return Response({'detail': 'Tender must be verified before publishing.'}, status=status.HTTP_400_BAD_REQUEST)
+            if tender.publish_approval_status != PublishApprovalStatus.APPROVED:
+                return Response({'detail': 'This tender must be approved by the Super Admin before it can be published.'}, status=status.HTTP_400_BAD_REQUEST)
 
         old_status = tender.status
         tender.status = TenderStatus.PUBLISHED
@@ -1531,10 +2429,25 @@ class TenderViewSet(viewsets.ModelViewSet):
         self._assert_write_permission()
         tender = self.get_object()
 
+        if tender.lots.exists():
+            return Response(
+                {'detail': 'This is a lot-wise tender — use award_lot with a lot_id instead.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         if tender.status not in {TenderStatus.PUBLISHED, TenderStatus.EVALUATION}:
             return Response(
                 {'detail': 'Tender can be awarded only from Published or Evaluation state.'},
                 status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        evaluation_status = _tender_evaluation_status(tender)
+        if evaluation_status['committee_size'] and not evaluation_status['complete']:
+            return Response(
+                {
+                    'detail': 'Finalize the Evaluation Committee scores before issuing an intent to award.',
+                    'reasons': evaluation_status['reasons'],
+                },
+                status=status.HTTP_409_CONFLICT,
             )
 
         bid_id = str(request.data.get('bid_id') or '').strip()
@@ -1643,8 +2556,569 @@ class TenderViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'])
     def award_ranking(self, request, pk=None):
         tender = self.get_object()
+        lots = list(tender.lots.all())
+        if lots:
+            return Response({
+                'is_lot_wise': True,
+                'cooling_off_days': tender.cooling_off_days,
+                'technical_weight': tender.technical_weight,
+                'financial_weight': tender.financial_weight,
+                'evaluation_status': _tender_evaluation_status(tender),
+                'lots': [_build_lot_award_ranking(tender, lot) for lot in lots],
+            }, status=status.HTTP_200_OK)
         ranking_payload = _build_award_ranking(tender)
+        ranking_payload['evaluation_status'] = _tender_evaluation_status(tender)
         return Response(ranking_payload, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def award_lot(self, request, pk=None):
+        """Issue intent-to-award for one lot of a lot-wise tender. Distinct vendors can
+        win different lots; the standstill/cooling-off timeline is shared across the
+        whole tender and starts on the first lot's intent-to-award."""
+        self._assert_write_permission()
+        tender = self.get_object()
+
+        if tender.status not in {TenderStatus.PUBLISHED, TenderStatus.EVALUATION, TenderStatus.STANDSTILL}:
+            return Response(
+                {'detail': 'Lots can be awarded only from Published, Evaluation, or Standstill state.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        evaluation_status = _tender_evaluation_status(tender)
+        if evaluation_status['committee_size'] and not evaluation_status['complete']:
+            return Response(
+                {
+                    'detail': 'Finalize the Evaluation Committee scores before issuing an intent to award.',
+                    'reasons': evaluation_status['reasons'],
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        lot_id = str(request.data.get('lot_id') or '').strip()
+        bid_id = str(request.data.get('bid_id') or '').strip()
+        if not lot_id or not bid_id:
+            return Response({'detail': 'lot_id and bid_id are required.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            lot = tender.lots.get(id=lot_id)
+        except TenderLot.DoesNotExist:
+            return Response({'detail': 'Lot not found for this tender.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            bid = TenderBid.objects.get(id=bid_id, tender=tender)
+        except TenderBid.DoesNotExist:
+            return Response({'detail': 'Bid not found for this tender.'}, status=status.HTTP_400_BAD_REQUEST)
+        if bid.status not in {BidStatus.SUBMITTED, BidStatus.UNDER_REVIEW, BidStatus.ACCEPTED}:
+            return Response({'detail': 'Only submitted or under-review bids can be awarded.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        ranking = _build_lot_award_ranking(tender, lot)
+        recommended = ranking.get('recommended')
+        if not recommended:
+            return Response(
+                {'detail': f'No qualifying bid passed the technical threshold for {lot.name}.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if str(recommended['bid_id']) != str(bid.id):
+            return Response(
+                {
+                    'detail': f'Intent to award for {lot.name} can only be issued to the recommended (highest weighted score) bid.',
+                    'recommended_bid_id': recommended['bid_id'],
+                    'recommended_vendor_id': recommended['vendor_id'],
+                    'recommended_vendor_name': recommended['vendor_name'],
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        now = timezone.now()
+        lot.intent_to_award_bid = bid
+        lot.intent_to_award_at = now
+        lot.awarded_vendor_id = bid.vendor_id
+        lot.awarded_vendor_name = bid.vendor_name
+        lot.save(update_fields=['intent_to_award_bid', 'intent_to_award_at', 'awarded_vendor_id', 'awarded_vendor_name', 'updated_at'])
+
+        if tender.status != TenderStatus.STANDSTILL:
+            cooling_off_days = tender.cooling_off_days if tender.cooling_off_days is not None else 7
+            tender.status = TenderStatus.STANDSTILL
+            tender.intent_to_award_at = now
+            tender.cooling_off_until = now + timedelta(days=cooling_off_days)
+            tender.save(update_fields=['status', 'intent_to_award_at', 'cooling_off_until', 'updated_at'])
+
+        if bid.status != BidStatus.ACCEPTED:
+            bid.status = BidStatus.ACCEPTED
+            bid.reviewed_at = bid.reviewed_at or timezone.now()
+            bid.reviewed_by = bid.reviewed_by or (request.user.full_name or request.user.username)
+            bid.save(update_fields=['status', 'reviewed_at', 'reviewed_by', 'updated_at'])
+
+        log_audit(
+            request.user,
+            'lot_intent_to_award_issued',
+            tender,
+            {
+                'reference_number': tender.reference_number,
+                'lot_id': lot_id,
+                'lot_name': lot.name,
+                'bid_id': bid_id,
+                'awarded_vendor_id': bid.vendor_id,
+                'awarded_vendor_name': bid.vendor_name,
+            },
+        )
+
+        data = TenderSerializer(tender, context={'request': request}).data
+        return Response(data, status=status.HTTP_200_OK)
+
+    def _assert_super_admin(self):
+        if getattr(self.request.user, 'role', None) != UserRole.ADMIN:
+            raise PermissionDenied('Only Platform Administrator (Super Admin) can manage the Evaluation Committee.')
+
+    @action(detail=True, methods=['get', 'post'], url_path='evaluation_committee')
+    def evaluation_committee(self, request, pk=None):
+        """Super Admin assembles this tender's Evaluation Committee: 3-5 members,
+        each drawn from users holding the Evaluation Committee role. GET returns the
+        current roster plus the pool of eligible users to choose from; POST replaces
+        the roster."""
+        tender = self.get_object()
+        if request.method == 'GET':
+            self._assert_super_admin()
+            roster = tender.evaluation_committee_members.select_related('member', 'assigned_by').all()
+            pool = User.objects.filter(role=UserRole.EVALUATION_COMMITTEE, status='Active').order_by('full_name')
+            return Response({
+                'roster': TenderEvaluationCommitteeMemberSerializer(roster, many=True, context={'request': request}).data,
+                'available_members': [
+                    {'id': str(u.id), 'full_name': u.full_name, 'email': u.email}
+                    for u in pool
+                ],
+            })
+
+        self._assert_super_admin()
+        member_ids = request.data.get('member_ids')
+        if not isinstance(member_ids, list):
+            return Response({'detail': 'member_ids must be a list of user ids.'}, status=status.HTTP_400_BAD_REQUEST)
+        member_ids = [str(mid) for mid in member_ids]
+        if not (3 <= len(set(member_ids)) <= 5):
+            return Response({'detail': 'An Evaluation Committee must have between 3 and 5 members.'}, status=status.HTTP_400_BAD_REQUEST)
+        members = list(User.objects.filter(id__in=member_ids))
+        if len(members) != len(set(member_ids)):
+            return Response({'detail': 'One or more selected users could not be found.'}, status=status.HTTP_400_BAD_REQUEST)
+        non_ec_members = [u for u in members if u.role != UserRole.EVALUATION_COMMITTEE]
+        if non_ec_members:
+            return Response(
+                {'detail': f'These users do not hold the Evaluation Committee role: {", ".join(u.full_name or u.username for u in non_ec_members)}.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        previously_assigned_ids = set(tender.evaluation_committee_members.values_list('member_id', flat=True))
+        previous_attestation = {
+            m.member_id: m for m in tender.evaluation_committee_members.select_related('member').all()
+        }
+        with transaction.atomic():
+            tender.evaluation_committee_members.all().delete()
+            TenderEvaluationCommitteeMember.objects.bulk_create([
+                TenderEvaluationCommitteeMember(
+                    tender=tender,
+                    member=member,
+                    assigned_by=request.user,
+                    # Re-assigning a member who already attested keeps their attestation —
+                    # only genuinely new members must sign it fresh.
+                    coi_attested=(member.id in previous_attestation and previous_attestation[member.id].coi_attested),
+                    coi_attested_at=(previous_attestation[member.id].coi_attested_at if
+                                     member.id in previous_attestation else None),
+                )
+                for member in members
+            ])
+        log_audit(request.user, 'evaluation_committee_assigned', tender, {
+            'reference_number': tender.reference_number,
+            'member_ids': [str(u.id) for u in members],
+        })
+        for member in members:
+            if member.id in previously_assigned_ids:
+                continue
+            Notification.objects.create(
+                recipient_id=str(member.id),
+                recipient_name=member.full_name or member.username,
+                type=NotificationChannel.IN_APP,
+                event='evaluation_committee_assigned',
+                title=f'Assigned to Evaluation Committee: {tender.reference_number}',
+                body=f'You have been assigned to the Evaluation Committee for "{tender.name}" ({tender.reference_number}). You can now score its bids under Evaluations.',
+                linked_entity_id=str(tender.id),
+            )
+        roster = tender.evaluation_committee_members.select_related('member', 'assigned_by').all()
+        return Response({
+            'roster': TenderEvaluationCommitteeMemberSerializer(roster, many=True, context={'request': request}).data,
+        }, status=status.HTTP_200_OK)
+
+    def _assert_evaluation_oversight(self):
+        if getattr(self.request.user, 'role', None) not in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}:
+            raise PermissionDenied('Only the RBF Management Team and Platform Administrators can view Evaluation Committee scores.')
+
+    @action(detail=True, methods=['get'], url_path='evaluation_scores')
+    def evaluation_scores(self, request, pk=None):
+        """The raw marks each Evaluation Committee member gave, per bid — the RBF
+        Official's / Super Admin's oversight view of the committee's scoring, showing
+        every member's component scores rather than just the averaged result."""
+        self._assert_evaluation_oversight()
+        tender = self.get_object()
+        return Response(_tender_evaluation_scoreboard(tender))
+
+    @action(detail=True, methods=['get', 'post'], url_path='evaluation_comment')
+    def evaluation_comment(self, request, pk=None):
+        """The RBF Official's comment on the tender's evaluation, written only once the
+        committee's whole evaluation is complete. GET returns the saved comment and
+        whether the evaluation has finished; POST saves it (RBF Official / Super Admin
+        only, and only when the evaluation is complete)."""
+        self._assert_evaluation_oversight()
+        tender = self.get_object()
+        status_data = _tender_evaluation_status(tender)
+        if request.method == 'GET':
+            return Response({
+                'comment': tender.evaluation_comment,
+                'author': tender.evaluation_comment_author,
+                'updated_at': tender.evaluation_comment_updated_at,
+                'evaluation_complete': status_data['complete'],
+                'incomplete_reasons': status_data['reasons'],
+                'committee_size': status_data['committee_size'],
+            })
+
+        if not status_data['complete']:
+            return Response({
+                'detail': 'The Evaluation Committee\'s scores are not complete yet. The RBF Official comment can only be added once the whole evaluation is finished.',
+                'evaluation_complete': False,
+                'incomplete_reasons': status_data['reasons'],
+                'committee_size': status_data['committee_size'],
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        comment = str(request.data.get('comment') or '').strip()
+        user = request.user
+        tender.evaluation_comment = comment
+        tender.evaluation_comment_author = user.full_name or user.username or ''
+        tender.evaluation_comment_updated_at = timezone.now()
+        tender.save(update_fields=['evaluation_comment', 'evaluation_comment_author', 'evaluation_comment_updated_at'])
+        log_audit(user, 'evaluation_comment_saved', tender, {
+            'reference_number': tender.reference_number,
+            'comment': comment,
+        })
+        return Response({
+            'comment': tender.evaluation_comment,
+            'author': tender.evaluation_comment_author,
+            'updated_at': tender.evaluation_comment_updated_at,
+            'evaluation_complete': True,
+            'incomplete_reasons': [],
+            'committee_size': status_data['committee_size'],
+        })
+
+    @action(detail=True, methods=['get'], url_path='coi_status')
+    def coi_status(self, request, pk=None):
+        """A committee member's conflict-of-interest posture on this tender: whether
+        they have attested, plus their declared (and unresolved) conflicts. Super Admin
+        sees the whole committee's attestations."""
+        tender = self.get_object()
+        user = request.user
+        is_oversight = user.role in {UserRole.ADMIN, UserRole.RBF_OFFICIAL}
+        memberships = TenderEvaluationCommitteeMember.objects.filter(tender=tender)
+        if is_oversight:
+            roster = [
+                {
+                    'member_id': str(m.member_id),
+                    'name': m.member.full_name or m.member.username or '',
+                    'coi_attested': m.coi_attested,
+                    'coi_attested_at': m.coi_attested_at.isoformat() if m.coi_attested_at else None,
+                }
+                for m in memberships.select_related('member').order_by('assigned_at', 'id')
+            ]
+            declarations = [
+                {
+                    'id': str(c.id),
+                    'evaluator_id': str(c.evaluator_id),
+                    'evaluator_name': c.evaluator.full_name or c.evaluator.username or '',
+                    'vendor_id': c.vendor_id,
+                    'vendor_name': c.vendor_name,
+                    'relationship': c.relationship,
+                    'details': c.details,
+                    'resolved': c.resolved,
+                    'resolved_at': c.resolved_at.isoformat() if c.resolved_at else None,
+                    'resolution_notes': c.resolution_notes,
+                    'declared_at': c.declared_at.isoformat() if c.declared_at else None,
+                }
+                for c in tender.conflict_of_interests.select_related('evaluator', 'resolved_by').order_by('-declared_at')
+            ]
+        else:
+            membership = memberships.filter(member=user).first()
+            if membership is None:
+                raise PermissionDenied('You are not assigned to this tender\'s Evaluation Committee.')
+            roster = [{
+                'member_id': str(user.id),
+                'name': user.full_name or user.username or '',
+                'coi_attested': membership.coi_attested,
+                'coi_attested_at': membership.coi_attested_at.isoformat() if membership.coi_attested_at else None,
+            }]
+            declarations = [
+                {
+                    'id': str(c.id),
+                    'vendor_id': c.vendor_id,
+                    'vendor_name': c.vendor_name,
+                    'relationship': c.relationship,
+                    'details': c.details,
+                    'resolved': c.resolved,
+                    'declared_at': c.declared_at.isoformat() if c.declared_at else None,
+                }
+                for c in EvaluationConflictOfInterest.objects.filter(evaluator=user, tender=tender).order_by('-declared_at')
+            ]
+        return Response({'committee': roster, 'declarations': declarations})
+
+    @action(detail=True, methods=['post'], url_path='attest_coi')
+    def attest_coi(self, request, pk=None):
+        """Blanket attestation a committee member signs before scoring anything on a
+        tender — confirming they have no conflict of interest with any bidder, or that
+        any conflict they do have is already declared (and will be handled)."""
+        tender = self.get_object()
+        user = request.user
+        membership = TenderEvaluationCommitteeMember.objects.filter(tender=tender, member=user).first()
+        if user.role != UserRole.ADMIN and membership is None:
+            raise PermissionDenied('Only assigned Evaluation Committee members (or Super Admin) can attest on this tender.')
+        if membership is not None:
+            membership.coi_attested = True
+            membership.coi_attested_at = timezone.now()
+            membership.save(update_fields=['coi_attested', 'coi_attested_at'])
+        log_audit(user, 'evaluation_coi_attested', tender, {'reference_number': tender.reference_number})
+        return Response({'detail': 'Conflict-of-interest attestation recorded.', 'coi_attested': True})
+
+    @action(detail=True, methods=['post'], url_path='declare_coi')
+    def declare_coi(self, request, pk=None):
+        """Declare a conflict of interest against a specific bidder on this tender.
+        The declaration blocks the member from scoring that bidder's bids until a
+        Super Admin resolves it."""
+        tender = self.get_object()
+        user = request.user
+        membership = TenderEvaluationCommitteeMember.objects.filter(tender=tender, member=user).first()
+        if user.role != UserRole.ADMIN and membership is None:
+            raise PermissionDenied('Only assigned Evaluation Committee members (or Super Admin) can declare a conflict of interest here.')
+        vendor_id = str(request.data.get('vendor_id') or '').strip()
+        relationship = str(request.data.get('relationship') or ConflictOfInterestRelationship.OTHER)
+        details = str(request.data.get('details') or '').strip()
+        if not vendor_id:
+            raise ValidationError({'vendor_id': 'The bidder you have a conflict with is required.'})
+        if relationship not in ConflictOfInterestRelationship.values:
+            raise ValidationError({'relationship': 'Valid relationships: ' + ', '.join(ConflictOfInterestRelationship.values) + '.'})
+        vendor_bid = TenderBid.objects.filter(tender=tender, vendor_id=vendor_id).first()
+        if vendor_bid is None:
+            raise ValidationError({'vendor_id': 'That bidder has not submitted a bid on this tender.'})
+        coi = EvaluationConflictOfInterest.objects.create(
+            evaluator=user,
+            tender=tender,
+            vendor_id=vendor_id,
+            vendor_name=vendor_bid.vendor_name,
+            relationship=relationship,
+            details=details,
+        )
+        log_audit(user, 'evaluation_coi_declared', coi, {
+            'tender_id': str(tender.id),
+            'vendor_id': vendor_id,
+            'vendor_name': vendor_bid.vendor_name,
+            'relationship': relationship,
+        })
+        return Response({
+            'id': str(coi.id),
+            'detail': f'Conflict of interest declared against {vendor_bid.vendor_name}. You cannot score their bids until a Super Admin resolves this declaration.',
+        }, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'], url_path='resolve_coi')
+    def resolve_coi(self, request, pk=None):
+        """Super Admin only: resolve a declared conflict of interest. Once resolved the
+        member may score that bidder's bids again (the resolution is audited)."""
+        tender = self.get_object()
+        user = request.user
+        if user.role != UserRole.ADMIN:
+            raise PermissionDenied('Only Super Admin can resolve a declared conflict of interest.')
+        coi_id = request.data.get('coi_id')
+        try:
+            coi = tender.conflict_of_interests.get(id=coi_id, resolved=False)
+        except EvaluationConflictOfInterest.DoesNotExist:
+            raise ValidationError({'coi_id': 'No unresolved conflict-of-interest declaration found with that id.'})
+        coi.resolved = True
+        coi.resolved_by = user
+        coi.resolved_at = timezone.now()
+        coi.resolution_notes = str(request.data.get('resolution_notes') or '').strip()
+        coi.save(update_fields=['resolved', 'resolved_by', 'resolved_at', 'resolution_notes'])
+        log_audit(user, 'evaluation_coi_resolved', coi, {
+            'tender_id': str(tender.id),
+            'vendor_id': coi.vendor_id,
+            'vendor_name': coi.vendor_name,
+        })
+        return Response({'detail': 'Conflict of interest resolved. The member may now score this bidder.', 'id': str(coi.id)})
+
+    @action(detail=True, methods=['get', 'post'], url_path='invited_vendors')
+    def invited_vendors(self, request, pk=None):
+        """Manage the invited-vendor list for a Restricted Tendering tender. Only
+        vendors on this list may bid once the tender is Restricted (enforced in
+        _assert_vendor_submission_access and TenderViewSet.get_queryset). GET returns
+        the current roster plus the pool of eligible (approved, active) vendors to
+        choose from; POST replaces the roster."""
+        tender = self.get_object()
+        if request.method == 'GET':
+            self._assert_write_permission()
+            roster = tender.invited_vendors.select_related('vendor', 'invited_by').all()
+            # Only vendors whose CURRENT prequalification status is Approved are
+            # eligible to be invited — their most recent submission overall (approved
+            # or not), matching the exact same lookup _assert_vendor_submission_access
+            # uses (_latest_vendor_prequalification: order_by('-submitted_at', '-id'),
+            # no status filter). A vendor whose approval was superseded by a
+            # not-yet-re-approved resubmission is excluded, since inviting them would
+            # be pointless — they can't currently bid even if invited.
+            latest_prequal_by_vendor = {}
+            for prequal in VendorPrequalification.objects.order_by('vendor_id', '-submitted_at', '-id'):
+                latest_prequal_by_vendor.setdefault(prequal.vendor_id, prequal)
+            approved_vendor_ids = {
+                vendor_id for vendor_id, prequal in latest_prequal_by_vendor.items()
+                if prequal.status == PrequalificationStatus.APPROVED
+            }
+            # Account status is still surfaced (not filtered) so the official can see
+            # e.g. a Suspended account before inviting it — only prequalification
+            # status gates who appears in the pool at all.
+            pool = User.objects.filter(
+                role=UserRole.VENDOR, id__in=approved_vendor_ids
+            ).order_by('full_name')
+            tender_tech_types = set(tender.technology_types or [])
+
+            def _vendor_capability(user):
+                prequal = latest_prequal_by_vendor.get(user.id)
+                vendor_tech_types = set(prequal.technology_types or []) if prequal else set()
+                return {
+                    'id': str(user.id),
+                    'full_name': user.full_name,
+                    'email': user.email,
+                    'organization_name': user.organization_name,
+                    # computed_status (blacklist status, else prequalification status),
+                    # not the raw `status` field, which is what the vendor's own
+                    # profile page and the Vendor Directory both display — keeping
+                    # this consistent so the badge here never disagrees with what an
+                    # official would see if they opened this vendor's profile.
+                    'account_status': user.computed_status,
+                    'prequalification_status': prequal.status if prequal else '',
+                    'technology_types': sorted(vendor_tech_types),
+                    'tech_tier': prequal.tech_tier if prequal else '',
+                    'years_experience': prequal.years_experience if prequal else None,
+                    'prior_projects': prequal.prior_projects if prequal else None,
+                    'matches_tender_technology': bool(tender_tech_types & vendor_tech_types) if tender_tech_types else True,
+                }
+
+            available = [_vendor_capability(u) for u in pool]
+            # Vendors whose pre-qualified technology matches this tender surface
+            # first — the most genuinely relevant candidates up top.
+            available.sort(key=lambda v: not v['matches_tender_technology'])
+            return Response({
+                'invited': TenderInvitedVendorSerializer(roster, many=True, context={'request': request}).data,
+                'available_vendors': available,
+            })
+
+        self._assert_write_permission()
+        vendor_ids = request.data.get('vendor_ids')
+        if not isinstance(vendor_ids, list):
+            return Response({'detail': 'vendor_ids must be a list of user ids.'}, status=status.HTTP_400_BAD_REQUEST)
+        vendor_ids = [str(vid) for vid in vendor_ids]
+        vendors = list(User.objects.filter(id__in=vendor_ids))
+        if len(vendors) != len(set(vendor_ids)):
+            return Response({'detail': 'One or more selected users could not be found.'}, status=status.HTTP_400_BAD_REQUEST)
+        non_vendors = [u for u in vendors if u.role != UserRole.VENDOR]
+        if non_vendors:
+            return Response(
+                {'detail': f'These users are not vendors: {", ".join(u.full_name or u.username for u in non_vendors)}.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(vendor_ids) > 1 and tender.procurement_method in _limited_procurement_values():
+            return Response(
+                {'detail': 'Limited/Single-Source tenders may only be directed to one vendor.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        previously_invited_ids = set(tender.invited_vendors.values_list('vendor_id', flat=True))
+        with transaction.atomic():
+            tender.invited_vendors.all().delete()
+            TenderInvitedVendor.objects.bulk_create([
+                TenderInvitedVendor(tender=tender, vendor=vendor, invited_by=request.user)
+                for vendor in vendors
+            ])
+        log_audit(request.user, 'tender_invited_vendors_updated', tender, {
+            'reference_number': tender.reference_number,
+            'vendor_ids': [str(u.id) for u in vendors],
+        })
+        for vendor in vendors:
+            if vendor.id in previously_invited_ids:
+                continue
+            Notification.objects.create(
+                recipient_id=str(vendor.id),
+                recipient_name=vendor.full_name or vendor.username,
+                type=NotificationChannel.IN_APP,
+                event='tender_invited_vendor_added',
+                title=f'Invited to bid: {tender.reference_number}',
+                body=f'You have been invited to bid on the Restricted tender "{tender.name}" ({tender.reference_number}).',
+                linked_entity_id=str(tender.id),
+            )
+        roster = tender.invited_vendors.select_related('vendor', 'invited_by').all()
+        return Response({
+            'invited': TenderInvitedVendorSerializer(roster, many=True, context={'request': request}).data,
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['get'], url_path='financial_evaluation')
+    def financial_evaluation(self, request, pk=None):
+        """The Evaluation Committee's financial evaluation screen: every bid (or, for a
+        lot-wise tender, every lot offer) that has cleared technical evaluation, with its
+        financial score computed live from the price formula — 100 x lowest qualifying
+        price / this price. Nothing here is persisted until a committee member finalizes
+        a row via TenderBidEvaluationViewSet (stage=financial)."""
+        tender = self.get_object()
+        user = request.user
+        if user.role == UserRole.EVALUATION_COMMITTEE and not TenderEvaluationCommitteeMember.objects.filter(tender=tender, member=user).exists():
+            raise PermissionDenied('You are not assigned to this tender\'s Evaluation Committee.')
+        elif user.role not in {UserRole.EVALUATION_COMMITTEE, UserRole.ADMIN}:
+            raise PermissionDenied('Only Evaluation Committee members (or Super Admin) can view financial evaluation.')
+
+        lots = list(tender.lots.all())
+        financial_bids = _financial_bids_for_tender(tender)
+        if lots:
+            payload = []
+            financial_bid_ids = {b.id for b in financial_bids}
+            for lot in lots:
+                lowest = _lowest_qualifying_lot_offer_amount(lot)
+                offer_rows = []
+                for offer in lot.bid_offers.select_related('bid').filter(bid_id__in=financial_bid_ids):
+                    finalized = offer.bid.evaluations.filter(stage=EvaluationStage.FINANCIAL, lot=lot, status=EvaluationStatus.SCORED).order_by('-created_at').first()
+                    mine = offer.bid.evaluations.filter(stage=EvaluationStage.FINANCIAL, lot=lot, evaluator=user).order_by('-created_at').first()
+                    offer_rows.append({
+                        'bid_id': str(offer.bid_id),
+                        'vendor_id': str(offer.bid.vendor_id),
+                        'vendor_name': offer.bid.vendor_name,
+                        'bid_amount': float(offer.bid_amount or 0),
+                        'bid_currency': offer.bid.bid_currency or tender.bidding_currency,
+                        'bid_amount_base_currency': float(_to_base_currency(tender, offer.bid_amount, offer.bid.bid_currency) or 0),
+                        'subsidy_requested': float(offer.subsidy_requested) if offer.subsidy_requested is not None else None,
+                        'computed_financial_score': _round_score(_compute_auto_financial_score_for_offer(offer, lowest)),
+                        'finalized': finalized is not None,
+                        'finalized_by_me': finalized is not None and str(finalized.evaluator_id) == str(user.id),
+                        'submission_status': mine.submission_status if mine is not None else None,
+                        'submitted_at': mine.submitted_at.isoformat() if mine is not None and mine.submitted_at else None,
+                    })
+                offer_rows.sort(key=lambda r: r['bid_amount_base_currency'])
+                payload.append({'lot_id': str(lot.id), 'lot_name': lot.name, 'rows': offer_rows})
+            return Response({'is_lot_wise': True, 'lots': payload})
+
+        lowest = _lowest_qualifying_bid_amount(tender)
+        rows = []
+        for bid in financial_bids:
+            finalized = bid.evaluations.filter(stage=EvaluationStage.FINANCIAL, lot__isnull=True, status=EvaluationStatus.SCORED).order_by('-created_at').first()
+            mine = bid.evaluations.filter(stage=EvaluationStage.FINANCIAL, lot__isnull=True, evaluator=user).order_by('-created_at').first()
+            rows.append({
+                'bid_id': str(bid.id),
+                'vendor_id': str(bid.vendor_id),
+                'vendor_name': bid.vendor_name,
+                'bid_amount': float(bid.bid_amount or 0),
+                'bid_currency': bid.bid_currency or tender.bidding_currency,
+                'bid_amount_base_currency': float(_to_base_currency(tender, bid.bid_amount, bid.bid_currency) or 0),
+                'subsidy_requested': float(bid.subsidy_requested or 0) if bid.subsidy_requested is not None else None,
+                'computed_financial_score': _round_score(_compute_auto_financial_score(bid, lowest)),
+                'finalized': finalized is not None,
+                'finalized_by_me': finalized is not None and str(finalized.evaluator_id) == str(user.id),
+                'submission_status': mine.submission_status if mine is not None else None,
+                'submitted_at': mine.submitted_at.isoformat() if mine is not None and mine.submitted_at else None,
+            })
+        rows.sort(key=lambda r: r['bid_amount_base_currency'])
+        return Response({'is_lot_wise': False, 'rows': rows})
 
     @action(detail=True, methods=['post'])
     def confirm_award(self, request, pk=None):
@@ -1672,8 +3146,15 @@ class TenderViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        bid = tender.intent_to_award_bid
-        if bid is None:
+        lots = list(tender.lots.all())
+        is_lot_wise = bool(lots)
+        awarded_lots = [lot for lot in lots if lot.intent_to_award_bid_id] if is_lot_wise else []
+        if is_lot_wise and not awarded_lots:
+            return Response(
+                {'detail': 'Intent to award must be issued for at least one lot before confirming.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not is_lot_wise and tender.intent_to_award_bid is None:
             return Response(
                 {'detail': 'Intent to award must be issued before confirming the final award.'},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -1687,51 +3168,96 @@ class TenderViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        contracts = []
         with transaction.atomic():
-            tender.status = TenderStatus.AWARDED
-            tender.awarded_vendor_id = bid.vendor_id
-            tender.awarded_vendor_name = bid.vendor_name
-            tender.awarded_at = timezone.now()
-            tender.cooling_off_until = None
-            tender.dispute_started_at = None
-            tender.save(
-                update_fields=[
-                    'status',
-                    'awarded_vendor_id',
-                    'awarded_vendor_name',
-                    'awarded_at',
-                    'cooling_off_until',
-                    'dispute_started_at',
-                    'updated_at',
-                ]
-            )
-            if bid.status != BidStatus.AWARDED:
-                bid.status = BidStatus.AWARDED
-                bid.reviewed_at = bid.reviewed_at or timezone.now()
-                bid.reviewed_by = bid.reviewed_by or (request.user.full_name or request.user.username)
-                bid.save(update_fields=['status', 'reviewed_at', 'reviewed_by', 'updated_at'])
+            now = timezone.now()
+            if is_lot_wise:
+                for lot in awarded_lots:
+                    bid = lot.intent_to_award_bid
+                    if bid.status != BidStatus.AWARDED:
+                        bid.status = BidStatus.AWARDED
+                        bid.reviewed_at = bid.reviewed_at or now
+                        bid.reviewed_by = bid.reviewed_by or (request.user.full_name or request.user.username)
+                        bid.save(update_fields=['status', 'reviewed_at', 'reviewed_by', 'updated_at'])
+                    lot.awarded_at = now
+                    lot.save(update_fields=['awarded_at', 'updated_at'])
+                    contract = self._ensure_award_contract(tender, bid, bid.vendor_id, lot=lot)
+                    if contract:
+                        contracts.append(contract)
+                    log_audit(
+                        request.user,
+                        'lot_awarded',
+                        tender,
+                        {
+                            'reference_number': tender.reference_number,
+                            'lot_id': str(lot.id),
+                            'lot_name': lot.name,
+                            'bid_id': str(bid.id),
+                            'awarded_vendor_id': bid.vendor_id,
+                            'awarded_vendor_name': bid.vendor_name,
+                            'contract_id': str(contract.id) if contract else None,
+                        },
+                    )
+                tender.status = TenderStatus.AWARDED
+                tender.awarded_at = now
+                tender.cooling_off_until = None
+                tender.dispute_started_at = None
+                tender.save(update_fields=['status', 'awarded_at', 'cooling_off_until', 'dispute_started_at', 'updated_at'])
+            else:
+                bid = tender.intent_to_award_bid
+                tender.status = TenderStatus.AWARDED
+                tender.awarded_vendor_id = bid.vendor_id
+                tender.awarded_vendor_name = bid.vendor_name
+                tender.awarded_at = now
+                tender.cooling_off_until = None
+                tender.dispute_started_at = None
+                tender.save(
+                    update_fields=[
+                        'status',
+                        'awarded_vendor_id',
+                        'awarded_vendor_name',
+                        'awarded_at',
+                        'cooling_off_until',
+                        'dispute_started_at',
+                        'updated_at',
+                    ]
+                )
+                if bid.status != BidStatus.AWARDED:
+                    bid.status = BidStatus.AWARDED
+                    bid.reviewed_at = bid.reviewed_at or now
+                    bid.reviewed_by = bid.reviewed_by or (request.user.full_name or request.user.username)
+                    bid.save(update_fields=['status', 'reviewed_at', 'reviewed_by', 'updated_at'])
 
-            contract = self._ensure_award_contract(tender, bid, bid.vendor_id)
+                contract = self._ensure_award_contract(tender, bid, bid.vendor_id)
+                if contract:
+                    contracts.append(contract)
 
-            log_audit(
-                request.user,
-                'tender_awarded',
-                tender,
-                {
-                    'reference_number': tender.reference_number,
-                    'bid_id': str(bid.id),
-                    'awarded_vendor_id': bid.vendor_id,
-                    'awarded_vendor_name': bid.vendor_name,
-                    'contract_id': str(contract.id) if contract else None,
-                },
-            )
+                log_audit(
+                    request.user,
+                    'tender_awarded',
+                    tender,
+                    {
+                        'reference_number': tender.reference_number,
+                        'bid_id': str(bid.id),
+                        'awarded_vendor_id': bid.vendor_id,
+                        'awarded_vendor_name': bid.vendor_name,
+                        'contract_id': str(contract.id) if contract else None,
+                    },
+                )
 
         send_email = request.data.get('send_email', True)
-        self._notify_award(tender, bid.vendor_id, bid.vendor_name, send_email)
+        if is_lot_wise:
+            for lot in awarded_lots:
+                bid = lot.intent_to_award_bid
+                self._notify_award(tender, bid.vendor_id, bid.vendor_name, send_email)
+        else:
+            bid = tender.intent_to_award_bid
+            self._notify_award(tender, bid.vendor_id, bid.vendor_name, send_email)
         response_data = TenderSerializer(tender, context={'request': request}).data
-        if contract:
-            response_data['generated_contract'] = TenderContractSerializer(
-                contract,
+        if contracts:
+            response_data['generated_contracts'] = TenderContractSerializer(
+                contracts,
+                many=True,
                 context={'request': request},
             ).data
         return Response(response_data, status=status.HTTP_200_OK)
@@ -1806,6 +3332,16 @@ class TenderViewSet(viewsets.ModelViewSet):
         previous_bid_id = str(tender.intent_to_award_bid.id) if tender.intent_to_award_bid else None
         previous_vendor_id = tender.awarded_vendor_id
         previous_vendor_name = tender.awarded_vendor_name
+
+        lots = list(tender.lots.all())
+        if lots:
+            for lot in lots:
+                if lot.intent_to_award_bid_id or lot.awarded_vendor_id:
+                    lot.intent_to_award_bid = None
+                    lot.intent_to_award_at = None
+                    lot.awarded_vendor_id = ''
+                    lot.awarded_vendor_name = ''
+                    lot.save(update_fields=['intent_to_award_bid', 'intent_to_award_at', 'awarded_vendor_id', 'awarded_vendor_name', 'updated_at'])
 
         tender.intent_to_award_bid = None
         tender.intent_to_award_at = None
@@ -2298,14 +3834,19 @@ class TenderViewSet(viewsets.ModelViewSet):
         if email_enabled and vendor.email:
             NotificationService.dispatch_email(email_subject, email_body, [vendor.email])
 
-    def _ensure_award_contract(self, tender: Tender, bid: TenderBid, vendor_id: str):
-        """Create a generated contract on award if one doesn't exist."""
+    def _ensure_award_contract(self, tender: Tender, bid: TenderBid, vendor_id: str, lot=None):
+        """Create a generated contract on award if one doesn't exist.
+
+        For lot-wise tenders, pass `lot` — a vendor can win several lots with the same
+        bid, so the contract must be keyed by (tender, vendor, lot), not just vendor.
+        """
         try:
             vendor = User.objects.get(id=vendor_id)
         except User.DoesNotExist:
             return None
 
-        existing = TenderContract.objects.filter(tender=tender, vendor_id=vendor_id).first()
+        existing_qs = TenderContract.objects.filter(tender=tender, vendor_id=vendor_id, lot=lot)
+        existing = existing_qs.first()
         if existing:
             if bid and not existing.bid_id:
                 existing.bid = bid
@@ -2323,9 +3864,12 @@ class TenderViewSet(viewsets.ModelViewSet):
             return existing
 
         reference_number = f"CTR-{tender.reference_number}-{vendor_id}"
+        if lot is not None:
+            reference_number = f"{reference_number}-LOT{lot.id}"
         contract = TenderContract.objects.create(
             tender=tender,
             bid=bid,
+            lot=lot,
             vendor_id=vendor_id,
             vendor_name=vendor.full_name or vendor.username,
             vendor_email=vendor.email or '',
@@ -2393,14 +3937,16 @@ class TenderViewSet(viewsets.ModelViewSet):
         workflow = getattr(tender, 'procurement_workflow', ProcurementWorkflow.SEQUENTIAL)
 
         passing_bids = _technical_passing_bids(tender)
-        submitted_technical = TenderBid.objects.filter(
-            tender=tender,
-            bid_stage__in=[BidStage.TECHNICAL, BidStage.COMBINED],
-            status=BidStatus.SUBMITTED,
-        )
-        if submitted_technical.exists():
+        technical_pending = []
+        for bid in _detailed_evaluation_bids(tender):
+            if not _quorum_met_evaluations(bid, EvaluationStage.TECHNICAL):
+                technical_pending.append(bid.vendor_name)
+        if technical_pending:
             return Response(
-                {'detail': 'Not all technical bids have been evaluated yet. Evaluate every technical submission before opening the Financial stage.'},
+                {
+                    'detail': 'Not all technical bids have been evaluated yet. Evaluate every technical submission before opening the Financial stage.',
+                    'pending': sorted(set(technical_pending)),
+                },
                 status=status.HTTP_409_CONFLICT,
             )
 
@@ -2498,6 +4044,9 @@ class TenderBidViewSet(viewsets.ModelViewSet):
         if user.role == UserRole.VENDOR:
             _backfill_stage_two_drafts_for_vendor(str(user.id))
             return TenderBid.objects.filter(vendor_id=str(user.id)).order_by('-updated_at', '-submitted_at', '-created_at')
+        if user.role == UserRole.EVALUATION_COMMITTEE:
+            assigned_tender_ids = TenderEvaluationCommitteeMember.objects.filter(member=user).values_list('tender_id', flat=True)
+            return TenderBid.objects.filter(tender_id__in=list(assigned_tender_ids)).order_by('-updated_at', '-submitted_at', '-created_at')
         return TenderBid.objects.all().order_by('-updated_at', '-submitted_at', '-created_at')
 
     def _assert_vendor_submission_access(self, request, tender: Tender, bid: TenderBid | None = None):
@@ -2515,6 +4064,30 @@ class TenderBidViewSet(viewsets.ModelViewSet):
         workflow = getattr(tender, 'procurement_workflow', ProcurementWorkflow.SEQUENTIAL)
         spec = _bid_stage_spec(bid, tender)
         stage = spec['stage']
+
+        # A Restricted-family tender (Restricted / Limited-Single-Source / RFQ) normally
+        # only allows invited vendors to bid. The one exception is the EOI stage of an
+        # 'EOI → Combined' tender: it is an open invitation every approved vendor can
+        # respond to; the invite (shortlist) gate only applies to the actual combined
+        # bid submission after the tender is published. Legacy 'sequential' Restricted
+        # tenders do NOT get this exemption — their EOI stage is already gated behind
+        # invites.
+        is_invite_gated = tender.procurement_method in _invite_gated_procurement_values()
+        is_eoi_combined = getattr(tender, 'procurement_workflow', '') == ProcurementWorkflow.EOI_COMBINED
+        is_open_eoi_stage = (
+            is_invite_gated
+            and is_eoi_combined
+            and stage == BidStage.EOI
+        )
+        if is_invite_gated and not is_open_eoi_stage and not tender.invited_vendors.filter(vendor_id=str(request.user.id)).exists():
+            raise ValidationError({'detail': 'This is a Restricted tender — only specifically invited vendors can bid.'})
+
+        # A Framework/Pre-Qualified Pool tender has no invite list at all — the vendor's
+        # own approved pre-qualification tier/technology types must meet the tender's
+        # minimum_service_tier/technology_types requirements instead.
+        if tender.procurement_method in _framework_procurement_values() and not _vendor_meets_framework_requirements(tender, latest_prequalification):
+            raise ValidationError({'detail': 'Your pre-qualification tier or technology types do not meet this tender\'s requirements.'})
+
         deadline = spec['deadline']
         if _uses_hard_deadline(tender) and deadline and timezone.now() >= deadline:
             raise ValidationError({'tender': 'Bidding deadline has passed.'})
@@ -2529,7 +4102,11 @@ class TenderBidViewSet(viewsets.ModelViewSet):
             if not _has_financial_stage_access(bid):
                 raise ValidationError({'detail': 'The Financial stage is not yet open for this vendor.'})
         elif stage == BidStage.COMBINED:
-            if bid is not None and not _has_technical_stage_access(bid):
+            # Workflows that begin with an EOI stage ('EOI → Combined', and legacy
+            # 'combined'/sequential tenders that carry an eoi_deadline) require prior
+            # shortlisting before the combined stage opens. A genuine single-stage
+            # 'Combined' tender has no EOI gate — any eligible vendor may bid directly.
+            if workflow_has_eoi_stage(tender) and bid is not None and not _has_technical_stage_access(bid):
                 raise ValidationError({'detail': 'Only shortlisted vendors can submit a combined Technical & Financial proposal.'})
 
         # Prevent duplicate submissions within the SAME stage lineage.
@@ -2541,12 +4118,7 @@ class TenderBidViewSet(viewsets.ModelViewSet):
             if bid.stage_two_unlocked and not _has_stage_two_shortlist_access(bid):
                 raise ValidationError({'detail': 'Only shortlisted vendors can submit Stage 2 proposals.'})
             existing_submitted_bid = existing_submitted_bid.exclude(id=bid.id)
-            if bid.stage_two_source_bid_id:
-                existing_submitted_bid = existing_submitted_bid.exclude(id=bid.stage_two_source_bid_id)
-            if bid.technical_stage_source_bid_id:
-                existing_submitted_bid = existing_submitted_bid.exclude(id=bid.technical_stage_source_bid_id)
-            if bid.financial_stage_source_bid_id:
-                existing_submitted_bid = existing_submitted_bid.exclude(id=bid.financial_stage_source_bid_id)
+            existing_submitted_bid = existing_submitted_bid.exclude(id__in=_bid_lineage_ids(bid))
         if existing_submitted_bid.exists():
             raise ValidationError({'tender': 'You have already submitted a bid for this tender.'})
 
@@ -2843,8 +4415,22 @@ class TenderBidViewSet(viewsets.ModelViewSet):
         if is_eoi_bid or is_legacy:
             workflow = getattr(bid.tender, 'procurement_workflow', ProcurementWorkflow.SEQUENTIAL)
             draft = _unlock_stage_for_bid(bid, BidStage.TECHNICAL)
-            if workflow == ProcurementWorkflow.COMBINED:
+            if workflow_is_combined_style(bid.tender, workflow):
                 _unlock_stage_for_bid(bid, BidStage.FINANCIAL)
+
+            # For a Restricted-family tender the vendor must also be on the invited-vendor
+            # list to bid (enforced in _assert_vendor_submission_access). Shortlisting is
+            # the RBF's decision that this vendor may proceed, so add them to the roster
+            # now — idempotently — while still allowing manual review/management later.
+            if bid.tender.procurement_method in _invite_gated_procurement_values():
+                vendor_user = User.objects.filter(id=bid.vendor_id).first()
+                if vendor_user is not None:
+                    TenderInvitedVendor.objects.get_or_create(
+                        tender=bid.tender,
+                        vendor=vendor_user,
+                        defaults={'invited_by': request.user},
+                    )
+
             Notification.objects.create(
                 recipient_id=bid.vendor_id,
                 recipient_name=bid.vendor_name,
@@ -2863,7 +4449,6 @@ class TenderBidViewSet(viewsets.ModelViewSet):
             return Response(TenderBidSerializer(bid).data, status=status.HTTP_200_OK)
 
         try:
-            from rbf.users.models import User
             User.objects.get(id=bid.vendor_id)
             Notification.objects.create(
                 recipient_id=bid.vendor_id,
@@ -2950,6 +4535,68 @@ class TenderBidViewSet(viewsets.ModelViewSet):
         return Response(TenderBidSerializer(bid).data, status=status.HTTP_200_OK)
 
 
+EVALUATION_SNAPSHOT_FIELDS = (
+    'stage',
+    'lot_id',
+    'submission_status',
+    'technical_score',
+    'financial_score',
+    'financial_score_auto_calculated',
+    'feasibility_score',
+    'kpi_score',
+    'gender_score',
+    'environmental_score',
+    'om_score',
+    'inclusivity_score',
+    'total_score',
+    'comments',
+    'justifications',
+)
+
+
+def _evaluation_score_snapshot(evaluation: TenderBidEvaluation) -> dict:
+    """JSON-serializable snapshot of every scoring-relevant field on an evaluation.
+    Used as the before/after pair inside TenderBidEvaluationRevision so an audit can
+    reconstruct exactly how (and why) marks evolved."""
+    return {
+        field: getattr(evaluation, field, None)
+        for field in EVALUATION_SNAPSHOT_FIELDS
+        if field != 'lot_id' or getattr(evaluation, 'lot_id', None) is not None
+    }
+
+
+def _evaluation_snapshot_diff(before: dict, after: dict):
+    """Yield (field, before, after) triples for every field that changed between two
+    evaluation snapshots. Values are normalized (lists/dicts coerced to strings) so
+    the diff is trivially JSON-serializable for the audit/reporting surface."""
+    key_order = list(EVALUATION_SNAPSHOT_FIELDS)
+    for field in key_order:
+        b = before.get(field)
+        a = after.get(field)
+        b_norm = json.dumps(b, default=str, sort_keys=True) if isinstance(b, (dict, list)) else b
+        a_norm = json.dumps(a, default=str, sort_keys=True) if isinstance(a, (dict, list)) else a
+        if b_norm != a_norm:
+            yield field, before.get(field), after.get(field)
+
+
+def _write_evaluation_revision(evaluation, changed_by, action, before, after, reason=''):
+    """Append an immutable revision row for an evaluation. Skips writing noise when a
+    draft re-save didn't actually change anything."""
+    if before == after and action == EvaluationRevisionAction.DRAFT_SAVED:
+        return None
+    try:
+        return TenderBidEvaluationRevision.objects.create(
+            evaluation=evaluation,
+            changed_by=changed_by if getattr(changed_by, 'is_authenticated', False) else None,
+            action=action,
+            reason=reason,
+            before=before or {},
+            after=after or {},
+        )
+    except Exception:  # noqa: BLE001 — an audit write must never break a score save
+        return None
+
+
 class TenderBidEvaluationViewSet(viewsets.ModelViewSet):
     queryset = TenderBidEvaluation.objects.select_related('bid', 'evaluator').all().order_by('-created_at')
     serializer_class = TenderBidEvaluationSerializer
@@ -2964,20 +4611,47 @@ class TenderBidEvaluationViewSet(viewsets.ModelViewSet):
         qs = TenderBidEvaluation.objects.select_related('bid', 'evaluator')
         if user.role == UserRole.VENDOR:
             return qs.filter(bid__vendor_id=str(user.id))
+        if user.role == UserRole.EVALUATION_COMMITTEE:
+            assigned_tender_ids = TenderEvaluationCommitteeMember.objects.filter(member=user).values_list('tender_id', flat=True)
+            return qs.filter(bid__tender_id__in=list(assigned_tender_ids))
         return qs
 
-    def _assert_eval_permission(self, request):
-        if request.user.role not in {UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.TAC}:
-            raise PermissionDenied('Only the RBF Management Team or TAC members can score bids.')
+    def _assert_eval_permission(self, request, bid=None):
+        user = request.user
+        if user.role == UserRole.ADMIN:
+            return
+        if user.role != UserRole.EVALUATION_COMMITTEE:
+            raise PermissionDenied('Only Evaluation Committee members (or Super Admin) can score bids.')
+        if bid is not None:
+            membership = TenderEvaluationCommitteeMember.objects.filter(tender_id=bid.tender_id, member=user).first()
+            if membership is None:
+                raise PermissionDenied('You are not assigned to this tender\'s Evaluation Committee.')
+            if not membership.coi_attested:
+                raise PermissionDenied('You must attest to having no conflict of interest on this tender before scoring bids.')
+            if EvaluationConflictOfInterest.objects.filter(
+                evaluator=user, tender_id=bid.tender_id, resolved=False, vendor_id=str(bid.vendor_id or ''),
+            ).exists():
+                raise PermissionDenied('You have a declared, unresolved conflict of interest with this bidder and cannot score their bid.')
 
-    def _assert_tender_closed_for_evaluation(self, bid):
+    def _assert_can_write(self, evaluation, user):
+        """Enforces the submit-to-finalize lock: a SUBMITTED evaluation is sealed and
+        only a Super Admin may touch it (reopening is recorded as a revision)."""
+        if user.role == UserRole.ADMIN:
+            return
+        if evaluation.submission_status == EvaluationSubmissionStatus.SUBMITTED:
+            raise PermissionDenied('This evaluation has been submitted and locked. A Super Admin must unlock it before it can be changed.')
+
+    def _assert_tender_closed_for_evaluation(self, bid, evaluation_stage=EvaluationStage.TECHNICAL):
         stage = normalize_bid_stage(getattr(bid, 'bid_stage', '') or bid.stage)
         is_detailed = stage in (BidStage.TECHNICAL, BidStage.COMBINED) or getattr(bid, 'stage_two_unlocked', False)
         if is_detailed:
-            if getattr(bid, 'financial_stage_unlocked', False) is False \
-                    and getattr(bid, 'financial_sealed', True) \
-                    and getattr(self.request.user, 'role', None) == UserRole.TAC:
-                raise PermissionDenied('Financial pricing is sealed until the Technical stage clears.')
+            # Scoring a TECHNICAL evaluation never touches or exposes financial pricing
+            # (the payload is technical/feasibility/kpi/gender/environmental/om scores
+            # only) — financial pricing visibility is independently controlled by
+            # financial_bid_is_sealed() in the bid serializer, and FINANCIAL scoring
+            # itself is already gated on the technical threshold/quorum having cleared
+            # first (see _apply_auto_financial_score). There is nothing to block here:
+            # scoring Technical is exactly the action that's supposed to clear that gate.
             _assert_evaluation_window_open(bid.tender)
             return
         _auto_close_tender_on_deadline(bid.tender)
@@ -2986,43 +4660,201 @@ class TenderBidEvaluationViewSet(viewsets.ModelViewSet):
                 {'detail': 'EOI evaluation requires the tender to be Published, Closed, or in Evaluation.'}
             )
 
-    def create(self, request, *args, **kwargs):
-        self._assert_eval_permission(request)
-        bid_id = request.data.get('bid')
-        if bid_id:
+    def _apply_auto_financial_score(self, data, bid):
+        """For a financial-stage submission, the score is always computed server-side
+        from the price formula — whatever the client sent for financial_score is
+        ignored. Lot-wise tenders compute per lot (a bid can offer on several lots);
+        non-lot-wise tenders compute once for the bid's own bid_amount."""
+        technical_score = _technical_score_for_bid(bid)
+        threshold = Decimal(str(bid.tender.technical_threshold or 70))
+        if technical_score is None:
+            raise ValidationError({'stage': 'This bid has not yet cleared technical evaluation (committee quorum not reached).'})
+        if technical_score < threshold:
+            raise ValidationError({'stage': f'This bid has not cleared the technical threshold ({threshold}%) yet.'})
+
+        lot_id = data.get('lot')
+        if lot_id:
             try:
-                bid = TenderBid.objects.get(id=bid_id)
-            except TenderBid.DoesNotExist:
-                raise ValidationError({'bid': 'Bid not found.'})
-            self._assert_tender_closed_for_evaluation(bid)
+                lot = TenderLot.objects.get(id=lot_id, tender_id=bid.tender_id)
+                offer = TenderBidLotOffer.objects.get(bid=bid, lot=lot)
+            except (TenderLot.DoesNotExist, TenderBidLotOffer.DoesNotExist):
+                raise ValidationError({'lot': 'This bid has no offer for that lot.'})
+            computed = _compute_auto_financial_score_for_offer(offer)
+        else:
+            data['lot'] = None
+            computed = _compute_auto_financial_score(bid)
+        data['financial_score'] = int(computed.to_integral_value(rounding=ROUND_HALF_UP))
+        data['financial_score_auto_calculated'] = True
+
+    def create(self, request, *args, **kwargs):
+        bid_id = request.data.get('bid')
+        if not bid_id:
+            raise ValidationError({'bid': 'This field is required.'})
+        try:
+            bid = TenderBid.objects.get(id=bid_id)
+        except TenderBid.DoesNotExist:
+            raise ValidationError({'bid': 'Bid not found.'})
+        self._assert_eval_permission(request, bid)
+        stage = request.data.get('stage') or EvaluationStage.TECHNICAL
+        self._assert_tender_closed_for_evaluation(bid, stage)
         data = request.data.copy()
         data['evaluator'] = request.user.id
-        existing = TenderBidEvaluation.objects.filter(
-            bid_id=data.get('bid'),
-            evaluator=request.user,
-        ).order_by('-created_at').first()
+        data['stage'] = stage
+        if stage == EvaluationStage.FINANCIAL:
+            self._apply_auto_financial_score(data, bid)
+        else:
+            data['lot'] = None
+            data['financial_score_auto_calculated'] = False
+        data.setdefault('submission_status', EvaluationSubmissionStatus.DRAFT)
+        filter_kwargs = {
+            'bid_id': data.get('bid'),
+            'evaluator': request.user,
+            'stage': stage,
+        }
+        lot_id = data.get('lot') or None
+        if lot_id:
+            filter_kwargs['lot_id'] = lot_id
+        existing = TenderBidEvaluation.objects.filter(**filter_kwargs).order_by('-created_at').first()
         if existing is not None:
+            self._assert_can_write(existing, request.user)
+            before = _evaluation_score_snapshot(existing)
             serializer = self.get_serializer(existing, data=data, partial=True)
             serializer.is_valid(raise_exception=True)
-            self.perform_update(serializer)
-            evaluation = serializer.instance
+            submitted_now = data.get('submission_status') == EvaluationSubmissionStatus.SUBMITTED and existing.submission_status != EvaluationSubmissionStatus.SUBMITTED
+            with transaction.atomic():
+                self.perform_update(serializer)
+                evaluation = serializer.instance
+                _write_evaluation_revision(
+                    evaluation, request.user,
+                    EvaluationRevisionAction.SUBMITTED if submitted_now else EvaluationRevisionAction.DRAFT_SAVED,
+                    before,
+                    _evaluation_score_snapshot(evaluation),
+                )
             log_audit(request.user, 'bid_evaluated', evaluation, {'bid_id': str(evaluation.bid_id), 'score': evaluation.total_score, 'mode': 'updated_existing'})
             return Response(serializer.data, status=status.HTTP_200_OK)
 
-        serializer = self.get_serializer(data=data)
-        serializer.is_valid(raise_exception=True)
-        self.perform_create(serializer)
-        evaluation = serializer.instance
+        try:
+            with transaction.atomic():
+                serializer = self.get_serializer(data=data)
+                serializer.is_valid(raise_exception=True)
+                self.perform_create(serializer)
+                evaluation = serializer.instance
+        except IntegrityError:
+            # A concurrent request created the same (bid, evaluator, stage[, lot]) row
+            # between our lookup and insert — fall back to that row instead of erroring.
+            existing = TenderBidEvaluation.objects.filter(**filter_kwargs).order_by('-created_at').first()
+            if existing is None:
+                raise
+            _write_evaluation_revision(
+                existing, request.user, EvaluationRevisionAction.DRAFT_SAVED,
+                _evaluation_score_snapshot(existing), _evaluation_score_snapshot(existing),
+            )
+            return Response(self.get_serializer(existing).data, status=status.HTTP_200_OK)
+        _write_evaluation_revision(
+            evaluation, request.user,
+            EvaluationRevisionAction.SUBMITTED if data.get('submission_status') == EvaluationSubmissionStatus.SUBMITTED else EvaluationRevisionAction.DRAFT_SAVED,
+            {},
+            _evaluation_score_snapshot(evaluation),
+        )
         log_audit(request.user, 'bid_evaluated', evaluation, {'bid_id': str(evaluation.bid_id), 'score': evaluation.total_score, 'mode': 'created'})
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
     def update(self, request, *args, **kwargs):
-        self._assert_eval_permission(request)
         evaluation = self.get_object()
-        self._assert_tender_closed_for_evaluation(evaluation.bid)
+        self._assert_eval_permission(request, evaluation.bid)
+        self._assert_tender_closed_for_evaluation(evaluation.bid, request.data.get('stage') or evaluation.stage)
         if request.user.role != UserRole.ADMIN and str(getattr(evaluation, 'evaluator_id', '')) != str(request.user.id):
             raise PermissionDenied('You can only edit your own evaluation record.')
-        return super().update(request, *args, **kwargs)
+        self._assert_can_write(evaluation, request.user)
+        data = request.data.copy()
+        before = _evaluation_score_snapshot(evaluation)
+        revision_action = EvaluationRevisionAction.DRAFT_SAVED
+        if evaluation.submission_status == EvaluationSubmissionStatus.SUBMITTED:
+            # A Super Admin patching a submitted row is, in effect, reopening it — log it
+            # as such so the audit trail is unambiguous.
+            revision_action = EvaluationRevisionAction.REOPENED
+        if evaluation.stage == EvaluationStage.FINANCIAL or data.get('stage') == EvaluationStage.FINANCIAL:
+            if 'lot' not in data:
+                data['lot'] = evaluation.lot_id
+            self._apply_auto_financial_score(data, evaluation.bid)
+            serializer = self.get_serializer(evaluation, data=data, partial=kwargs.get('partial', False))
+            serializer.is_valid(raise_exception=True)
+            self.perform_update(serializer)
+            _write_evaluation_revision(
+                evaluation, request.user, revision_action, before, _evaluation_score_snapshot(evaluation),
+                reason='Super Admin reopened a submitted financial evaluation.' if revision_action == EvaluationRevisionAction.REOPENED else '',
+            )
+            return Response(serializer.data)
+        serializer = self.get_serializer(evaluation, data=data, partial=kwargs.get('partial', False))
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        _write_evaluation_revision(
+            evaluation, request.user, revision_action, before, _evaluation_score_snapshot(evaluation),
+            reason='Super Admin reopened a submitted evaluation.' if revision_action == EvaluationRevisionAction.REOPENED else '',
+        )
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['post'])
+    def submit(self, request, pk=None):
+        """Seal this evaluation as the member's final mark. For a technical evaluation
+        this re-validates that every criterion carries a rationale first; financial
+        evaluations just need the auto-calculated score. A submitted row cannot be
+        edited without a Super Admin unlock ('/unlock/')."""
+        evaluation = self.get_object()
+        self._assert_eval_permission(request, evaluation.bid)
+        if request.user.role != UserRole.ADMIN and str(getattr(evaluation, 'evaluator_id', '')) != str(request.user.id):
+            raise PermissionDenied('You can only submit your own evaluation record.')
+        if evaluation.submission_status == EvaluationSubmissionStatus.SUBMITTED:
+            return Response(self.get_serializer(evaluation).data)
+        payload = {
+            'bid': str(evaluation.bid_id),
+            'lot': evaluation.lot_id,
+            'stage': evaluation.stage,
+            'evaluator': evaluation.evaluator_id,
+            'technical_score': evaluation.technical_score,
+            'financial_score': evaluation.financial_score,
+            'feasibility_score': evaluation.feasibility_score,
+            'kpi_score': evaluation.kpi_score,
+            'gender_score': evaluation.gender_score,
+            'environmental_score': evaluation.environmental_score,
+            'om_score': evaluation.om_score,
+            'inclusivity_score': evaluation.inclusivity_score,
+            'comments': request.data.get('comments', evaluation.comments),
+            'justifications': request.data.get('justifications', evaluation.justifications or {}),
+            'submission_status': EvaluationSubmissionStatus.SUBMITTED,
+        }
+        before = _evaluation_score_snapshot(evaluation)
+        serializer = self.get_serializer(evaluation, data=payload, partial=True)
+        serializer.is_valid(raise_exception=True)
+        with transaction.atomic():
+            self.perform_update(serializer)
+            evaluation = serializer.instance
+            _write_evaluation_revision(
+                evaluation, request.user, EvaluationRevisionAction.SUBMITTED, before,
+                _evaluation_score_snapshot(evaluation), reason='Evaluation submitted for the record.',
+            )
+        log_audit(request.user, 'bid_evaluation_submitted', evaluation, {'bid_id': str(evaluation.bid_id), 'score': evaluation.total_score})
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['post'])
+    def unlock(self, request, pk=None):
+        """Super Admin only: reopen a submitted evaluation so the evaluator may correct
+        their marks. The reopen is itself recorded as a revision for the audit trail."""
+        evaluation = self.get_object()
+        if request.user.role != UserRole.ADMIN:
+            raise PermissionDenied('Only Super Admin can unlock a submitted evaluation.')
+        if evaluation.submission_status != EvaluationSubmissionStatus.SUBMITTED:
+            return Response(self.get_serializer(evaluation).data)
+        before = _evaluation_score_snapshot(evaluation)
+        evaluation.submission_status = EvaluationSubmissionStatus.DRAFT
+        evaluation.submitted_at = None
+        evaluation.save(update_fields=['submission_status', 'submitted_at', 'updated_at'])
+        _write_evaluation_revision(
+            evaluation, request.user, EvaluationRevisionAction.REOPENED, before,
+            _evaluation_score_snapshot(evaluation), reason=request.data.get('reason') or 'Super Admin reopened the evaluation.',
+        )
+        log_audit(request.user, 'bid_evaluation_unlocked', evaluation, {'bid_id': str(evaluation.bid_id)})
+        return Response(self.get_serializer(evaluation).data)
 
 
 class TenderContractViewSet(viewsets.ModelViewSet):
