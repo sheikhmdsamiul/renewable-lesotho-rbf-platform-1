@@ -4,6 +4,7 @@ import tempfile
 import html
 import logging
 import os
+import re
 
 from rest_framework import viewsets, filters
 from rest_framework.permissions import IsAuthenticated
@@ -170,7 +171,19 @@ def field_verifier_district_filter(user, project_prefix: str = 'project__'):
         return Q(pk__in=[])
     district_queries = Q()
     for district in normalized_districts:
-        district_queries |= Q(**{f'{project_prefix}district__iexact': district}) | Q(**{f'{project_prefix}region__iexact': district})
+        # `district` holds only the PRIMARY district, while `district_zone` holds every
+        # district the project covers. A lot-wise project spans all of a lot's districts,
+        # so scoping on `district` alone hid its installations from the field verifiers
+        # serving the lot's other districts. Match the full zone list as whole
+        # comma-separated tokens (a bare icontains would let "Maseru" match "Maseru
+        # Urban" as an unrelated token), plus the lot's own target districts.
+        zone_token = rf'(^|,\s*){re.escape(district)}(,\s*|$)'
+        district_queries |= (
+            Q(**{f'{project_prefix}district__iexact': district})
+            | Q(**{f'{project_prefix}region__iexact': district})
+            | Q(**{f'{project_prefix}district_zone__iregex': zone_token})
+            | Q(**{f'{project_prefix}lot__target_districts__icontains': district})
+        )
     return district_queries
 
 
