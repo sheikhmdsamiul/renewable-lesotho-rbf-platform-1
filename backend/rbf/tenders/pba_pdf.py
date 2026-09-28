@@ -28,9 +28,21 @@ PBA_DISBURSEMENT_PLAN = (
 ANNEX_SECTION_SPECS = (
     ("annex_a_file", "Annex A", "Results Framework", "Mapped from the awarded Gender Action Plan."),
     ("annex_b_file", "Annex B", "Implementation Schedule", "Mapped from the awarded Vendor Implementation Plan."),
-    ("annex_c_file", "Annex C", "Payment Terms", "Includes the BOQ and generated disbursement table."),
+    ("annex_c_file", "Annex C", "Payment Terms", "Includes the generated disbursement table."),
     ("annex_d_file", "Annex D", "Reporting Formats", "Includes standardized system reporting templates."),
     ("annex_e_file", "Annex E", "Technical Standards", "Mapped from the awarded Technical Proposal."),
+)
+
+# Other documents the vendor attached to their bid that aren't one of the five lettered
+# annexes above but still belong in the contract package. Unlike ANNEX_SECTION_SPECS
+# these are optional/supplementary — no cover page is generated at all if the bid never
+# had this field populated (the five lettered annexes above always get a page, even
+# with nothing attached, since they're contractually required sections).
+ADDITIONAL_BID_DOCUMENT_SPECS = (
+    ("boq_file", "Bill of Quantities"),
+    ("tender_security_file", "Tender Security"),
+    ("om_plan_file", "O&M Plan"),
+    ("distribution_map_file", "Distribution Map"),
 )
 
 
@@ -706,8 +718,11 @@ def _resolve_contract_project(contract) -> Project | None:
     return Project.objects.filter(tender_id=tender_id, vendor_id=vendor_id).order_by("-id").first()
 
 
-def _resolve_source_path(contract, annex_field: str) -> Path | None:
-    file_field = getattr(contract, annex_field, None)
+def _resolve_source_path(obj, field_name: str) -> Path | None:
+    """Resolves a FileField on any model instance to an on-disk Path — used both for
+    the contract's own annex_x_file fields and (for the additional-documents pass)
+    directly on the winning bid, since those aren't copied onto the contract."""
+    file_field = getattr(obj, field_name, None)
     if not file_field:
         return None
     try:
@@ -718,6 +733,19 @@ def _resolve_source_path(contract, annex_field: str) -> Path | None:
             return None
         candidate = Path(settings.MEDIA_ROOT) / relative_name
         return candidate if candidate.exists() else None
+
+
+def _resolve_media_url_path(file_url: str) -> Path | None:
+    """Resolves a stored `custom_documents` entry's file_url (MEDIA_URL-relative or
+    absolute) to an on-disk Path, mirroring _resolve_source_path for FileFields."""
+    if not file_url:
+        return None
+    media_url = getattr(settings, "MEDIA_URL", "") or ""
+    relative = file_url
+    if media_url and file_url.startswith(media_url):
+        relative = file_url[len(media_url):]
+    candidate = Path(settings.MEDIA_ROOT) / relative.lstrip("/")
+    return candidate if candidate.exists() else None
 
 
 def _is_mergeable_pdf(path: Path | None) -> bool:
@@ -852,6 +880,47 @@ def generate_contract_pdf(contract, tender, bid, vendor, project=None):
                     )
             if valid_source_pdf:
                 parts.append(annex_source_path)
+
+        # Additional documents the vendor attached to their bid, beyond the five
+        # lettered annexes above — optional/supplementary, so unlike ANNEX_SECTION_SPECS
+        # a page is only generated when the bid actually has something in that field.
+        next_index = len(ANNEX_SECTION_SPECS) + 2
+        for offset, (field_name, title) in enumerate(ADDITIONAL_BID_DOCUMENT_SPECS):
+            source_path = _resolve_source_path(bid, field_name)
+            if source_path is None:
+                continue
+            extra_part = AnnexPart(
+                field_name=field_name,
+                label="Additional Document",
+                title=title,
+                description=f"Submitted with the vendor's bid ({title}).",
+                source_path=source_path,
+            )
+            extra_pdf = tmp_dir / f"{next_index + offset:02d}_{field_name}.pdf"
+            _render_pdf(_annex_section_html(contract, extra_part, total_award), extra_pdf, contract.reference_number)
+            parts.append(extra_pdf)
+            if _is_mergeable_pdf(source_path):
+                parts.append(source_path)
+
+        custom_documents = getattr(bid, "custom_documents", None) or []
+        custom_base_index = next_index + len(ADDITIONAL_BID_DOCUMENT_SPECS)
+        for offset, doc in enumerate(custom_documents):
+            doc_name = (doc or {}).get("name") or "Custom Document"
+            source_path = _resolve_media_url_path((doc or {}).get("file_url") or "")
+            if source_path is None:
+                continue
+            extra_part = AnnexPart(
+                field_name=f"custom_document_{offset}",
+                label="Additional Document",
+                title=doc_name,
+                description=f"Submitted with the vendor's bid ({doc_name}).",
+                source_path=source_path,
+            )
+            extra_pdf = tmp_dir / f"{custom_base_index + offset:02d}_custom_document_{offset}.pdf"
+            _render_pdf(_annex_section_html(contract, extra_part, total_award), extra_pdf, contract.reference_number)
+            parts.append(extra_pdf)
+            if _is_mergeable_pdf(source_path):
+                parts.append(source_path)
 
         final_pdf = tmp_dir / f"{contract.reference_number}.pdf"
         _pdfa_merge(parts, final_pdf)

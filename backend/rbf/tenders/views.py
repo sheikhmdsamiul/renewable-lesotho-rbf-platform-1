@@ -13,9 +13,11 @@ from decimal import Decimal, ROUND_HALF_UP
 from math import ceil
 from django.conf import settings
 from django.db import transaction
+from django.db import models
 from django.db import IntegrityError
 from django.db.models import Q, Count
 from django.db.models.functions import Coalesce
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.urls import reverse
 from rest_framework.parsers import MultiPartParser, FormParser
 from django_filters.rest_framework import DjangoFilterBackend
@@ -52,6 +54,9 @@ from .models import (
     TenderInvitedVendor,
     ProcurementMethod,
     EvaluationStage,
+    TenderAwardRecommendation,
+    IntentToAwardRequest,
+    IntentAwardRequestStatus,
 )
 from .serializers import (
     TenderSerializer,
@@ -75,6 +80,8 @@ from .serializers import (
     ChallengeCreateSerializer,
     TenderEvaluationCommitteeMemberSerializer,
     TenderInvitedVendorSerializer,
+    TenderAwardRecommendationSerializer,
+    IntentToAwardRequestSerializer,
 )
 from .pba_pdf import generate_contract_pdf
 from rbf.users.models import UserRole, VendorPrequalification, PrequalificationStatus
@@ -221,8 +228,8 @@ CONTRACT_ANNEX_SPECS = (
         'annex_c_file',
         'Annex C',
         'Payment Terms',
-        'BOQ and Disbursement Table',
-        ('financial_proposal_file', 'boq_file'),
+        'Financial Proposal and Disbursement Table',
+        ('financial_proposal_file',),
     ),
     (
         'annex_d_file',
@@ -347,6 +354,7 @@ def _assignment_defaults(contract: TenderContract):
     installation_target = contract.tender.approximate_installation_target or (len(list(bid.sites.all())) if bid else 0)
     start_date = contract.tender.awarded_at.date() if contract.tender.awarded_at else timezone.now().date()
     contract_value = _contract_value(contract)
+    platform_config = _platform_configuration()
     return {
         'project_duration_months': 12,
         'installation_target': installation_target or 1,
@@ -359,6 +367,11 @@ def _assignment_defaults(contract: TenderContract):
         'vulnerable_target_pct': 30,
         'low_income_target_pct': 60,
         'start_date': start_date.isoformat(),
+        'm1_disbursement_pct': DEFAULT_MILESTONE_DISBURSEMENT_PCTS[0],
+        'm2_disbursement_pct': DEFAULT_MILESTONE_DISBURSEMENT_PCTS[1],
+        'm3_disbursement_pct': DEFAULT_MILESTONE_DISBURSEMENT_PCTS[2],
+        'm2_installation_required_pct': platform_config.m2_verification_required_pct or 80,
+        'm3_installation_required_pct': platform_config.m3_verification_required_pct or 100,
         'disbursement_preview': _disbursement_preview(contract_value),
     }
 
@@ -400,10 +413,44 @@ def _normalize_technology_type(value: str) -> str:
     return mapping.get(raw, str(value or '').strip().upper())
 
 
-def _disbursement_preview(contract_value: Decimal) -> dict:
-    m1 = (contract_value * Decimal('0.20')).quantize(Decimal('0.01'))
-    m2 = (contract_value * Decimal('0.50')).quantize(Decimal('0.01'))
-    m3 = (contract_value * Decimal('0.30')).quantize(Decimal('0.01'))
+DEFAULT_MILESTONE_DISBURSEMENT_PCTS = (20, 50, 30)
+
+
+def _milestone_amounts(contract_value: Decimal, disbursement_pcts) -> list[Decimal]:
+    """Split the contract value by milestone percentage; the last milestone takes
+    the rounding remainder so the amounts always sum to the contract value."""
+    total = Decimal(str(contract_value or 0)).quantize(Decimal('0.01'))
+    amounts = [
+        (total * Decimal(pct) / Decimal('100')).quantize(Decimal('0.01'))
+        for pct in disbursement_pcts[:-1]
+    ]
+    amounts.append(total - sum(amounts, Decimal('0.00')))
+    return amounts
+
+
+def _milestone_requirement_descriptions(project: Project, m2_installation_pct: int, m3_installation_pct: int) -> dict[int, str]:
+    female = project.female_target_pct or project.target_female_pct
+    vulnerable = project.vulnerable_target_pct or project.target_vulnerable_pct
+    low_income = project.low_income_target_pct or project.target_low_income_pct
+    return {
+        1: 'Contract approved; project setup completed.',
+        2: (
+            f'At least {m2_installation_pct}% of target installations verified; '
+            f'female-headed households at or above {female}%; '
+            'no unresolved blocking anomaly flags; meter data received within the last 30 days.'
+        ),
+        3: (
+            f'At least {m3_installation_pct}% of target installations verified; '
+            f'female-headed households at or above {female}%; '
+            f'vulnerable households at or above {vulnerable}%; '
+            f'low-income households at or above {low_income}%; '
+            'all anomaly flags resolved; Milestone 2 fully paid.'
+        ),
+    }
+
+
+def _disbursement_preview(contract_value: Decimal, disbursement_pcts=DEFAULT_MILESTONE_DISBURSEMENT_PCTS) -> dict:
+    m1, m2, m3 = _milestone_amounts(contract_value, list(disbursement_pcts))
     return {
         'milestone_1_amount_lsl': str(m1),
         'milestone_2_amount_lsl': str(m2),
@@ -463,21 +510,33 @@ def _create_project_assignment(request, contract: TenderContract, assignment_dat
         energy_output_target_kwh=assignment_data['energy_output_target_kwh'],
     )
 
-    base_amount = Decimal(str(project_budget or 0))
-    for milestone_number, name, disbursement_pct, milestone_status in [
-        (1, 'Mobilization', 20, MilestoneStatus.PENDING),
-        (2, '80% Implementation', 50, MilestoneStatus.LOCKED),
-        (3, 'Final', 30, MilestoneStatus.LOCKED),
+    disbursement_pcts = [
+        assignment_data.get('m1_disbursement_pct', DEFAULT_MILESTONE_DISBURSEMENT_PCTS[0]),
+        assignment_data.get('m2_disbursement_pct', DEFAULT_MILESTONE_DISBURSEMENT_PCTS[1]),
+        assignment_data.get('m3_disbursement_pct', DEFAULT_MILESTONE_DISBURSEMENT_PCTS[2]),
+    ]
+    m2_installation_pct = int(assignment_data.get('m2_installation_required_pct') or 80)
+    m3_installation_pct = int(assignment_data.get('m3_installation_required_pct') or 100)
+    amounts = _milestone_amounts(project_budget, disbursement_pcts)
+    descriptions = _milestone_requirement_descriptions(project, m2_installation_pct, m3_installation_pct)
+    for milestone_number, name, required_installation_pct, milestone_status in [
+        (1, 'Mobilization', 0, MilestoneStatus.PENDING),
+        (2, f'{m2_installation_pct}% Implementation', m2_installation_pct, MilestoneStatus.LOCKED),
+        (3, 'Final', m3_installation_pct, MilestoneStatus.LOCKED),
     ]:
+        disbursement_pct = disbursement_pcts[milestone_number - 1]
+        amount = amounts[milestone_number - 1]
         Milestone.objects.create(
             project=project,
             milestone_number=milestone_number,
             disbursement_pct=disbursement_pct,
             name=name,
+            description=descriptions[milestone_number],
             percentage=disbursement_pct,
+            required_installation_pct=required_installation_pct,
             status=milestone_status,
-            amount=(base_amount * Decimal(disbursement_pct) / Decimal('100')).quantize(Decimal('0.01')) if base_amount else Decimal('0.00'),
-            amount_lsl=(base_amount * Decimal(disbursement_pct) / Decimal('100')).quantize(Decimal('0.01')) if base_amount else Decimal('0.00'),
+            amount=amount,
+            amount_lsl=amount,
         )
 
     contract.project_id = str(project.id)
@@ -656,11 +715,31 @@ def _quorum_met_evaluations(bid: TenderBid, stage: str, evaluations=None) -> lis
     return scored
 
 
-def _technical_score_for_bid(bid: TenderBid) -> Decimal | None:
-    technical_evaluations = _quorum_met_evaluations(bid, EvaluationStage.TECHNICAL)
-    if not technical_evaluations:
+def _technical_score_for_bid(bid: TenderBid, lot=None) -> Decimal | None:
+    """Average of the quorum-met technical evaluations for a bid.
+
+    `lot` scopes the average to that lot's own technical rows (a lot-wise tender can
+    hold one technical evaluation per lot per evaluator). When no per-lot rows exist yet
+    — or `lot` is None on a non-lot-wise tender — the legacy shared technical row
+    (lot=NULL) is used, so older data keeps working."""
+    def _avg(evals):
+        return sum(_technical_evaluation_score(ev) for ev in evals) / Decimal(len(evals))
+
+    if lot is not None:
+        per_lot = _quorum_met_evaluations(bid, EvaluationStage.TECHNICAL, bid.evaluations.filter(lot=lot))
+        if per_lot:
+            return _avg(per_lot)
+        legacy = _quorum_met_evaluations(bid, EvaluationStage.TECHNICAL, bid.evaluations.filter(lot__isnull=True))
+        if legacy:
+            return _avg(legacy)
         return None
-    return sum(_technical_evaluation_score(ev) for ev in technical_evaluations) / Decimal(len(technical_evaluations))
+    legacy = _quorum_met_evaluations(bid, EvaluationStage.TECHNICAL, bid.evaluations.filter(lot__isnull=True))
+    if legacy:
+        return _avg(legacy)
+    aggregated = _quorum_met_evaluations(bid, EvaluationStage.TECHNICAL, bid.evaluations.all())
+    if not aggregated:
+        return None
+    return _avg(aggregated)
 
 
 def _lowest_qualifying_bid_amount(tender: Tender, exclude_bid_id=None) -> Decimal | None:
@@ -1191,6 +1270,68 @@ def _tender_evaluation_status(tender: Tender) -> dict:
     }
 
 
+def _award_recommendation_unit(tender: Tender, lot) -> dict:
+    """Every assigned committee member's latest winner suggestion for one decision unit
+    (the whole tender, or a single lot), whether they all agree on one bid, and who has
+    not suggested yet. Consensus = EVERY assigned member's suggestion points to the same bid."""
+    members = TenderEvaluationCommitteeMember.objects.filter(tender=tender).select_related('member').order_by('id')
+    assigned = [
+        {'member_id': str(m.member_id), 'member_name': m.member.full_name or m.member.username}
+        for m in members
+    ]
+    recommendations = (
+        TenderAwardRecommendation.objects.filter(tender=tender, lot=lot)
+        .select_related('bid', 'suggested_by')
+    )
+    suggestions = [{
+        'recommendation_id': str(r.id),
+        'suggested_by': str(r.suggested_by_id),
+        'suggested_by_name': r.suggested_by.full_name or r.suggested_by.username,
+        'bid_id': str(r.bid_id),
+        'vendor_name': r.bid.vendor_name,
+        'rationale': r.rationale,
+        'updated_at': r.updated_at.isoformat() if r.updated_at else None,
+    } for r in recommendations]
+    by_member = {s['suggested_by']: s for s in suggestions}
+    pending_member_ids = [a['member_id'] for a in assigned if a['member_id'] not in by_member]
+    vote_ids = {s['bid_id'] for s in suggestions}
+    consensus = bool(assigned) and len(suggestions) == len(assigned) and len(vote_ids) == 1
+    agreed_bid_id = next(iter(vote_ids)) if consensus else None
+    agreed_vendor_name = next((s['vendor_name'] for s in suggestions if s['bid_id'] == agreed_bid_id), None) if agreed_bid_id else None
+    return {
+        'lot_id': str(lot.id) if lot else None,
+        'lot_name': lot.name if lot else '',
+        'assigned_members': assigned,
+        'suggestions': suggestions,
+        'pending_member_ids': pending_member_ids,
+        'consensus': consensus,
+        'agreed_bid_id': agreed_bid_id,
+        'agreed_vendor_name': agreed_vendor_name,
+        'intent_to_award_bid_id': str(lot.intent_to_award_bid_id) if lot and lot.intent_to_award_bid_id else None,
+    }
+
+
+def _award_recommendation_consensus(tender: Tender) -> dict:
+    """Consensus for every decision unit of a tender: { is_lot_wise, evaluation_complete, units }."""
+    lots = list(tender.lots.order_by('position', 'id'))
+    units = [_award_recommendation_unit(tender, lot) for lot in lots] if lots else [_award_recommendation_unit(tender, None)]
+    return {
+        'is_lot_wise': bool(lots),
+        'evaluation_complete': _tender_evaluation_status(tender)['complete'],
+        'units': units,
+    }
+
+
+def _bid_covers_lot(bid: TenderBid, lot_id) -> bool:
+    """Whether a bid covers a given lot (declared lots, priced offers, or site tags)."""
+    if not lot_id:
+        return True
+    covered = set(bid.declared_lots or [])
+    covered |= set(bid.lot_offers.values_list('lot_id', flat=True))
+    covered |= set(bid.sites.values_list('lot_id', flat=True))
+    return str(lot_id) in {str(c) for c in covered}
+
+
 def _bid_financial_finalized(tender: Tender, bid: TenderBid, quorum: int) -> bool:
     """Whether the committee has finalized the bid's financial score — quorum of distinct
     members with a SCORED financial-stage row. For a lot-wise tender every lot the bid
@@ -1372,6 +1513,32 @@ def _notify_stage_one_outcome(bid: TenderBid, passed: bool, draft: TenderBid | N
     )
 
 
+def _ec_verdict_check(tender, selected_bid_id, recommended_bid_id, lot=None) -> dict:
+    """Apply the EC's winner-suggestion verdict when issuing an intent to award.
+
+    Selection rule for a decision unit (whole tender, or one lot):
+      * The committee's agreed bid — the one EVERY assigned member's latest suggestion
+        points at — may be issued even if it is not the highest-scoring recommended bid;
+        the committee's verdict wins.
+      * Issuing to the score-recommended bid is allowed when the committee has NO
+        verdict (either no suggestions yet, or no consensus). If the committee DID
+        agree on a different bid, issuing to the score-recommended bid instead
+        overrides the verdict and needs a recorded reason.
+      * Any other bids require an explicit `ec_override_reason`.
+
+    Returns {'allowed', 'needs_override', 'reason_required', 'ec'} where `ec` is the
+    unit's consensus payload (useful for the UI to surface members' votes)."""
+    unit = _award_recommendation_unit(tender, lot)
+    agreed = unit['agreed_bid_id']
+    has_verdict = unit['consensus'] and bool(agreed)
+    is_ec_agreed = has_verdict and str(agreed) == str(selected_bid_id)
+    is_recommended = str(recommended_bid_id) == str(selected_bid_id)
+    if is_ec_agreed or (is_recommended and not has_verdict):
+        return {'allowed': True, 'needs_override': False, 'reason_required': False, 'ec': unit}
+    reason_required = bool(is_recommended and has_verdict) or not is_recommended
+    return {'allowed': False, 'needs_override': True, 'reason_required': reason_required, 'ec': unit}
+
+
 def _build_award_ranking(tender: Tender):
     candidate_bids = list(
         TenderBid.objects.filter(
@@ -1544,7 +1711,7 @@ def _build_award_ranking(tender: Tender):
     }
 
 
-def _build_lot_award_ranking(tender: Tender, lot):
+def _build_lot_award_ranking(tender: Tender, lot, *, include_pending_request=False, request=None):
     """Award ranking for one lot of a lot-wise tender.
 
     Technical merit is shared across a bid's lots (a vendor's technical capability
@@ -1671,19 +1838,46 @@ def _build_lot_award_ranking(tender: Tender, lot):
         'awarded_vendor_name': lot.awarded_vendor_name or None,
         'intent_to_award_bid_id': str(lot.intent_to_award_bid_id) if lot.intent_to_award_bid_id else None,
         'intent_to_award_at': lot.intent_to_award_at.isoformat() if lot.intent_to_award_at else None,
+        'cooling_off_until': lot.cooling_off_until.isoformat() if lot.cooling_off_until else None,
         'awarded_at': lot.awarded_at.isoformat() if lot.awarded_at else None,
+        'pending_intent_award_request': (
+            _pending_intent_award_request_payload(lot.tender, lot=lot, request=request)
+            if include_pending_request else None
+        ),
     }
 
 
-def _notify_intent_to_award(tender: Tender, ranking_payload: dict, send_email=True):
+def _pending_intent_award_request_queryset(tender: Tender, lot=None):
+    """Pending intent-to-award requests for one decision unit — `lot` for a lot-wise
+    award, or the whole-tender unit when `lot` is None."""
+    qs = tender.intent_award_requests.filter(status=IntentAwardRequestStatus.PENDING)
+    return qs.filter(lot=lot) if lot is not None else qs.filter(lot__isnull=True)
+
+
+def _pending_intent_award_request_payload(tender: Tender, lot=None, request=None):
+    """The pending request for a decision unit, as plain JSON, or None. Embedded in the
+    award-ranking payloads so the Award panel can grey out the row it is waiting on.
+
+    `award_ranking` is a public read, and a queued request names the proposed winner
+    before the Super Admin has approved it — so it is only embedded for RBF/Super Admin
+    callers (see `intent_award_proposal_visible`).
+    """
+    pending = _pending_intent_award_request_queryset(tender, lot=lot).select_related('lot', 'bid').first()
+    if pending is None:
+        return None
+    return IntentToAwardRequestSerializer(pending, context={'request': request}).data
+
+
+def _notify_intent_to_award(tender: Tender, ranking_payload: dict, send_email=True, cooling_off_until=None, lot_name=None):
     recommended = ranking_payload.get('recommended')
     if not recommended:
         return
 
     bids_by_vendor = {row['vendor_id']: row for row in ranking_payload.get('rows', [])}
-    cooling_off_until = tender.cooling_off_until
+    cooling_off_until = cooling_off_until if cooling_off_until is not None else tender.cooling_off_until
     cooling_date_text = cooling_off_until.strftime('%Y-%m-%d %H:%M:%S') if cooling_off_until else 'N/A'
     email_enabled = send_email and email_configured()
+    lot_suffix = f' — {lot_name}' if lot_name else ''
 
     vendors = User.objects.filter(id__in=list(bids_by_vendor.keys())).only('id', 'email', 'full_name', 'username')
     for vendor in vendors:
@@ -1692,40 +1886,334 @@ def _notify_intent_to_award(tender: Tender, ranking_payload: dict, send_email=Tr
             continue
         is_winner = row['vendor_id'] == recommended['vendor_id']
         title = (
-            f'Notice of Best Evaluated Bidder: {tender.reference_number}'
+            f'Notice of Best Evaluated Bidder: {tender.reference_number}{lot_suffix}'
             if is_winner
-            else f'Regret Letter: {tender.reference_number}'
+            else f'Regret Letter: {tender.reference_number}{lot_suffix}'
         )
         body = (
-            f"Tender: {tender.name} ({tender.reference_number})\n"
+            f"Tender: {tender.name} ({tender.reference_number}){lot_suffix}\n"
             f"Technical Score: {row['technical_score'] if row['technical_score'] is not None else 'N/A'}\n"
             f"Financial Score: {row['financial_score'] if row['financial_score'] is not None else 'Not opened'}\n"
             f"Combined Score: {row['combined_score'] if row['combined_score'] is not None else 'N/A'}\n"
         )
         if is_winner:
             body += (
-                f"\nStatus: You are the Best Evaluated Bidder.\n"
+                f"\nStatus: You are the Best Evaluated Bidder{lot_suffix}.\n"
                 f"Cooling-off period ends on: {cooling_date_text}\n"
                 f"The final award and PBA generation will only occur after the cooling-off period expires without a formal protest.\n"
             )
         else:
-            body += "\nStatus: Another vendor achieved the highest combined score under the weighted RBF evaluation.\n"
+            body += f"\nStatus: Another vendor achieved the highest combined score{lot_suffix} under the weighted RBF evaluation.\n"
             if row.get('disqualification_reason'):
                 body += f"Reason: {row['disqualification_reason']}\n"
 
-        Notification.objects.create(
+        # update_or_create (not create): a lot-wise tender calls this once per lot, and
+        # a vendor bidding on multiple lots would otherwise collide on the
+        # (recipient, event, tender) uniqueness constraint — the notification is kept
+        # as one evolving "intent to award" notice per vendor per tender, refreshed
+        # with whichever lot's outcome was decided most recently.
+        Notification.objects.update_or_create(
             recipient_id=str(vendor.id),
-            recipient_name=vendor.full_name or vendor.username or vendor.email,
-            type=NotificationChannel.IN_APP,
             event='intent_to_award',
-            title=title,
-            body=body,
-            status=NotificationStatus.SENT,
             linked_entity_id=str(tender.id),
+            defaults={
+                'recipient_name': vendor.full_name or vendor.username or vendor.email,
+                'type': NotificationChannel.IN_APP,
+                'title': title,
+                'body': body,
+                'status': NotificationStatus.SENT,
+            },
         )
 
         if email_enabled and vendor.email:
             NotificationService.dispatch_email(title, body, [vendor.email])
+
+
+class _IntentToAwardError(Exception):
+    """A validation failure raised while preparing or applying an intent to award.
+
+    Carries the HTTP status the calling action should answer with, so the shared
+    preparation/apply logic below can be reused by the RBF's request path and the Super
+    Admin's approval path without either re-implementing the checks (or collapsing the
+    409 "evaluation not finished" case into a generic 400).
+    """
+
+    def __init__(self, detail, status_code=status.HTTP_400_BAD_REQUEST, **extra):
+        super().__init__(detail)
+        self.detail = detail
+        self.status_code = status_code
+        self.extra = extra
+
+    def as_response(self):
+        return Response({'detail': self.detail, **self.extra}, status=self.status_code)
+
+
+def _check_intent_to_award_preconditions(tender, lot=None):
+    """The guards shared by every intent-to-award path: a live tender/lot, and a
+    finished Evaluation Committee evaluation. Raises _IntentToAwardError."""
+    allowed = {TenderStatus.PUBLISHED, TenderStatus.EVALUATION}
+    if lot is not None:
+        # Each lot is approved and applied independently, so once the tender has moved
+        # into standstill the remaining lots can still be queued.
+        allowed.add(TenderStatus.STANDSTILL)
+        # ...but a lot that already carries a live intent (or a confirmed award) is
+        # closed. Without this, a second request for an already-issued lot would queue
+        # successfully and its approval would silently re-award the lot, restart the
+        # cooling-off window and re-notify the bidders. Revoking the intent re-opens
+        # the lot, so a genuine re-award still works.
+        if lot.awarded_at or lot.awarded_vendor_id:
+            raise _IntentToAwardError(
+                f'{lot.name} has already been awarded and confirmed. It cannot be awarded again.'
+            )
+        if lot.intent_to_award_bid_id:
+            raise _IntentToAwardError(
+                f'{lot.name} already has an issued intent to award with the cooling-off period '
+                'running. Revoke it before proposing a different bidder for this lot.'
+            )
+    if tender.status not in allowed:
+        if lot is not None:
+            detail = 'Lots can be awarded only from Published, Evaluation, or Standstill state.'
+        else:
+            detail = 'Tender can be awarded only from Published or Evaluation state.'
+        raise _IntentToAwardError(detail)
+
+    evaluation_status = _tender_evaluation_status(tender)
+    if evaluation_status['committee_size'] and not evaluation_status['complete']:
+        raise _IntentToAwardError(
+            'Finalize the Evaluation Committee scores before issuing an intent to award.',
+            status.HTTP_409_CONFLICT,
+            reasons=evaluation_status['reasons'],
+        )
+    return evaluation_status
+
+
+def _prepare_intent_to_award(tender, *, bid_id, awarded_vendor_id='', awarded_vendor_name='',
+                             ec_override_reason='', lot=None):
+    """Validate a proposed intent to award and return everything needed to apply it.
+
+    This is pure validation — it never mutates. Both the RBF's "request" call and the
+    Super Admin's "approve" call run it, so a queued request can never be approved on
+    the strength of a bid that has since been withdrawn, a committee evaluation that
+    has since been reopened, or a ranking that has since changed underneath it.
+    """
+    _check_intent_to_award_preconditions(tender, lot=lot)
+
+    bid_id = str(bid_id or '').strip()
+    if not bid_id:
+        raise _IntentToAwardError('bid_id is required and must reference a submitted bid.')
+    try:
+        bid = TenderBid.objects.get(id=bid_id, tender=tender)
+    except (TenderBid.DoesNotExist, ValueError, DjangoValidationError):
+        raise _IntentToAwardError('Bid not found for this tender.')
+    if bid.status not in {BidStatus.SUBMITTED, BidStatus.UNDER_REVIEW, BidStatus.ACCEPTED}:
+        raise _IntentToAwardError('Only submitted or under-review bids can be awarded.')
+
+    ranking_payload = _build_lot_award_ranking(tender, lot) if lot is not None else _build_award_ranking(tender)
+    recommended = ranking_payload.get('recommended')
+    if not recommended:
+        scope = f' for {lot.name}' if lot is not None else ''
+        raise _IntentToAwardError(f'No qualifying bid passed the technical threshold{scope} for intent to award.')
+
+    verdict = _ec_verdict_check(tender, str(bid.id), str(recommended['bid_id']), lot=lot)
+    if not verdict['allowed']:
+        ec_override_reason = str(ec_override_reason or '').strip()
+        if not ec_override_reason:
+            scope = f' for {lot.name}' if lot is not None else ''
+            raise _IntentToAwardError(
+                f'Intent to award{scope} can only be issued to the Evaluation Committee\'s agreed bid, '
+                'or (when the committee has no verdict) the recommended '
+                f'{"(highest weighted score) bid" if lot is not None else "winner with the highest combined score"}. '
+                'A different choice requires an explicit EC override reason.',
+                recommended_bid_id=recommended['bid_id'],
+                recommended_vendor_id=recommended['vendor_id'],
+                recommended_vendor_name=recommended['vendor_name'],
+                ec_override_reason_required=True,
+                ec=verdict['ec'],
+            )
+        verdict['reason'] = ec_override_reason
+
+    awarded_vendor_id = str(awarded_vendor_id or '').strip()
+    awarded_vendor_name = str(awarded_vendor_name or '').strip()
+    if awarded_vendor_id and awarded_vendor_id != bid.vendor_id:
+        raise _IntentToAwardError('awarded_vendor_id must match the selected bid vendor.')
+    if awarded_vendor_name and bid.vendor_name and awarded_vendor_name != bid.vendor_name:
+        raise _IntentToAwardError('awarded_vendor_name must match the selected bid vendor.')
+    awarded_vendor_id = awarded_vendor_id or bid.vendor_id
+    awarded_vendor_name = awarded_vendor_name or bid.vendor_name
+    if not awarded_vendor_id and not awarded_vendor_name:
+        raise _IntentToAwardError('awarded_vendor_id or awarded_vendor_name is required.')
+
+    return {
+        'bid': bid,
+        'lot': lot,
+        'ranking': ranking_payload,
+        'recommended': recommended,
+        'verdict': verdict,
+        'awarded_vendor_id': awarded_vendor_id,
+        'awarded_vendor_name': awarded_vendor_name,
+    }
+
+
+def _apply_intent_to_award(tender, prepared, *, actor, send_email=True, from_challenge=False):
+    """Actually issue the intent to award: standstill + cooling-off, ACCEPTED on the
+    winning bid, audit trail, bidder notices.
+
+    This is the ONLY place the tender/lot award state is moved. It is reached only
+    through a Super Admin approval (`approve_intent_award`) — the RBF's `award` /
+    `award_lot` calls only ever queue a request.
+    """
+    bid = prepared['bid']
+    lot = prepared['lot']
+    verdict = prepared['verdict']
+    now = timezone.now()
+    cooling_off_days = tender.cooling_off_days if tender.cooling_off_days is not None else 7
+
+    if lot is not None:
+        # awarded_vendor_id/name are intentionally NOT set here — they represent a
+        # CONFIRMED award and are only set in confirm_award, alongside awarded_at. This
+        # lot's own cooling_off_until (not the tender's shared one) is what gates when
+        # confirm_award may finalize it, so a lot whose intent is issued later than
+        # another still gets its own full standstill window.
+        lot_cooling_off_until = now + timedelta(days=cooling_off_days)
+        lot.intent_to_award_bid = bid
+        lot.intent_to_award_at = now
+        lot.cooling_off_until = lot_cooling_off_until
+        lot.save(update_fields=['intent_to_award_bid', 'intent_to_award_at', 'cooling_off_until', 'updated_at'])
+
+        if tender.status != TenderStatus.STANDSTILL:
+            tender.status = TenderStatus.STANDSTILL
+            tender.intent_to_award_at = now
+            tender.cooling_off_until = lot_cooling_off_until
+            tender.save(update_fields=['status', 'intent_to_award_at', 'cooling_off_until', 'updated_at'])
+    else:
+        lot_cooling_off_until = None
+        tender.status = TenderStatus.STANDSTILL
+        tender.intent_to_award_bid = bid
+        tender.intent_to_award_at = now
+        tender.awarded_vendor_id = prepared['awarded_vendor_id']
+        tender.awarded_vendor_name = prepared['awarded_vendor_name']
+        tender.cooling_off_until = now + timedelta(days=cooling_off_days)
+        tender.save(update_fields=[
+            'status', 'intent_to_award_bid', 'intent_to_award_at', 'awarded_vendor_id',
+            'awarded_vendor_name', 'cooling_off_until', 'updated_at',
+        ])
+
+    if bid.status != BidStatus.ACCEPTED:
+        bid.status = BidStatus.ACCEPTED
+        bid.reviewed_at = bid.reviewed_at or now
+        bid.reviewed_by = bid.reviewed_by or (actor.full_name or actor.username)
+        bid.save(update_fields=['status', 'reviewed_at', 'reviewed_by', 'updated_at'])
+
+    log_audit(
+        actor,
+        'lot_intent_to_award_issued' if lot is not None else 'intent_to_award_issued',
+        tender,
+        {
+            'reference_number': tender.reference_number,
+            'lot_id': str(lot.id) if lot is not None else None,
+            'lot_name': lot.name if lot is not None else None,
+            'bid_id': str(bid.id),
+            'awarded_vendor_id': bid.vendor_id,
+            'awarded_vendor_name': bid.vendor_name,
+            'from_challenge': from_challenge,
+            'ec_agreed_bid_id': verdict['ec'].get('agreed_bid_id'),
+            'ec_consensus': verdict['ec'].get('consensus'),
+            'ec_override_reason': verdict.get('reason', ''),
+            'cooling_off_until': (lot_cooling_off_until or tender.cooling_off_until).isoformat(),
+        },
+    )
+
+    _notify_intent_to_award(
+        tender, prepared['ranking'], send_email,
+        cooling_off_until=lot_cooling_off_until, lot_name=lot.name if lot is not None else None,
+    )
+
+
+def _intent_award_event(intent_request, prefix):
+    """Build a notification event key that is unique per decision unit.
+
+    Notification is unique on (recipient, event, linked_entity), so a lot-wise tender
+    with several lots approving in turn would otherwise collide on one event.
+    """
+    if intent_request.lot_id:
+        return f'{prefix}_lot_{intent_request.lot_id}'
+    return prefix
+
+
+def _clear_intent_award_approval_notifications(intent_request, *, to_recipients=None):
+    """Retire the "awaiting approval" notices once their request is decided or withdrawn.
+
+    Without this the Super Admin's bell keeps showing a request that is no longer in the
+    queue, which reads as a stale action waiting to be taken.
+    """
+    qs = Notification.objects.filter(
+        event=_intent_award_event(intent_request, 'intent_to_award_approval_requested'),
+        linked_entity_id=str(intent_request.tender_id),
+    )
+    if to_recipients is not None:
+        qs = qs.filter(recipient_id__in=[str(uid) for uid in to_recipients])
+    return qs.update(status=NotificationStatus.READ)
+
+
+def _notify_intent_award_request_submitted(tender, intent_request):
+    """Tell the Super Admins an intent to award is waiting on their decision."""
+    unit = f" — Lot: {intent_request.lot.name}" if intent_request.lot_id else ''
+    vendor = intent_request.proposed_vendor_name or 'the proposed bidder'
+    recipients = User.objects.filter(role=UserRole.ADMIN).only('id', 'full_name', 'username', 'email')
+    for user in recipients:
+        title = f'Intent to Award Awaiting Approval: {tender.reference_number}{unit}'
+        body = (
+            f'Tender: {tender.name} ({tender.reference_number})\n'
+            f'Proposed winner: {vendor}\n'
+            f'Raised by: {intent_request.requested_by_name or "Unknown"}'
+            f'{" (upheld challenge)" if intent_request.from_challenge else ""}\n'
+            f'EC agreed bid: {intent_request.ec_agreed_bid_id or "No committee verdict"}\n'
+            f'EC consensus: {"Yes" if intent_request.ec_consensus else ("No" if intent_request.ec_consensus is False else "N/A")}\n'
+            + (f'EC override reason: {intent_request.ec_override_reason}\n' if intent_request.ec_override_reason else '')
+            + '\nThe intent to award, the standstill period and the bidder notices are only issued once you approve this request.'
+        )
+        Notification.objects.update_or_create(
+            recipient_id=str(user.id),
+            event=_intent_award_event(intent_request, 'intent_to_award_approval_requested'),
+            linked_entity_id=str(tender.id),
+            defaults={
+                'recipient_name': user.full_name or user.username,
+                'type': NotificationChannel.IN_APP,
+                'title': title,
+                'body': body,
+                'status': NotificationStatus.SENT,
+            },
+        )
+        if email_configured() and user.email:
+            NotificationService.dispatch_email(title, body, [user.email])
+
+
+def _notify_intent_award_decision(tender, intent_request, *, status_value, title, body):
+    """Tell the RBF (and, for a challenge re-issue, the new bidder) how their request
+    was decided."""
+    recipients = set()
+    if intent_request.requested_by_id:
+        recipients.add(str(intent_request.requested_by_id))
+    recipients.update(
+        str(user.id)
+        for user in User.objects.filter(role__in={UserRole.RBF_OFFICIAL, UserRole.ADMIN}).only('id')
+    )
+    users = User.objects.filter(id__in=recipients).only('id', 'full_name', 'username', 'email')
+    for user in users:
+        Notification.objects.update_or_create(
+            recipient_id=str(user.id),
+            recipient_name=user.full_name or user.username,
+            type=NotificationChannel.IN_APP,
+            event=_intent_award_event(intent_request, f'intent_to_award_{status_value}'),
+            linked_entity_id=str(tender.id),
+            defaults={
+                'title': title,
+                'body': body,
+                'status': NotificationStatus.SENT,
+            },
+        )
+        if email_configured() and user.email:
+            NotificationService.dispatch_email(title, body, [user.email])
 
 
 class IsRbfOfficialOrReadOnly(BasePermission):
@@ -1895,7 +2383,17 @@ class TenderViewSet(viewsets.ModelViewSet):
         return super().get_permissions()
 
     def get_queryset(self):
-        qs = Tender.objects.all().order_by(Coalesce('published_at', 'created_at').desc())
+        # Pending intent-to-award requests ride along on every tender payload so the
+        # Award panel can show "Awaiting Super Admin approval" without extra round-trips.
+        qs = Tender.objects.all().prefetch_related(
+            models.Prefetch(
+                'intent_award_requests',
+                queryset=IntentToAwardRequest.objects.filter(
+                    status=IntentAwardRequestStatus.PENDING,
+                ).select_related('lot', 'bid'),
+                to_attr='pending_intent_award_request_rows',
+            ),
+        ).order_by(Coalesce('published_at', 'created_at').desc())
         user = self.request.user
         # Handle unauthenticated users - return all published tenders
         if not user.is_authenticated:
@@ -2095,6 +2593,29 @@ class TenderViewSet(viewsets.ModelViewSet):
             publish_approval_status=PublishApprovalStatus.PENDING,
         ).order_by('-publish_approval_requested_at')
         serializer = TenderSerializer(qs, many=True, context=self.get_serializer_context())
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['get'])
+    def tenders_ready_for_award(self, request):
+        """RBF Official/Admin-only list of tenders relevant to the award pipeline:
+        either evaluation is complete and awaiting an award decision, already mid-award
+        (intent issued, in standstill, disputed), or already awarded and still moving
+        through contract approval / milestone assignment. Backs the dedicated "Award
+        Management" tab so Tender Management itself never needs to surface award
+        actions."""
+        if getattr(request.user, 'role', None) not in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}:
+            raise PermissionDenied('Only the RBF Management Team or Super Admin can view the award pipeline.')
+        candidates = Tender.objects.filter(
+            status__in=[TenderStatus.PUBLISHED, TenderStatus.EVALUATION, TenderStatus.STANDSTILL,
+                        TenderStatus.DISPUTED, TenderStatus.AWARDED],
+        ).order_by('-updated_at')
+        results = [
+            t for t in candidates
+            if t.status in {TenderStatus.STANDSTILL, TenderStatus.DISPUTED, TenderStatus.AWARDED}
+            or bool(t.intent_to_award_at)
+            or _tender_evaluation_status(t)['complete']
+        ]
+        serializer = TenderSerializer(results, many=True, context=self.get_serializer_context())
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=['get'])
@@ -2423,9 +2944,15 @@ class TenderViewSet(viewsets.ModelViewSet):
             'email_error': email_error,
         }
 
-
     @action(detail=True, methods=['post'])
     def award(self, request, pk=None):
+        """RBF selects the winner for a whole tender.
+
+        This only *proposes* the intent to award: it queues a pending
+        IntentToAwardRequest for Super Admin approval and changes nothing on the
+        tender — no standstill, no cooling-off clock, no bidder notices. The intent is
+        actually issued by `approve_intent_award`, which only a Super Admin can call.
+        """
         self._assert_write_permission()
         tender = self.get_object()
 
@@ -2434,123 +2961,30 @@ class TenderViewSet(viewsets.ModelViewSet):
                 {'detail': 'This is a lot-wise tender — use award_lot with a lot_id instead.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        if tender.status not in {TenderStatus.PUBLISHED, TenderStatus.EVALUATION}:
-            return Response(
-                {'detail': 'Tender can be awarded only from Published or Evaluation state.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
 
-        evaluation_status = _tender_evaluation_status(tender)
-        if evaluation_status['committee_size'] and not evaluation_status['complete']:
-            return Response(
-                {
-                    'detail': 'Finalize the Evaluation Committee scores before issuing an intent to award.',
-                    'reasons': evaluation_status['reasons'],
-                },
-                status=status.HTTP_409_CONFLICT,
-            )
-
-        bid_id = str(request.data.get('bid_id') or '').strip()
-        if not bid_id:
-            return Response(
-                {'detail': 'bid_id is required and must reference a submitted bid.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
         try:
-            bid = TenderBid.objects.get(id=bid_id, tender=tender)
-        except TenderBid.DoesNotExist:
-            return Response(
-                {'detail': 'Bid not found for this tender.'},
-                status=status.HTTP_400_BAD_REQUEST,
+            prepared = _prepare_intent_to_award(
+                tender,
+                bid_id=request.data.get('bid_id'),
+                awarded_vendor_id=request.data.get('awarded_vendor_id') or '',
+                awarded_vendor_name=request.data.get('awarded_vendor_name') or '',
+                ec_override_reason=request.data.get('ec_override_reason') or '',
             )
-        if bid.status not in {BidStatus.SUBMITTED, BidStatus.UNDER_REVIEW, BidStatus.ACCEPTED}:
-            return Response(
-                {'detail': 'Only submitted or under-review bids can be awarded.'},
-                status=status.HTTP_400_BAD_REQUEST,
+            intent_request = self._queue_intent_award_request(
+                tender, prepared, actor=request.user,
+                send_email=request.data.get('send_email', True),
             )
-        ranking_payload = _build_award_ranking(tender)
-        recommended = ranking_payload.get('recommended')
-        if not recommended:
-            return Response(
-                {'detail': 'No qualifying bid passed the technical threshold for intent to award.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        if str(recommended['bid_id']) != str(bid.id):
-            return Response(
-                {
-                    'detail': 'Intent to award can only be issued to the recommended winner with the highest combined score.',
-                    'recommended_bid_id': recommended['bid_id'],
-                    'recommended_vendor_id': recommended['vendor_id'],
-                    'recommended_vendor_name': recommended['vendor_name'],
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        except _IntentToAwardError as exc:
+            return exc.as_response()
 
-        awarded_vendor_id = str(request.data.get('awarded_vendor_id') or '').strip()
-        awarded_vendor_name = str(request.data.get('awarded_vendor_name') or '').strip()
-        if awarded_vendor_id and awarded_vendor_id != bid.vendor_id:
-            return Response(
-                {'detail': 'awarded_vendor_id must match the selected bid vendor.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        if awarded_vendor_name and bid.vendor_name and awarded_vendor_name != bid.vendor_name:
-            return Response(
-                {'detail': 'awarded_vendor_name must match the selected bid vendor.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        awarded_vendor_id = awarded_vendor_id or bid.vendor_id
-        awarded_vendor_name = awarded_vendor_name or bid.vendor_name
-        if not awarded_vendor_id and not awarded_vendor_name:
-            return Response(
-                {'detail': 'awarded_vendor_id or awarded_vendor_name is required.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        now = timezone.now()
-        tender.status = TenderStatus.STANDSTILL
-        tender.intent_to_award_bid = bid
-        tender.intent_to_award_at = now
-        tender.awarded_vendor_id = awarded_vendor_id
-        tender.awarded_vendor_name = awarded_vendor_name
-        cooling_off_days = tender.cooling_off_days if tender.cooling_off_days is not None else 7
-        tender.cooling_off_until = now + timedelta(days=cooling_off_days)
-        tender.save(
-            update_fields=[
-                'status',
-                'intent_to_award_bid',
-                'intent_to_award_at',
-                'awarded_vendor_id',
-                'awarded_vendor_name',
-                'cooling_off_until',
-                'updated_at',
-            ]
-        )
-        if bid.status != BidStatus.ACCEPTED:
-            bid.status = BidStatus.ACCEPTED
-            bid.reviewed_at = bid.reviewed_at or timezone.now()
-            bid.reviewed_by = bid.reviewed_by or (request.user.full_name or request.user.username)
-            bid.save(update_fields=['status', 'reviewed_at', 'reviewed_by', 'updated_at'])
-        log_audit(
-            request.user,
-            'intent_to_award_issued',
-            tender,
-            {
-                'reference_number': tender.reference_number,
-                'bid_id': bid_id,
-                'recommended_vendor_id': awarded_vendor_id,
-                'recommended_vendor_name': awarded_vendor_name,
-                'cooling_off_until': tender.cooling_off_until.isoformat() if tender.cooling_off_until else None,
-            },
-        )
-
-        send_email = request.data.get('send_email', True)
-        _notify_intent_to_award(tender, ranking_payload, send_email)
-
-        data = TenderSerializer(tender).data
-        data['award_ranking'] = ranking_payload['rows']
-        data['recommended_bid_id'] = recommended['bid_id']
-        data['recommended_vendor_id'] = recommended['vendor_id']
-        data['recommended_vendor_name'] = recommended['vendor_name']
+        data = TenderSerializer(tender, context={'request': request}).data
+        data['intent_award_request'] = IntentToAwardRequestSerializer(
+            intent_request, context={'request': request},
+        ).data
+        data['award_ranking'] = prepared['ranking']['rows']
+        data['recommended_bid_id'] = prepared['recommended']['bid_id']
+        data['recommended_vendor_id'] = prepared['recommended']['vendor_id']
+        data['recommended_vendor_name'] = prepared['recommended']['vendor_name']
         return Response(data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['get'])
@@ -2564,35 +2998,31 @@ class TenderViewSet(viewsets.ModelViewSet):
                 'technical_weight': tender.technical_weight,
                 'financial_weight': tender.financial_weight,
                 'evaluation_status': _tender_evaluation_status(tender),
-                'lots': [_build_lot_award_ranking(tender, lot) for lot in lots],
+                'lots': [
+                    _build_lot_award_ranking(
+                        tender, lot, include_pending_request=True, request=request,
+                    )
+                    for lot in lots
+                ],
             }, status=status.HTTP_200_OK)
         ranking_payload = _build_award_ranking(tender)
         ranking_payload['evaluation_status'] = _tender_evaluation_status(tender)
+        ranking_payload['pending_intent_award_request'] = _pending_intent_award_request_payload(
+            tender, request=request,
+        )
         return Response(ranking_payload, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'])
     def award_lot(self, request, pk=None):
-        """Issue intent-to-award for one lot of a lot-wise tender. Distinct vendors can
-        win different lots; the standstill/cooling-off timeline is shared across the
-        whole tender and starts on the first lot's intent-to-award."""
+        """RBF selects the winner for one lot of a lot-wise tender.
+
+        Like `award`, this only queues the request. Each lot gets its own request and
+        its own Super Admin decision, and the lot's independent standstill/cooling-off
+        window (TenderLot.cooling_off_until) only starts once THAT lot's request is
+        approved — so a lot approved later still gets its own full standstill window.
+        """
         self._assert_write_permission()
         tender = self.get_object()
-
-        if tender.status not in {TenderStatus.PUBLISHED, TenderStatus.EVALUATION, TenderStatus.STANDSTILL}:
-            return Response(
-                {'detail': 'Lots can be awarded only from Published, Evaluation, or Standstill state.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        evaluation_status = _tender_evaluation_status(tender)
-        if evaluation_status['committee_size'] and not evaluation_status['complete']:
-            return Response(
-                {
-                    'detail': 'Finalize the Evaluation Committee scores before issuing an intent to award.',
-                    'reasons': evaluation_status['reasons'],
-                },
-                status=status.HTTP_409_CONFLICT,
-            )
 
         lot_id = str(request.data.get('lot_id') or '').strip()
         bid_id = str(request.data.get('bid_id') or '').strip()
@@ -2600,68 +3030,377 @@ class TenderViewSet(viewsets.ModelViewSet):
             return Response({'detail': 'lot_id and bid_id are required.'}, status=status.HTTP_400_BAD_REQUEST)
         try:
             lot = tender.lots.get(id=lot_id)
-        except TenderLot.DoesNotExist:
+        except (TenderLot.DoesNotExist, ValueError, DjangoValidationError):
             return Response({'detail': 'Lot not found for this tender.'}, status=status.HTTP_400_BAD_REQUEST)
+
         try:
-            bid = TenderBid.objects.get(id=bid_id, tender=tender)
-        except TenderBid.DoesNotExist:
-            return Response({'detail': 'Bid not found for this tender.'}, status=status.HTTP_400_BAD_REQUEST)
-        if bid.status not in {BidStatus.SUBMITTED, BidStatus.UNDER_REVIEW, BidStatus.ACCEPTED}:
-            return Response({'detail': 'Only submitted or under-review bids can be awarded.'}, status=status.HTTP_400_BAD_REQUEST)
-
-        ranking = _build_lot_award_ranking(tender, lot)
-        recommended = ranking.get('recommended')
-        if not recommended:
-            return Response(
-                {'detail': f'No qualifying bid passed the technical threshold for {lot.name}.'},
-                status=status.HTTP_400_BAD_REQUEST,
+            prepared = _prepare_intent_to_award(
+                tender, bid_id=bid_id,
+                ec_override_reason=request.data.get('ec_override_reason') or '',
+                lot=lot,
             )
-        if str(recommended['bid_id']) != str(bid.id):
-            return Response(
-                {
-                    'detail': f'Intent to award for {lot.name} can only be issued to the recommended (highest weighted score) bid.',
-                    'recommended_bid_id': recommended['bid_id'],
-                    'recommended_vendor_id': recommended['vendor_id'],
-                    'recommended_vendor_name': recommended['vendor_name'],
-                },
-                status=status.HTTP_400_BAD_REQUEST,
+            intent_request = self._queue_intent_award_request(
+                tender, prepared, actor=request.user,
+                send_email=request.data.get('send_email', True),
+            )
+        except _IntentToAwardError as exc:
+            return exc.as_response()
+
+        data = TenderSerializer(tender, context={'request': request}).data
+        data['intent_award_request'] = IntentToAwardRequestSerializer(
+            intent_request, context={'request': request},
+        ).data
+        return Response(data, status=status.HTTP_200_OK)
+
+    # --- Intent to Award approval (RBF proposes, Super Admin decides) ---
+
+    def _queue_intent_award_request(self, tender, prepared, *, actor, send_email=True, from_challenge=False):
+        """Persist a PENDING IntentToAwardRequest for a validated proposal and alert the
+        Super Admins. Raises _IntentToAwardError when the decision unit is already
+        queued, so a tender can never sit in the approval queue twice for the same
+        lot (or whole-tender award)."""
+        lot = prepared['lot']
+        scope = f' for {lot.name}' if lot is not None else ''
+        already_pending = (
+            f'An intent to award{scope} is already awaiting Super Admin approval. '
+            'Withdraw the pending request before proposing a different bidder.'
+        )
+        pending = _pending_intent_award_request_queryset(tender, lot=lot).first()
+        if pending is not None:
+            raise _IntentToAwardError(
+                already_pending, intent_award_request_id=str(pending.id),
             )
 
-        now = timezone.now()
-        lot.intent_to_award_bid = bid
-        lot.intent_to_award_at = now
-        lot.awarded_vendor_id = bid.vendor_id
-        lot.awarded_vendor_name = bid.vendor_name
-        lot.save(update_fields=['intent_to_award_bid', 'intent_to_award_at', 'awarded_vendor_id', 'awarded_vendor_name', 'updated_at'])
-
-        if tender.status != TenderStatus.STANDSTILL:
-            cooling_off_days = tender.cooling_off_days if tender.cooling_off_days is not None else 7
-            tender.status = TenderStatus.STANDSTILL
-            tender.intent_to_award_at = now
-            tender.cooling_off_until = now + timedelta(days=cooling_off_days)
-            tender.save(update_fields=['status', 'intent_to_award_at', 'cooling_off_until', 'updated_at'])
-
-        if bid.status != BidStatus.ACCEPTED:
-            bid.status = BidStatus.ACCEPTED
-            bid.reviewed_at = bid.reviewed_at or timezone.now()
-            bid.reviewed_by = bid.reviewed_by or (request.user.full_name or request.user.username)
-            bid.save(update_fields=['status', 'reviewed_at', 'reviewed_by', 'updated_at'])
-
+        try:
+            with transaction.atomic():
+                # The unique constraint (one pending request per tender/lot) is the real
+                # guard: two concurrent proposals would both pass the check above, and
+                # without catching it the loser would surface as a 500, not a clean 400.
+                intent_request = IntentToAwardRequest.objects.create(
+                    tender=tender,
+                    lot=lot,
+                    bid=prepared['bid'],
+                    proposed_vendor_id=prepared['awarded_vendor_id'],
+                    proposed_vendor_name=prepared['awarded_vendor_name'],
+                    ec_agreed_bid_id=str(prepared['verdict']['ec'].get('agreed_bid_id') or ''),
+                    ec_consensus=prepared['verdict']['ec'].get('consensus'),
+                    ec_override_reason=prepared['verdict'].get('reason', '') or '',
+                    send_email=bool(send_email),
+                    requested_by=actor if getattr(actor, 'pk', None) else None,
+                    requested_by_name=self._admin_reference(actor),
+                    from_challenge=from_challenge,
+                )
+        except IntegrityError:
+            raise _IntentToAwardError(already_pending)
         log_audit(
-            request.user,
-            'lot_intent_to_award_issued',
+            actor,
+            'lot_intent_to_award_approval_requested' if lot is not None else 'intent_to_award_approval_requested',
             tender,
             {
                 'reference_number': tender.reference_number,
-                'lot_id': lot_id,
-                'lot_name': lot.name,
-                'bid_id': bid_id,
-                'awarded_vendor_id': bid.vendor_id,
-                'awarded_vendor_name': bid.vendor_name,
+                'intent_award_request_id': str(intent_request.id),
+                'lot_id': str(lot.id) if lot is not None else None,
+                'lot_name': lot.name if lot is not None else None,
+                'bid_id': str(prepared['bid'].id),
+                'proposed_vendor_id': prepared['awarded_vendor_id'],
+                'proposed_vendor_name': prepared['awarded_vendor_name'],
+                'ec_agreed_bid_id': intent_request.ec_agreed_bid_id,
+                'ec_consensus': intent_request.ec_consensus,
+                'ec_override_reason': intent_request.ec_override_reason,
             },
+        )
+        _notify_intent_award_request_submitted(tender, intent_request)
+        return intent_request
+
+    def _get_pending_intent_award_request(self, tender, request):
+        """Resolve the request a decision action applies to: by `request_id` when the
+        caller names one, otherwise by `lot_id` (lot-wise) / the whole-tender unit."""
+        qs = tender.intent_award_requests.filter(status=IntentAwardRequestStatus.PENDING)
+        request_id = str(request.data.get('request_id') or '').strip()
+        if request_id:
+            return qs.filter(id=request_id).select_related('lot', 'bid').first()
+        lot_id = str(request.data.get('lot_id') or '').strip()
+        if lot_id:
+            return qs.filter(lot_id=lot_id).select_related('lot', 'bid').first()
+        return qs.filter(lot__isnull=True).select_related('lot', 'bid').first()
+
+    def _assert_intent_award_approval_permission(self):
+        if getattr(self.request.user, 'role', None) != UserRole.ADMIN:
+            raise PermissionDenied(
+                'Only the Platform Administrator (Super Admin) can decide an intent to award request.'
+            )
+
+    def _no_pending_request_response(self):
+        return Response(
+            {'detail': 'No intent to award is awaiting approval for this tender.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    @action(detail=False, methods=['get'])
+    def pending_intent_award_approvals(self, request):
+        """Super Admin-only queue of intent-to-award requests awaiting a decision."""
+        if getattr(request.user, 'role', None) != UserRole.ADMIN:
+            raise PermissionDenied(
+                'Only the Platform Administrator (Super Admin) can view pending intent to award approvals.'
+            )
+        qs = (
+            IntentToAwardRequest.objects.filter(status=IntentAwardRequestStatus.PENDING)
+            .select_related('tender', 'lot', 'bid', 'requested_by')
+            .order_by('requested_at')
+        )
+        return Response(IntentToAwardRequestSerializer(qs, many=True, context={'request': request}).data)
+
+    @action(detail=True, methods=['get'])
+    def intent_award_requests(self, request, pk=None):
+        """Every intent-to-award request raised for this tender, decided or not."""
+        if getattr(request.user, 'role', None) not in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}:
+            raise PermissionDenied(
+                'Only the RBF Management Team or Super Admin can view intent to award requests.'
+            )
+        tender = self.get_object()
+        qs = (
+            tender.intent_award_requests
+            .select_related('lot', 'bid', 'requested_by', 'reviewed_by')
+            .order_by('-requested_at')
+        )
+        return Response(IntentToAwardRequestSerializer(qs, many=True, context={'request': request}).data)
+
+    @action(detail=True, methods=['post'])
+    def approve_intent_award(self, request, pk=None):
+        """Super Admin approves a queued intent to award.
+
+        This is the moment the intent actually takes effect: the tender/lot enters
+        standstill, the cooling-off clock starts, the winning bid is marked ACCEPTED and
+        the bidder notices go out. The proposal is re-validated first, so a request that
+        went stale while it sat in the queue (bid withdrawn, evaluation reopened) is
+        refused rather than issued blind.
+        """
+        self._assert_intent_award_approval_permission()
+        tender = self.get_object()
+        intent_request = self._get_pending_intent_award_request(tender, request)
+        if intent_request is None:
+            return self._no_pending_request_response()
+
+        notes = (request.data.get('notes') or '').strip()
+        unit = f' — Lot: {intent_request.lot.name}' if intent_request.lot_id else ''
+        with transaction.atomic():
+            # Re-read under a row lock: a second Super Admin click (or a reject racing
+            # this approve) must not both decide the same request and both issue the
+            # intent, which would reset the cooling-off window and re-notify bidders.
+            locked = IntentToAwardRequest.objects.select_for_update().filter(
+                pk=intent_request.pk, status=IntentAwardRequestStatus.PENDING,
+            ).first()
+            if locked is None:
+                return self._no_pending_request_response()
+            intent_request = locked
+            try:
+                prepared = _prepare_intent_to_award(
+                    tender,
+                    bid_id=intent_request.bid_id,
+                    awarded_vendor_id=intent_request.proposed_vendor_id,
+                    awarded_vendor_name=intent_request.proposed_vendor_name,
+                    ec_override_reason=intent_request.ec_override_reason,
+                    lot=intent_request.lot,
+                )
+            except _IntentToAwardError as exc:
+                return exc.as_response()
+
+            intent_request.status = IntentAwardRequestStatus.APPROVED
+            intent_request.reviewed_by = request.user
+            intent_request.reviewed_by_name = self._admin_reference(request.user)
+            intent_request.reviewed_at = timezone.now()
+            intent_request.notes = notes
+            intent_request.save(update_fields=[
+                'status', 'reviewed_by', 'reviewed_by_name', 'reviewed_at', 'notes',
+            ])
+            _apply_intent_to_award(
+                tender, prepared, actor=request.user,
+                send_email=intent_request.send_email,
+                from_challenge=intent_request.from_challenge,
+            )
+            log_audit(
+                request.user,
+                'intent_to_award_approved',
+                tender,
+                {
+                    'reference_number': tender.reference_number,
+                    'intent_award_request_id': str(intent_request.id),
+                    'lot_id': str(intent_request.lot_id) if intent_request.lot_id else None,
+                    'bid_id': str(intent_request.bid_id),
+                    'proposed_vendor_id': intent_request.proposed_vendor_id,
+                    'proposed_vendor_name': intent_request.proposed_vendor_name,
+                    'notes': notes or f'Intent to award approved by Super Admin{unit}.',
+                },
+            )
+
+        winner = intent_request.proposed_vendor_name or str(intent_request.bid_id)
+        _clear_intent_award_approval_notifications(intent_request)
+        _notify_intent_award_decision(
+            tender, intent_request,
+            status_value='approved',
+            title=f'Intent to Award Approved: {tender.reference_number}{unit}',
+            body=(
+                f'The Super Admin approved the intent to award{unit} to {winner}.\n'
+                'The standstill period has started and the bidders have been notified.\n'
+                + (f'Approval notes: {notes}' if notes else '')
+            ),
         )
 
         data = TenderSerializer(tender, context={'request': request}).data
+        data['intent_award_request'] = IntentToAwardRequestSerializer(
+            intent_request, context={'request': request},
+        ).data
+        return Response(data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def request_intent_award_changes(self, request, pk=None):
+        """Super Admin sends the proposal back to the RBF, which can then pick a
+        different bidder and queue a fresh request. Nothing is issued."""
+        return self._close_intent_award_request(
+            request,
+            status_value=IntentAwardRequestStatus.CHANGES_REQUESTED,
+            log_action='intent_to_award_changes_requested',
+            require_notes=True,
+            title_suffix='Changes Requested',
+            body_text=(
+                'The Super Admin asked for changes before the intent to award can be issued. '
+                'Nothing has been issued and no bidder has been notified. Pick a different '
+                'bidder (or revise your justification) and submit a new request.'
+            ),
+        )
+
+    @action(detail=True, methods=['post'])
+    def reject_intent_award(self, request, pk=None):
+        """Super Admin refuses the proposal outright. Nothing is issued."""
+        return self._close_intent_award_request(
+            request,
+            status_value=IntentAwardRequestStatus.REJECTED,
+            log_action='intent_to_award_rejected',
+            require_notes=False,
+            title_suffix='Rejected',
+            body_text=(
+                'The Super Admin rejected the intent to award request. Nothing has been '
+                'issued and no bidder has been notified.'
+            ),
+        )
+
+    def _close_intent_award_request(self, request, *, status_value, log_action, require_notes,
+                                    title_suffix, body_text):
+        self._assert_intent_award_approval_permission()
+        tender = self.get_object()
+        intent_request = self._get_pending_intent_award_request(tender, request)
+        if intent_request is None:
+            return self._no_pending_request_response()
+
+        notes = (request.data.get('notes') or '').strip()
+        if require_notes and not notes:
+            return Response(
+                {'detail': 'Notes are required when requesting changes — tell the RBF what to revise.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        with transaction.atomic():
+            # Same row lock as approve: a decision racing an approval must not both land.
+            locked = IntentToAwardRequest.objects.select_for_update().filter(
+                pk=intent_request.pk, status=IntentAwardRequestStatus.PENDING,
+            ).first()
+            if locked is None:
+                return self._no_pending_request_response()
+            intent_request = locked
+            intent_request.status = status_value
+            intent_request.reviewed_by = request.user
+            intent_request.reviewed_by_name = self._admin_reference(request.user)
+            intent_request.reviewed_at = timezone.now()
+            intent_request.notes = notes
+            intent_request.save(update_fields=[
+                'status', 'reviewed_by', 'reviewed_by_name', 'reviewed_at', 'notes',
+            ])
+
+        _clear_intent_award_approval_notifications(intent_request)
+        unit = f' — Lot: {intent_request.lot.name}' if intent_request.lot_id else ''
+        log_audit(
+            request.user,
+            log_action,
+            tender,
+            {
+                'reference_number': tender.reference_number,
+                'intent_award_request_id': str(intent_request.id),
+                'lot_id': str(intent_request.lot_id) if intent_request.lot_id else None,
+                'bid_id': str(intent_request.bid_id),
+                'proposed_vendor_id': intent_request.proposed_vendor_id,
+                'proposed_vendor_name': intent_request.proposed_vendor_name,
+                'notes': notes or f'Intent to award {title_suffix.lower()} by Super Admin{unit}.',
+            },
+        )
+        _notify_intent_award_decision(
+            tender, intent_request,
+            status_value=status_value,
+            title=f'Intent to Award {title_suffix}: {tender.reference_number}{unit}',
+            body=body_text + (f'\n\nSuper Admin notes: {notes}' if notes else ''),
+        )
+
+        data = TenderSerializer(tender, context={'request': request}).data
+        data['intent_award_request'] = IntentToAwardRequestSerializer(
+            intent_request, context={'request': request},
+        ).data
+        return Response(data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def withdraw_intent_award_request(self, request, pk=None):
+        """The RBF pulls its own queued request back so a different bidder can be proposed.
+
+        Only the official who raised the request may withdraw it (or a Super Admin) — a
+        queued request belongs to the person who submitted it, not to the whole team.
+        """
+        self._assert_write_permission()
+        tender = self.get_object()
+        intent_request = self._get_pending_intent_award_request(tender, request)
+        if intent_request is None:
+            return self._no_pending_request_response()
+
+        is_requester = str(intent_request.requested_by_id or '') == str(self.request.user.pk or '')
+        if not (is_requester or getattr(self.request.user, 'role', None) == UserRole.ADMIN):
+            raise PermissionDenied(
+                'Only the RBF official who submitted this request (or a Super Admin) can withdraw it.'
+            )
+
+        notes = (request.data.get('notes') or '').strip()
+        with transaction.atomic():
+            locked = IntentToAwardRequest.objects.select_for_update().filter(
+                pk=intent_request.pk, status=IntentAwardRequestStatus.PENDING,
+            ).first()
+            if locked is None:
+                return self._no_pending_request_response()
+            intent_request = locked
+            intent_request.status = IntentAwardRequestStatus.WITHDRAWN
+            intent_request.reviewed_by = request.user
+            intent_request.reviewed_by_name = self._admin_reference(request.user)
+            intent_request.reviewed_at = timezone.now()
+            if notes:
+                intent_request.notes = notes
+            intent_request.save(update_fields=[
+                'status', 'reviewed_by', 'reviewed_by_name', 'reviewed_at', 'notes',
+            ])
+
+        # The Super Admins were told to expect a decision on this; drop that notice.
+        _clear_intent_award_approval_notifications(intent_request)
+        unit = f' for {intent_request.lot.name}' if intent_request.lot_id else ''
+        log_audit(
+            request.user,
+            'intent_to_award_request_withdrawn',
+            tender,
+            {
+                'reference_number': tender.reference_number,
+                'intent_award_request_id': str(intent_request.id),
+                'lot_id': str(intent_request.lot_id) if intent_request.lot_id else None,
+                'bid_id': str(intent_request.bid_id),
+                'notes': notes or f'Intent to award request{unit} withdrawn by the RBF before a Super Admin decision.',
+            },
+        )
+        data = TenderSerializer(tender, context={'request': request}).data
+        data['intent_award_request'] = IntentToAwardRequestSerializer(
+            intent_request, context={'request': request},
+        ).data
         return Response(data, status=status.HTTP_200_OK)
 
     def _assert_super_admin(self):
@@ -3122,6 +3861,12 @@ class TenderViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def confirm_award(self, request, pk=None):
+        """Finalize the award after standstill. For a lot-wise tender, an optional
+        `lot_id` confirms just that one lot (gated on ITS OWN cooling_off_until) —
+        letting different lots finalize independently as each one's window elapses.
+        Without `lot_id`, every lot whose own cooling-off has already elapsed is
+        confirmed in one call (lots still pending are left untouched). The tender only
+        flips to AWARDED once no lot is left with an unconfirmed intent."""
         self._assert_write_permission()
         tender = self.get_object()
 
@@ -3148,39 +3893,83 @@ class TenderViewSet(viewsets.ModelViewSet):
 
         lots = list(tender.lots.all())
         is_lot_wise = bool(lots)
-        awarded_lots = [lot for lot in lots if lot.intent_to_award_bid_id] if is_lot_wise else []
-        if is_lot_wise and not awarded_lots:
-            return Response(
-                {'detail': 'Intent to award must be issued for at least one lot before confirming.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        if not is_lot_wise and tender.intent_to_award_bid is None:
-            return Response(
-                {'detail': 'Intent to award must be issued before confirming the final award.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        if tender.cooling_off_until and timezone.now() < tender.cooling_off_until:
-            return Response(
-                {
-                    'detail': 'Cooling-off period has not yet expired.',
-                    'cooling_off_until': tender.cooling_off_until.isoformat(),
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        requested_lot_id = str(request.data.get('lot_id') or '').strip()
+        lots_to_confirm = []
+
+        if is_lot_wise:
+            pending_lots = [lot for lot in lots if lot.intent_to_award_bid_id and not lot.awarded_at]
+            if requested_lot_id:
+                lot = next((l for l in lots if str(l.id) == requested_lot_id), None)
+                if lot is None:
+                    return Response({'detail': 'Lot not found for this tender.'}, status=status.HTTP_400_BAD_REQUEST)
+                if not lot.intent_to_award_bid_id:
+                    return Response(
+                        {'detail': f'Intent to award must be issued for {lot.name} before confirming.'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                if lot.awarded_at:
+                    return Response(
+                        {'detail': f'{lot.name} has already been confirmed as awarded.'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                if lot.cooling_off_until and timezone.now() < lot.cooling_off_until:
+                    return Response(
+                        {
+                            'detail': f'Cooling-off period for {lot.name} has not yet expired.',
+                            'cooling_off_until': lot.cooling_off_until.isoformat(),
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                lots_to_confirm = [lot]
+            else:
+                if not pending_lots:
+                    return Response(
+                        {'detail': 'Intent to award must be issued for at least one lot before confirming.'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                lots_to_confirm = [
+                    lot for lot in pending_lots
+                    if not lot.cooling_off_until or timezone.now() >= lot.cooling_off_until
+                ]
+                if not lots_to_confirm:
+                    return Response(
+                        {'detail': 'No lots have cleared their cooling-off period yet.'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+        else:
+            if tender.intent_to_award_bid is None:
+                return Response(
+                    {'detail': 'Intent to award must be issued before confirming the final award.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if tender.cooling_off_until and timezone.now() < tender.cooling_off_until:
+                return Response(
+                    {
+                        'detail': 'Cooling-off period has not yet expired.',
+                        'cooling_off_until': tender.cooling_off_until.isoformat(),
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
         contracts = []
+        confirmed_lots = []
         with transaction.atomic():
             now = timezone.now()
             if is_lot_wise:
-                for lot in awarded_lots:
+                for lot in lots_to_confirm:
                     bid = lot.intent_to_award_bid
                     if bid.status != BidStatus.AWARDED:
                         bid.status = BidStatus.AWARDED
                         bid.reviewed_at = bid.reviewed_at or now
                         bid.reviewed_by = bid.reviewed_by or (request.user.full_name or request.user.username)
                         bid.save(update_fields=['status', 'reviewed_at', 'reviewed_by', 'updated_at'])
+                    # This is the moment the award actually becomes confirmed — only now
+                    # do awarded_vendor_id/name get set (see TenderLot model comment).
                     lot.awarded_at = now
-                    lot.save(update_fields=['awarded_at', 'updated_at'])
+                    lot.awarded_vendor_id = bid.vendor_id
+                    lot.awarded_vendor_name = bid.vendor_name
+                    lot.save(update_fields=['awarded_at', 'awarded_vendor_id', 'awarded_vendor_name', 'updated_at'])
+                    confirmed_lots.append(lot)
                     contract = self._ensure_award_contract(tender, bid, bid.vendor_id, lot=lot)
                     if contract:
                         contracts.append(contract)
@@ -3198,11 +3987,15 @@ class TenderViewSet(viewsets.ModelViewSet):
                             'contract_id': str(contract.id) if contract else None,
                         },
                     )
-                tender.status = TenderStatus.AWARDED
-                tender.awarded_at = now
-                tender.cooling_off_until = None
-                tender.dispute_started_at = None
-                tender.save(update_fields=['status', 'awarded_at', 'cooling_off_until', 'dispute_started_at', 'updated_at'])
+                # Only close out the whole tender once every lot that received intent
+                # has actually been confirmed — other lots may still be mid-standstill.
+                still_pending = any(l.intent_to_award_bid_id and not l.awarded_at for l in lots)
+                if not still_pending:
+                    tender.status = TenderStatus.AWARDED
+                    tender.awarded_at = now
+                    tender.cooling_off_until = None
+                    tender.dispute_started_at = None
+                    tender.save(update_fields=['status', 'awarded_at', 'cooling_off_until', 'dispute_started_at', 'updated_at'])
             else:
                 bid = tender.intent_to_award_bid
                 tender.status = TenderStatus.AWARDED
@@ -3228,6 +4021,13 @@ class TenderViewSet(viewsets.ModelViewSet):
                     bid.reviewed_by = bid.reviewed_by or (request.user.full_name or request.user.username)
                     bid.save(update_fields=['status', 'reviewed_at', 'reviewed_by', 'updated_at'])
 
+                # Give every other qualified-but-losing bid an explicit, final outcome
+                # instead of leaving it in a submitted/under-review limbo forever.
+                TenderBid.objects.filter(
+                    tender=tender,
+                    status__in=[BidStatus.SUBMITTED, BidStatus.UNDER_REVIEW, BidStatus.ACCEPTED],
+                ).exclude(id=bid.id).update(status=BidStatus.NOT_AWARDED)
+
                 contract = self._ensure_award_contract(tender, bid, bid.vendor_id)
                 if contract:
                     contracts.append(contract)
@@ -3247,7 +4047,7 @@ class TenderViewSet(viewsets.ModelViewSet):
 
         send_email = request.data.get('send_email', True)
         if is_lot_wise:
-            for lot in awarded_lots:
+            for lot in confirmed_lots:
                 bid = lot.intent_to_award_bid
                 self._notify_award(tender, bid.vendor_id, bid.vendor_name, send_email)
         else:
@@ -3312,54 +4112,76 @@ class TenderViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def revoke_intent(self, request, pk=None):
         """
-        Revoke the intent to award, clearing all award fields.
-        Tender returns to EVALUATION status.
+        Revoke any PENDING (not yet confirmed) intent to award. Never touches a lot
+        that has already been confirmed-awarded (lot.awarded_at set) — those are done
+        deals with a real contract and must not be silently wiped out by a revoke
+        triggered over a different, still-pending lot. Only resets the tender back to
+        EVALUATION when nothing on it has actually been confirmed yet.
         """
         self._assert_write_permission()
         tender = self.get_object()
 
-        if not tender.intent_to_award_at:
-            return Response(
-                {'detail': 'No intent to award has been issued yet.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
         if tender.status == TenderStatus.AWARDED:
             return Response(
                 {'detail': 'Tender has already been awarded. Cannot revoke intent.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        lots = list(tender.lots.all())
+        is_lot_wise = bool(lots)
+        pending_lots = [lot for lot in lots if lot.intent_to_award_bid_id and not lot.awarded_at] if is_lot_wise else []
+
+        if is_lot_wise:
+            if not pending_lots:
+                return Response(
+                    {'detail': 'No pending intent to award to revoke.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        elif not tender.intent_to_award_at:
+            return Response(
+                {'detail': 'No intent to award has been issued yet.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         previous_bid_id = str(tender.intent_to_award_bid.id) if tender.intent_to_award_bid else None
         previous_vendor_id = tender.awarded_vendor_id
         previous_vendor_name = tender.awarded_vendor_name
+        revoked_lots = []
 
-        lots = list(tender.lots.all())
-        if lots:
-            for lot in lots:
-                if lot.intent_to_award_bid_id or lot.awarded_vendor_id:
-                    lot.intent_to_award_bid = None
-                    lot.intent_to_award_at = None
-                    lot.awarded_vendor_id = ''
-                    lot.awarded_vendor_name = ''
-                    lot.save(update_fields=['intent_to_award_bid', 'intent_to_award_at', 'awarded_vendor_id', 'awarded_vendor_name', 'updated_at'])
+        for lot in pending_lots:
+            bid = lot.intent_to_award_bid
+            revoked_lots.append({'lot': lot, 'vendor_id': bid.vendor_id if bid else '', 'vendor_name': bid.vendor_name if bid else ''})
+            lot.intent_to_award_bid = None
+            lot.intent_to_award_at = None
+            lot.cooling_off_until = None
+            lot.awarded_vendor_id = ''
+            lot.awarded_vendor_name = ''
+            lot.save(update_fields=['intent_to_award_bid', 'intent_to_award_at', 'cooling_off_until', 'awarded_vendor_id', 'awarded_vendor_name', 'updated_at'])
 
-        tender.intent_to_award_bid = None
-        tender.intent_to_award_at = None
-        tender.awarded_vendor_id = ''
-        tender.awarded_vendor_name = ''
-        tender.cooling_off_until = None
-        tender.dispute_started_at = None
-        tender.status = TenderStatus.EVALUATION
-        tender.save(update_fields=[
-            'intent_to_award_bid',
-            'intent_to_award_at',
-            'awarded_vendor_id',
-            'awarded_vendor_name',
-            'cooling_off_until',
-            'dispute_started_at',
-            'status',
-            'updated_at',
-        ])
+        any_lot_confirmed = any(lot.awarded_at for lot in lots)
+        if not any_lot_confirmed:
+            # Nothing on this tender has actually been finalized yet — safe to fully
+            # reset it back to EVALUATION, matching the pre-per-lot-confirm behavior.
+            tender.intent_to_award_bid = None
+            tender.intent_to_award_at = None
+            tender.awarded_vendor_id = ''
+            tender.awarded_vendor_name = ''
+            tender.cooling_off_until = None
+            tender.dispute_started_at = None
+            tender.status = TenderStatus.EVALUATION
+            tender.save(update_fields=[
+                'intent_to_award_bid',
+                'intent_to_award_at',
+                'awarded_vendor_id',
+                'awarded_vendor_name',
+                'cooling_off_until',
+                'dispute_started_at',
+                'status',
+                'updated_at',
+            ])
+        # else: at least one lot is already confirmed-awarded with a real contract —
+        # leave the tender's own status/award fields untouched; only the still-pending
+        # lots above were revoked.
 
         log_audit(
             request.user,
@@ -3370,10 +4192,16 @@ class TenderViewSet(viewsets.ModelViewSet):
                 'previous_bid_id': previous_bid_id,
                 'previous_vendor_id': previous_vendor_id,
                 'previous_vendor_name': previous_vendor_name,
+                'revoked_lot_ids': [str(entry['lot'].id) for entry in revoked_lots],
             },
         )
 
-        self._notify_intent_revoked(tender, previous_vendor_id, previous_vendor_name)
+        if is_lot_wise:
+            for entry in revoked_lots:
+                if entry['vendor_id']:
+                    self._notify_intent_revoked(tender, entry['vendor_id'], entry['vendor_name'])
+        else:
+            self._notify_intent_revoked(tender, previous_vendor_id, previous_vendor_name)
 
         return Response(TenderSerializer(tender).data, status=status.HTTP_200_OK)
 
@@ -3481,7 +4309,10 @@ class TenderViewSet(viewsets.ModelViewSet):
     def resolve_challenge(self, request, pk=None):
         """
         Resolve a challenge with outcome 'upheld' or 'dismissed'.
-        If upheld: revokes old intent, sets challenger as new recommended winner, resets cooling-off.
+        If upheld: revokes the current intent immediately and queues a request to award
+        the challenger's bid — like every other intent to award, that re-issue only
+        takes effect once a Super Admin approves it, so the fresh standstill window
+        starts at approval, not at the resolution.
         If dismissed: returns tender to EVALUATION, resumes cooling-off clock.
         """
         self._assert_write_permission()
@@ -3559,14 +4390,39 @@ class TenderViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            tender.intent_to_award_bid = challenger_bid
-            tender.intent_to_award_at = timezone.now()
-            tender.awarded_vendor_id = challenger_bid.vendor_id
-            tender.awarded_vendor_name = challenger_bid.vendor_name
-            cooling_off_days = tender.cooling_off_days if tender.cooling_off_days is not None else 7
-            tender.cooling_off_until = timezone.now() + timedelta(days=cooling_off_days)
+            # An upheld challenge invalidates the intent that is currently standing, so
+            # the revocation is applied immediately and unconditionally. The challenger's
+            # replacement intent is NOT issued here: it is queued like any other proposal
+            # and only takes effect once a Super Admin approves it, which is also when
+            # the fresh cooling-off window starts.
+            tender.intent_to_award_bid = None
+            tender.intent_to_award_at = None
+            tender.awarded_vendor_id = ''
+            tender.awarded_vendor_name = ''
+            tender.cooling_off_until = None
             tender.dispute_started_at = None
-            tender.status = TenderStatus.STANDSTILL
+            tender.status = TenderStatus.EVALUATION
+
+            # The challenger's bid is by definition not the committee's ranked winner, so
+            # the upheld challenge is the recorded justification for the override.
+            challenge_override_reason = f'Challenge upheld (challenge_id={challenge.id}).'
+            try:
+                prepared = _prepare_intent_to_award(
+                    tender, bid_id=challenger_bid.id, ec_override_reason=challenge_override_reason,
+                )
+            except _IntentToAwardError as exc:
+                return exc.as_response()
+
+            # A proposal already sitting in the Super Admin queue for this tender is
+            # superseded by the challenge outcome, so it is withdrawn rather than left to
+            # compete with the replacement.
+            superseded = _pending_intent_award_request_queryset(tender).first()
+            if superseded is not None:
+                superseded.status = IntentAwardRequestStatus.WITHDRAWN
+                superseded.reviewed_at = timezone.now()
+                superseded.notes = f'Superseded by upheld challenge {challenge.id}.'
+                superseded.save(update_fields=['status', 'reviewed_at', 'notes'])
+
             tender.save(update_fields=[
                 'intent_to_award_bid',
                 'intent_to_award_at',
@@ -3601,21 +4457,14 @@ class TenderViewSet(viewsets.ModelViewSet):
                     'new_intent_bid_id': str(challenger_bid.id),
                     'new_intent_vendor_id': challenger_bid.vendor_id,
                     'new_intent_vendor_name': challenger_bid.vendor_name,
-                    'new_cooling_off_until': tender.cooling_off_until.isoformat(),
+                    'new_intent_awaiting_super_admin_approval': True,
                     'resolution_notes': resolution_notes,
                 },
             )
-            log_audit(
-                request.user,
-                'intent_reissued',
-                tender,
-                {
-                    'reference_number': tender.reference_number,
-                    'bid_id': str(challenger_bid.id),
-                    'vendor_id': challenger_bid.vendor_id,
-                    'vendor_name': challenger_bid.vendor_name,
-                    'new_cooling_off_until': tender.cooling_off_until.isoformat(),
-                },
+
+            self._queue_intent_award_request(
+                tender, prepared, actor=request.user,
+                send_email=request.data.get('send_email', True), from_challenge=True,
             )
 
             if previous_vendor_id:
@@ -3769,19 +4618,20 @@ class TenderViewSet(viewsets.ModelViewSet):
         )
 
     def _notify_challenge_upheld(self, tender: Tender, challenge: TenderChallenge, new_bid: TenderBid):
-        """Notify the challenging vendor that their challenge was upheld and they are the new winner."""
+        """Tell the challenging vendor their challenge was upheld and their bid has been
+        put forward as the new intent to award — which still needs Super Admin approval
+        before it is issued and the cooling-off period starts."""
         from rbf.users.models import User
         try:
             vendor = User.objects.get(id=challenge.filed_by_vendor_id)
         except User.DoesNotExist:
             return
-        cooling_date_text = tender.cooling_off_until.strftime('%Y-%m-%d %H:%M:%S') if tender.cooling_off_until else 'N/A'
-        title = f'Challenge Upheld — New Intent to Award: {tender.reference_number}'
+        title = f'Challenge Upheld — New Intent to Award Pending Approval: {tender.reference_number}'
         body = (
             f"Your challenge for {tender.name} ({tender.reference_number}) has been upheld.\n"
-            f"You are now the Best Evaluated Bidder.\n"
-            f"Cooling-off period ends on: {cooling_date_text}\n"
-            f"The final award will occur after the cooling-off period expires without further protest.\n"
+            f"Your bid has been put forward as the new Best Evaluated Bidder.\n"
+            f"The intent to award is pending approval by the Platform Administrator (Super Admin).\n"
+            f"You will be notified, and the cooling-off period will start, once it is approved.\n"
         )
         Notification.objects.create(
             recipient_id=str(vendor.id),
@@ -4665,14 +5515,14 @@ class TenderBidEvaluationViewSet(viewsets.ModelViewSet):
         from the price formula — whatever the client sent for financial_score is
         ignored. Lot-wise tenders compute per lot (a bid can offer on several lots);
         non-lot-wise tenders compute once for the bid's own bid_amount."""
-        technical_score = _technical_score_for_bid(bid)
+        lot_id = data.get('lot')
+        technical_score = _technical_score_for_bid(bid, lot_id)
         threshold = Decimal(str(bid.tender.technical_threshold or 70))
         if technical_score is None:
             raise ValidationError({'stage': 'This bid has not yet cleared technical evaluation (committee quorum not reached).'})
         if technical_score < threshold:
             raise ValidationError({'stage': f'This bid has not cleared the technical threshold ({threshold}%) yet.'})
 
-        lot_id = data.get('lot')
         if lot_id:
             try:
                 lot = TenderLot.objects.get(id=lot_id, tender_id=bid.tender_id)
@@ -4703,8 +5553,30 @@ class TenderBidEvaluationViewSet(viewsets.ModelViewSet):
         if stage == EvaluationStage.FINANCIAL:
             self._apply_auto_financial_score(data, bid)
         else:
-            data['lot'] = None
             data['financial_score_auto_calculated'] = False
+            # Lot-wise tenders score each lot a bid covers separately (one technical
+            # evaluation per lot per evaluator); non-lot-wise tenders always keep lot=NULL.
+            # A lot-wise tender MUST be given an explicit lot here — silently falling back
+            # to lot=NULL previously let a client that hadn't loaded the tender's lots yet
+            # create an ambiguous "no lot" row that no serial-order/quorum check could ever
+            # distinguish from a real per-lot score.
+            lot_id = data.get('lot') or None
+            if not bid.tender.lots.exists():
+                data['lot'] = None
+            elif lot_id is None:
+                raise ValidationError({'lot': 'This is a lot-wise tender — select which lot this technical score applies to.'})
+            else:
+                try:
+                    lot = TenderLot.objects.get(id=lot_id, tender_id=bid.tender_id)
+                except TenderLot.DoesNotExist:
+                    raise ValidationError({'lot': 'Lot not found for this tender.'})
+                bid_lot_ids = (
+                    set(bid.declared_lots or [])
+                    | set(bid.lot_offers.values_list('lot_id', flat=True))
+                    | set(bid.sites.values_list('lot_id', flat=True))
+                )
+                if lot.id not in bid_lot_ids:
+                    raise ValidationError({'lot': 'This bid does not cover that lot.'})
         data.setdefault('submission_status', EvaluationSubmissionStatus.DRAFT)
         filter_kwargs = {
             'bid_id': data.get('bid'),
@@ -4855,6 +5727,167 @@ class TenderBidEvaluationViewSet(viewsets.ModelViewSet):
         )
         log_audit(request.user, 'bid_evaluation_unlocked', evaluation, {'bid_id': str(evaluation.bid_id)})
         return Response(self.get_serializer(evaluation).data)
+
+
+class TenderAwardRecommendationViewSet(viewsets.ModelViewSet):
+    """Evaluation Committee members' suggested winners, used to reach a verdict on who
+    should receive the intent to award. POST is an upsert keyed on (tender, lot, member):
+    an assigned member re-submitting changes their latest suggestion (they may revise it
+    until an intent to award is issued). Admin (RBF) access is unrestricted."""
+    queryset = TenderAwardRecommendation.objects.select_related('bid', 'suggested_by', 'lot').all()
+    serializer_class = TenderAwardRecommendationSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['tender', 'lot']
+
+    def get_queryset(self):
+        qs = TenderAwardRecommendation.objects.select_related('bid', 'suggested_by', 'lot')
+        tender_id = self.request.query_params.get('tender')
+        lot_id = self.request.query_params.get('lot')
+        if tender_id:
+            qs = qs.filter(tender_id=tender_id)
+        if lot_id:
+            qs = qs.filter(lot_id=lot_id)
+        return qs
+
+    def _tender(self):
+        data = getattr(self.request, 'data', {})
+        tender_id = str(data.get('tender') or '').strip()
+        if not tender_id:
+            raise ValidationError({'tender': 'tender is required.'})
+        return Tender.objects.filter(id=tender_id).first()
+
+    def _assert_can_suggest(self, tender):
+        user = self.request.user
+        if getattr(user, 'role', None) == UserRole.ADMIN:
+            return True
+        if getattr(user, 'role', None) != UserRole.EVALUATION_COMMITTEE:
+            raise PermissionDenied('Only assigned Evaluation Committee members can suggest a winner.')
+        if not TenderEvaluationCommitteeMember.objects.filter(tender=tender, member=user).exists():
+            raise PermissionDenied('You are not assigned to this tender\'s Evaluation Committee.')
+        if not _tender_evaluation_status(tender)['complete']:
+            raise PermissionDenied('Winner suggestions open only after the full technical and financial evaluation is complete.')
+        return False
+
+    def _validate_payload(self, tender, lot_id):
+        """Returns (bid, lot) after validating the suggestion references this tender's
+        bids/lots, and that on a lot-wise tender the bid actually covers the chosen lot."""
+        bid_id = str(self.request.data.get('bid') or '').strip()
+        if not bid_id:
+            raise ValidationError({'bid': 'bid is required.'})
+        bid = TenderBid.objects.filter(id=bid_id, tender=tender).first()
+        if bid is None:
+            raise ValidationError({'bid': 'Bid not found for this tender.'})
+        lots = list(tender.lots.all())
+        lot = None
+        if lots:
+            if not lot_id:
+                raise ValidationError({'lot': 'This is a lot-wise tender — a lot is required for the suggestion.'})
+            lot = next((l for l in lots if str(l.id) == lot_id), None)
+            if lot is None:
+                raise ValidationError({'lot': 'Lot not found for this tender.'})
+            if not _bid_covers_lot(bid, lot_id):
+                raise ValidationError({'bid': 'This bid did not offer on the selected lot.'})
+        elif lot_id:
+            raise ValidationError({'lot': 'This tender is not lot-wise — omit the lot.'})
+        return bid, lot
+
+    def create(self, request, *args, **kwargs):
+        tender = self._tender()
+        if tender is None:
+            raise ValidationError({'tender': 'Tender not found.'})
+        self._assert_can_suggest(tender)
+        lot_id = str(request.data.get('lot') or '').strip() or None
+        bid, lot = self._validate_payload(tender, lot_id)
+        recommendation, created = TenderAwardRecommendation.objects.get_or_create(
+            tender=tender,
+            lot=lot,
+            suggested_by=request.user,
+            defaults={'bid': bid, 'rationale': str(request.data.get('rationale') or '').strip()},
+        )
+        if not created:
+            changed = False
+            if str(recommendation.bid_id) != str(bid.id):
+                recommendation.bid = bid
+                changed = True
+            rationale = str(request.data.get('rationale') or '').strip()
+            if rationale != recommendation.rationale:
+                recommendation.rationale = rationale
+                changed = True
+            if changed:
+                recommendation.save(update_fields=['bid', 'rationale', 'updated_at'])
+        action = 'award_recommendation_created' if created else 'award_recommendation_updated'
+        log_audit(
+            request.user, action, tender,
+            {
+                'lot_id': lot_id,
+                'bid_id': str(bid.id),
+                'vendor_name': bid.vendor_name,
+                'ec_consensus': _award_recommendation_unit(tender, lot)['consensus'],
+            },
+        )
+        serializer = self.get_serializer(recommendation)
+        return Response(serializer.data, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+    def _assert_can_edit(self, recommendation):
+        user = self.request.user
+        if getattr(user, 'role', None) == UserRole.ADMIN:
+            return
+        if str(recommendation.suggested_by_id) != str(user.id):
+            raise PermissionDenied('You can only change your own recommendation.')
+
+    def partial_update(self, request, *args, **kwargs):
+        return self.update(request, *args, **kwargs)
+
+    def update(self, request, *args, **kwargs):
+        recommendation = self.get_object()
+        self._assert_can_edit(recommendation)
+        tender = recommendation.tender
+        lot_id = str(request.data.get('lot') or '').strip() or None
+        if lot_id and lot_id != str(recommendation.lot_id or ''):
+            raise ValidationError({'lot': 'Cannot move a recommendation between decision units — update the other unit directly.'})
+        self._assert_can_suggest(tender)
+        bid, lot = self._validate_payload(tender, lot_id)
+        before = str(recommendation.bid_id)
+        recommendation.bid = bid
+        recommendation.rationale = str(request.data.get('rationale') or recommendation.rationale).strip()
+        recommendation.save(update_fields=['bid', 'rationale', 'updated_at'])
+        log_audit(
+            request.user, 'award_recommendation_updated', tender,
+            {
+                'lot_id': lot_id,
+                'bid_before': before,
+                'bid_after': str(bid.id),
+                'vendor_name': bid.vendor_name,
+            },
+        )
+        return Response(self.get_serializer(recommendation).data)
+
+    @action(detail=False, methods=['get'])
+    def consensus(self, request):
+        """Live verdict per decision unit: every assigned member's latest suggestion,
+        who has not suggested yet, whether the committee agrees, and whether the full
+        evaluation has been finalized (which gates suggestions)."""
+        tender_id = request.query_params.get('tender')
+        if not tender_id:
+            return Response({'detail': 'tender is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        tender = Tender.objects.filter(id=tender_id).first()
+        if tender is None:
+            return Response({'detail': 'Tender not found.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(_award_recommendation_consensus(tender))
+
+    def destroy(self, request, *args, **kwargs):
+        recommendation = self.get_object()
+        self._assert_can_edit(recommendation)
+        tender = recommendation.tender
+        lot_id = str(recommendation.lot_id or '')
+        self._assert_can_suggest(tender)
+        super().destroy(request, *args, **kwargs)
+        log_audit(
+            request.user, 'award_recommendation_withdrawn', tender,
+            {'lot_id': lot_id, 'bid_id': str(recommendation.bid_id)},
+        )
+        return Response({'detail': 'Recommendation withdrawn.'}, status=status.HTTP_200_OK)
 
 
 class TenderContractViewSet(viewsets.ModelViewSet):
@@ -5095,16 +6128,26 @@ class TenderContractViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def reject(self, request, pk=None):
+        """Reject the vendor's uploaded signed copy. This is NOT a dead end: the
+        contract is reset back to Generated (signed file cleared) so the vendor's
+        upload form reopens and they can submit a corrected signed copy — the
+        rejection reason is kept on the record as context for that re-upload."""
         self._assert_admin_permission(request)
         contract = self.get_object()
         reason = str(request.data.get('rejection_reason') or '').strip()
         if not reason:
             raise ValidationError({'rejection_reason': 'Rejection reason is required.'})
-        contract.status = ContractStatus.REJECTED
+        contract.status = ContractStatus.GENERATED
         contract.rejection_reason = reason
+        contract.signed_file = None
+        contract.signed_at = None
+        contract.signature_status = ContractSignatureStatus.AWAITING
         contract.approved_at = timezone.now()
         contract.approved_by = request.user.full_name or request.user.username
-        contract.save(update_fields=['status', 'rejection_reason', 'approved_at', 'approved_by', 'updated_at'])
+        contract.save(update_fields=[
+            'status', 'rejection_reason', 'signed_file', 'signed_at', 'signature_status',
+            'approved_at', 'approved_by', 'updated_at',
+        ])
         log_audit(request.user, 'contract_rejected', contract, {'reason': reason})
         Notification.objects.create(
             recipient_id=contract.vendor_id,
@@ -5112,7 +6155,7 @@ class TenderContractViewSet(viewsets.ModelViewSet):
             type=NotificationChannel.IN_APP,
             event='contract_rejected',
             title=f'Contract Rejected: {contract.tender.reference_number}',
-            body=f'Your contract was rejected. Reason: {reason}',
+            body=f'Your signed contract was rejected. Reason: {reason}\n\nPlease review and upload a corrected signed copy.',
             linked_entity_id=str(contract.tender.id),
         )
         return Response(TenderContractSerializer(contract).data, status=status.HTTP_200_OK)

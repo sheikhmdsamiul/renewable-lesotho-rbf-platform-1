@@ -24,6 +24,19 @@ class PublishApprovalStatus(models.TextChoices):
     CHANGES_REQUESTED = 'changes_requested', 'Changes Requested'
 
 
+class IntentAwardRequestStatus(models.TextChoices):
+    """Lifecycle of a single "issue intent to award" request awaiting Super Admin sign-off.
+
+    PENDING is the only state in which the tender/lot is *not* yet in standstill:
+    the request carries the proposed winner but nothing on the tender has moved yet,
+    so bidders are never notified until a Super Admin approves."""
+    PENDING = 'pending', 'Pending Super Admin Approval'
+    APPROVED = 'approved', 'Approved'
+    REJECTED = 'rejected', 'Rejected'
+    CHANGES_REQUESTED = 'changes_requested', 'Changes Requested'
+    WITHDRAWN = 'withdrawn', 'Withdrawn'
+
+
 class BidStatus(models.TextChoices):
     DRAFT = 'Draft'
     SUBMITTED = 'Submitted'
@@ -33,6 +46,7 @@ class BidStatus(models.TextChoices):
     ACCEPTED = 'Accepted'
     REJECTED = 'Rejected'
     WITHDRAWN = 'Withdrawn'
+    NOT_AWARDED = 'Not Awarded'
 
 
 class BidStage1Status(models.TextChoices):
@@ -279,8 +293,9 @@ class TenderLot(models.Model):
     A tender with no lots is awarded as a single whole (unchanged legacy behavior,
     using the award fields on Tender itself). A tender with one or more TenderLot rows
     switches into lot-wise mode: bidders price whichever lots they choose (see
-    TenderBidLotOffer), and RMT selects a winner independently for each lot, though the
-    standstill/cooling-off/dispute timeline stays shared at the tender level.
+    TenderBidLotOffer), and RMT selects a winner independently for each lot, each with
+    its own standstill/cooling-off window starting from when THAT lot's intent was
+    issued (only the dispute/challenge timeline is still shared at the tender level).
     """
     tender = models.ForeignKey(Tender, on_delete=models.CASCADE, related_name='lots')
     name = models.CharField(max_length=255)
@@ -291,13 +306,19 @@ class TenderLot(models.Model):
     budget = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
     position = models.PositiveIntegerField(default=0)
 
-    # Award state — independent per lot, unlike the shared standstill/cooling-off timing.
+    # Award state — independent per lot, unlike the shared dispute/challenge timing.
+    # awarded_vendor_id/name are set only once this lot's award is CONFIRMED (alongside
+    # awarded_at, in confirm_award) — not at intent-to-award time. Use
+    # intent_to_award_bid/_at to detect "intent issued, pending confirmation".
     awarded_vendor_id = models.CharField(max_length=64, blank=True)
     awarded_vendor_name = models.CharField(max_length=255, blank=True)
     intent_to_award_bid = models.ForeignKey(
         'TenderBid', null=True, blank=True, on_delete=models.SET_NULL, related_name='lot_intent_awards',
     )
     intent_to_award_at = models.DateTimeField(null=True, blank=True)
+    # This lot's own standstill/cooling-off deadline, started when ITS intent was
+    # issued — independent of other lots and of Tender.cooling_off_until.
+    cooling_off_until = models.DateTimeField(null=True, blank=True)
     awarded_at = models.DateTimeField(null=True, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
@@ -602,7 +623,7 @@ class TenderBidEvaluation(models.Model):
     stage = models.CharField(max_length=16, choices=EvaluationStage.choices, default=EvaluationStage.TECHNICAL)
     lot = models.ForeignKey(
         TenderLot, null=True, blank=True, on_delete=models.CASCADE, related_name='bid_evaluations',
-        help_text="Set only for a financial-stage row on a lot-wise tender, where a single bid can have a distinct financial score per lot. Technical evaluations stay lot=None — technical merit is shared across a bid's lots.",
+        help_text="Scopes an evaluation to a single lot. Lot-wise tenders keep one evaluation per lot per evaluator for BOTH technical and financial stages (a bid covering several lots is scored separately for each). Non-lot-wise tenders leave this NULL.",
     )
     financial_score_auto_calculated = models.BooleanField(
         default=False,
@@ -657,6 +678,134 @@ class TenderBidEvaluation(models.Model):
 
     def __str__(self):
         return f"Evaluation for bid {self.bid_id} ({self.status})"
+
+
+class TenderAwardRecommendation(models.Model):
+    """An assigned Evaluation Committee member's suggested winner for a tender. On a
+    lot-wise tender the suggestion is per lot — a different vendor can be suggested for
+    each lot; on a non-lot-wise tender `lot` stays NULL. The committee's verdict for a
+    decision unit is the bid that EVERY assigned member's latest suggestion points to.
+    The RBF may then issue intent to award to that agreed bid, or — with a recorded
+    `ec_override_reason` — step in when the members disagree or reach no verdict."""
+    tender = models.ForeignKey(Tender, on_delete=models.CASCADE, related_name='award_recommendations')
+    lot = models.ForeignKey(
+        TenderLot, null=True, blank=True, on_delete=models.CASCADE, related_name='award_recommendations',
+        help_text='NULL on a non-lot-wise tender (one verdict for the whole tender); set per lot on a lot-wise tender.',
+    )
+    bid = models.ForeignKey(TenderBid, on_delete=models.CASCADE, related_name='award_recommendations')
+    suggested_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='award_recommendations')
+    rationale = models.TextField(blank=True, help_text="Optional note explaining this member's choice.")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        constraints = [
+            # One suggestion per member per tender (lot-wise: per lot).
+            models.UniqueConstraint(
+                fields=['tender', 'lot', 'suggested_by'],
+                condition=~models.Q(lot__isnull=True),
+                name='uniq_recommendation_tender_lot_member',
+            ),
+            models.UniqueConstraint(
+                fields=['tender', 'suggested_by'],
+                condition=models.Q(lot__isnull=True),
+                name='uniq_recommendation_tender_member',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['tender', 'lot']),
+            models.Index(fields=['tender', 'suggested_by']),
+        ]
+
+    def __str__(self):
+        unit = f"lot {self.lot_id}" if self.lot_id else "whole tender"
+        return f"Award recommendation ({unit}) by {self.suggested_by_id} -> bid {self.bid_id}"
+
+
+class IntentToAwardRequest(models.Model):
+    """The RBF's proposal to issue an intent to award, held for Super Admin approval.
+
+    The RBF selecting a winner and the intent to award actually taking effect are two
+    separate acts. This row is the hand-off between them: the RBF's `award` /
+    `award_lot` call (or a challenge upheld re-issue) writes a PENDING request and
+    nothing else — the tender keeps its current status, no standstill/cooling-off
+    clock starts, and bidders are not notified. Only `approve_intent_award`, which a
+    Super Admin alone may call, mutates the tender/lot and sends the notices.
+
+    One row per decision unit: `lot` is NULL for a whole-tender award and set per lot
+    on a lot-wise tender, so each lot is queued, reviewed and approved independently.
+    The Evaluation Committee verdict that justified the choice is snapshotted onto
+    the request (`ec_agreed_bid_id`, `ec_consensus`, `ec_override_reason`) so the
+    Super Admin reviews the same evidence the RBF saw, even if committee suggestions
+    change before the decision is made.
+    """
+    tender = models.ForeignKey(Tender, on_delete=models.CASCADE, related_name='intent_award_requests')
+    lot = models.ForeignKey(
+        TenderLot, null=True, blank=True, on_delete=models.CASCADE, related_name='intent_award_requests',
+        help_text='NULL on a non-lot-wise tender (one approval for the whole award); set per lot on a lot-wise tender.',
+    )
+    bid = models.ForeignKey(
+        TenderBid, on_delete=models.CASCADE, related_name='intent_award_requests',
+        help_text='The bid proposed to receive the intent to award.',
+    )
+    proposed_vendor_id = models.CharField(max_length=64, blank=True)
+    proposed_vendor_name = models.CharField(max_length=255, blank=True)
+
+    # Snapshot of the committee's verdict + any override reason supplied by the RBF.
+    ec_agreed_bid_id = models.CharField(max_length=64, blank=True)
+    ec_consensus = models.BooleanField(null=True, blank=True)
+    ec_override_reason = models.TextField(blank=True)
+    # The RBF's "notify bidders by email" choice, captured at request time and honoured
+    # when the Super Admin approves — the notices can only be sent at approval.
+    send_email = models.BooleanField(default=True)
+
+    status = models.CharField(
+        max_length=32,
+        choices=IntentAwardRequestStatus.choices,
+        default=IntentAwardRequestStatus.PENDING,
+    )
+    notes = models.TextField(blank=True, help_text="Super Admin's decision notes.")
+
+    requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name='+',
+    )
+    requested_by_name = models.CharField(max_length=255, blank=True)
+    requested_at = models.DateTimeField(auto_now_add=True)
+    # True when the request was raised by an upheld challenge rather than by the RBF
+    # picking a winner in the Award panel.
+    from_challenge = models.BooleanField(default=False)
+
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name='+',
+    )
+    reviewed_by_name = models.CharField(max_length=255, blank=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-requested_at']
+        constraints = [
+            # At most one live request per decision unit, so a tender can never sit in
+            # the Super Admin queue twice for the same lot (or whole-tender award).
+            models.UniqueConstraint(
+                fields=['tender', 'lot'],
+                condition=models.Q(status='pending'),
+                name='uniq_pending_intent_award_request_per_lot',
+            ),
+            models.UniqueConstraint(
+                fields=['tender'],
+                condition=models.Q(status='pending', lot__isnull=True),
+                name='uniq_pending_intent_award_request_whole_tender',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['status', '-requested_at']),
+            models.Index(fields=['tender', 'lot']),
+        ]
+
+    def __str__(self):
+        unit = f"lot {self.lot_id}" if self.lot_id else "whole tender"
+        return f"Intent to award request ({unit}) for {self.tender.reference_number} -> {self.proposed_vendor_name or self.bid_id}"
 
 
 class TenderBidEvaluationRevision(models.Model):

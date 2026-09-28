@@ -7,6 +7,8 @@ import {
   User,
   UserRole,
   Milestone,
+  MilestoneCompletionReview,
+  MilestoneReviewDecision,
   ProjectUpdate,
   ProjectDocument,
   InstallationReport,
@@ -43,6 +45,9 @@ import {
   TenderContract,
   TenderAwardRankingRow,
   TenderAwardRankingResponse,
+  TenderAwardConsensus,
+  TenderAwardRecommendation,
+  IntentToAwardRequest,
   TenderLot,
   TenderBidLotOffer,
   VendorBlacklistCase,
@@ -491,9 +496,12 @@ function mapTenderFromApi(api: any): Tender {
           awardedVendorName: l.awarded_vendor_name || undefined,
           intentToAwardBidId: l.intent_to_award_bid_id || undefined,
           intentToAwardAt: l.intent_to_award_at || undefined,
+          coolingOffUntil: l.cooling_off_until || undefined,
           awardedAt: l.awarded_at || undefined,
         }))
       : undefined,
+    lotCount: api.lot_count != null ? Number(api.lot_count) : (Array.isArray(api.lots) ? api.lots.length : undefined),
+    awardedLotCount: api.awarded_lot_count != null ? Number(api.awarded_lot_count) : (Array.isArray(api.lots) ? api.lots.filter((l: any) => l.awarded_vendor_id).length : undefined),
     maxLotsPerBidder: api.max_lots_per_bidder != null ? Number(api.max_lots_per_bidder) : undefined,
     boqItems: Array.isArray(api.boq_items)
       ? api.boq_items.map((b: any) => ({
@@ -583,6 +591,8 @@ function mapVendorProfileFromApi(api: any): VendorProfile {
     organization_type: api.organization_type ?? undefined,
     technology_types: Array.isArray(api.technology_types) ? api.technology_types : [],
     registration_certificate_name: api.registration_certificate_name ?? undefined,
+    registration_certificate_url: normalizeFileUrl(api.registration_certificate_url ?? undefined) ?? null,
+    company_registration_number: api.company_registration_number ?? undefined,
     tax_id: api.tax_id ?? undefined,
     bank_name: api.bank_name ?? undefined,
     bank_branch: api.bank_branch ?? undefined,
@@ -1180,7 +1190,42 @@ function mapMilestoneFromApi(api: any): Milestone {
     targetDate: api.target_date ?? undefined,
     completedDate: api.completed_date ?? undefined,
     unlockedAt: api.unlocked_at ?? undefined,
+    requiredInstallationPct: api.required_installation_pct != null ? Number(api.required_installation_pct) : undefined,
+    completionReview: api.completion_review ? mapMilestoneCompletionReviewFromApi(api.completion_review) : null,
   };
+}
+
+function mapMilestoneCompletionReviewFromApi(api: any): MilestoneCompletionReview {
+  return {
+    id: String(api.id ?? ""),
+    milestoneId: String(api.milestone ?? ""),
+    status: api.status === "decided" ? "decided" : "pending",
+    decision: api.decision ?? "",
+    verificationNotes: api.verification_notes ?? "",
+    vendorId: String(api.vendor_id ?? ""),
+    vendorName: api.vendor_name ?? "",
+    transferredToVendorId: api.transferred_to_vendor_id || undefined,
+    transferredToVendorName: api.transferred_to_vendor_name || undefined,
+    reviewedByName: api.reviewed_by_name || undefined,
+    reviewedAt: api.reviewed_at ?? undefined,
+    createdAt: api.created_at ?? undefined,
+  };
+}
+
+export async function submitMilestoneCompletionReview(milestoneId: string, payload: {
+  decision: MilestoneReviewDecision;
+  verificationNotes: string;
+  newVendorId?: string;
+}): Promise<Milestone> {
+  const data = await http<any>(`/api/projects/milestones/${milestoneId}/completion-review/`, {
+    method: "POST",
+    body: JSON.stringify({
+      decision: payload.decision,
+      verification_notes: payload.verificationNotes,
+      ...(payload.newVendorId ? { new_vendor_id: payload.newVendorId } : {}),
+    }),
+  });
+  return mapMilestoneFromApi(data);
 }
 
 function mapProjectUpdateFromApi(api: any): ProjectUpdate {
@@ -1603,7 +1648,7 @@ function mapVendorPrequalificationFromApi(api: any): VendorPrequalification {
     tradingLicense: normalizeFileUrl(api.trading_license ?? undefined),
     registrationCertificate: normalizeFileUrl(api.registration_certificate ?? undefined),
     taxComplianceCertificate: normalizeFileUrl(api.tax_compliance_certificate ?? undefined),
-    authorizedSignatoryId: api.authorized_signatory_id ?? undefined,
+    authorizedSignatoryId: normalizeFileUrl(api.authorized_signatory_id ?? undefined),
     experienceFinancialProof: normalizeFileUrl(api.experience_financial_proof ?? undefined),
     techTier: api.tech_tier ?? undefined,
     yearsExperience: Number(api.years_experience ?? 0),
@@ -2157,6 +2202,13 @@ export async function fetchPendingPublishApprovals(): Promise<Tender[]> {
   return (Array.isArray(data) ? data : (data?.results ?? [])).map(mapTenderFromApi);
 }
 
+export async function fetchTendersReadyForAward(): Promise<Tender[]> {
+  const data = await http<any>(`/api/tenders/tenders_ready_for_award/`, {
+    method: "GET",
+  });
+  return (Array.isArray(data) ? data : (data?.results ?? [])).map(mapTenderFromApi);
+}
+
 export async function awardTender(
   tenderId: string,
   payload: {
@@ -2165,6 +2217,7 @@ export async function awardTender(
     awardedVendorName?: string;
     sendSms?: boolean;
     sendEmail?: boolean;
+    ecOverrideReason?: string;
   }
 ): Promise<Tender> {
   const data = await http<any>(`/api/tenders/${tenderId}/award/`, {
@@ -2175,6 +2228,7 @@ export async function awardTender(
       awarded_vendor_name: payload.awardedVendorName ?? "",
       send_sms: payload.sendSms ?? false,
       send_email: payload.sendEmail ?? true,
+      ec_override_reason: payload.ecOverrideReason ?? "",
     }),
   });
   return mapTenderFromApi(data);
@@ -2188,27 +2242,133 @@ export async function fetchTenderAwardRanking(
 
 export async function awardTenderLot(
   tenderId: string,
-  payload: { lotId: string; bidId: string }
+  payload: { lotId: string; bidId: string; ecOverrideReason?: string; sendEmail?: boolean }
 ): Promise<Tender> {
   const data = await http<any>(`/api/tenders/${tenderId}/award_lot/`, {
     method: "POST",
     body: JSON.stringify({
       lot_id: payload.lotId,
       bid_id: payload.bidId,
+      ec_override_reason: payload.ecOverrideReason ?? "",
+      send_email: payload.sendEmail ?? true,
     }),
   });
   return mapTenderFromApi(data);
 }
 
+/**
+ * `awardTender` / `awardTenderLot` only QUEUE a request. The intent to award, the
+ * standstill period and the bidder notices are issued by the Super Admin from
+ * `approveIntentToAward` below.
+ */
+export async function fetchPendingIntentToAwardApprovals(): Promise<IntentToAwardRequest[]> {
+  const data = await http<any>(`/api/tenders/pending_intent_award_approvals/`, {
+    method: "GET",
+  });
+  return Array.isArray(data) ? data : (data?.results ?? []);
+}
+
+export async function fetchIntentToAwardRequests(
+  tenderId: string
+): Promise<IntentToAwardRequest[]> {
+  const data = await http<any>(`/api/tenders/${tenderId}/intent_award_requests/`, {
+    method: "GET",
+  });
+  return Array.isArray(data) ? data : (data?.results ?? []);
+}
+
+export async function approveIntentToAward(
+  tenderId: string,
+  payload?: { notes?: string; lotId?: string }
+): Promise<Tender> {
+  const data = await http<any>(`/api/tenders/${tenderId}/approve_intent_award/`, {
+    method: "POST",
+    body: JSON.stringify({
+      notes: payload?.notes ?? "",
+      ...(payload?.lotId ? { lot_id: payload.lotId } : {}),
+    }),
+  });
+  return mapTenderFromApi(data);
+}
+
+export async function requestIntentToAwardChanges(
+  tenderId: string,
+  payload: { notes?: string; lotId?: string }
+): Promise<Tender> {
+  const data = await http<any>(`/api/tenders/${tenderId}/request_intent_award_changes/`, {
+    method: "POST",
+    body: JSON.stringify({
+      notes: payload.notes ?? "",
+      ...(payload.lotId ? { lot_id: payload.lotId } : {}),
+    }),
+  });
+  return mapTenderFromApi(data);
+}
+
+export async function rejectIntentToAward(
+  tenderId: string,
+  payload: { notes?: string; lotId?: string }
+): Promise<Tender> {
+  const data = await http<any>(`/api/tenders/${tenderId}/reject_intent_award/`, {
+    method: "POST",
+    body: JSON.stringify({
+      notes: payload.notes ?? "",
+      ...(payload.lotId ? { lot_id: payload.lotId } : {}),
+    }),
+  });
+  return mapTenderFromApi(data);
+}
+
+export async function withdrawIntentToAwardRequest(
+  tenderId: string,
+  payload?: { lotId?: string }
+): Promise<Tender> {
+  const data = await http<any>(`/api/tenders/${tenderId}/withdraw_intent_award_request/`, {
+    method: "POST",
+    body: JSON.stringify(payload?.lotId ? { lot_id: payload.lotId } : {}),
+  });
+  return mapTenderFromApi(data);
+}
+
+export async function fetchTenderAwardConsensus(
+  tenderId: string
+): Promise<TenderAwardConsensus> {
+  return await http<any>(`/api/tender-award-recommendations/consensus/?tender=${tenderId}`);
+}
+
+export async function submitTenderAwardRecommendation(
+  tenderId: string,
+  payload: { bidId: string; lotId?: string | null; rationale?: string }
+): Promise<TenderAwardRecommendation> {
+  return await http<any>(`/api/tender-award-recommendations/`, {
+    method: "POST",
+    body: JSON.stringify({
+      tender: tenderId,
+      bid: payload.bidId,
+      lot: payload.lotId ?? undefined,
+      rationale: payload.rationale ?? "",
+    }),
+  });
+}
+
+export async function withdrawTenderAwardRecommendation(
+  recommendationId: string
+): Promise<void> {
+  await http<any>(`/api/tender-award-recommendations/${recommendationId}/`, {
+    method: "DELETE",
+  });
+}
+
 export async function confirmTenderAward(
   tenderId: string,
-  payload?: { sendEmail?: boolean }
+  payload?: { sendEmail?: boolean; lotId?: string }
 ): Promise<Tender> {
   const data = await http<any>(`/api/tenders/${tenderId}/confirm_award/`, {
     method: "POST",
     timeoutMs: 60000,
     body: JSON.stringify({
       send_email: payload?.sendEmail ?? true,
+      ...(payload?.lotId ? { lot_id: payload.lotId } : {}),
     }),
   });
   return mapTenderFromApi(data);
@@ -2999,6 +3159,9 @@ export async function assignTenderContract(contractId: string, payload?: {
   targetFemalePct?: number;
   targetVulnerablePct?: number;
   targetLowIncomePct?: number;
+  milestoneDisbursementPcts?: [number, number, number];
+  m2InstallationRequiredPct?: number;
+  m3InstallationRequiredPct?: number;
 }): Promise<TenderContract> {
   const body: any = {};
   if (payload?.projectDurationMonths != null) body.project_duration_months = payload.projectDurationMonths;
@@ -3010,6 +3173,11 @@ export async function assignTenderContract(contractId: string, payload?: {
   if (payload?.targetFemalePct != null) body.female_target_pct = payload.targetFemalePct;
   if (payload?.targetVulnerablePct != null) body.vulnerable_target_pct = payload.targetVulnerablePct;
   if (payload?.targetLowIncomePct != null) body.low_income_target_pct = payload.targetLowIncomePct;
+  if (payload?.milestoneDisbursementPcts) {
+    [body.m1_disbursement_pct, body.m2_disbursement_pct, body.m3_disbursement_pct] = payload.milestoneDisbursementPcts;
+  }
+  if (payload?.m2InstallationRequiredPct != null) body.m2_installation_required_pct = payload.m2InstallationRequiredPct;
+  if (payload?.m3InstallationRequiredPct != null) body.m3_installation_required_pct = payload.m3InstallationRequiredPct;
   const data = await http<any>(`/api/tender-contracts/${contractId}/assign/`, {
     method: "POST",
     body: JSON.stringify(body),
@@ -3488,7 +3656,7 @@ export async function updateMyProfile(payload: Partial<VendorProfile>): Promise<
       address: payload.address,
       organization_name: payload.organization_name,
       organization_type: payload.organization_type,
-      registration_certificate_name: payload.registration_certificate_name,
+      company_registration_number: payload.company_registration_number,
       tax_id: payload.tax_id,
       technology_types: payload.technology_types,
       region: payload.region,
@@ -3632,7 +3800,8 @@ export async function submitVendorPrequalification(
   form.append('tech_tier', payload.techTier ?? "");
   form.append('years_experience', String(payload.yearsExperience ?? 0));
   form.append('prior_projects', String(payload.priorProjects ?? 0));
-  form.append('annual_revenue', String(payload.annualRevenue ?? 0));
+  // Blank means "not provided" (stored as null), not zero revenue.
+  form.append('annual_revenue', payload.annualRevenue == null ? '' : String(payload.annualRevenue));
   form.append('districts_covered', String(payload.districtsCovered ?? 0));
   form.append('female_beneficiary_target', String(payload.femaleBeneficiaryTarget ?? 50));
   form.append('vulnerable_group_target', String(payload.vulnerableGroupTarget ?? 30));
@@ -4594,7 +4763,7 @@ export async function fetchSystemHealth(): Promise<SystemHealthPayload> {
   return mapSystemHealthFromApi(data);
 }
 
-export async function registerVendor(payload: {
+export type VendorRegistrationPayload = {
   username: string;
   password: string;
   fullName: string;
@@ -4605,14 +4774,19 @@ export async function registerVendor(payload: {
   address: string;
   organizationName: string;
   organizationType: string;
+  companyRegistrationNumber: string;
   associatedEntities?: string[];
   technologyTypes: string[];
-  registrationCertificateName: string;
+  registrationCertificate: File | null;
   taxId: string;
   deviceId?: string;
   region?: string;
-}): Promise<User> {
-  const body = JSON.stringify({
+  consentAccepted: boolean;
+};
+
+function vendorRegistrationForm(payload: VendorRegistrationPayload): FormData {
+  const form = new FormData();
+  const fields: Record<string, string> = {
     username: payload.username,
     password: payload.password,
     full_name: payload.fullName,
@@ -4624,19 +4798,34 @@ export async function registerVendor(payload: {
     role: UserRole.VENDOR,
     organization_name: payload.organizationName,
     organization_type: payload.organizationType,
-    associated_entities: payload.associatedEntities ?? [],
-    technology_types: payload.technologyTypes,
-    registration_certificate_name: payload.registrationCertificateName,
+    company_registration_number: payload.companyRegistrationNumber,
+    associated_entities: JSON.stringify(payload.associatedEntities ?? []),
+    technology_types: JSON.stringify(payload.technologyTypes),
     tax_id: payload.taxId,
     device_id: payload.deviceId ?? "",
     region: payload.region ?? "",
-    status: "Pending",
-  });
+    consent_accepted: payload.consentAccepted ? "true" : "false",
+  };
+  Object.entries(fields).forEach(([key, value]) => form.append(key, value));
+  if (payload.registrationCertificate) form.append("registration_certificate", payload.registrationCertificate);
+  return form;
+}
 
+/** Server-side check of every sign-up rule before an OTP is sent. */
+export async function validateVendorRegistration(payload: VendorRegistrationPayload): Promise<void> {
+  await http<any>(`/api/users/auth/validate-registration/`, {
+    method: "POST",
+    headers: { "X-Skip-Auth": "1" } as any,
+    body: vendorRegistrationForm(payload),
+  });
+}
+
+export async function registerVendor(payload: VendorRegistrationPayload): Promise<User> {
   const data = await http<any>(`/api/users/`, {
     method: "POST",
     headers: { "X-Skip-Auth": "1" } as any,
-    body,
+    body: vendorRegistrationForm(payload),
+    timeoutMs: 120000,
   });
   return mapUserFromApi(data);
 }

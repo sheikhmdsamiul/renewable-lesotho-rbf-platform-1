@@ -17,6 +17,7 @@ from django.conf import settings
 from django.http import FileResponse, Http404, HttpResponse
 from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
+from django.db import transaction
 from django.db.models import Q, F, Value, OuterRef, Subquery, Count, Avg, CharField, Case, When, Sum
 from django.db.models.functions import Coalesce
 from django.utils import timezone
@@ -31,6 +32,8 @@ from .models import (
     ProjectStatus,
     ProspectSyncStatus,
     Milestone,
+    MilestoneReviewDecision,
+    MilestoneReviewStatus,
     ProjectUpdate,
     ProjectDocument,
     InstallationReport,
@@ -61,6 +64,7 @@ from .serializers import (
     ProjectSerializer,
     ProjectSetupSerializer,
     MilestoneSerializer,
+    MilestoneReviewDecisionSerializer,
     ProjectUpdateSerializer,
     ProjectDocumentSerializer,
     InstallationReportSerializer,
@@ -94,6 +98,7 @@ from .integrations import (
 )
 from .gis import GpsValidator
 from .kpi import KpiService, invalidate_kpi_cache, render_kpi_pdf
+from .milestone_reviews import is_last_milestone, next_milestone_blocker, open_completion_review
 from rbf.notifications.models import Notification, NotificationChannel, NotificationStatus
 from rbf.notifications.services import NotificationService
 from rbf.tenders.models import ContractStatus, TenderContract
@@ -271,10 +276,7 @@ def create_or_refresh_anomaly(*, installation: InstallationReport, project: Proj
     return flag
 
 
-def finalize_project_if_ready(project: Project, actor):
-    milestone_statuses = list(project.milestones.order_by('milestone_number').values_list('status', flat=True)[:3])
-    if len(milestone_statuses) < 3 or any(status_value not in {'paid', 'Paid'} for status_value in milestone_statuses):
-        return False
+def mark_project_completed(project: Project, actor):
     if project.status == ProjectStatus.COMPLETED:
         return True
 
@@ -284,7 +286,7 @@ def finalize_project_if_ready(project: Project, actor):
         project,
         actor,
         'Project Completed',
-        'All milestone payments are complete. The project is now marked completed.',
+        'The final milestone was paid and verified. The project is now marked completed.',
     )
     log_audit(
         actor,
@@ -1465,7 +1467,7 @@ class MilestoneViewSet(viewsets.ModelViewSet):
     WRITE_ROLES = {UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.DOE_OFFICER, UserRole.VENDOR}
 
     def get_queryset(self):
-        qs = Milestone.objects.select_related('project').all().order_by('id')
+        qs = Milestone.objects.select_related('project', 'completion_review__reviewed_by').all().order_by('id')
         user = self.request.user
         if user.role != UserRole.VENDOR:
             return qs
@@ -1529,6 +1531,129 @@ class MilestoneViewSet(viewsets.ModelViewSet):
     def destroy(self, request, *args, **kwargs):
         self._assert_write_permission()
         return super().destroy(request, *args, **kwargs)
+
+    REVIEW_ROLES = {UserRole.RBF_OFFICIAL, UserRole.ADMIN}
+
+    @action(detail=True, methods=['post'], url_path='completion-review')
+    def completion_review(self, request, pk=None):
+        """Verify a paid milestone and decide the project's next step:
+        proceed to the next milestone, close the project, transfer the remaining
+        milestones to another vendor, or (final milestone) complete the project."""
+        if request.user.role not in self.REVIEW_ROLES:
+            raise PermissionDenied('Only the RBF Management Team or Super Admin can verify milestone completion.')
+        milestone = self.get_object()
+        project = milestone.project
+        review = getattr(milestone, 'completion_review', None)
+        if review is None:
+            return Response({'detail': 'This milestone has not been paid yet, so there is nothing to verify.'}, status=status.HTTP_400_BAD_REQUEST)
+        if review.status != MilestoneReviewStatus.PENDING:
+            return Response({'detail': 'A decision has already been recorded for this milestone.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        serializer = MilestoneReviewDecisionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        decision = serializer.validated_data['decision']
+        notes = serializer.validated_data['verification_notes']
+        final_milestone = is_last_milestone(milestone)
+        allowed = {MilestoneReviewDecision.COMPLETE} if final_milestone else {
+            MilestoneReviewDecision.PROCEED,
+            MilestoneReviewDecision.CLOSE,
+            MilestoneReviewDecision.TRANSFER,
+        }
+        if decision not in allowed:
+            message = (
+                'The final milestone can only be verified to complete the project.'
+                if final_milestone
+                else 'Choose proceed, close or transfer for this milestone.'
+            )
+            return Response({'decision': [message]}, status=status.HTTP_400_BAD_REQUEST)
+
+        previous_vendor = User.objects.filter(id=project.vendor_id).first() if str(project.vendor_id).isdigit() else None
+        new_vendor = None
+        if decision == MilestoneReviewDecision.TRANSFER:
+            new_vendor_id = str(serializer.validated_data['new_vendor_id']).strip()
+            new_vendor = User.objects.filter(id=new_vendor_id, role=UserRole.VENDOR).first() if new_vendor_id.isdigit() else None
+            error = ''
+            if new_vendor is None:
+                error = 'Selected vendor was not found.'
+            elif str(new_vendor.id) == str(project.vendor_id):
+                error = 'Select a different vendor from the current one.'
+            elif is_vendor_restricted(new_vendor):
+                error = 'This vendor is suspended or blacklisted and cannot take over the project.'
+            if error:
+                return Response({'new_vendor_id': [error]}, status=status.HTTP_400_BAD_REQUEST)
+
+        milestone_label = f'Milestone {milestone.milestone_number}'
+        project_label = project.project_reference or project.id
+        with transaction.atomic():
+            review.status = MilestoneReviewStatus.DECIDED
+            review.decision = decision
+            review.verification_notes = notes
+            review.reviewed_by = request.user
+            review.reviewed_at = timezone.now()
+            if new_vendor is not None:
+                review.transferred_to_vendor_id = str(new_vendor.id)
+                review.transferred_to_vendor_name = new_vendor.organization_name or new_vendor.full_name or new_vendor.username
+            review.save()
+
+            if decision == MilestoneReviewDecision.PROCEED:
+                activity = f'{milestone_label} verified. The vendor may proceed with the next milestone.'
+            elif decision == MilestoneReviewDecision.CLOSE:
+                cancelled = project.milestones.filter(milestone_number__gt=milestone.milestone_number).exclude(
+                    status__in=['paid', 'Paid']
+                ).update(status='cancelled', updated_at=timezone.now())
+                project.status = ProjectStatus.CLOSED
+                project.save(update_fields=['status', 'updated_at'])
+                activity = f'{milestone_label} verified and the project was closed. {cancelled} remaining milestone(s) cancelled.'
+            elif decision == MilestoneReviewDecision.TRANSFER:
+                project.vendor_id = str(new_vendor.id)
+                project.vendor_name = review.transferred_to_vendor_name
+                project.save(update_fields=['vendor_id', 'vendor_name', 'updated_at'])
+                activity = (
+                    f'{milestone_label} verified. The remaining milestones were transferred from '
+                    f'{review.vendor_name or "the previous vendor"} to {review.transferred_to_vendor_name}.'
+                )
+            else:
+                activity = f'{milestone_label} (final) verified.'
+
+            log_audit(request.user, f'milestone_review_{decision}', milestone, {
+                'project_id': str(project.id),
+                'milestone_number': milestone.milestone_number,
+                'decision': decision,
+                'notes': notes,
+                'previous_vendor_id': review.vendor_id,
+                'new_vendor_id': review.transferred_to_vendor_id,
+            })
+            create_project_activity_update(project, request.user, 'Milestone Completion Verified', f'{activity} Notes: {notes}')
+
+        if decision == MilestoneReviewDecision.COMPLETE:
+            mark_project_completed(project, request.user)
+        else:
+            vendor_messages = {
+                MilestoneReviewDecision.PROCEED: f'{milestone_label} of project {project_label} was verified. You may proceed with the next milestone.',
+                MilestoneReviewDecision.CLOSE: f'{milestone_label} of project {project_label} was verified and the project has been closed. Reason: {notes}',
+                MilestoneReviewDecision.TRANSFER: f'{milestone_label} of project {project_label} was verified. The remaining milestones have been transferred to another vendor. Reason: {notes}',
+            }
+            if previous_vendor:
+                notify_vendor_and_oversight(
+                    project,
+                    vendor=previous_vendor,
+                    event=f'milestone_review_{decision}',
+                    title=f'{milestone_label} Verified',
+                    body=vendor_messages[decision],
+                    linked_entity_id=str(project.id),
+                )
+            if new_vendor is not None:
+                NotificationService.send(
+                    str(new_vendor.id),
+                    'Project Transferred To You',
+                    f'Project {project_label} has been transferred to you starting after {milestone_label}. Review the project to continue.',
+                    'info',
+                    'projects',
+                    project.id,
+                )
+        refresh_project_kpis(str(project.id))
+        milestone.refresh_from_db()
+        return Response(self.get_serializer(milestone).data, status=status.HTTP_200_OK)
 
 
 class ProjectUpdateViewSet(viewsets.ModelViewSet):
@@ -1704,6 +1829,11 @@ class PaymentClaimViewSet(viewsets.ModelViewSet):
                 {'detail': 'A claim for this milestone already exists and the milestone is locked from duplicate submissions.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        claim_milestone = serializer.validated_data.get('milestone')
+        if claim_milestone is not None:
+            blocker = next_milestone_blocker(claim_milestone)
+            if blocker:
+                return Response({'detail': blocker}, status=status.HTTP_400_BAD_REQUEST)
         claim = serializer.save()
         claim.status = PaymentClaimStatus.SUBMITTED
         if claim.milestone and not claim.claim_amount:
@@ -2108,8 +2238,23 @@ class PaymentClaimViewSet(viewsets.ModelViewSet):
         if claim.milestone:
             claim.milestone.status = 'paid'
             claim.milestone.save(update_fields=['status', 'updated_at'])
+            _, review_opened = open_completion_review(claim.milestone)
+            if review_opened:
+                milestone_label = f'Milestone {claim.milestone.milestone_number}'
+                project_label = claim.project.project_reference or claim.project.id
+                create_project_activity_update(
+                    claim.project,
+                    request.user,
+                    'Milestone Completion Verification Required',
+                    f'{milestone_label} was paid. RBF / Super Admin must verify it and decide whether the project '
+                    'proceeds, is closed, or is transferred to another vendor.',
+                )
+                notify_project_oversight(
+                    claim.project,
+                    f'{milestone_label} Awaiting Verification',
+                    f'{milestone_label} of project {project_label} is paid. Verify it and decide the next step.',
+                )
         refresh_project_kpis(str(claim.project_id))
-        finalize_project_if_ready(claim.project, request.user)
         return Response(self.get_serializer(claim).data, status=status.HTTP_200_OK)
 
 

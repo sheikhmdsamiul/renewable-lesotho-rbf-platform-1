@@ -39,6 +39,9 @@ from .models import (
     EvaluationStage,
     EvaluationSubmissionStatus,
     BudgetDisclosure,
+    TenderAwardRecommendation,
+    IntentToAwardRequest,
+    IntentAwardRequestStatus,
 )
 from rbf.users.models import UserRole, VendorPrequalification, PrequalificationStatus
 from rbf.projects.models import TechnologyType, VerificationMethod
@@ -1510,11 +1513,31 @@ class TenderBidEvaluationSerializer(serializers.ModelSerializer):
         return super().update(instance, validated_data)
 
 
+class TenderAwardRecommendationSerializer(serializers.ModelSerializer):
+    """An Evaluation Committee member's suggested winner, exposed read-only to the
+    RBF/committee. Creation/updates happen through the viewset (upsert per member per
+    decision unit), not the serializer."""
+    suggested_by_name = serializers.CharField(source='suggested_by.full_name', read_only=True, default='')
+    bid_vendor_name = serializers.CharField(source='bid.vendor_name', read_only=True, default='')
+    lot_name = serializers.CharField(source='lot.name', read_only=True, default='')
+
+    class Meta:
+        model = TenderAwardRecommendation
+        fields = [
+            'id', 'tender', 'lot', 'lot_name', 'bid', 'bid_vendor_name',
+            'suggested_by', 'suggested_by_name', 'rationale', 'created_at', 'updated_at',
+        ]
+        read_only_fields = [
+            'id', 'tender', 'lot_name', 'bid_vendor_name', 'suggested_by_name',
+            'created_at', 'updated_at',
+        ]
+
+
 class TenderContractSerializer(serializers.ModelSerializer):
     ANNEX_SOURCE_FIELDS = {
         'annex_a_file': ('gender_action_plan_file',),
         'annex_b_file': ('implementation_plan_file',),
-        'annex_c_file': ('financial_proposal_file', 'boq_file'),
+        'annex_c_file': ('financial_proposal_file',),
         'annex_d_file': ('reporting_templates_file', 'milestone_payment_schedule_file', 'schedule_file'),
         'annex_e_file': ('technical_proposal_file',),
     }
@@ -1589,6 +1612,13 @@ class ProjectAssignmentSerializer(serializers.Serializer):
     vulnerable_target_pct = serializers.IntegerField(min_value=30, max_value=100, required=False, default=30)
     low_income_target_pct = serializers.IntegerField(min_value=60, max_value=100, required=False, default=60)
     start_date = serializers.DateField(required=False, allow_null=True, input_formats=['%Y-%m-%d'])
+    # Milestone plan — disbursement share of the contract value per milestone
+    # (must total 100) and the verified-installation checklist thresholds.
+    m1_disbursement_pct = serializers.IntegerField(min_value=1, max_value=98, required=False, default=20)
+    m2_disbursement_pct = serializers.IntegerField(min_value=1, max_value=98, required=False, default=50)
+    m3_disbursement_pct = serializers.IntegerField(min_value=1, max_value=98, required=False, default=30)
+    m2_installation_required_pct = serializers.IntegerField(min_value=1, max_value=100, required=False)
+    m3_installation_required_pct = serializers.IntegerField(min_value=1, max_value=100, required=False)
 
     def validate_technology_type(self, value):
         normalized = normalize_technology_type(value)
@@ -1630,6 +1660,19 @@ class ProjectAssignmentSerializer(serializers.Serializer):
         attrs['district_zones'] = normalized_districts
         attrs['district_zone'] = normalized_districts[0]
 
+        disbursement_total = attrs['m1_disbursement_pct'] + attrs['m2_disbursement_pct'] + attrs['m3_disbursement_pct']
+        if disbursement_total != 100:
+            raise serializers.ValidationError({
+                'milestone_disbursement_pct': f'Milestone disbursement percentages must total 100% (currently {disbursement_total}%).',
+            })
+        platform_config = PlatformConfiguration.objects.order_by('id').first() or PlatformConfiguration()
+        attrs.setdefault('m2_installation_required_pct', platform_config.m2_verification_required_pct or 80)
+        attrs.setdefault('m3_installation_required_pct', platform_config.m3_verification_required_pct or 100)
+        if attrs['m3_installation_required_pct'] < attrs['m2_installation_required_pct']:
+            raise serializers.ValidationError({
+                'm3_installation_required_pct': 'Milestone 3 installation requirement cannot be lower than Milestone 2.',
+            })
+
         contract = self.context.get('contract')
         if contract is None:
             return attrs
@@ -1650,6 +1693,8 @@ class TenderListSerializer(serializers.ModelSerializer):
     skips_eoi_stage = serializers.SerializerMethodField()
     invited_vendor_count = serializers.SerializerMethodField()
     linked_tender_count = serializers.SerializerMethodField()
+    lot_count = serializers.SerializerMethodField()
+    awarded_lot_count = serializers.SerializerMethodField()
 
     def get_bid_count(self, obj):
         return obj.bids.count()
@@ -1662,6 +1707,12 @@ class TenderListSerializer(serializers.ModelSerializer):
 
     def get_linked_tender_count(self, obj):
         return obj.linked_tenders.count()
+
+    def get_lot_count(self, obj):
+        return obj.lots.count()
+
+    def get_awarded_lot_count(self, obj):
+        return obj.lots.exclude(awarded_vendor_id='').count()
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
@@ -1684,7 +1735,7 @@ class TenderListSerializer(serializers.ModelSerializer):
             'publish_approval_reviewed_at', 'publish_approval_reviewed_by', 'publish_approval_notes',
             'evaluation_comment', 'evaluation_comment_author', 'evaluation_comment_updated_at',
             'is_eoi_invite_only', 'linked_eoi_tender', 'skips_eoi_stage', 'invited_vendor_count',
-            'linked_tender_count',
+            'linked_tender_count', 'lot_count', 'awarded_lot_count',
         ]
 
 
@@ -1704,9 +1755,54 @@ class TenderBoqItemSerializer(serializers.ModelSerializer):
         read_only_fields = ['id']
 
 
+def intent_award_proposal_visible(serializer):
+    """Whether the caller may see a *queued* intent-to-award proposal.
+
+    A pending request names the proposed winner before the Super Admin has approved it
+    and before any bidder notice has gone out, so it is embargoed: only the RBF and the
+    Super Admin may read it. Tenders are readable publicly and by every vendor, and
+    letting those callers see it would publish the outcome of an unapproved decision and
+    break the standstill sequence. Deny-by-default — a serializer built without a
+    request in context (internal/background use) sees nothing.
+    """
+    request = serializer.context.get('request')
+    user = getattr(request, 'user', None) if request is not None else None
+    return getattr(user, 'role', None) in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}
+
+
+class IntentToAwardRequestSerializer(serializers.ModelSerializer):
+    """One RBF proposal to issue an intent to award, awaiting (or carrying) a Super Admin
+    decision. Deliberately does not nest `tender` — the request is always returned
+    alongside the tender it belongs to, and nesting would recurse through
+    TenderSerializer."""
+    lot_id = serializers.UUIDField(source='lot.id', read_only=True, default=None)
+    lot_name = serializers.CharField(source='lot.name', read_only=True, default='')
+    tender_reference_number = serializers.CharField(source='tender.reference_number', read_only=True)
+    tender_name = serializers.CharField(source='tender.name', read_only=True)
+    bid_id = serializers.UUIDField(read_only=True)
+    status_label = serializers.CharField(source='get_status_display', read_only=True)
+
+    class Meta:
+        model = IntentToAwardRequest
+        fields = [
+            'id', 'tender', 'tender_reference_number', 'tender_name',
+            'lot', 'lot_id', 'lot_name', 'bid', 'bid_id',
+            'proposed_vendor_id', 'proposed_vendor_name',
+            'ec_agreed_bid_id', 'ec_consensus', 'ec_override_reason',
+            'status', 'status_label', 'notes',
+            'requested_by', 'requested_by_name', 'requested_at', 'from_challenge',
+            'reviewed_by', 'reviewed_by_name', 'reviewed_at',
+        ]
+        read_only_fields = fields
+
+
 class TenderLotSerializer(serializers.ModelSerializer):
     intent_to_award_bid_id = serializers.SerializerMethodField()
     boq_items = TenderBoqItemSerializer(source='boq_template_items', many=True, read_only=True)
+    # Set while this lot's intent to award is queued for Super Admin approval. Lets the
+    # Award panel grey out the row and show "Awaiting Super Admin approval" without a
+    # second round-trip.
+    pending_intent_award_request = serializers.SerializerMethodField()
 
     class Meta:
         model = TenderLot
@@ -1714,15 +1810,32 @@ class TenderLotSerializer(serializers.ModelSerializer):
             'id', 'name', 'description', 'technology_types', 'target_districts',
             'estimated_installation_target', 'budget', 'position', 'boq_items',
             'awarded_vendor_id', 'awarded_vendor_name',
-            'intent_to_award_bid_id', 'intent_to_award_at', 'awarded_at',
+            'intent_to_award_bid_id', 'intent_to_award_at', 'cooling_off_until', 'awarded_at',
+            'pending_intent_award_request',
         ]
         read_only_fields = [
             'id', 'awarded_vendor_id', 'awarded_vendor_name',
-            'intent_to_award_bid_id', 'intent_to_award_at', 'awarded_at',
+            'intent_to_award_bid_id', 'intent_to_award_at', 'cooling_off_until', 'awarded_at',
+            'pending_intent_award_request',
         ]
 
     def get_intent_to_award_bid_id(self, obj):
         return str(obj.intent_to_award_bid_id) if obj.intent_to_award_bid_id is not None else None
+
+    def get_pending_intent_award_request(self, obj):
+        if not intent_award_proposal_visible(self):
+            return None
+        pending = getattr(obj, 'pending_intent_award_requests', None)
+        if pending is None:
+            pending = list(
+                obj.intent_award_requests
+                .filter(status=IntentAwardRequestStatus.PENDING)
+                .select_related('lot', 'bid')
+            )
+            obj.pending_intent_award_requests = pending
+        if not pending:
+            return None
+        return IntentToAwardRequestSerializer(pending[0], context=self.context).data
 
 
 class TenderEvaluationCommitteeMemberSerializer(serializers.ModelSerializer):
@@ -1760,6 +1873,10 @@ class TenderSerializer(serializers.ModelSerializer):
     linked_eoi_tender_name = serializers.CharField(source='linked_eoi_tender.name', read_only=True, default='')
     linked_tenders_summary = serializers.SerializerMethodField()
     invited_vendor_count = serializers.SerializerMethodField()
+    # Every intent-to-award request still waiting on a Super Admin decision, keyed by
+    # decision unit: `null` = whole-tender award, otherwise the TenderLot id. Lets the
+    # Award panel show "Awaiting Super Admin approval" per row straight off the payload.
+    pending_intent_award_requests = serializers.SerializerMethodField()
 
     def get_bid_count(self, obj):
         return obj.bids.count()
@@ -1769,6 +1886,22 @@ class TenderSerializer(serializers.ModelSerializer):
 
     def get_invited_vendor_count(self, obj):
         return obj.invited_vendors.count()
+
+    def get_pending_intent_award_requests(self, obj):
+        if not intent_award_proposal_visible(self):
+            return []
+        # Prefetched as `pending_intent_award_request_rows` by TenderViewSet's queryset;
+        # fall back to a per-instance query (memoised on the instance) so the field is
+        # still correct for tenders serialized straight off a single instance.
+        rows = getattr(obj, 'pending_intent_award_request_rows', None)
+        if rows is None:
+            rows = list(
+                obj.intent_award_requests
+                .filter(status=IntentAwardRequestStatus.PENDING)
+                .select_related('lot', 'bid')
+            )
+            obj.pending_intent_award_request_rows = rows
+        return IntentToAwardRequestSerializer(rows, many=True, context=self.context).data
 
     def get_linked_tenders_summary(self, obj):
         return [
@@ -2052,6 +2185,8 @@ class TenderSerializer(serializers.ModelSerializer):
         )
         data['required_documents'] = req_serializer.data
         data['lots'] = TenderLotSerializer(instance.lots.all(), many=True, context=self.context).data
+        data['lot_count'] = len(data['lots'])
+        data['awarded_lot_count'] = sum(1 for lot in data['lots'] if lot.get('awarded_vendor_id'))
         data['boq_items'] = TenderBoqItemSerializer(instance.boq_template_items.filter(lot__isnull=True), many=True, context=self.context).data
         requester_role = getattr(request.user, 'role', None) if request else None
         requester_id = str(getattr(request.user, 'id', '')) if request else ''

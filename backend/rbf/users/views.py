@@ -73,6 +73,7 @@ from .serializers import (
     generate_temporary_password,
 )
 from rbf.projects.audit import log_audit, AuditLogger
+from rbf.notifications.services import NotificationService
 from rbf.projects.integrations import SyncToProspectJob, normalize_prospect_gender
 from rbf.projects.models import AuditLog, Project, ProjectStatus, ProspectSyncLog, ProspectSyncStatus
 
@@ -258,6 +259,18 @@ class IsReviewerRole:
             user
             and user.is_authenticated
             and user.role in {UserRole.ADMIN, UserRole.RBF_OFFICIAL, UserRole.AUDITOR}
+        )
+
+
+class IsPrequalificationDecisionRole:
+    """Who may decide on a pre-qualification. Auditors can read but not decide."""
+
+    @staticmethod
+    def check(user):
+        return bool(
+            user
+            and user.is_authenticated
+            and user.role in {UserRole.ADMIN, UserRole.RBF_OFFICIAL}
         )
 
 
@@ -479,8 +492,7 @@ class UserViewSet(viewsets.ModelViewSet):
             else:
                 AuditLogger.log('user_updated', 'users', updated_user.id, 'user', new_status=updated_user.status, notes='User profile updated by Super Admin.')
             return Response(self.get_serializer(updated_user).data)
-        if target_user.id != request.user.id and not IsAdminOrRbfOfficial.check(request.user):
-            raise PermissionDenied('You do not have permission to update this user.')
+        self._assert_super_admin(request.user)
         return super().update(request, *args, **kwargs)
 
     def partial_update(self, request, *args, **kwargs):
@@ -496,9 +508,18 @@ class UserViewSet(viewsets.ModelViewSet):
             else:
                 AuditLogger.log('user_updated', 'users', updated_user.id, 'user', new_status=updated_user.status, notes='User profile updated by Super Admin.')
             return Response(self.get_serializer(updated_user).data)
-        if target_user.id != request.user.id and not IsAdminOrRbfOfficial.check(request.user):
-            raise PermissionDenied('You do not have permission to update this user.')
+        # Everyone else edits their own details via /users/my_profile/ (vendors)
+        # or the dedicated actions; the generic endpoint would let them change
+        # their own role, status or password without checks.
+        self._assert_super_admin(request.user)
         return super().partial_update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        self._assert_super_admin(request.user)
+        target_user = self.get_object()
+        if target_user.id == request.user.id:
+            raise PermissionDenied('You cannot delete your own account.')
+        return super().destroy(request, *args, **kwargs)
 
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated], url_path='deactivate')
     def deactivate(self, request, pk=None):
@@ -1116,6 +1137,15 @@ class VendorPrequalificationViewSet(viewsets.ModelViewSet):
     def create(self, request, *args, **kwargs):
         if request.user.role != UserRole.VENDOR:
             raise PermissionDenied('Only vendors can submit pre-qualification forms.')
+        active = VendorPrequalification.objects.filter(
+            vendor=request.user,
+            status__in=[PrequalificationStatus.PENDING, PrequalificationStatus.UNDER_REVIEW, PrequalificationStatus.APPROVED],
+        ).first()
+        if active:
+            return Response(
+                {'detail': f'You already have a pre-qualification that is {active.status.lower()}. You cannot submit another one.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         existing = VendorPrequalification.objects.filter(
             vendor=request.user,
             status__in=[PrequalificationStatus.REJECTED, PrequalificationStatus.CLARIFICATION_REQUESTED],
@@ -1156,9 +1186,7 @@ class VendorPrequalificationViewSet(viewsets.ModelViewSet):
             response = self._refresh_vendor_resubmission_priority(preq, response)
             log_audit(request.user, 'prequalification_resubmitted', preq, {'vendor_id': preq.vendor_id})
             return response
-        if not IsReviewerRole.check(request.user):
-            raise PermissionDenied('Only reviewer roles can update pre-qualification records.')
-        return super().update(request, *args, **kwargs)
+        raise PermissionDenied('Pre-qualification decisions must be made with the review actions (start review, approve, request clarification, reject).')
 
     def partial_update(self, request, *args, **kwargs):
         preq = self.get_object()
@@ -1175,61 +1203,90 @@ class VendorPrequalificationViewSet(viewsets.ModelViewSet):
             response = self._refresh_vendor_resubmission_priority(preq, response)
             log_audit(request.user, 'prequalification_resubmitted', preq, {'vendor_id': preq.vendor_id})
             return response
-        if not IsReviewerRole.check(request.user):
-            raise PermissionDenied('Only reviewer roles can update pre-qualification records.')
-        return super().partial_update(request, *args, **kwargs)
+        raise PermissionDenied('Pre-qualification decisions must be made with the review actions (start review, approve, request clarification, reject).')
+
+    def destroy(self, request, *args, **kwargs):
+        raise PermissionDenied('Pre-qualification records cannot be deleted; they are part of the audit trail.')
+
+    # target status -> (allowed current statuses, comments required, vendor notification)
+    REVIEW_TRANSITIONS = {
+        PrequalificationStatus.UNDER_REVIEW: (
+            {PrequalificationStatus.PENDING}, False,
+            ('Pre-Qualification Under Review', 'Your pre-qualification application is now being reviewed by the RBF team.'),
+        ),
+        PrequalificationStatus.APPROVED: (
+            {PrequalificationStatus.PENDING, PrequalificationStatus.UNDER_REVIEW}, False,
+            ('Pre-Qualification Approved', 'Your pre-qualification application has been approved. You can now take part in tenders.'),
+        ),
+        PrequalificationStatus.CLARIFICATION_REQUESTED: (
+            {PrequalificationStatus.PENDING, PrequalificationStatus.UNDER_REVIEW}, True,
+            ('Pre-Qualification: Changes Requested', 'The RBF team has asked you to update your pre-qualification application. Reviewer comments: {comments}'),
+        ),
+        PrequalificationStatus.REJECTED: (
+            {PrequalificationStatus.PENDING, PrequalificationStatus.UNDER_REVIEW}, True,
+            ('Pre-Qualification Rejected', 'Your pre-qualification application was rejected. Reason: {comments}'),
+        ),
+    }
+    REVIEW_AUDIT_ACTIONS = {
+        PrequalificationStatus.UNDER_REVIEW: 'prequalification_under_review',
+        PrequalificationStatus.APPROVED: 'prequalification_approved',
+        PrequalificationStatus.CLARIFICATION_REQUESTED: 'prequalification_clarification_requested',
+        PrequalificationStatus.REJECTED: 'prequalification_rejected',
+    }
+
+    def _review(self, request, target_status):
+        if not IsPrequalificationDecisionRole.check(request.user):
+            raise PermissionDenied('Only the RBF Management Team or Super Admin can review pre-qualifications.')
+        preq = self.get_object()
+        allowed_from, comments_required, (title, body) = self.REVIEW_TRANSITIONS[target_status]
+        if preq.status not in allowed_from:
+            return Response(
+                {'detail': f'A submission that is {preq.status} cannot be moved to {target_status}.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        comments = str(request.data.get('reviewer_comments') or '').strip()
+        if comments_required and not comments:
+            return Response(
+                {'reviewer_comments': ['Explain what the vendor needs to fix or why the application was rejected.']},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        previous_status = preq.status
+        preq.status = target_status
+        preq.reviewed_by = request.user
+        preq.reviewed_at = timezone.now()
+        if comments:
+            preq.reviewer_comments = comments
+        preq.save(update_fields=['status', 'reviewed_by', 'reviewed_at', 'reviewer_comments'])
+        log_audit(request.user, self.REVIEW_AUDIT_ACTIONS[target_status], preq, {
+            'vendor_id': preq.vendor_id,
+            'previous_status': previous_status,
+            'reviewer_comments': comments,
+        })
+        NotificationService.send(
+            str(preq.vendor_id),
+            title,
+            body.format(comments=comments or 'none'),
+            'success' if target_status == PrequalificationStatus.APPROVED else 'info',
+            'prequalification',
+            preq.id,
+        )
+        return Response(self.get_serializer(preq).data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'])
     def start_review(self, request, pk=None):
-        if not IsReviewerRole.check(request.user):
-            raise PermissionDenied('Only reviewer roles can start review.')
-        preq = self.get_object()
-        preq.status = PrequalificationStatus.UNDER_REVIEW
-        preq.reviewed_by = request.user
-        preq.reviewed_at = timezone.now()
-        preq.reviewer_comments = request.data.get('reviewer_comments', preq.reviewer_comments)
-        preq.save(update_fields=['status', 'reviewed_by', 'reviewed_at', 'reviewer_comments'])
-        log_audit(request.user, 'prequalification_under_review', preq, {'vendor_id': preq.vendor_id})
-        return Response(self.get_serializer(preq).data, status=status.HTTP_200_OK)
+        return self._review(request, PrequalificationStatus.UNDER_REVIEW)
 
     @action(detail=True, methods=['post'])
     def approve(self, request, pk=None):
-        if not IsReviewerRole.check(request.user):
-            raise PermissionDenied('Only reviewer roles can approve submissions.')
-        preq = self.get_object()
-        preq.status = PrequalificationStatus.APPROVED
-        preq.reviewed_by = request.user
-        preq.reviewed_at = timezone.now()
-        preq.reviewer_comments = request.data.get('reviewer_comments', preq.reviewer_comments)
-        preq.save(update_fields=['status', 'reviewed_by', 'reviewed_at', 'reviewer_comments'])
-        log_audit(request.user, 'prequalification_approved', preq, {'vendor_id': preq.vendor_id})
-        return Response(self.get_serializer(preq).data, status=status.HTTP_200_OK)
+        return self._review(request, PrequalificationStatus.APPROVED)
 
     @action(detail=True, methods=['post'])
     def request_clarification(self, request, pk=None):
-        if not IsReviewerRole.check(request.user):
-            raise PermissionDenied('Only reviewer roles can request clarification.')
-        preq = self.get_object()
-        preq.status = PrequalificationStatus.CLARIFICATION_REQUESTED
-        preq.reviewed_by = request.user
-        preq.reviewed_at = timezone.now()
-        preq.reviewer_comments = request.data.get('reviewer_comments', preq.reviewer_comments)
-        preq.save(update_fields=['status', 'reviewed_by', 'reviewed_at', 'reviewer_comments'])
-        log_audit(request.user, 'prequalification_clarification_requested', preq, {'vendor_id': preq.vendor_id})
-        return Response(self.get_serializer(preq).data, status=status.HTTP_200_OK)
+        return self._review(request, PrequalificationStatus.CLARIFICATION_REQUESTED)
 
     @action(detail=True, methods=['post'])
     def reject(self, request, pk=None):
-        if not IsReviewerRole.check(request.user):
-            raise PermissionDenied('Only reviewer roles can reject submissions.')
-        preq = self.get_object()
-        preq.status = PrequalificationStatus.REJECTED
-        preq.reviewed_by = request.user
-        preq.reviewed_at = timezone.now()
-        preq.reviewer_comments = request.data.get('reviewer_comments', preq.reviewer_comments)
-        preq.save(update_fields=['status', 'reviewed_by', 'reviewed_at', 'reviewer_comments'])
-        log_audit(request.user, 'prequalification_rejected', preq, {'vendor_id': preq.vendor_id})
-        return Response(self.get_serializer(preq).data, status=status.HTTP_200_OK)
+        return self._review(request, PrequalificationStatus.REJECTED)
 
 
 class VendorBlacklistCaseViewSet(viewsets.ModelViewSet):
@@ -1365,6 +1422,33 @@ class LoginView(TokenObtainPairView):
         return Response(serializer.validated_data, status=status.HTTP_200_OK)
 
 
+OTP_RESEND_COOLDOWN_SECONDS = 60
+OTP_MAX_REQUESTS_PER_IP_PER_HOUR = 10
+OTP_MAX_VERIFY_ATTEMPTS = 5
+
+
+def _client_ip(request) -> str:
+    forwarded = str(request.META.get('HTTP_X_FORWARDED_FOR') or '').split(',')[0].strip()
+    return forwarded or str(request.META.get('REMOTE_ADDR') or 'unknown')
+
+
+class ValidateRegistrationView(APIView):
+    """Runs every vendor sign-up check (uniqueness, password rules, documents,
+    blacklist) before an OTP is sent, so applicants are not told their username
+    is taken only after verifying their email."""
+
+    permission_classes = [AllowAny]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request):
+        serializer = UserSerializer(
+            data=request.data,
+            context={'request': request, 'cache': cache, 'registration_precheck': True},
+        )
+        serializer.is_valid(raise_exception=True)
+        return Response({'valid': True}, status=status.HTTP_200_OK)
+
+
 class RequestRegistrationOtpView(APIView):
     permission_classes = [AllowAny]
 
@@ -1373,9 +1457,29 @@ class RequestRegistrationOtpView(APIView):
         if not email:
             return Response({'detail': 'Email is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
+        cooldown_key = f'registration_otp_cooldown:{email}'
+        if cache.get(cooldown_key):
+            return Response(
+                {
+                    'detail': f'Please wait {OTP_RESEND_COOLDOWN_SECONDS} seconds before requesting another code.',
+                    'retry_after': OTP_RESEND_COOLDOWN_SECONDS,
+                },
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+        ip_key = f'registration_otp_ip:{_client_ip(request)}'
+        ip_count = int(cache.get(ip_key) or 0)
+        if ip_count >= OTP_MAX_REQUESTS_PER_IP_PER_HOUR:
+            return Response(
+                {'detail': 'Too many verification codes requested from this network. Try again later.', 'retry_after': 3600},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+        cache.set(ip_key, ip_count + 1, timeout=3600)
+        cache.set(cooldown_key, True, timeout=OTP_RESEND_COOLDOWN_SECONDS)
+
         otp_length = max(4, int(getattr(settings, 'OTP_LENGTH', 6)))
-        otp = ''.join(random.choices(string.digits, k=otp_length))
+        otp = ''.join(secrets.choice(string.digits) for _ in range(otp_length))
         cache_key = f'registration_otp:{email}'
+        cache.delete(f'registration_otp_attempts:{email}')
         otp_timeout = int(getattr(settings, 'OTP_EXPIRY_SECONDS', 600))
         # Cache is preferred, but keep a local fallback for dev/local setups.
         try:
@@ -1456,8 +1560,24 @@ class VerifyRegistrationOtpView(APIView):
                     _OTP_FALLBACK.pop(cache_key, None)
         if expected is None:
             return Response({'detail': 'OTP has expired. Please request a new one.'}, status=status.HTTP_400_BAD_REQUEST)
-        if otp != expected:
-            return Response({'detail': 'Invalid OTP.'}, status=status.HTTP_400_BAD_REQUEST)
+        if not secrets.compare_digest(str(otp), str(expected)):
+            attempts_key = f'registration_otp_attempts:{email}'
+            attempts = int(cache.get(attempts_key) or 0) + 1
+            if attempts >= OTP_MAX_VERIFY_ATTEMPTS:
+                cache.delete(cache_key)
+                cache.delete(attempts_key)
+                _OTP_FALLBACK.pop(cache_key, None)
+                return Response(
+                    {'detail': 'Too many incorrect codes. Request a new verification code.', 'attempts_remaining': 0},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            cache.set(attempts_key, attempts, timeout=int(getattr(settings, 'OTP_EXPIRY_SECONDS', 600)))
+            remaining = OTP_MAX_VERIFY_ATTEMPTS - attempts
+            return Response(
+                {'detail': f'Incorrect code. {remaining} attempt(s) remaining.', 'attempts_remaining': remaining},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        cache.delete(f'registration_otp_attempts:{email}')
 
         try:
             cache.delete(cache_key)

@@ -90,6 +90,7 @@ export enum ProjectStatus {
   DISBURSEMENT = "Disbursement",
   HALTED = "Halted",
   COMPLETED = "Completed",
+  CLOSED = "closed",
 }
 
 export type UserStatus = 
@@ -261,6 +262,12 @@ export interface Tender {
    * tender into lot-wise mode: bidders price whichever lots they choose (up to
    * maxLotsPerBidder if set), and each lot can be awarded to a different vendor. */
   lots?: TenderLot[];
+  /** Lightweight lot-wise summary — present even in list views where `lots` itself
+   * isn't sent (e.g. Tender Management's list endpoint). Prefer these over deriving
+   * from `lots.length` so counts are correct regardless of which endpoint loaded this
+   * tender. `lotCount` is 0 (not undefined) for a non-lot-wise tender. */
+  lotCount?: number;
+  awardedLotCount?: number;
   maxLotsPerBidder?: number;
   /** This tender's own designed BOQ — only meaningful when `lots` is empty (a
    * lot-wise tender designs its BOQ per lot instead, on each TenderLot.boqItems). An
@@ -298,10 +305,15 @@ export interface TenderLot {
    * TenderBidLotOffer.boq_items); an empty list falls back to a plain typed bid
    * amount for this lot. */
   boqItems?: TenderBoqTemplateItem[];
+  /** Set only once this lot's award is CONFIRMED (alongside awardedAt) — not at
+   * intent-to-award time. Use intentToAwardBidId/intentToAwardAt to detect "intent
+   * issued, pending confirmation". */
   awardedVendorId?: string;
   awardedVendorName?: string;
   intentToAwardBidId?: string;
   intentToAwardAt?: string;
+  /** This lot's own standstill/cooling-off deadline, independent of other lots. */
+  coolingOffUntil?: string;
   awardedAt?: string;
 }
 
@@ -761,7 +773,7 @@ export interface ProjectKpiSummary {
     total_verified: number;
     target: number;
   };
-  milestone_eligibility: Record<string, { eligible: boolean; status?: string; conditions: Record<string, boolean> }>;
+  milestone_eligibility: Record<string, { eligible: boolean; status?: string; conditions: Record<string, boolean>; thresholds?: MilestoneConditionThresholds }>;
   generated_at: string;
 }
 
@@ -1202,7 +1214,48 @@ export interface TenderLotAwardRanking {
   awarded_vendor_name: string | null;
   intent_to_award_bid_id: string | null;
   intent_to_award_at?: string | null;
+  cooling_off_until?: string | null;
   awarded_at?: string | null;
+  /** The lot's pending request, if the RBF has queued an intent for this lot. */
+  pending_intent_award_request?: IntentToAwardRequest | null;
+}
+
+export interface TenderAwardRecommendation {
+  id: string;
+  tender: string;
+  lot: string | null;
+  lot_name?: string;
+  bid: string;
+  vendor_name?: string;
+  bid_vendor_name?: string;
+  suggested_by: string;
+  suggested_by_name?: string;
+  rationale?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface AwardConsensusMember {
+  member_id: string;
+  member_name: string;
+}
+
+export interface AwardConsensusUnit {
+  lot_id: string | null;
+  lot_name: string;
+  assigned_members: AwardConsensusMember[];
+  suggestions: TenderAwardRecommendation[];
+  pending_member_ids: string[];
+  consensus: boolean;
+  agreed_bid_id: string | null;
+  agreed_vendor_name: string | null;
+  intent_to_award_bid_id: string | null;
+}
+
+export interface TenderAwardConsensus {
+  is_lot_wise: boolean;
+  evaluation_complete: boolean;
+  units: AwardConsensusUnit[];
 }
 
 export interface TenderEvaluationStatusInfo {
@@ -1210,6 +1263,41 @@ export interface TenderEvaluationStatusInfo {
   reasons: string[];
   committee_size: number;
   detailed_bid_count: number;
+}
+
+export type IntentToAwardRequestStatus =
+  | "pending"
+  | "approved"
+  | "changes_requested"
+  | "rejected"
+  | "withdrawn";
+
+/** One RBF proposal to issue an intent to award, waiting on a Super Admin decision. */
+export interface IntentToAwardRequest {
+  id: string;
+  tender: string;
+  tender_reference_number: string;
+  tender_name: string;
+  lot: string | null;
+  lot_id: string | null;
+  lot_name: string;
+  bid: string;
+  bid_id: string;
+  proposed_vendor_id: string;
+  proposed_vendor_name: string;
+  ec_agreed_bid_id: string;
+  ec_consensus: boolean | null;
+  ec_override_reason: string;
+  status: IntentToAwardRequestStatus;
+  status_label: string;
+  notes: string;
+  requested_by: string | null;
+  requested_by_name: string;
+  requested_at: string;
+  from_challenge: boolean;
+  reviewed_by: string | null;
+  reviewed_by_name: string;
+  reviewed_at: string | null;
 }
 
 export interface TenderAwardRankingResponse {
@@ -1222,6 +1310,8 @@ export interface TenderAwardRankingResponse {
   recommended?: TenderAwardRankingRow | null;
   lots?: TenderLotAwardRanking[];
   evaluation_status?: TenderEvaluationStatusInfo;
+  /** Set on the whole-tender award decision unit; each lot carries its own. */
+  pending_intent_award_request?: IntentToAwardRequest | null;
 }
 
 export interface TenderContract {
@@ -1254,6 +1344,13 @@ export interface TenderContract {
   updatedAt?: string;
 }
 
+export interface MilestoneConditionThresholds {
+  installations_pct?: number;
+  female_pct?: number;
+  vulnerable_pct?: number;
+  low_income_pct?: number;
+}
+
 export interface Milestone {
   id: string;
   projectId: string;
@@ -1262,13 +1359,34 @@ export interface Milestone {
   name: string;
   description?: string;
   percentage: number;
-  status: "locked" | "pending" | "claimable" | "claimed" | "paid" | "Pending" | "Submitted" | "Verified" | "Paid";
+  status: "locked" | "pending" | "claimable" | "claimed" | "paid" | "cancelled" | "Pending" | "Submitted" | "Verified" | "Paid";
   amount: number;
   progressPercentage: number;
   targetDate?: string;
   completedDate?: string;
   unlockedAt?: string;
   amountLsl?: number;
+  requiredInstallationPct?: number;
+  completionReview?: MilestoneCompletionReview | null;
+}
+
+export type MilestoneReviewDecision = "proceed" | "close" | "transfer" | "complete";
+
+// RBF / Super Admin verification opened when a milestone is paid; decides
+// whether the project proceeds, closes, or moves to another vendor.
+export interface MilestoneCompletionReview {
+  id: string;
+  milestoneId: string;
+  status: "pending" | "decided";
+  decision?: MilestoneReviewDecision | "";
+  verificationNotes: string;
+  vendorId: string;
+  vendorName: string;
+  transferredToVendorId?: string;
+  transferredToVendorName?: string;
+  reviewedByName?: string;
+  reviewedAt?: string;
+  createdAt?: string;
 }
 
 export interface ProjectUpdate {
@@ -1577,6 +1695,8 @@ export interface VendorProfile {
   organization_type?: string;
   technology_types: string[];
   registration_certificate_name?: string;
+  registration_certificate_url?: string | null;
+  company_registration_number?: string;
   tax_id?: string;
   bank_name?: string;
   bank_branch?: string;

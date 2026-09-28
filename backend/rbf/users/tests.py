@@ -8,9 +8,11 @@ from django.core import mail
 from django.core.management import call_command
 from django.utils import timezone
 from django.test import override_settings
+from django.core.files.uploadedfile import SimpleUploadedFile
 from rest_framework import status
 from rest_framework.test import APITestCase
 
+from rbf.notifications.models import Notification
 from rbf.projects.models import (
     AuditLog,
     Disbursement,
@@ -32,6 +34,33 @@ from rbf.users.models import (
     VendorBlacklistCase,
 )
 
+
+
+def sample_pdf(name="document.pdf"):
+    return SimpleUploadedFile(name, b"%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF", content_type="application/pdf")
+
+
+def prequal_documents():
+    return {
+        "registration_certificate": sample_pdf("registration.pdf"),
+        "trading_license": sample_pdf("trading.pdf"),
+        "tax_compliance_certificate": sample_pdf("tax.pdf"),
+        "authorized_signatory_id": sample_pdf("signatory.pdf"),
+        "experience_financial_proof": sample_pdf("experience.pdf"),
+    }
+
+
+PREQUAL_CORE_FIELDS = {
+    "tech_tier": "Level 2",
+    "years_experience": 5,
+    "prior_projects": 3,
+    "districts_covered": 2,
+    "female_beneficiary_target": 50,
+    "vulnerable_group_target": 30,
+    "gender_of_focal_person": "Female",
+    "contact_number": "58123456",
+    "email": "vendor@example.com",
+}
 
 class ProcurementMethodsConfigTests(APITestCase):
     def setUp(self):
@@ -540,11 +569,13 @@ class UserApiTests(APITestCase):
                 "address": "Maseru HQ",
                 "organization_name": "Pending Vendor Ltd",
                 "organization_type": "Private",
-                "technology_types": ["SHS"],
-                "registration_certificate_name": "reg.pdf",
+                "technology_types": '["SHS"]',
+                "registration_certificate": sample_pdf("reg.pdf"),
+                "company_registration_number": "A2024/123",
+                "consent_accepted": "true",
                 "tax_id": "TIN-123",
             },
-            format="json",
+            format="multipart",
         )
 
         response = self.client.post(
@@ -652,12 +683,14 @@ class UserApiTests(APITestCase):
                 "address": "Maseru HQ",
                 "organization_name": "Fresh Entity Ltd",
                 "organization_type": "Private",
-                "associated_entities": ["Jane Director"],
-                "technology_types": ["SHS"],
-                "registration_certificate_name": "reg.pdf",
+                "associated_entities": '["Jane Director"]',
+                "technology_types": '["SHS"]',
+                "registration_certificate": sample_pdf("reg.pdf"),
+                "company_registration_number": "A2024/456",
+                "consent_accepted": "true",
                 "tax_id": "TIN-NEW-1",
             },
-            format="json",
+            format="multipart",
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
@@ -870,16 +903,18 @@ class UserApiTests(APITestCase):
                 "organization_type": "Private",
                 "tax_id": "TIN-123",
                 "hq_address": "Maseru HQ",
-                "technology_types": ["SHS", "Mini-grid"],
+                "technology_types": '["SHS", "GMG"]',
                 "bank_name": "First National Bank",
                 "bank_branch": "Maseru Main",
                 "bank_swift_code": "FNBLLSMX",
                 "bank_sort_code": "12-34-56",
                 "bank_account_name": "Solar Vendor Ltd",
                 "bank_account_number": "123456789012",
-                "declaration_accepted": True,
+                "declaration_accepted": "true",
+                **PREQUAL_CORE_FIELDS,
+                **prequal_documents(),
             },
-            format="json",
+            format="multipart",
         )
         self.assertEqual(submit_response.status_code, status.HTTP_201_CREATED)
         preq_id = submit_response.data["id"]
@@ -935,6 +970,18 @@ class UserApiTests(APITestCase):
             declaration_accepted=True,
             contact_number="26655555555",
             email="vendor@example.com",
+            tech_tier="Level 2",
+            districts_covered=2,
+            gender_of_focal_person="Female",
+            bank_name="Old Bank",
+            bank_branch="Maseru",
+            bank_account_name="Original Vendor Ltd",
+            bank_account_number="11112222",
+            registration_certificate=sample_pdf("registration.pdf"),
+            trading_license=sample_pdf("trading.pdf"),
+            tax_compliance_certificate=sample_pdf("tax.pdf"),
+            authorized_signatory_id=sample_pdf("signatory.pdf"),
+            experience_financial_proof=sample_pdf("experience.pdf"),
             status="Partial (Resubmit)",
             reviewer_comments="Please correct your application.",
             reviewed_by=reviewer,
@@ -946,7 +993,7 @@ class UserApiTests(APITestCase):
             f"/api/users/prequalifications/{preq.id}/",
             {
                 "company_name": "Updated Vendor Ltd",
-                "technology_types": ["SHS", "Mini-grid"],
+                "technology_types": ["SHS", "GMG"],
                 "bank_name": "Standard Lesotho Bank",
                 "bank_branch": "Maputsoe",
                 "bank_swift_code": "STLBLSMX",
@@ -963,7 +1010,7 @@ class UserApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         preq.refresh_from_db()
         self.assertEqual(preq.company_name, "Updated Vendor Ltd")
-        self.assertEqual(preq.technology_types, ["SHS", "Mini-grid"])
+        self.assertEqual(preq.technology_types, ["SHS", "GMG"])
         self.assertEqual(preq.bank_name, "Standard Lesotho Bank")
         self.assertEqual(preq.bank_branch, "Maputsoe")
         self.assertEqual(preq.bank_account_name, "Updated Vendor Ltd")
@@ -1276,3 +1323,192 @@ class UserApiTests(APITestCase):
         vendor.refresh_from_db()
         self.assertEqual(vendor.status, "Registered")
         self.assertFalse(BlacklistedIdentifier.objects.filter(case_id=case_id, vendor=vendor, active=True).exists())
+
+
+
+class RegistrationAndPrequalificationHardeningTests(APITestCase):
+    def setUp(self):
+        cache.clear()
+        User = get_user_model()
+        self.vendor = User.objects.create_user(
+            username="hardening_vendor", password="securePass123", role="Vendor", status="Active",
+            gender="Female", region="Maseru", mobile_number="26658123456", email="hv@example.com",
+        )
+        self.rmt = User.objects.create_user(
+            username="hardening_rmt", password="securePass123", role="RBF Management Team", status="Active",
+            gender="Female", region="Maseru", mobile_number="26658123456",
+        )
+        self.auditor = User.objects.create_user(
+            username="hardening_auditor", password="securePass123", role="Auditor", status="Active",
+            gender="Male", region="Maseru", mobile_number="26658123456",
+        )
+
+    def registration_payload(self, **overrides):
+        payload = {
+            "username": "new_vendor_1",
+            "password": "Sunlight#2026x",
+            "email": "new.vendor@example.com",
+            "full_name": "New Vendor",
+            "gender": "Female",
+            "region": "Maseru",
+            "mobile_number": "58123456",
+            "national_id": "ID-NEW-9",
+            "address": "Kingsway, Maseru",
+            "organization_name": "New Vendor Energy",
+            "organization_type": "Private",
+            "technology_types": '["SHS"]',
+            "registration_certificate": sample_pdf("reg.pdf"),
+            "company_registration_number": "A2026/0001",
+            "consent_accepted": "true",
+            "tax_id": "TIN-NEW-9",
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_vendor_cannot_change_own_role_or_status(self):
+        self.client.force_authenticate(self.vendor)
+        response = self.client.patch(
+            f"/api/users/{self.vendor.id}/",
+            {"role": "Platform Administrator (Super Admin)", "status": "Active"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.vendor.refresh_from_db()
+        self.assertEqual(self.vendor.role, "Vendor")
+
+    def test_staff_cannot_escalate_or_delete_own_account(self):
+        self.client.force_authenticate(self.rmt)
+        response = self.client.patch(
+            f"/api/users/{self.rmt.id}/", {"role": "Platform Administrator (Super Admin)"}, format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        response = self.client.delete(f"/api/users/{self.rmt.id}/")
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertTrue(get_user_model().objects.filter(id=self.rmt.id).exists())
+
+    def test_registration_precheck_reports_all_problems_before_otp(self):
+        get_user_model().objects.filter(id=self.vendor.id).update(tax_id="TIN-TAKEN")
+        payload = self.registration_payload(
+            email="HV@example.com",
+            tax_id="tin-taken",
+            mobile_number="12345678",
+            consent_accepted="false",
+            password="password",
+        )
+        payload.pop("registration_certificate")
+        response = self.client.post("/api/users/auth/validate-registration/", payload, format="multipart")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        for field in ("email", "tax_id", "registration_certificate", "consent_accepted"):
+            self.assertIn(field, response.data)
+
+        response = self.client.post(
+            "/api/users/auth/validate-registration/", self.registration_payload(), format="multipart",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+
+    def test_registration_rejects_fake_pdf_and_stores_real_certificate(self):
+        cache.set("registration_otp_verified:new.vendor@example.com", True, timeout=300)
+        fake = SimpleUploadedFile("reg.pdf", b"MZ\x90\x00not a pdf", content_type="application/pdf")
+        response = self.client.post("/api/users/", self.registration_payload(registration_certificate=fake), format="multipart")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("registration_certificate", response.data)
+
+        response = self.client.post(
+            "/api/users/", self.registration_payload(bank_name="Injected", tier_assignment="Tier 1"), format="multipart",
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        created = get_user_model().objects.get(username="new_vendor_1")
+        self.assertTrue(created.registration_certificate.name)
+        self.assertEqual(created.registration_certificate_name, "reg.pdf")
+        self.assertEqual(created.mobile_number, "26658123456")
+        self.assertIsNotNone(created.registration_consent_at)
+        self.assertEqual(created.status, "Pending")
+        self.assertEqual(created.bank_name, "")
+        self.assertEqual(created.tier_assignment, "")
+
+    @override_settings(
+        EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
+        EMAIL_HOST_USER="otp-sender",
+        EMAIL_HOST_PASSWORD="otp-secret",
+    )
+    def test_otp_resend_cooldown_and_attempt_limit(self):
+        response = self.client.post("/api/users/auth/request-otp/", {"email": "otp@example.com"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        response = self.client.post("/api/users/auth/request-otp/", {"email": "otp@example.com"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+        self.assertEqual(len(mail.outbox), 1)
+        correct = cache.get("registration_otp:otp@example.com")
+        wrong = "000000" if correct != "000000" else "111111"
+        for _ in range(4):
+            response = self.client.post("/api/users/auth/verify-otp/", {"email": "otp@example.com", "otp": wrong}, format="json")
+            self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        response = self.client.post("/api/users/auth/verify-otp/", {"email": "otp@example.com", "otp": wrong}, format="json")
+        self.assertEqual(response.data["attempts_remaining"], 0)
+        # The code is burned after too many failures, even the right one no longer works.
+        response = self.client.post("/api/users/auth/verify-otp/", {"email": "otp@example.com", "otp": correct}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def _submit_prequal(self, **overrides):
+        payload = {
+            "company_name": "Hardening Vendor Ltd",
+            "organization_type": "Private",
+            "tax_id": "TIN-HV",
+            "hq_address": "Maseru",
+            "technology_types": '["SHS"]',
+            "bank_name": "Standard Lesotho Bank",
+            "bank_branch": "Maseru",
+            "bank_account_name": "Hardening Vendor Ltd",
+            "bank_account_number": "1234567890",
+            "declaration_accepted": "true",
+            **PREQUAL_CORE_FIELDS,
+            **prequal_documents(),
+        }
+        payload.update(overrides)
+        self.client.force_authenticate(self.vendor)
+        return self.client.post("/api/users/prequalifications/", payload, format="multipart")
+
+    def test_prequal_requires_documents_declaration_and_valid_bank_details(self):
+        response = self._submit_prequal(
+            declaration_accepted="false",
+            authorized_signatory_id="",
+            bank_account_number="12AB",
+            bank_swift_code="BAD",
+            districts_covered=12,
+            status="Approved",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        for field in ("declaration_accepted", "authorized_signatory_id", "bank_account_number", "bank_swift_code", "districts_covered"):
+            self.assertIn(field, response.data)
+
+    def test_prequal_single_active_submission_state_machine_and_roles(self):
+        response = self._submit_prequal(status="Approved", reviewer_comments="self-approved")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        self.assertEqual(response.data["status"], "Pending")
+        self.assertEqual(response.data["reviewer_comments"], "")
+        preq_id = response.data["id"]
+
+        self.assertEqual(self._submit_prequal().status_code, status.HTTP_400_BAD_REQUEST)
+        self.client.force_authenticate(self.vendor)
+        self.assertEqual(self.client.delete(f"/api/users/prequalifications/{preq_id}/").status_code, status.HTTP_403_FORBIDDEN)
+
+        self.client.force_authenticate(self.auditor)
+        self.assertEqual(self.client.post(f"/api/users/prequalifications/{preq_id}/approve/").status_code, status.HTTP_403_FORBIDDEN)
+        listing = self.client.get(f"/api/users/prequalifications/{preq_id}/")
+        self.assertEqual(listing.status_code, status.HTTP_200_OK)
+        self.assertEqual(listing.data["bank_account_number"], "******7890")
+
+        self.client.force_authenticate(self.rmt)
+        self.assertEqual(
+            self.client.patch(f"/api/users/prequalifications/{preq_id}/", {"status": "Approved"}, format="json").status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+        response = self.client.post(f"/api/users/prequalifications/{preq_id}/reject/", {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("reviewer_comments", response.data)
+        response = self.client.post(f"/api/users/prequalifications/{preq_id}/approve/", {"reviewer_comments": "Looks good"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["bank_account_number"], "1234567890")
+        response = self.client.post(f"/api/users/prequalifications/{preq_id}/reject/", {"reviewer_comments": "late"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertTrue(Notification.objects.filter(recipient_id=str(self.vendor.id), title="Pre-Qualification Approved").exists())

@@ -9,10 +9,10 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import override_settings
 from django.utils import timezone
 from rest_framework import status
-from rest_framework.test import APITestCase
+from rest_framework.test import APIClient, APITestCase
 import subprocess
 
-from rbf.notifications.models import Notification
+from rbf.notifications.models import Notification, NotificationStatus
 from rbf.projects.models import AuditLog, Milestone, Project, ProjectStatus
 from rbf.users.models import PlatformConfiguration, PrequalificationStatus, User, UserRole, VendorPrequalification
 
@@ -36,16 +36,37 @@ from .models import (
     TenderEvaluationCommitteeMember,
     TenderLot,
     TenderStatus,
+    IntentAwardRequestStatus,
+    IntentToAwardRequest,
     EvaluationConflictOfInterest,
 )
 from .pba_pdf import _annex_section_html, _main_agreement_html, _pdfa_merge, generate_contract_pdf
-from .serializers import TenderBidSiteSerializer, TenderContractSerializer
+from .serializers import IntentToAwardRequestSerializer, TenderBidSiteSerializer, TenderContractSerializer
+from .views import _attach_awarded_bid_annexes
 
 
 def _close_tender_for_evaluation(tender):
     """Simulate the submission deadline passing so evaluation may begin."""
     tender.status = TenderStatus.CLOSED
     tender.save(update_fields=['status'])
+
+
+def _approve_pending_intent_to_award(client, tender, *, as_user, lot=None, notes="Approved in tests."):
+    """Run the Super Admin approval step for an intent-to-award request the RBF has just
+    queued. Tests that assert on the *effect* of an intent to award (standstill, cooling
+    off, contract generation) call this so they don't each have to spell out the
+    two-call RBF-proposes / Super-Admin-approves flow. Tests that assert on the
+    approval gate itself skip it and check the request is still pending."""
+    client.force_authenticate(as_user)
+    payload = {"notes": notes}
+    if lot is not None:
+        payload["lot_id"] = str(lot.id)
+    response = client.post(f"/api/tenders/{tender.id}/approve_intent_award/", payload, format="json")
+    assert response.status_code == status.HTTP_200_OK, response.data
+    tender.refresh_from_db()
+    if lot is not None:
+        lot.refresh_from_db()
+    return response
 
 
 class TenderApiTests(APITestCase):
@@ -164,6 +185,15 @@ class TenderApiTests(APITestCase):
             bid_amount=125000,
             status=BidStatus.SUBMITTED,
         )
+        # Publishing notifies every approved pre-qualified vendor, so the lifecycle
+        # fixture needs one for the publish step to succeed.
+        VendorPrequalification.objects.create(
+            vendor=vendor,
+            company_name=vendor.organization_name,
+            status=PrequalificationStatus.APPROVED,
+            tech_tier="Level 3",
+            female_beneficiary_target=55,
+        )
         TenderBidEvaluation.objects.create(
             bid=bid,
             evaluator=self.admin_user,
@@ -207,7 +237,9 @@ class TenderApiTests(APITestCase):
         )
 
         self.assertEqual(award_response.status_code, status.HTTP_200_OK)
-        self.assertEqual(award_response.data["status"], TenderStatus.STANDSTILL)
+        self.assertEqual(award_response.data["intent_award_request"]["status"], IntentAwardRequestStatus.PENDING)
+
+        _approve_pending_intent_to_award(self.client, tender, as_user=self.admin_user)
 
         tender.refresh_from_db()
         self.assertEqual(tender.status, TenderStatus.STANDSTILL)
@@ -350,11 +382,61 @@ class TenderApiTests(APITestCase):
             format="json",
         )
 
+        # Selecting a winner only queues the request — the tender must not move.
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data["status"], TenderStatus.STANDSTILL)
+        self.assertEqual(response.data["status"], TenderStatus.EVALUATION)
+        self.assertEqual(
+            response.data["intent_award_request"]["status"], IntentAwardRequestStatus.PENDING,
+        )
         tender.refresh_from_db()
+        self.assertIsNone(tender.intent_to_award_at)
+        self.assertIsNone(tender.cooling_off_until)
+
+        _approve_pending_intent_to_award(self.client, tender, as_user=self.admin_user)
+
         self.assertEqual(tender.status, TenderStatus.STANDSTILL)
         self.assertIsNotNone(tender.cooling_off_until)
+
+    def test_confirm_award_marks_other_bids_not_awarded(self):
+        """Losing bidders on a non-lot-wise tender must get an explicit, final
+        Not Awarded outcome instead of sitting in Submitted/Under Review forever."""
+        self.client.force_authenticate(self.admin_user)
+        winner = User.objects.create_user(
+            username="not_awarded_winner", password="securePass123", role=UserRole.VENDOR,
+            status="Active", full_name="Winner Vendor",
+        )
+        loser = User.objects.create_user(
+            username="not_awarded_loser", password="securePass123", role=UserRole.VENDOR,
+            status="Active", full_name="Loser Vendor",
+        )
+        tender = Tender.objects.create(
+            reference_number="NOTAWD-001",
+            name="Not Awarded Test",
+            department="DoE",
+            category="SHS",
+            status=TenderStatus.STANDSTILL,
+            deadline=timezone.now(),
+            technology_types=["Solar Home System"],
+            cooling_off_until=timezone.now() - timedelta(minutes=1),
+        )
+        winning_bid = TenderBid.objects.create(
+            tender=tender, vendor_id=str(winner.id), vendor_name=winner.full_name,
+            bid_amount=100000, status=BidStatus.ACCEPTED,
+        )
+        losing_bid = TenderBid.objects.create(
+            tender=tender, vendor_id=str(loser.id), vendor_name=loser.full_name,
+            bid_amount=120000, status=BidStatus.SUBMITTED,
+        )
+        tender.intent_to_award_bid = winning_bid
+        tender.save(update_fields=["intent_to_award_bid"])
+
+        response = self.client.post(f"/api/tenders/{tender.id}/confirm_award/", {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+
+        winning_bid.refresh_from_db()
+        losing_bid.refresh_from_db()
+        self.assertEqual(winning_bid.status, BidStatus.AWARDED)
+        self.assertEqual(losing_bid.status, BidStatus.NOT_AWARDED)
 
     def test_confirm_award_rejects_disputed_status(self):
         self.client.force_authenticate(self.admin_user)
@@ -1733,6 +1815,17 @@ class TenderBidSubmissionTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.site_specific_tender.refresh_from_db()
+        self.assertIsNone(self.site_specific_tender.intent_to_award_bid_id)
+
+        super_admin = User.objects.create_user(
+            username="stage_two_super_admin",
+            password="securePass123",
+            role=UserRole.ADMIN,
+            status="Active",
+            full_name="Stage Two Super Admin",
+        )
+        _approve_pending_intent_to_award(self.client, self.site_specific_tender, as_user=super_admin)
+
         self.assertEqual(str(self.site_specific_tender.intent_to_award_bid_id), str(winning_bid.id))
         self.assertEqual(self.site_specific_tender.awarded_vendor_id, str(self.vendor.id))
         self.assertEqual(self.site_specific_tender.awarded_vendor_name, self.vendor.full_name)
@@ -3164,6 +3257,58 @@ class TenderContractPdfTests(APITestCase):
                 self.contract.refresh_from_db()
                 self.assertTrue(self.contract.generated_file.name.endswith(".pdf"))
 
+    def test_generate_contract_pdf_merges_additional_bid_documents(self):
+        with TemporaryDirectory() as media_root:
+            with override_settings(MEDIA_ROOT=media_root):
+                self.bid.financial_proposal_file.save("annex-c.pdf", SimpleUploadedFile("annex-c.pdf", b"%PDF-1.4 annex c"), save=True)
+                self.bid.boq_file.save("boq.pdf", SimpleUploadedFile("boq.pdf", b"%PDF-1.4 boq"), save=True)
+                self.bid.tender_security_file.save("security.pdf", SimpleUploadedFile("security.pdf", b"%PDF-1.4 security"), save=True)
+                self.bid.om_plan_file.save("om-plan.pdf", SimpleUploadedFile("om-plan.pdf", b"%PDF-1.4 om"), save=True)
+                self.bid.distribution_map_file.save("map.pdf", SimpleUploadedFile("map.pdf", b"%PDF-1.4 map"), save=True)
+
+                custom_dir = Path(media_root) / "custom_documents"
+                custom_dir.mkdir(parents=True, exist_ok=True)
+                (custom_dir / "extra-doc.pdf").write_bytes(b"%PDF-1.4 extra")
+                self.bid.custom_documents = [{
+                    "name": "Warranty Certificate",
+                    "expected_type": "PDF",
+                    "file_name": "extra-doc.pdf",
+                    "file_url": "/media/custom_documents/extra-doc.pdf",
+                }]
+                self.bid.save()
+
+                self.contract.annex_c_file = self.bid.financial_proposal_file.name
+                self.contract.save()
+
+                def fake_render(_html, output_path, _contract_reference):
+                    Path(output_path).write_bytes(b"%PDF-1.4 generated")
+
+                def fake_merge(parts, output_path):
+                    output_path.write_bytes(b"%PDF-1.4 merged")
+                    fake_merge.parts = [Path(part).name for part in parts]
+
+                with patch("rbf.tenders.pba_pdf._render_pdf", side_effect=fake_render):
+                    with patch("rbf.tenders.pba_pdf._pdfa_merge", side_effect=fake_merge):
+                        generate_contract_pdf(self.contract, self.tender, self.bid, self.vendor)
+
+                self.assertIn("boq.pdf", fake_merge.parts)
+                self.assertIn("security.pdf", fake_merge.parts)
+                self.assertIn("om-plan.pdf", fake_merge.parts)
+                self.assertIn("map.pdf", fake_merge.parts)
+                self.assertIn("extra-doc.pdf", fake_merge.parts)
+                # BOQ appears exactly once — no longer duplicated as Annex C's fallback.
+                self.assertEqual(fake_merge.parts.count("boq.pdf"), 1)
+
+    def test_attach_awarded_bid_annexes_no_longer_falls_back_boq_into_annex_c(self):
+        with TemporaryDirectory() as media_root:
+            with override_settings(MEDIA_ROOT=media_root):
+                self.bid.boq_file.save("boq-only.pdf", SimpleUploadedFile("boq-only.pdf", b"%PDF-1.4 boq"), save=True)
+                self.bid.save()
+
+                _attach_awarded_bid_annexes(self.contract, self.tender, self.bid)
+
+                self.assertFalse(self.contract.annex_c_file)
+
     def test_pdfa_merge_falls_back_to_standard_pdf_merge(self):
         with TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -3282,6 +3427,39 @@ class TenderContractSigningTests(APITestCase):
         self.contract.refresh_from_db()
         self.assertEqual(self.contract.signature_status, ContractSignatureStatus.UPLOADED)
 
+    def test_reject_resets_contract_to_generated_for_reupload(self):
+        """Rejecting a signed contract must not be a dead end — the vendor should be
+        able to see why and re-upload a corrected signed copy."""
+        self.client.force_authenticate(self.vendor)
+        self.client.post(
+            f"/api/tender-contracts/{self.contract.id}/sign/",
+            {"signed_file": SimpleUploadedFile("signed.pdf", b"%PDF-1.4 test", content_type="application/pdf")},
+            format="multipart",
+        )
+
+        self.client.force_authenticate(self.admin)
+        response = self.client.post(
+            f"/api/tender-contracts/{self.contract.id}/reject/",
+            {"rejection_reason": "Signature page is missing."},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.contract.refresh_from_db()
+        self.assertEqual(self.contract.status, ContractStatus.GENERATED)
+        self.assertEqual(self.contract.signature_status, ContractSignatureStatus.AWAITING)
+        self.assertFalse(self.contract.signed_file)
+        self.assertEqual(self.contract.rejection_reason, "Signature page is missing.")
+
+        # The vendor can now re-upload, since the contract is back in Generated state.
+        self.client.force_authenticate(self.vendor)
+        reupload = self.client.post(
+            f"/api/tender-contracts/{self.contract.id}/sign/",
+            {"signed_file": SimpleUploadedFile("signed_v2.pdf", b"%PDF-1.4 corrected", content_type="application/pdf")},
+            format="multipart",
+        )
+        self.assertEqual(reupload.status_code, status.HTTP_200_OK, reupload.data)
+
 
 class TenderContractAssignmentTests(APITestCase):
     def setUp(self):
@@ -3373,6 +3551,9 @@ class TenderContractAssignmentTests(APITestCase):
         self.assertEqual(response.data["assignment_defaults"]["technology_type"], "SHS")
         self.assertEqual(response.data["assignment_defaults"]["verification_method"], "manual")
         self.assertEqual(response.data["assignment_defaults"]["female_target_pct"], 50)
+        self.assertEqual(response.data["assignment_defaults"]["m1_disbursement_pct"], 20)
+        self.assertEqual(response.data["assignment_defaults"]["m2_installation_required_pct"], 80)
+        self.assertEqual(response.data["assignment_defaults"]["m3_installation_required_pct"], 100)
         self.assertEqual(response.data["contract_details"]["contract_ref"], self.contract.reference_number)
         self.assertEqual(response.data["assignment_fields"]["technology_type_read_only"], True)
         self.assertEqual(response.data["disbursement_preview"]["milestone_1_amount_lsl"], "24000.00")
@@ -3463,6 +3644,72 @@ class TenderContractAssignmentTests(APITestCase):
             ).exists()
         )
         queue_targets.assert_called_once_with(str(project.id), run_immediately=True, record_type="project")
+
+    @patch("rbf.tenders.views.queue_project_targets_sync")
+    def test_assign_post_applies_configured_milestone_plan(self, queue_targets):
+        self.client.force_authenticate(self.rmt_user)
+
+        response = self.client.post(
+            f"/api/tender-contracts/{self.contract.id}/assign/",
+            {
+                "project_duration_months": 12,
+                "installation_target": 250,
+                "technology_type": "SHS",
+                "energy_output_target_kwh": "20000.00",
+                "district_zones": ["Maseru"],
+                "verification_method": "manual",
+                "female_target_pct": 55,
+                "vulnerable_target_pct": 35,
+                "low_income_target_pct": 65,
+                "m1_disbursement_pct": 10,
+                "m2_disbursement_pct": 60,
+                "m3_disbursement_pct": 30,
+                "m2_installation_required_pct": 70,
+                "m3_installation_required_pct": 95,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        project = Project.objects.get(contract=self.contract)
+        milestones = list(project.milestones.order_by("milestone_number"))
+        self.assertEqual([m.disbursement_pct for m in milestones], [10, 60, 30])
+        self.assertEqual([m.percentage for m in milestones], [10, 60, 30])
+        self.assertEqual([m.required_installation_pct for m in milestones], [0, 70, 95])
+        self.assertEqual([str(m.amount_lsl) for m in milestones], ["12000.00", "72000.00", "36000.00"])
+        self.assertEqual(milestones[1].name, "70% Implementation")
+        self.assertIn("At least 70% of target installations verified", milestones[1].description)
+        self.assertIn("female-headed households at or above 55%", milestones[1].description)
+        self.assertIn("low-income households at or above 65%", milestones[2].description)
+
+    @patch("rbf.tenders.views.queue_project_targets_sync")
+    def test_assign_post_rejects_invalid_milestone_plan(self, queue_targets):
+        self.client.force_authenticate(self.rmt_user)
+        base_payload = {
+            "project_duration_months": 12,
+            "installation_target": 250,
+            "technology_type": "SHS",
+            "energy_output_target_kwh": "20000.00",
+            "district_zones": ["Maseru"],
+            "verification_method": "manual",
+        }
+
+        response = self.client.post(
+            f"/api/tender-contracts/{self.contract.id}/assign/",
+            {**base_payload, "m1_disbursement_pct": 20, "m2_disbursement_pct": 50, "m3_disbursement_pct": 20},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("milestone_disbursement_pct", response.data)
+
+        response = self.client.post(
+            f"/api/tender-contracts/{self.contract.id}/assign/",
+            {**base_payload, "m2_installation_required_pct": 90, "m3_installation_required_pct": 80},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("m3_installation_required_pct", response.data)
+        self.assertFalse(Project.objects.filter(contract=self.contract).exists())
 
     @patch("rbf.tenders.views.queue_project_targets_sync")
     def test_assign_post_normalizes_legacy_mini_grid_label(self, queue_targets):
@@ -3559,7 +3806,7 @@ class StandstillTransitionTests(APITestCase):
             format="json",
         )
         self.assertEqual(award_response.status_code, status.HTTP_200_OK)
-        self.assertEqual(award_response.data["status"], TenderStatus.STANDSTILL)
+        _approve_pending_intent_to_award(self.client, self.tender, as_user=self.admin_user)
 
         challenge_response = self.client.post(
             f"/api/tenders/{self.tender.id}/create_challenge/",
@@ -3587,7 +3834,7 @@ class StandstillTransitionTests(APITestCase):
         self.assertIsNotNone(self.tender.cooling_off_until)
         self.assertIsNone(self.tender.dispute_started_at)
 
-    def test_resolve_challenge_upheld_returns_to_standstill_with_new_intent(self):
+    def test_resolve_challenge_upheld_queues_replacement_intent_for_super_admin_approval(self):
         self.client.force_authenticate(self.admin_user)
 
         award_response = self.client.post(
@@ -3596,7 +3843,7 @@ class StandstillTransitionTests(APITestCase):
             format="json",
         )
         self.assertEqual(award_response.status_code, status.HTTP_200_OK)
-        self.assertEqual(award_response.data["status"], TenderStatus.STANDSTILL)
+        _approve_pending_intent_to_award(self.client, self.tender, as_user=self.admin_user)
 
         challenger = User.objects.create_user(
             username="challenger_vendor",
@@ -3634,6 +3881,24 @@ class StandstillTransitionTests(APITestCase):
             format="json",
         )
         self.assertEqual(resolve_response.status_code, status.HTTP_200_OK)
+
+        # The old intent is revoked straight away, but the replacement is only QUEUED —
+        # the challenger must not be treated as the winner until a Super Admin says so.
+        self.tender.refresh_from_db()
+        self.assertIsNone(self.tender.intent_to_award_bid_id)
+        self.assertIsNone(self.tender.cooling_off_until)
+        self.assertIsNone(self.tender.dispute_started_at)
+        self.assertEqual(self.tender.status, TenderStatus.EVALUATION)
+        pending = IntentToAwardRequest.objects.get(
+            tender=self.tender, status=IntentAwardRequestStatus.PENDING
+        )
+        self.assertEqual(pending.status, IntentAwardRequestStatus.PENDING)
+        self.assertTrue(pending.from_challenge)
+        self.assertEqual(str(pending.bid_id), str(challenger_bid.id))
+        self.assertIn("Challenge upheld", pending.ec_override_reason)
+
+        _approve_pending_intent_to_award(self.client, self.tender, as_user=self.admin_user)
+
         self.tender.refresh_from_db()
         self.assertEqual(self.tender.status, TenderStatus.STANDSTILL)
         self.assertEqual(str(self.tender.intent_to_award_bid_id), str(challenger_bid.id))
@@ -3651,7 +3916,7 @@ class StandstillTransitionTests(APITestCase):
             format="json",
         )
         self.assertEqual(award_response.status_code, status.HTTP_200_OK)
-        self.assertEqual(award_response.data["status"], TenderStatus.STANDSTILL)
+        _approve_pending_intent_to_award(self.client, self.tender, as_user=self.admin_user)
 
         self.tender.refresh_from_db()
         self.tender.cooling_off_until = timezone.now() - timedelta(minutes=1)
@@ -3680,6 +3945,8 @@ class StandstillTransitionTests(APITestCase):
             format="json",
         )
         self.assertEqual(award_response.status_code, status.HTTP_200_OK)
+        _approve_pending_intent_to_award(self.client, self.tender, as_user=self.admin_user)
+
         self.tender.refresh_from_db()
         self.assertEqual(self.tender.status, TenderStatus.STANDSTILL)
 
@@ -5310,16 +5577,32 @@ class LotWiseTenderTests(APITestCase):
         )
         self.assertEqual(award2.status_code, status.HTTP_200_OK, award2.data)
 
+        # Each lot's intent is queued independently, then approved independently — and
+        # only the approval starts that lot's cooling-off clock.
+        self.lot1.refresh_from_db()
+        self.lot2.refresh_from_db()
+        self.assertIsNone(self.lot1.intent_to_award_bid_id)
+        self.assertIsNone(self.lot2.intent_to_award_bid_id)
+
+        _approve_pending_intent_to_award(self.client, self.tender, as_user=self.admin_user, lot=self.lot1)
+        _approve_pending_intent_to_award(self.client, self.tender, as_user=self.admin_user, lot=self.lot2)
+
         self.tender.refresh_from_db()
         self.assertEqual(self.tender.status, TenderStatus.STANDSTILL)
         self.lot1.refresh_from_db()
         self.lot2.refresh_from_db()
-        self.assertEqual(self.lot1.awarded_vendor_id, str(self.vendor_a.id))
-        self.assertEqual(self.lot2.awarded_vendor_id, str(self.vendor_b.id))
+        # Only intent has been issued so far — awarded_vendor_id is set only once
+        # confirm_award actually confirms the lot, not at intent-to-award time.
+        self.assertEqual(self.lot1.awarded_vendor_id, "")
+        self.assertEqual(self.lot2.awarded_vendor_id, "")
+        self.assertEqual(self.lot1.intent_to_award_bid_id, bid_a.id)
+        self.assertEqual(self.lot2.intent_to_award_bid_id, bid_b.id)
 
-        # Cooling-off is 0 days by default in this setup's tender -> confirm immediately.
-        self.tender.cooling_off_until = timezone.now() - timedelta(minutes=1)
-        self.tender.save(update_fields=["cooling_off_until"])
+        # Each lot got its own cooling-off window when its intent was issued.
+        self.lot1.cooling_off_until = timezone.now() - timedelta(minutes=1)
+        self.lot1.save(update_fields=["cooling_off_until"])
+        self.lot2.cooling_off_until = timezone.now() - timedelta(minutes=1)
+        self.lot2.save(update_fields=["cooling_off_until"])
 
         confirm = self.client.post(f"/api/tenders/{self.tender.id}/confirm_award/", {}, format="json")
         self.assertEqual(confirm.status_code, status.HTTP_200_OK, confirm.data)
@@ -5329,6 +5612,10 @@ class LotWiseTenderTests(APITestCase):
 
         self.tender.refresh_from_db()
         self.assertEqual(self.tender.status, TenderStatus.AWARDED)
+        self.lot1.refresh_from_db()
+        self.lot2.refresh_from_db()
+        self.assertEqual(self.lot1.awarded_vendor_id, str(self.vendor_a.id))
+        self.assertEqual(self.lot2.awarded_vendor_id, str(self.vendor_b.id))
         contracts = TenderContract.objects.filter(tender=self.tender)
         self.assertEqual(contracts.count(), 2)
         self.assertEqual({c.lot_id for c in contracts}, {self.lot1.id, self.lot2.id})
@@ -5363,14 +5650,263 @@ class LotWiseTenderTests(APITestCase):
             format="json",
         )
         self.assertEqual(award.status_code, status.HTTP_200_OK, award.data)
+        _approve_pending_intent_to_award(self.client, self.tender, as_user=self.admin_user, lot=self.lot1)
 
-        self.tender.cooling_off_until = timezone.now() - timedelta(minutes=1)
-        self.tender.save(update_fields=["cooling_off_until"])
+        self.lot1.refresh_from_db()
+        self.lot1.cooling_off_until = timezone.now() - timedelta(minutes=1)
+        self.lot1.save(update_fields=["cooling_off_until"])
         confirm = self.client.post(f"/api/tenders/{self.tender.id}/confirm_award/", {}, format="json")
         self.assertEqual(confirm.status_code, status.HTTP_200_OK, confirm.data)
 
         contract = TenderContract.objects.get(tender=self.tender, lot=self.lot1)
         self.assertEqual(contract.resolved_award_value(), Decimal("100000"))
+
+    def test_award_lot_notifies_winner_and_regret_letter_to_other_lot_bidder(self):
+        """award_lot must notify both the lot's winner and its other bidder(s) —
+        previously it sent no notifications at all. The notices go out on approval, not
+        on the RBF's request, so no bidder hears anything while it is queued."""
+        bid_a = self._submitted_financial_bid(self.vendor_a, {self.lot1: 100000})
+        bid_b = self._submitted_financial_bid(self.vendor_b, {self.lot1: 150000})
+        self._score_technical(bid_a, score=80)
+        self._score_technical(bid_b, score=75)
+        self._score_financial_for_lot(bid_a, self.lot1, 100)
+        self._score_financial_for_lot(bid_b, self.lot1, 67)
+
+        self.client.force_authenticate(self.admin_user)
+        award = self.client.post(
+            f"/api/tenders/{self.tender.id}/award_lot/",
+            {"lot_id": str(self.lot1.id), "bid_id": str(bid_a.id)},
+            format="json",
+        )
+        self.assertEqual(award.status_code, status.HTTP_200_OK, award.data)
+        self.assertFalse(Notification.objects.filter(event="intent_to_award").exists())
+
+        _approve_pending_intent_to_award(self.client, self.tender, as_user=self.admin_user, lot=self.lot1)
+
+        winner_note = Notification.objects.get(recipient_id=str(self.vendor_a.id), event="intent_to_award")
+        self.assertIn("Best Evaluated Bidder", winner_note.title)
+        self.assertIn("Lot 1", winner_note.title)
+        loser_note = Notification.objects.get(recipient_id=str(self.vendor_b.id), event="intent_to_award")
+        self.assertIn("Regret Letter", loser_note.title)
+
+    def test_award_lot_gives_each_lot_its_own_cooling_off_window(self):
+        """Lot 2's intent, issued after Lot 1's, must get its own full cooling-off
+        window rather than inheriting whatever is left of Lot 1's shared clock."""
+        bid_a = self._submitted_financial_bid(self.vendor_a, {self.lot1: 100000, self.lot2: 200000})
+        self._score_technical(bid_a, score=80)
+        self._score_financial_for_lot(bid_a, self.lot1, 100)
+        self._score_financial_for_lot(bid_a, self.lot2, 100)
+
+        self.client.force_authenticate(self.admin_user)
+        self.client.post(
+            f"/api/tenders/{self.tender.id}/award_lot/",
+            {"lot_id": str(self.lot1.id), "bid_id": str(bid_a.id)},
+            format="json",
+        )
+        _approve_pending_intent_to_award(self.client, self.tender, as_user=self.admin_user, lot=self.lot1)
+        self.lot1.refresh_from_db()
+        # Simulate time passing before Lot 2's intent is issued.
+        self.lot1.cooling_off_until = timezone.now() - timedelta(days=3)
+        self.lot1.save(update_fields=["cooling_off_until"])
+
+        award2 = self.client.post(
+            f"/api/tenders/{self.tender.id}/award_lot/",
+            {"lot_id": str(self.lot2.id), "bid_id": str(bid_a.id)},
+            format="json",
+        )
+        self.assertEqual(award2.status_code, status.HTTP_200_OK, award2.data)
+        self.lot2.refresh_from_db()
+        # The window only starts at approval, so nothing is ticking while it is queued.
+        self.assertIsNone(self.lot2.cooling_off_until)
+
+        _approve_pending_intent_to_award(self.client, self.tender, as_user=self.admin_user, lot=self.lot2)
+
+        # Lot 2's own window starts fresh from approval, not from Lot 1's already-elapsed one.
+        self.assertGreater(self.lot2.cooling_off_until, timezone.now() + timedelta(days=5))
+
+    def test_lot_already_issued_cannot_be_awarded_again(self):
+        """Once a lot's intent has been approved and issued, that lot is closed. A second
+        request for it must be refused — otherwise a later approval would silently
+        re-award the lot, restart its cooling-off window and re-notify the bidders."""
+        bid_a = self._submitted_financial_bid(self.vendor_a, {self.lot1: 100000})
+        bid_b = self._submitted_financial_bid(self.vendor_b, {self.lot1: 90000})
+        self._score_technical(bid_a, score=80)
+        self._score_technical(bid_b, score=75)
+        self._score_financial_for_lot(bid_a, self.lot1, 100)
+        self._score_financial_for_lot(bid_b, self.lot1, 100)
+
+        self.client.force_authenticate(self.admin_user)
+        first = self.client.post(
+            f"/api/tenders/{self.tender.id}/award_lot/",
+            {"lot_id": str(self.lot1.id), "bid_id": str(bid_a.id)},
+            format="json",
+        )
+        self.assertEqual(first.status_code, status.HTTP_200_OK, first.data)
+        _approve_pending_intent_to_award(self.client, self.tender, as_user=self.admin_user, lot=self.lot1)
+        self.lot1.refresh_from_db()
+        issued_bid_id = str(self.lot1.intent_to_award_bid_id)
+        cooling_off_until = self.lot1.cooling_off_until
+
+        # The tender is now in STANDSTILL, so a fresh request for the same lot must fail
+        # rather than queue a second award for a lot that already has a live intent.
+        # ec_override_reason is supplied on purpose: it clears the EC-agreement gate so
+        # the request would otherwise succeed, leaving the already-issued lot guard as
+        # the only thing that can refuse it.
+        second = self.client.post(
+            f"/api/tenders/{self.tender.id}/award_lot/",
+            {"lot_id": str(self.lot1.id), "bid_id": str(bid_b.id), "ec_override_reason": "Committee reconsidered."},
+            format="json",
+        )
+        self.assertEqual(second.status_code, status.HTTP_400_BAD_REQUEST, second.data)
+        self.assertIn("cooling-off", str(second.data["detail"]))
+        self.assertEqual(
+            IntentToAwardRequest.objects.filter(
+                tender=self.tender, lot=self.lot1, status=IntentAwardRequestStatus.PENDING
+            ).count(),
+            0,
+        )
+
+        self.lot1.refresh_from_db()
+        self.assertEqual(str(self.lot1.intent_to_award_bid_id), issued_bid_id)
+        self.assertEqual(self.lot1.cooling_off_until, cooling_off_until)
+
+    def test_confirmed_lot_cannot_be_awarded_again(self):
+        """A confirmed lot is final: revoking the tender's intent must not open a hole
+        that lets an already-confirmed lot be re-awarded through a new request."""
+        bid_a = self._submitted_financial_bid(self.vendor_a, {self.lot1: 100000})
+        bid_b = self._submitted_financial_bid(self.vendor_b, {self.lot1: 90000})
+        self._score_technical(bid_a, score=80)
+        self._score_technical(bid_b, score=75)
+        self._score_financial_for_lot(bid_a, self.lot1, 100)
+        self._score_financial_for_lot(bid_b, self.lot1, 100)
+
+        self.client.force_authenticate(self.admin_user)
+        self.client.post(
+            f"/api/tenders/{self.tender.id}/award_lot/",
+            {"lot_id": str(self.lot1.id), "bid_id": str(bid_a.id)},
+            format="json",
+        )
+        _approve_pending_intent_to_award(self.client, self.tender, as_user=self.admin_user, lot=self.lot1)
+        self.lot1.refresh_from_db()
+        self.lot1.cooling_off_until = timezone.now() - timedelta(minutes=1)
+        self.lot1.save(update_fields=["cooling_off_until"])
+        self.client.post(
+            f"/api/tenders/{self.tender.id}/confirm_award/",
+            {"lot_id": str(self.lot1.id)},
+            format="json",
+        )
+        self.lot1.refresh_from_db()
+        self.assertIsNotNone(self.lot1.awarded_vendor_id)
+
+        second = self.client.post(
+            f"/api/tenders/{self.tender.id}/award_lot/",
+            {"lot_id": str(self.lot1.id), "bid_id": str(bid_b.id), "ec_override_reason": "Committee reconsidered."},
+            format="json",
+        )
+        self.assertEqual(second.status_code, status.HTTP_400_BAD_REQUEST, second.data)
+        self.assertIn("cannot be awarded again", str(second.data["detail"]))
+        self.lot1.refresh_from_db()
+        self.assertEqual(self.lot1.awarded_vendor_id, str(self.vendor_a.id))
+
+    def test_confirm_award_for_one_lot_leaves_other_lot_pending(self):
+        """Each lot must be confirmable independently: confirming Lot 1 must not
+        require Lot 2's cooling-off to have elapsed, and must leave Lot 2 untouched."""
+        bid_a = self._submitted_financial_bid(self.vendor_a, {self.lot1: 100000})
+        bid_b = self._submitted_financial_bid(self.vendor_b, {self.lot2: 120000})
+        self._score_technical(bid_a, score=80)
+        self._score_technical(bid_b, score=75)
+        self._score_financial_for_lot(bid_a, self.lot1, 100)
+        self._score_financial_for_lot(bid_b, self.lot2, 100)
+
+        self.client.force_authenticate(self.admin_user)
+        self.client.post(
+            f"/api/tenders/{self.tender.id}/award_lot/",
+            {"lot_id": str(self.lot1.id), "bid_id": str(bid_a.id)},
+            format="json",
+        )
+        self.client.post(
+            f"/api/tenders/{self.tender.id}/award_lot/",
+            {"lot_id": str(self.lot2.id), "bid_id": str(bid_b.id)},
+            format="json",
+        )
+        _approve_pending_intent_to_award(self.client, self.tender, as_user=self.admin_user, lot=self.lot1)
+        _approve_pending_intent_to_award(self.client, self.tender, as_user=self.admin_user, lot=self.lot2)
+        self.lot1.refresh_from_db()
+        self.lot1.cooling_off_until = timezone.now() - timedelta(minutes=1)
+        self.lot1.save(update_fields=["cooling_off_until"])
+        # Lot 2's own cooling-off has NOT elapsed yet.
+        self.lot2.refresh_from_db()
+        self.assertGreater(self.lot2.cooling_off_until, timezone.now())
+
+        confirm = self.client.post(
+            f"/api/tenders/{self.tender.id}/confirm_award/",
+            {"lot_id": str(self.lot1.id)},
+            format="json",
+        )
+        self.assertEqual(confirm.status_code, status.HTTP_200_OK, confirm.data)
+
+        self.tender.refresh_from_db()
+        self.lot1.refresh_from_db()
+        self.lot2.refresh_from_db()
+        self.assertEqual(self.tender.status, TenderStatus.STANDSTILL)
+        self.assertIsNotNone(self.lot1.awarded_at)
+        self.assertEqual(self.lot1.awarded_vendor_id, str(self.vendor_a.id))
+        self.assertIsNone(self.lot2.awarded_at)
+        self.assertEqual(self.lot2.awarded_vendor_id, "")
+
+        # Bulk confirm without a lot_id must skip Lot 2 since its window hasn't elapsed.
+        bulk_confirm = self.client.post(f"/api/tenders/{self.tender.id}/confirm_award/", {}, format="json")
+        self.assertEqual(bulk_confirm.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("cooling-off", bulk_confirm.data["detail"].lower())
+
+    def test_revoke_intent_preserves_already_confirmed_lot(self):
+        """Revoking pending intent on Lot 2 must not disturb Lot 1, which was already
+        confirmed-awarded and has a real contract."""
+        bid_a = self._submitted_financial_bid(self.vendor_a, {self.lot1: 100000})
+        bid_b = self._submitted_financial_bid(self.vendor_b, {self.lot2: 120000})
+        self._score_technical(bid_a, score=80)
+        self._score_technical(bid_b, score=75)
+        self._score_financial_for_lot(bid_a, self.lot1, 100)
+        self._score_financial_for_lot(bid_b, self.lot2, 100)
+
+        self.client.force_authenticate(self.admin_user)
+        self.client.post(
+            f"/api/tenders/{self.tender.id}/award_lot/",
+            {"lot_id": str(self.lot1.id), "bid_id": str(bid_a.id)},
+            format="json",
+        )
+        self.client.post(
+            f"/api/tenders/{self.tender.id}/award_lot/",
+            {"lot_id": str(self.lot2.id), "bid_id": str(bid_b.id)},
+            format="json",
+        )
+        _approve_pending_intent_to_award(self.client, self.tender, as_user=self.admin_user, lot=self.lot1)
+        _approve_pending_intent_to_award(self.client, self.tender, as_user=self.admin_user, lot=self.lot2)
+        self.lot1.refresh_from_db()
+        self.lot1.cooling_off_until = timezone.now() - timedelta(minutes=1)
+        self.lot1.save(update_fields=["cooling_off_until"])
+        self.client.post(
+            f"/api/tenders/{self.tender.id}/confirm_award/",
+            {"lot_id": str(self.lot1.id)},
+            format="json",
+        )
+
+        revoke = self.client.post(f"/api/tenders/{self.tender.id}/revoke_intent/", {}, format="json")
+        self.assertEqual(revoke.status_code, status.HTTP_200_OK, revoke.data)
+
+        self.tender.refresh_from_db()
+        self.lot1.refresh_from_db()
+        self.lot2.refresh_from_db()
+        # Lot 1 is untouched — a done deal with a real contract.
+        self.assertIsNotNone(self.lot1.awarded_at)
+        self.assertEqual(self.lot1.awarded_vendor_id, str(self.vendor_a.id))
+        self.assertTrue(TenderContract.objects.filter(tender=self.tender, lot=self.lot1).exists())
+        # Lot 2's still-pending intent was revoked.
+        self.assertIsNone(self.lot2.intent_to_award_bid)
+        self.assertIsNone(self.lot2.awarded_at)
+        # Tender must not be forced back to EVALUATION out from under a lot that's
+        # already confirmed-awarded.
+        self.assertEqual(self.tender.status, TenderStatus.STANDSTILL)
 
     def test_eoi_submission_requires_declared_lots_for_lot_wise_tender(self):
         self.client.force_authenticate(self.vendor_a)
@@ -6270,7 +6806,12 @@ class CommitteeAwardGatingTests(APITestCase):
             format="json",
         )
         self.assertEqual(awarded.status_code, status.HTTP_200_OK, awarded.data)
+        self.assertEqual(awarded.data["intent_award_request"]["status"], IntentAwardRequestStatus.PENDING)
         self.tender.refresh_from_db()
+        self.assertIsNone(self.tender.intent_to_award_bid_id)
+
+        _approve_pending_intent_to_award(self.client, self.tender, as_user=self.admin_user)
+
         self.assertEqual(self.tender.status, TenderStatus.STANDSTILL)
         self.assertEqual(str(self.tender.intent_to_award_bid_id), str(self.tech_bid.id))
 
@@ -6291,3 +6832,460 @@ class CommitteeAwardGatingTests(APITestCase):
         )
         self.assertEqual(blocked.status_code, status.HTTP_409_CONFLICT)
         self.assertIn("reasons", blocked.data)
+
+
+class IntentToAwardApprovalTests(APITestCase):
+    """The RBF's intent-to-award click only QUEUES a request. Nothing about the award
+    may move — no standby status, no cooling-off window, no awarded vendor, no bidder
+    notices — until a Super Admin approves that specific request."""
+
+    def setUp(self):
+        self.admin_user = User.objects.create_user(
+            username="ita_admin",
+            password="securePass123",
+            role=UserRole.ADMIN,
+            status="Active",
+            full_name="ITA Super Admin",
+            email="ita-admin@example.com",
+        )
+        self.rmt_user = User.objects.create_user(
+            username="ita_rmt",
+            password="securePass123",
+            role=UserRole.RBF_OFFICIAL,
+            status="Active",
+            full_name="ITA RBF Official",
+            email="ita-rmt@example.com",
+        )
+        self.vendor = User.objects.create_user(
+            username="ita_vendor",
+            password="securePass123",
+            role=UserRole.VENDOR,
+            status="Active",
+            full_name="ITA Vendor",
+            email="ita-vendor@example.com",
+        )
+        self.tender = Tender.objects.create(
+            reference_number="ITA-001",
+            name="Intent To Award Approval",
+            department="DoE",
+            category="SHS",
+            status=TenderStatus.EVALUATION,
+            deadline=timezone.now(),
+            technology_types=["Solar Home System"],
+            cooling_off_days=14,
+        )
+        self.bid = TenderBid.objects.create(
+            tender=self.tender,
+            vendor_id=str(self.vendor.id),
+            vendor_name=self.vendor.full_name,
+            vendor_email=self.vendor.email,
+            bid_amount=250000,
+            status=BidStatus.SUBMITTED,
+        )
+        TenderBidEvaluation.objects.create(
+            bid=self.bid,
+            evaluator=self.admin_user,
+            stage=EvaluationStage.TECHNICAL,
+            status=EvaluationStatus.SCORED,
+            technical_score=18,
+            feasibility_score=14,
+            kpi_score=9,
+            gender_score=8,
+            environmental_score=4,
+            om_score=9,
+            total_score=62,
+        )
+        TenderBidEvaluation.objects.create(
+            bid=self.bid,
+            evaluator=self.admin_user,
+            stage=EvaluationStage.FINANCIAL,
+            status=EvaluationStatus.SCORED,
+            financial_score=74,
+            financial_score_auto_calculated=True,
+            total_score=74,
+        )
+        self.tender.lots.all().delete()
+        self.client.force_authenticate(self.rmt_user)
+
+    def _assert_no_award_side_effects(self, *, bid_status=None):
+        self.tender.refresh_from_db()
+        self.bid.refresh_from_db()
+        self.assertEqual(self.tender.status, TenderStatus.EVALUATION)
+        self.assertIsNone(self.tender.intent_to_award_bid_id)
+        self.assertIsNone(self.tender.intent_to_award_at)
+        self.assertIsNone(self.tender.cooling_off_until)
+        self.assertFalse(self.tender.awarded_vendor_id)
+        self.assertFalse(self.tender.awarded_vendor_name)
+        if bid_status is not None:
+            self.assertEqual(self.bid.status, bid_status)
+        # The bidder must not learn about an award before a Super Admin approves.
+        self.assertFalse(
+            Notification.objects.filter(
+                event__startswith="intent_to_award",
+                linked_entity_id=str(self.tender.id),
+                recipient_id=str(self.vendor.id),
+            ).exists()
+        )
+
+    def _vendor_client(self):
+        """A client authenticated as an unrelated, pre-qualified unsuccessful bidder."""
+        other = User.objects.create_user(
+            username="ita_rival",
+            password="securePass123",
+            role=UserRole.VENDOR,
+            status="Active",
+            full_name="ITA Rival Bidder",
+            organization_name="ITA Rival Ltd",
+        )
+        VendorPrequalification.objects.create(
+            vendor=other,
+            company_name=other.organization_name,
+            status=PrequalificationStatus.APPROVED,
+            tech_tier="Level 3",
+            female_beneficiary_target=55,
+            vulnerable_group_target=35,
+        )
+        client = APIClient()
+        client.force_authenticate(other)
+        return client
+
+    def _propose(self):
+        response = self.client.post(
+            f"/api/tenders/{self.tender.id}/award/",
+            {
+                "bid_id": str(self.bid.id),
+                "awarded_vendor_id": str(self.vendor.id),
+                "awarded_vendor_name": self.vendor.full_name,
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        return IntentToAwardRequest.objects.get(
+            tender=self.tender, status=IntentAwardRequestStatus.PENDING
+        )
+
+    def test_award_click_only_queues_a_request_and_changes_nothing(self):
+        pending = self._propose()
+
+        self.assertEqual(pending.status, IntentAwardRequestStatus.PENDING)
+        self.assertEqual(pending.requested_by_id, self.rmt_user.id)
+        self.assertEqual(str(pending.bid_id), str(self.bid.id))
+        self.assertEqual(pending.proposed_vendor_id, str(self.vendor.id))
+        self.assertFalse(pending.from_challenge)
+        self.assertIsNone(pending.reviewed_by_id)
+        self._assert_no_award_side_effects(bid_status=BidStatus.SUBMITTED)
+
+    def test_whole_tender_request_serializes_a_null_lot(self):
+        """A whole-tender decision unit has no lot; the nullable nested source must
+        serialize as null rather than blowing up."""
+        self._propose()
+        payload = IntentToAwardRequest.objects.get(tender=self.tender)
+        data = IntentToAwardRequestSerializer(payload).data
+        self.assertIsNone(data["lot"])
+        self.assertIsNone(data["lot_id"])
+        self.assertEqual(data["lot_name"], "")
+        self.assertEqual(data["tender_reference_number"], self.tender.reference_number)
+        self.assertEqual(data["tender_name"], self.tender.name)
+
+    def test_queued_proposal_is_embargoed_from_bidders_and_the_public(self):
+        """A pending request names the proposed winner before the Super Admin has
+        approved it. Tenders are readable publicly and by every vendor, so the proposal
+        must not appear in those payloads — only in the RBF/Super Admin views."""
+        self._propose()
+        winner = self.vendor.full_name
+        self.assertTrue(winner)
+
+        # An intent to award can be requested while the tender is still PUBLISHED, and a
+        # PUBLISHED tender is readable by the public and by every approved vendor — which
+        # is exactly the window where this leak would be exposed.
+        self.tender.status = TenderStatus.PUBLISHED
+        self.tender.save(update_fields=["status"])
+        self.tender.refresh_from_db()
+
+        for label, client in (("anonymous", APIClient()), ("other vendor", self._vendor_client())):
+            for endpoint in ("", "/award_ranking/"):
+                response = client.get(f"/api/tenders/{self.tender.id}/{endpoint}")
+                if response.status_code == status.HTTP_404_NOT_FOUND:
+                    # Not reachable by this caller at all, so nothing can leak.
+                    continue
+                self.assertEqual(response.status_code, status.HTTP_200_OK, f"{label}{endpoint}")
+                body = json.dumps(response.data)
+                self.assertNotIn(winner, body, f"{label}{endpoint} leaked the proposed winner")
+                if endpoint == "/award_ranking/":
+                    self.assertIsNone(response.data["pending_intent_award_request"], f"{label}{endpoint}")
+                else:
+                    self.assertEqual(response.data["pending_intent_award_requests"], [], f"{label}{endpoint}")
+                    for lot_payload in response.data.get("lots") or []:
+                        self.assertIsNone(lot_payload["pending_intent_award_request"], f"{label}{endpoint}")
+
+        # The RBF and the Super Admin still see the whole thing.
+        self.client.force_authenticate(self.rmt_user)
+        self.assertEqual(
+            len(self.client.get(f"/api/tenders/{self.tender.id}/").data["pending_intent_award_requests"]),
+            1,
+        )
+        self.client.force_authenticate(self.admin_user)
+        self.assertEqual(
+            self.client.get(f"/api/tenders/{self.tender.id}/award_ranking/").data["pending_intent_award_request"]["proposed_vendor_name"],
+            winner,
+        )
+
+    def test_second_request_is_blocked_while_one_is_pending(self):
+        self._propose()
+
+        duplicate = self.client.post(
+            f"/api/tenders/{self.tender.id}/award/",
+            {
+                "bid_id": str(self.bid.id),
+                "awarded_vendor_id": str(self.vendor.id),
+                "awarded_vendor_name": self.vendor.full_name,
+            },
+            format="json",
+        )
+        self.assertEqual(duplicate.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(IntentToAwardRequest.objects.count(), 1)
+        self._assert_no_award_side_effects(bid_status=BidStatus.SUBMITTED)
+
+    def test_award_ranking_exposes_the_pending_request(self):
+        self._propose()
+
+        ranking = self.client.get(f"/api/tenders/{self.tender.id}/award_ranking/")
+        self.assertEqual(ranking.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            ranking.data["pending_intent_award_request"]["status"],
+            IntentAwardRequestStatus.PENDING,
+        )
+        self.assertEqual(
+            ranking.data["pending_intent_award_request"]["proposed_vendor_name"],
+            self.vendor.full_name,
+        )
+
+    def test_rbf_cannot_approve_and_admin_queue_is_empty_until_a_request_exists(self):
+        self._propose()
+
+        forbidden = self.client.post(
+            f"/api/tenders/{self.tender.id}/approve_intent_award/", {}, format="json"
+        )
+        self.assertEqual(forbidden.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(
+            IntentToAwardRequest.objects.get(tender=self.tender).status,
+            IntentAwardRequestStatus.PENDING,
+        )
+        self._assert_no_award_side_effects(bid_status=BidStatus.SUBMITTED)
+
+        self.client.force_authenticate(self.admin_user)
+        queue = self.client.get("/api/tenders/pending_intent_award_approvals/")
+        self.assertEqual(queue.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [item["id"] for item in queue.data],
+            [IntentToAwardRequest.objects.get(tender=self.tender).id],
+        )
+
+    def test_admin_approval_is_the_step_that_issues_the_intent(self):
+        pending = self._propose()
+        self.client.force_authenticate(self.admin_user)
+
+        approved = self.client.post(
+            f"/api/tenders/{self.tender.id}/approve_intent_award/",
+            {"notes": "Verified EC ranking."},
+            format="json",
+        )
+        self.assertEqual(approved.status_code, status.HTTP_200_OK)
+
+        pending.refresh_from_db()
+        self.assertEqual(pending.status, IntentAwardRequestStatus.APPROVED)
+        self.assertEqual(pending.reviewed_by_id, self.admin_user.id)
+        self.assertGreaterEqual(pending.reviewed_at, pending.requested_at)
+        self.assertEqual(pending.notes, "Verified EC ranking.")
+
+        self.tender.refresh_from_db()
+        self.bid.refresh_from_db()
+        self.assertEqual(self.tender.status, TenderStatus.STANDSTILL)
+        self.assertEqual(str(self.tender.intent_to_award_bid_id), str(self.bid.id))
+        self.assertEqual(self.tender.awarded_vendor_id, str(self.vendor.id))
+        self.assertIsNotNone(self.tender.cooling_off_until)
+        self.assertEqual(self.bid.status, BidStatus.ACCEPTED)
+
+        queue = self.client.get("/api/tenders/pending_intent_award_approvals/")
+        self.assertEqual(queue.data, [])
+
+    def test_request_changes_leaves_the_award_untouched_and_requeues(self):
+        self._propose()
+        self.client.force_authenticate(self.admin_user)
+
+        response = self.client.post(
+            f"/api/tenders/{self.tender.id}/request_intent_award_changes/",
+            {"notes": "Attach the signed EC minute."},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self._assert_no_award_side_effects(bid_status=BidStatus.SUBMITTED)
+
+        first = IntentToAwardRequest.objects.get(tender=self.tender)
+        self.assertEqual(first.status, IntentAwardRequestStatus.CHANGES_REQUESTED)
+        self.assertEqual(first.notes, "Attach the signed EC minute.")
+
+        # RBF can pull it back and resubmit; the rejected request stays in the history.
+        self.client.force_authenticate(self.rmt_user)
+        resubmit = self.client.post(
+            f"/api/tenders/{self.tender.id}/award/",
+            {
+                "bid_id": str(self.bid.id),
+                "awarded_vendor_id": str(self.vendor.id),
+                "awarded_vendor_name": self.vendor.full_name,
+            },
+            format="json",
+        )
+        self.assertEqual(resubmit.status_code, status.HTTP_200_OK)
+        self.assertEqual(IntentToAwardRequest.objects.filter(tender=self.tender).count(), 2)
+        self.assertEqual(
+            IntentToAwardRequest.objects.filter(
+                tender=self.tender, status=IntentAwardRequestStatus.PENDING
+            ).count(),
+            1,
+        )
+        self._assert_no_award_side_effects(bid_status=BidStatus.SUBMITTED)
+
+    def test_rejection_is_final_and_notifies_the_rbf(self):
+        pending = self._propose()
+        self.client.force_authenticate(self.admin_user)
+
+        response = self.client.post(
+            f"/api/tenders/{self.tender.id}/reject_intent_award/",
+            {"notes": "Wrong bidder shortlisted."},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        pending.refresh_from_db()
+        self.assertEqual(pending.status, IntentAwardRequestStatus.REJECTED)
+        self.assertEqual(pending.notes, "Wrong bidder shortlisted.")
+        self._assert_no_award_side_effects(bid_status=BidStatus.SUBMITTED)
+        self.assertTrue(
+            Notification.objects.filter(
+                recipient_id=str(self.rmt_user.id),
+                event=f"intent_to_award_{IntentAwardRequestStatus.REJECTED}",
+                linked_entity_id=str(self.tender.id),
+            ).exists()
+        )
+
+        # A rejected request must not block a corrected resubmission.
+        self.client.force_authenticate(self.rmt_user)
+        resubmit = self.client.post(
+            f"/api/tenders/{self.tender.id}/award/",
+            {
+                "bid_id": str(self.bid.id),
+                "awarded_vendor_id": str(self.vendor.id),
+                "awarded_vendor_name": self.vendor.full_name,
+            },
+            format="json",
+        )
+        self.assertEqual(resubmit.status_code, status.HTTP_200_OK)
+
+    def test_rbf_can_withdraw_a_pending_request(self):
+        pending = self._propose()
+
+        response = self.client.post(
+            f"/api/tenders/{self.tender.id}/withdraw_intent_award_request/", {}, format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        pending.refresh_from_db()
+        self.assertEqual(pending.status, IntentAwardRequestStatus.WITHDRAWN)
+        self._assert_no_award_side_effects(bid_status=BidStatus.SUBMITTED)
+
+        # Withdrawn, not pending: a fresh request is allowed again.
+        again = self.client.post(
+            f"/api/tenders/{self.tender.id}/award/",
+            {
+                "bid_id": str(self.bid.id),
+                "awarded_vendor_id": str(self.vendor.id),
+                "awarded_vendor_name": self.vendor.full_name,
+            },
+            format="json",
+        )
+        self.assertEqual(again.status_code, status.HTTP_200_OK)
+
+    def test_withdraw_is_limited_to_the_official_who_raised_it(self):
+        """A queued request belongs to whoever submitted it — a different RBF official
+        must not be able to pull it back."""
+        other_rmt = User.objects.create_user(
+            username="ita_rmt_other",
+            password="securePass123",
+            role=UserRole.RBF_OFFICIAL,
+            status="Active",
+            full_name="ITA Other RBF Official",
+        )
+        self._propose()
+        self.client.force_authenticate(other_rmt)
+
+        response = self.client.post(
+            f"/api/tenders/{self.tender.id}/withdraw_intent_award_request/", {}, format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self._assert_no_award_side_effects(bid_status=BidStatus.SUBMITTED)
+
+    def test_requester_can_withdraw_and_a_super_admin_also_may(self):
+        pending = self._propose()
+        self.client.force_authenticate(self.admin_user)
+        as_admin = self.client.post(
+            f"/api/tenders/{self.tender.id}/withdraw_intent_award_request/", {}, format="json"
+        )
+        self.assertEqual(as_admin.status_code, status.HTTP_200_OK)
+        pending.refresh_from_db()
+        self.assertEqual(pending.status, IntentAwardRequestStatus.WITHDRAWN)
+
+    def test_decision_retires_the_admins_awaiting_approval_notice(self):
+        """Once the request is decided, the Super Admin's bell must not still show an
+        action waiting to be taken."""
+        self._propose()
+        admins = list(User.objects.filter(role=UserRole.ADMIN).values_list('id', flat=True))
+        event = f"intent_to_award_approval_requested"
+        self.assertEqual(
+            Notification.objects.filter(
+                recipient_id__in=[str(a) for a in admins],
+                event=event,
+                linked_entity_id=str(self.tender.id),
+                status=NotificationStatus.SENT,
+            ).count(),
+            len(admins),
+        )
+
+        self.client.force_authenticate(self.admin_user)
+        self.client.post(
+            f"/api/tenders/{self.tender.id}/approve_intent_award/", {}, format="json"
+        )
+        self.assertEqual(
+            Notification.objects.filter(
+                recipient_id__in=[str(a) for a in admins],
+                event=event,
+                linked_entity_id=str(self.tender.id),
+                status=NotificationStatus.SENT,
+            ).count(),
+            0,
+        )
+
+    def test_withdrawing_also_retires_the_admins_awaiting_approval_notice(self):
+        self._propose()
+        admins = list(User.objects.filter(role=UserRole.ADMIN).values_list('id', flat=True))
+        event = f"intent_to_award_approval_requested"
+        self.client.post(
+            f"/api/tenders/{self.tender.id}/withdraw_intent_award_request/", {}, format="json"
+        )
+        self.assertEqual(
+            Notification.objects.filter(
+                recipient_id__in=[str(a) for a in admins],
+                event=event,
+                linked_entity_id=str(self.tender.id),
+                status=NotificationStatus.SENT,
+            ).count(),
+            0,
+        )
+
+    def test_approval_without_a_pending_request_is_rejected(self):
+        self.client.force_authenticate(self.admin_user)
+
+        response = self.client.post(
+            f"/api/tenders/{self.tender.id}/approve_intent_award/", {}, format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self._assert_no_award_side_effects(bid_status=BidStatus.SUBMITTED)

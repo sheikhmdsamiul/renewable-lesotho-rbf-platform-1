@@ -33,6 +33,7 @@ from .models import (
 )
 from .gis import GpsValidator
 from .kpi import KpiService
+from .models import MilestoneCompletionReview
 from .integrations import ProspectService, queue_installation_sync, queue_project_targets_sync
 from rbf.tenders.models import ContractStatus, Tender, TenderContract
 
@@ -1002,8 +1003,26 @@ class ProjectApiTests(APITestCase):
         self.assertEqual(confirm_response.status_code, status.HTTP_200_OK)
         project.refresh_from_db()
         milestone3.refresh_from_db()
-        self.assertEqual(project.status, ProjectStatus.COMPLETED)
+        # Payment alone no longer completes the project: RBF must verify the final milestone.
+        self.assertEqual(project.status, ProjectStatus.DISBURSEMENT)
         self.assertEqual(milestone3.status, "paid")
+        self.assertEqual(milestone3.completion_review.status, "pending")
+
+        review_response = self.client.post(
+            f"/api/projects/milestones/{milestone3.id}/completion-review/",
+            {"decision": "proceed", "verification_notes": "All good"},
+            format="json",
+        )
+        self.assertEqual(review_response.status_code, status.HTTP_400_BAD_REQUEST)
+        review_response = self.client.post(
+            f"/api/projects/milestones/{milestone3.id}/completion-review/",
+            {"decision": "complete", "verification_notes": "Final installations verified on site."},
+            format="json",
+        )
+        self.assertEqual(review_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(review_response.data["completion_review"]["decision"], "complete")
+        project.refresh_from_db()
+        self.assertEqual(project.status, ProjectStatus.COMPLETED)
         self.assertTrue(
             AuditLog.objects.filter(action="project_completed", details__project_id=str(project.id)).exists()
         )
@@ -2346,6 +2365,12 @@ class ProjectKpiTests(APITestCase):
             status=PaymentClaimStatus.COMPLETED,
             declaration_accepted=True,
         )
+        self.milestone1_review = MilestoneCompletionReview.objects.create(
+            milestone=milestone1,
+            project=self.project,
+            status="decided",
+            decision="proceed",
+        )
         self.verified_1 = InstallationReport.objects.create(
             project=self.project,
             vendor=self.vendor,
@@ -2418,6 +2443,38 @@ class ProjectKpiTests(APITestCase):
         self.assertEqual(float(self.project.gender_impact), float(summary["gender_kpi"]["female_headed"]["percentage"]))
         self.assertEqual(float(self.project.uptime), float(summary["uptime_kpi"]["average_uptime_pct"]))
         self.assertEqual(float(self.project.energy_output), float(summary["energy_kpi"]["current_month_kwh"]))
+
+    def test_milestone_two_stays_locked_until_milestone_one_verified_to_proceed(self):
+        self.project.milestones.filter(milestone_number=2).update(required_installation_pct=20)
+        self.milestone1_review.status = "pending"
+        self.milestone1_review.decision = ""
+        self.milestone1_review.save()
+
+        summary = KpiService.for_project(str(self.project.id)).getFullKpiSummary()
+
+        milestone_two = summary["milestone_eligibility"]["milestone_2"]
+        self.assertFalse(milestone_two["conditions"]["milestone_1_verified"])
+        self.assertFalse(milestone_two["eligible"])
+        self.assertEqual(self.project_refresh().milestones.get(milestone_number=2).status, "pending")
+
+    def test_milestone_two_uses_configured_installation_requirement(self):
+        # 2 of 10 installations verified: below the default 80%, but meets a 20% requirement.
+        self.project.milestones.filter(milestone_number=2).update(required_installation_pct=20)
+
+        summary = KpiService.for_project(str(self.project.id)).getFullKpiSummary()
+
+        milestone_two = summary["milestone_eligibility"]["milestone_2"]
+        self.assertTrue(milestone_two["conditions"]["installations_80_pct"])
+        self.assertEqual(milestone_two["thresholds"]["installations_pct"], 20)
+        self.assertEqual(milestone_two["thresholds"]["female_pct"], 50)
+
+    def test_gender_kpi_uses_project_targets(self):
+        Project.objects.filter(id=self.project.id).update(female_target_pct=70, target_female_pct=70)
+
+        summary = KpiService.for_project(str(self.project.id)).getFullKpiSummary()
+
+        self.assertEqual(summary["gender_kpi"]["female_headed"]["target"], 70)
+        self.assertEqual(summary["milestone_eligibility"]["milestone_3"]["thresholds"]["female_pct"], 70)
 
     def test_milestone_two_becomes_claimable_with_80_percent_verified_and_non_blocking_flags(self):
         for index in range(3, 9):
@@ -3108,3 +3165,115 @@ class AnomalyFlagReviewWorkflowTests(APITestCase):
         self.client.force_authenticate(self.vendor_user)
         response = self._review({"status": "under_investigation", "investigation_notes": "Vendor trying."})
         self.assertIn(response.status_code, {status.HTTP_403_FORBIDDEN})
+
+
+class MilestoneCompletionReviewTests(APITestCase):
+    def setUp(self):
+        User = get_user_model()
+        self.vendor = User.objects.create_user(username="review_vendor", password="securePass123", role="Vendor", status="Active")
+        self.new_vendor = User.objects.create_user(
+            username="review_vendor_new", password="securePass123", role="Vendor", status="Active",
+            organization_name="New Solar Co",
+        )
+        self.rmt = User.objects.create_user(username="review_rmt", password="securePass123", role="RBF Management Team", status="Active")
+        self.tac = User.objects.create_user(username="review_tac", password="securePass123", role="TAC Member", status="Active")
+        self.project = Project.objects.create(
+            vendor_id=str(self.vendor.id),
+            vendor_name=self.vendor.username,
+            tech_type="SHS",
+            region="Maseru",
+            district="Maseru",
+            status=ProjectStatus.INSTALLATION,
+            project_reference="PRJ-REVIEW-001",
+        )
+        self.m1 = self.project.milestones.create(name="M1", milestone_number=1, percentage=20, amount=1000, status="paid")
+        self.m2 = self.project.milestones.create(name="M2", milestone_number=2, percentage=50, amount=2000, status="locked")
+        self.m3 = self.project.milestones.create(name="M3", milestone_number=3, percentage=30, amount=3000, status="locked")
+        self.review = MilestoneCompletionReview.objects.create(
+            milestone=self.m1, project=self.project, vendor_id=self.project.vendor_id, vendor_name=self.project.vendor_name,
+        )
+        self.url = f"/api/projects/milestones/{self.m1.id}/completion-review/"
+        cache.clear()
+
+    def _submit_m2_claim(self, vendor):
+        self.client.force_authenticate(vendor)
+        return self.client.post(
+            "/api/projects/claims/",
+            {"project": self.project.id, "milestone": self.m2.id, "claim_amount": "2000.00", "declaration_accepted": True},
+            format="json",
+        )
+
+    def test_only_rbf_or_super_admin_can_decide(self):
+        self.client.force_authenticate(self.tac)
+        response = self.client.post(self.url, {"decision": "proceed", "verification_notes": "ok"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_next_milestone_claim_blocked_until_proceed_decision(self):
+        response = self._submit_m2_claim(self.vendor)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Milestone 1 must be completed and verified", response.data["detail"])
+
+        self.client.force_authenticate(self.rmt)
+        response = self.client.post(self.url, {"decision": "proceed", "verification_notes": "Site visit confirmed."}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.review.refresh_from_db()
+        self.assertEqual(self.review.status, "decided")
+        self.assertEqual(self.review.decision, "proceed")
+        self.assertEqual(self.review.reviewed_by, self.rmt)
+        self.assertTrue(Notification.objects.filter(recipient_id=str(self.vendor.id), event="milestone_review_proceed").exists())
+
+        response = self._submit_m2_claim(self.vendor)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        self.client.force_authenticate(self.rmt)
+        response = self.client.post(self.url, {"decision": "close", "verification_notes": "again"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_close_decision_closes_project_and_cancels_remaining_milestones(self):
+        self.client.force_authenticate(self.rmt)
+        response = self.client.post(self.url, {"decision": "close", "verification_notes": "Vendor underperformed."}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.project.refresh_from_db()
+        self.assertEqual(self.project.status, ProjectStatus.CLOSED)
+        self.assertEqual(
+            list(self.project.milestones.order_by("milestone_number").values_list("status", flat=True)),
+            ["paid", "cancelled", "cancelled"],
+        )
+        response = self._submit_m2_claim(self.vendor)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_notes_required(self):
+        self.client.force_authenticate(self.rmt)
+        response = self.client.post(self.url, {"decision": "proceed", "verification_notes": ""}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("verification_notes", response.data)
+
+    def test_transfer_decision_reassigns_project_to_new_vendor(self):
+        self.client.force_authenticate(self.rmt)
+        response = self.client.post(self.url, {"decision": "transfer", "verification_notes": "Handover"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("new_vendor_id", response.data)
+
+        response = self.client.post(
+            self.url,
+            {"decision": "transfer", "verification_notes": "Original vendor withdrew.", "new_vendor_id": str(self.vendor.id)},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        response = self.client.post(
+            self.url,
+            {"decision": "transfer", "verification_notes": "Original vendor withdrew.", "new_vendor_id": str(self.new_vendor.id)},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.project.refresh_from_db()
+        self.review.refresh_from_db()
+        self.assertEqual(self.project.vendor_id, str(self.new_vendor.id))
+        self.assertEqual(self.project.vendor_name, "New Solar Co")
+        self.assertEqual(self.review.vendor_id, str(self.vendor.id))
+        self.assertEqual(self.review.transferred_to_vendor_id, str(self.new_vendor.id))
+        self.assertTrue(Notification.objects.filter(recipient_id=str(self.new_vendor.id), title="Project Transferred To You").exists())
+
+        self.assertEqual(self._submit_m2_claim(self.vendor).status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(self._submit_m2_claim(self.new_vendor).status_code, status.HTTP_201_CREATED)

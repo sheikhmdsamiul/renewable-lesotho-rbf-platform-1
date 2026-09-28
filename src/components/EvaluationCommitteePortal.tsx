@@ -344,6 +344,30 @@ export function FinancialEvaluationView() {
   const sortedRows = (rows: FinancialEvaluationRow[]) =>
     [...rows].sort((a, b) => (a.bidAmountBaseCurrency ?? a.bidAmount) - (b.bidAmountBaseCurrency ?? b.bidAmount));
 
+  const rowKey = (row: FinancialEvaluationRow, lotId?: string) => row.bidId + (lotId || "");
+
+  // Strict serial order, same rule as Technical Evaluation: flatten every (bid, lot)
+  // pair across ALL lots in tender-lot order (lot-wise) — or just the one sorted list
+  // (non-lot-wise) — into a single queue. Financial has no separate draft state (a
+  // finalize is an immediate submit), so "done" here means finalizedByMe specifically,
+  // not just any evaluation existing.
+  const dueKey = useMemo(() => {
+    if (!data) return null;
+    const groups = data.isLotWise
+      ? (data.lots || []).map((lot) => ({ lotId: lot.lotId as string | undefined, rows: sortedRows(lot.rows) }))
+      : [{ lotId: undefined as string | undefined, rows: sortedRows(data.rows || []) }];
+    for (const group of groups) {
+      for (const row of group.rows) {
+        if (!row.finalizedByMe) return rowKey(row, group.lotId);
+      }
+    }
+    return null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data]);
+
+  const isRowLocked = (row: FinancialEvaluationRow, lotId?: string) =>
+    !row.finalizedByMe && rowKey(row, lotId) !== dueKey;
+
   const renderRows = (rows: FinancialEvaluationRow[], lotId?: string) => {
     const pageKey = lotId || "all";
     const sorted = sortedRows(rows);
@@ -363,16 +387,22 @@ export function FinancialEvaluationView() {
               </tr>
             </thead>
             <tbody>
-              {pageRows.map((row) => (
+              {pageRows.map((row) => {
+                const locked = isRowLocked(row, lotId);
+                const isDue = !row.finalizedByMe && rowKey(row, lotId) === dueKey;
+                return (
                 <tr
                   key={row.bidId}
-                  className="border-t border-slate-100 cursor-pointer hover:bg-slate-50"
-                  onClick={() => setViewing({ row, lotId })}
+                  className={`border-t border-slate-100 ${locked ? "opacity-60 bg-slate-50/60" : "cursor-pointer hover:bg-slate-50"}`}
+                  onClick={() => { if (!locked) setViewing({ row, lotId }); }}
                 >
                   <td className="px-4 py-3 font-semibold text-slate-900">
                     {row.vendorName}
                     {row.bidId === lowestBidId && sorted.length > 1 && (
                       <span className="ml-2 badge bg-blue-50 text-blue-700">Lowest price</span>
+                    )}
+                    {isDue && (
+                      <span className="ml-2 badge bg-amber-100 text-amber-700">Next to score</span>
                     )}
                   </td>
                   <td className="px-4 py-3">
@@ -384,7 +414,9 @@ export function FinancialEvaluationView() {
                   <td className="px-4 py-3">{row.subsidyRequested != null ? `${row.bidCurrency || selectedTender?.biddingCurrency || "LSL"} ${row.subsidyRequested.toLocaleString()}` : "N/A"}</td>
                   <td className="px-4 py-3 font-bold text-emerald-700">{row.computedFinancialScore.toFixed(1)} / 100</td>
                   <td className="px-4 py-3">
-                    {row.submissionStatus === "submitted" ? (
+                    {locked ? (
+                      <span className="badge bg-slate-200 text-slate-600">Locked — evaluate in order</span>
+                    ) : row.submissionStatus === "submitted" ? (
                       <span className="badge bg-emerald-100 text-emerald-700">
                         {row.finalized ? "Finalized" : "Locked"}
                         {row.finalizedByMe ? " by you" : ""}
@@ -397,14 +429,17 @@ export function FinancialEvaluationView() {
                   </td>
                   <td className="px-4 py-3">
                     <button
-                      onClick={(e) => { e.stopPropagation(); setViewing({ row, lotId }); }}
-                      className="btn-secondary text-xs px-3 py-1.5"
+                      onClick={(e) => { e.stopPropagation(); if (!locked) setViewing({ row, lotId }); }}
+                      disabled={locked}
+                      title={locked ? "Evaluation runs in serial order — finalize the earlier bid(s) first." : undefined}
+                      className="btn-secondary text-xs px-3 py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       Review Bid
                     </button>
                   </td>
                 </tr>
-              ))}
+                );
+              })}
               {rows.length === 0 && (
                 <tr><td colSpan={6} className="px-4 py-6 text-center text-slate-500">No bids have cleared technical evaluation yet.</td></tr>
               )}

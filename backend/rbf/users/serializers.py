@@ -2,6 +2,7 @@ import re
 from secrets import choice as secret_choice
 
 from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import models
 from django.db.models import Q
 from rest_framework import serializers
@@ -30,6 +31,8 @@ from .models import (
     PrequalificationStatus,
 )
 from rbf.projects.models import AuditLog, ProspectSyncLog
+from rbf.common.uploads import validate_document_upload
+from django.utils import timezone as dj_timezone
 
 
 ADMIN_CREATE_ROLE_ALIASES = {
@@ -55,8 +58,50 @@ def generate_temporary_password(length: int = 12) -> str:
     return ''.join(secret_choice(alphabet) for _ in range(length))
 
 
+def mask_account_number(value) -> str:
+    digits = str(value or '')
+    if not digits:
+        return ''
+    return '*' * max(0, len(digits) - 4) + digits[-4:]
+
+
+def can_see_full_bank_details(request, vendor_id) -> bool:
+    """Only the vendor, the RBF Management Team and Super Admin see full
+    account numbers; other roles (TAC, PSC, DoE, auditors) see a masked value."""
+    user = getattr(request, 'user', None)
+    if not (user and user.is_authenticated):
+        return False
+    return user.role in {UserRole.ADMIN, UserRole.RBF_OFFICIAL} or str(user.id) == str(vendor_id)
+
+
+# Fields a self-registering (anonymous) vendor must never set.
+SELF_REGISTRATION_BLOCKED_FIELDS = (
+    'bank_name', 'bank_branch', 'bank_swift_code', 'bank_sort_code',
+    'tier_assignment', 'verification_zone', 'districts', 'must_change_password',
+)
+
+
+def normalize_mobile_number(value: str) -> str:
+    """Digits-only mobile in international form. An 8-digit Lesotho mobile
+    (starting 5 or 6) gets the 266 country code; other numbers must already
+    include their country code."""
+    digits = re.sub(r'\D', '', str(value or ''))
+    if len(digits) == 8:
+        if digits[0] not in '56':
+            raise serializers.ValidationError('Enter a Lesotho mobile number starting with 5 or 6, or include the country code.')
+        return f'266{digits}'
+    if digits.startswith('266'):
+        if len(digits) != 11 or digits[3] not in '56':
+            raise serializers.ValidationError('A Lesotho mobile number is +266 followed by 8 digits starting with 5 or 6.')
+        return digits
+    if not 10 <= len(digits) <= 15:
+        raise serializers.ValidationError('Enter a valid mobile number including the country code.')
+    return digits
+
+
 class UserSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, required=False, min_length=8)
+    consent_accepted = serializers.BooleanField(write_only=True, required=False)
     vendor_tag = serializers.SerializerMethodField(read_only=True)
     blacklist_summary = serializers.SerializerMethodField(read_only=True)
     permissions = serializers.SerializerMethodField(read_only=True)
@@ -99,12 +144,14 @@ class UserSerializer(serializers.ModelSerializer):
             'id', 'username', 'email', 'full_name', 'gender', 'role', 'region',
             'mobile_number', 'national_id', 'address',
             'organization_name', 'organization_type', 'technology_types',
-            'registration_certificate_name', 'tax_id', 'device_id', 'associated_entities',
+            'registration_certificate_name', 'registration_certificate', 'company_registration_number',
+            'registration_consent_at', 'consent_accepted',
+            'tax_id', 'device_id', 'associated_entities',
             'bank_name', 'bank_branch', 'bank_swift_code', 'bank_sort_code',
             'tier_assignment', 'verification_zone', 'districts',
             'status', 'must_change_password', 'password', 'vendor_tag', 'blacklist_summary', 'permissions'
         ]
-        read_only_fields = ['id']
+        read_only_fields = ['id', 'registration_consent_at']
 
     def validate_associated_entities(self, value):
         if value in (None, ''):
@@ -127,19 +174,61 @@ class UserSerializer(serializers.ModelSerializer):
             cleaned.append(text)
         return cleaned
 
-    def validate(self, attrs):
-        request = self.context.get('request')
-        if self.instance is None and request is not None and not request.user.is_authenticated:
-            # Public endpoint is for vendor self-registration only.
-            requested_role = attrs.get('role', UserRole.VENDOR)
-            if requested_role != UserRole.VENDOR:
-                raise serializers.ValidationError({'role': 'Only vendor registration is allowed.'})
-            attrs['status'] = 'Pending'
-            email = (attrs.get('email') or '').strip().lower()
+    def validate_registration_certificate(self, value):
+        return validate_document_upload(value, label='Registration certificate')
+
+    def _validate_self_registration(self, attrs):
+        """Checks for the public vendor sign-up (also used by the pre-OTP
+        precheck, which sets context['registration_precheck'])."""
+        requested_role = attrs.get('role', UserRole.VENDOR)
+        if requested_role != UserRole.VENDOR:
+            raise serializers.ValidationError({'role': 'Only vendor registration is allowed.'})
+        attrs['role'] = UserRole.VENDOR
+        attrs['status'] = 'Pending'
+        for field_name in SELF_REGISTRATION_BLOCKED_FIELDS:
+            attrs.pop(field_name, None)
+
+        errors = {}
+        email = (attrs.get('email') or '').strip().lower()
+        attrs['email'] = email
+        if email and User.objects.filter(email__iexact=email).exists():
+            errors['email'] = 'An account with this email already exists. Sign in or reset your password.'
+        username = str(attrs.get('username') or '').strip()
+        if username and User.objects.filter(username__iexact=username).exists():
+            errors['username'] = 'This username is already taken.'
+        tax_id = str(attrs.get('tax_id') or '').strip()
+        if tax_id and User.objects.filter(role=UserRole.VENDOR, tax_id__iexact=tax_id).exists():
+            errors['tax_id'] = 'A vendor with this Tax ID is already registered. Contact the RBF team if this is your organisation.'
+        registration_number = str(attrs.get('company_registration_number') or '').strip()
+        if not registration_number:
+            errors['company_registration_number'] = 'Company registration number is required.'
+        elif User.objects.filter(role=UserRole.VENDOR, company_registration_number__iexact=registration_number).exists():
+            errors['company_registration_number'] = 'A vendor with this registration number is already registered.'
+        certificate = attrs.get('registration_certificate')
+        if certificate is None:
+            errors['registration_certificate'] = 'Upload your company registration certificate (PDF, JPG or PNG).'
+        else:
+            attrs['registration_certificate_name'] = str(certificate.name)[:255]
+        if attrs.pop('consent_accepted', False) is not True:
+            errors['consent_accepted'] = 'You must accept the terms and privacy notice to register.'
+        else:
+            attrs['registration_consent_at'] = dj_timezone.now()
+        if errors:
+            raise serializers.ValidationError(errors)
+
+        if not self.context.get('registration_precheck'):
             cache_key = f'registration_otp_verified:{email}'
             cache = self.context.get('cache')
             if not cache or not cache.get(cache_key):
                 raise serializers.ValidationError({'email': 'OTP verification is required before registration.'})
+
+    def validate(self, attrs):
+        request = self.context.get('request')
+        if self.instance is None and request is not None and not request.user.is_authenticated:
+            # Public endpoint is for vendor self-registration only.
+            self._validate_self_registration(attrs)
+        else:
+            attrs.pop('consent_accepted', None)
 
         if self.instance is None and request is not None and request.user.is_authenticated:
             if request.user.role != UserRole.ADMIN:
@@ -161,9 +250,11 @@ class UserSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({'email': 'Email is required.'})
         if not mobile_value:
             raise serializers.ValidationError({'mobile_number': 'Mobile number is required.'})
-        mobile = str(mobile_value or '').strip()
-        if mobile and not re.fullmatch(r'\d{8,15}', mobile):
-            raise serializers.ValidationError({'mobile_number': 'Mobile number must be 8-15 digits.'})
+        if 'mobile_number' in attrs:
+            try:
+                attrs['mobile_number'] = normalize_mobile_number(attrs['mobile_number'])
+            except serializers.ValidationError as exc:
+                raise serializers.ValidationError({'mobile_number': exc.detail})
         if not region_value:
             raise serializers.ValidationError({'region': 'Region is required.'})
 
@@ -232,7 +323,16 @@ class UserSerializer(serializers.ModelSerializer):
         if self.instance is None and role == UserRole.VENDOR and not password:
             raise serializers.ValidationError({'password': 'This field is required.'})
         if password:
-            validate_password(password)
+            # Compare against the applicant's own details (similarity validator).
+            candidate = self.instance or User(
+                username=attrs.get('username', ''),
+                email=attrs.get('email', ''),
+                first_name=attrs.get('full_name', ''),
+            )
+            try:
+                validate_password(password, user=candidate)
+            except DjangoValidationError as exc:
+                raise serializers.ValidationError({'password': list(exc.messages)})
 
         reg_name = str(attrs.get('registration_certificate_name') or '').strip().lower()
         if reg_name and not reg_name.endswith(('.pdf', '.jpg', '.jpeg', '.png')):
@@ -652,7 +752,21 @@ class VendorPrequalificationSerializer(serializers.ModelSerializer):
             'reviewed_by',
             'reviewed_by_username',
             'vendor_username',
+            # Only the review actions change these.
+            'status',
+            'reviewer_comments',
         ]
+
+    REQUIRED_DOCUMENTS = {
+        'registration_certificate': 'Company registration certificate',
+        'trading_license': 'Trading licence',
+        'tax_compliance_certificate': 'Tax compliance certificate',
+        'authorized_signatory_id': 'Authorised signatory ID',
+        'experience_financial_proof': 'Experience / financial proof',
+    }
+    DOCUMENT_EXTENSIONS = ('pdf', 'docx', 'jpg', 'jpeg', 'png')
+    TECHNOLOGY_CHOICES = {'SHS', 'ICS', 'GMG', 'SWP', 'PUE'}
+    SWIFT_PATTERN = re.compile(r'^[A-Z]{6}[A-Z0-9]{2}([A-Z0-9]{3})?$')
 
     def validate(self, attrs):
         """Validate pre-qualification submission"""
@@ -669,56 +783,96 @@ class VendorPrequalificationSerializer(serializers.ModelSerializer):
             attrs['status'] = PrequalificationStatus.PENDING
             attrs['vendor'] = request.user
         
-        # Validate percentages
-        female_target = attrs.get('female_beneficiary_target', 50)
-        if female_target < 50:
-            raise serializers.ValidationError({
-                'female_beneficiary_target': 'Female beneficiary target must be at least 50%.'
-            })
-        
-        vulnerable_target = attrs.get('vulnerable_group_target', 30)
-        if vulnerable_target < 30:
-            raise serializers.ValidationError({
-                'vulnerable_group_target': 'Vulnerable group inclusion target must be at least 30%.'
-            })
-        
-        # Validate contact number length
-        contact = attrs.get('contact_number', '')
-        if contact and (len(contact) < 10 or len(contact) > 15):
-            raise serializers.ValidationError({
-                'contact_number': 'Contact number must be between 10-15 digits.'
-            })
-        
-        # Validate technology types
-        tech_types = attrs.get('technology_types', [])
-        if not tech_types:
-            raise serializers.ValidationError({
-                'technology_types': 'Select at least one technology type.'
-            })
+        errors = {}
 
-        def validate_file(field_name, max_size_mb=5, allowed_ext=None):
-            file_obj = attrs.get(field_name)
-            if not file_obj:
+        def current(field_name, default=None):
+            if field_name in attrs:
+                return attrs[field_name]
+            return getattr(self.instance, field_name, default) if self.instance is not None else default
+
+        def check_range(field_name, label, minimum, maximum):
+            value = current(field_name)
+            if value is None:
                 return
-            if file_obj.size > max_size_mb * 1024 * 1024:
-                raise serializers.ValidationError({
-                    field_name: f'File too large (max {max_size_mb}MB).'
-                })
-            valid_ext = allowed_ext or {'.pdf', '.doc', '.docx'}
-            import os
-            ext = os.path.splitext(file_obj.name)[1].lower()
-            if ext not in valid_ext:
-                raise serializers.ValidationError({
-                    field_name: 'Invalid file type. Allowed: PDF, DOC, DOCX.'
-                })
+            if value < minimum or value > maximum:
+                errors[field_name] = f'{label} must be between {minimum} and {maximum}.'
 
-        validate_file('trading_license')
-        validate_file('registration_certificate')
-        validate_file('tax_compliance_certificate')
-        validate_file('authorized_signatory_id')
-        validate_file('experience_financial_proof')
-        
+        check_range('female_beneficiary_target', 'Female beneficiary target (%)', 50, 100)
+        check_range('vulnerable_group_target', 'Vulnerable group target (%)', 30, 100)
+        check_range('years_experience', 'Years of experience', 0, 100)
+        check_range('prior_projects', 'Number of prior projects', 0, 100000)
+        check_range('districts_covered', 'Districts covered', 1, 10)
+        revenue = current('annual_revenue')
+        if revenue is not None and revenue < 0:
+            errors['annual_revenue'] = 'Annual revenue cannot be negative.'
+
+        tech_types = current('technology_types') or []
+        if not tech_types:
+            errors['technology_types'] = 'Select at least one technology type.'
+        elif not set(tech_types) <= self.TECHNOLOGY_CHOICES:
+            errors['technology_types'] = f'Technology types must be from: {", ".join(sorted(self.TECHNOLOGY_CHOICES))}.'
+        if not current('tech_tier'):
+            errors['tech_tier'] = 'Select your technology tier.'
+        if not current('gender_of_focal_person'):
+            errors['gender_of_focal_person'] = 'Select the gender of the focal person.'
+
+        if 'contact_number' in attrs or self.instance is None:
+            try:
+                attrs['contact_number'] = normalize_mobile_number(attrs.get('contact_number', ''))
+            except serializers.ValidationError as exc:
+                errors['contact_number'] = exc.detail
+        if not current('email'):
+            errors['email'] = 'Contact email is required.'
+
+        # Payments are made to this account, so it must be complete and well-formed.
+        for field_name, label in (
+            ('bank_name', 'Bank name'),
+            ('bank_branch', 'Bank branch'),
+            ('bank_account_name', 'Account holder name'),
+            ('bank_account_number', 'Account number'),
+        ):
+            if not str(current(field_name) or '').strip():
+                errors[field_name] = f'{label} is required.'
+        account_number = re.sub(r'[\s-]', '', str(current('bank_account_number') or ''))
+        if account_number:
+            if not re.fullmatch(r'\d{5,20}', account_number):
+                errors['bank_account_number'] = 'Account number must be 5-20 digits.'
+            elif 'bank_account_number' in attrs:
+                attrs['bank_account_number'] = account_number
+        swift = str(current('bank_swift_code') or '').strip().upper().replace(' ', '')
+        if swift:
+            if not self.SWIFT_PATTERN.fullmatch(swift):
+                errors['bank_swift_code'] = 'SWIFT/BIC must be 8 or 11 characters, e.g. FIRNLSMX.'
+            elif 'bank_swift_code' in attrs:
+                attrs['bank_swift_code'] = swift
+        sort_code = str(current('bank_sort_code') or '').strip()
+        if sort_code and not re.fullmatch(r'[0-9-]{4,12}', sort_code):
+            errors['bank_sort_code'] = 'Branch/sort code may contain only digits and dashes.'
+
+        # Documents: every one is required; a resubmission may keep the file
+        # already on record instead of uploading it again.
+        for field_name, label in self.REQUIRED_DOCUMENTS.items():
+            upload = attrs.get(field_name)
+            if upload:
+                try:
+                    validate_document_upload(upload, label=label, allowed=self.DOCUMENT_EXTENSIONS)
+                except serializers.ValidationError as exc:
+                    errors[field_name] = exc.detail
+            elif not (self.instance is not None and getattr(self.instance, field_name)):
+                errors[field_name] = f'{label} is required.'
+
+        if current('declaration_accepted') is not True:
+            errors['declaration_accepted'] = 'You must accept the declaration before submitting.'
+        if errors:
+            raise serializers.ValidationError(errors)
+
         return attrs
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if not can_see_full_bank_details(self.context.get('request'), instance.vendor_id):
+            data['bank_account_number'] = mask_account_number(data.get('bank_account_number'))
+        return data
 
     def update(self, instance, validated_data):
         request = self.context.get('request')
@@ -835,7 +989,7 @@ class VendorProfileUpdateSerializer(serializers.ModelSerializer):
         fields = [
             'email', 'full_name', 'gender', 'mobile_number', 'address',
             'organization_name', 'organization_type',
-            'registration_certificate_name', 'tax_id', 'technology_types',
+            'company_registration_number', 'tax_id', 'technology_types',
             'region',
         ]
 
@@ -858,6 +1012,10 @@ class VendorProfileSerializer(serializers.ModelSerializer):
     prospect_sync_logs = serializers.SerializerMethodField()
     status = serializers.SerializerMethodField()
     operational_standing = serializers.SerializerMethodField()
+    registration_certificate_url = serializers.SerializerMethodField()
+
+    def get_registration_certificate_url(self, obj):
+        return self._build_absolute_uri(obj.registration_certificate) if obj.registration_certificate else None
 
     class Meta:
         model = User
@@ -865,7 +1023,7 @@ class VendorProfileSerializer(serializers.ModelSerializer):
             'id', 'username', 'email', 'full_name', 'gender', 'role',
             'mobile_number', 'national_id', 'address',
             'organization_name', 'organization_type', 'technology_types',
-            'registration_certificate_name', 'tax_id',
+            'registration_certificate_name', 'registration_certificate_url', 'company_registration_number', 'tax_id',
             'bank_name', 'bank_branch', 'bank_swift_code', 'bank_sort_code', 'bank_account_name', 'bank_account_number',
             'tier_assignment', 'verification_zone', 'region', 'status', 'operational_standing',
             'date_joined', 'last_login',
@@ -964,7 +1122,11 @@ class VendorProfileSerializer(serializers.ModelSerializer):
                 'bank_swift_code': prequal.bank_swift_code,
                 'bank_sort_code': prequal.bank_sort_code,
                 'bank_account_name': prequal.bank_account_name,
-                'bank_account_number': prequal.bank_account_number,
+                'bank_account_number': (
+                    prequal.bank_account_number
+                    if can_see_full_bank_details(self.context.get('request'), obj.id)
+                    else mask_account_number(prequal.bank_account_number)
+                ),
                 'trading_license': self._build_absolute_uri(prequal.trading_license),
                 'registration_certificate': self._build_absolute_uri(prequal.registration_certificate),
                 'tax_compliance_certificate': self._build_absolute_uri(prequal.tax_compliance_certificate),
@@ -1040,7 +1202,11 @@ class VendorProfileSerializer(serializers.ModelSerializer):
 
     def get_bank_account_number(self, obj):
         prequal = self._latest_prequalification(obj)
-        return prequal.bank_account_number if prequal and prequal.bank_account_number else None
+        if not (prequal and prequal.bank_account_number):
+            return None
+        if can_see_full_bank_details(self.context.get('request'), obj.id):
+            return prequal.bank_account_number
+        return mask_account_number(prequal.bank_account_number)
 
     def get_documents(self, obj):
         project_documents = []
