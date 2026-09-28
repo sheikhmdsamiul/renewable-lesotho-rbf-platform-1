@@ -21,6 +21,7 @@ from rbf.projects.models import (
     ProspectSyncLog,
 )
 from rbf.users.models import User, UserRole
+from rbf.projects.district_scope import field_verifier_district_filter
 from rbf.projects.kpi import KpiService
 
 from .report_templates import (
@@ -38,17 +39,6 @@ def vendor_query_filter(user, prefix: str = ''):
     vendor_names = {user.full_name, user.organization_name, user.username}
     vendor_names = {name for name in vendor_names if name}
     return Q(**{f'{prefix}vendor_id__in': vendor_ids}) | Q(**{f'{prefix}vendor_name__in': vendor_names})
-
-def field_verifier_district_filter(user, project_prefix: str = 'project__'):
-    district = (
-        getattr(user, 'verification_zone', '')
-        or getattr(user, 'district', '')
-        or getattr(user, 'region', '')
-        or ''
-    ).strip()
-    if not district:
-        return Q(pk__in=[])
-    return Q(**{f'{project_prefix}district__iexact': district}) | Q(**{f'{project_prefix}region__iexact': district})
 
 def doe_region_filter(user, prefix: str = ''):
     region = (

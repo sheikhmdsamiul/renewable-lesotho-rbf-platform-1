@@ -474,6 +474,9 @@ class InstallationReport(models.Model):
     # DOE Officer / UNDP Donor in InstallationReportSerializer.to_representation. The
     # prospect sync hashes it rather than sending it in clear (see integrations.py).
     beneficiary_phone = models.CharField(max_length=32, blank=True)
+    # District the installation was captured in: one of the project's districts, which
+    # for a lot-wise project can differ from the project's primary `district`.
+    district = models.CharField(max_length=128, blank=True, default='')
     household_type = models.CharField(max_length=64, blank=True)
     installation_date = models.DateField(null=True, blank=True)
     receipt_file = models.FileField(upload_to='installation_receipts/', null=True, blank=True)

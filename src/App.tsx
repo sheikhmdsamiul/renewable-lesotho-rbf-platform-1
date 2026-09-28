@@ -27721,8 +27721,11 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
         const report = reportsById[task.report];
         const project = report ? projectsById[report.projectId] : undefined;
         const siteName = project?.projectTitle || project?.projectReference || `Project ${report?.projectId || "Unknown"}`;
-        const taskDistrict = project?.district || project?.region || "";
-        const inAssignedDistricts = assignedDistricts.length === 0 || assignedDistricts.includes(taskDistrict);
+        // Route on the installation's own district: a lot-wise project spans several
+        // districts but `project.district` holds only the first of them.
+        const taskDistrict = report?.district || project?.district || project?.region || "";
+        const inAssignedDistricts = assignedDistricts.length === 0
+          || assignedDistricts.some((district) => district.trim().toLowerCase() === taskDistrict.trim().toLowerCase());
         if (!inAssignedDistricts) return null;
         return {
           task,
