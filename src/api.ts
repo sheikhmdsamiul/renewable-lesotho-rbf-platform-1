@@ -1839,6 +1839,25 @@ function unwrapListResponse<T>(data: any): T[] {
   return [];
 }
 
+const MAX_LIST_PAGES = 200;
+
+/** Every page of a paginated list endpoint. Using only the first page silently drops
+ *  rows past the API page size (50), e.g. a verifier's newest tasks. */
+async function fetchAllPages<T>(url: string): Promise<T[]> {
+  const rows: T[] = [];
+  let next: string | null = url;
+  for (let page = 0; next && page < MAX_LIST_PAGES; page += 1) {
+    const data: any = await http<any>(next);
+    rows.push(...unwrapListResponse<T>(data));
+    if (!data || Array.isArray(data) || !data.next) break;
+    // DRF builds `next` as an absolute URL from the backend's view of the host, which
+    // behind a proxy may not be the origin the browser uses, so keep only path + query.
+    const nextUrl = new URL(String(data.next), window.location.origin);
+    next = `${nextUrl.pathname}${nextUrl.search}`;
+  }
+  return rows;
+}
+
 // ============ HTTP helpers ============
 
 type ApiRequestInit = RequestInit & {
@@ -3225,6 +3244,11 @@ export async function fetchProjects(pageSize?: number): Promise<Project[]> {
   return unwrapListResponse<any>(data).map(mapProjectFromApi);
 }
 
+export async function fetchAllProjects(): Promise<Project[]> {
+  const rows = await fetchAllPages<any>(`/api/projects/`);
+  return rows.map(mapProjectFromApi);
+}
+
 export async function fetchProjectsSummary(): Promise<{
   total: number;
   active: number;
@@ -3535,8 +3559,8 @@ export async function uploadProjectDocument(payload: {
 
 export async function fetchInstallationReports(projectId?: string): Promise<InstallationReport[]> {
   const query = projectId ? `?project=${encodeURIComponent(projectId)}` : "";
-  const data = await http<any>(`/api/projects/installations/${query}`);
-  return unwrapListResponse<any>(data).map(mapInstallationReportFromApi);
+  const rows = await fetchAllPages<any>(`/api/projects/installations/${query}`);
+  return rows.map(mapInstallationReportFromApi);
 }
 
 export async function createInstallationReport(payload: {
@@ -3615,8 +3639,8 @@ export async function fetchMapInstallations(filters: Record<string, string | und
 
 export async function fetchVerificationTasks(projectId?: string): Promise<VerificationTask[]> {
   const query = projectId ? `?report__project=${encodeURIComponent(projectId)}` : "";
-  const data = await http<any>(`/api/projects/verification-tasks/${query}`);
-  return unwrapListResponse<any>(data).map(mapVerificationTaskFromApi);
+  const rows = await fetchAllPages<any>(`/api/projects/verification-tasks/${query}`);
+  return rows.map(mapVerificationTaskFromApi);
 }
 
 export async function verifyVerificationTask(
