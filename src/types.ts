@@ -591,6 +591,9 @@ export interface Project {
   contractReference?: string;
   contractStatus?: string;
   contractSignedFile?: string;
+  /** Set only for lot-wise awards — the single lot this project delivers. */
+  lotId?: string;
+  lotName?: string | null;
   milestoneTotalAmount?: number;
   milestoneCount?: number;
   milestonePlanId?: string;
@@ -773,7 +776,7 @@ export interface ProjectKpiSummary {
     total_verified: number;
     target: number;
   };
-  milestone_eligibility: Record<string, { eligible: boolean; status?: string; conditions: Record<string, boolean>; thresholds?: MilestoneConditionThresholds }>;
+  milestone_eligibility: Record<string, { eligible: boolean; status?: string; skipped?: boolean; conditions: Record<string, boolean>; thresholds?: MilestoneConditionThresholds }>;
   generated_at: string;
 }
 
@@ -1095,13 +1098,27 @@ export interface EvaluationCommitteeScoresBid {
   passedTechnicalThreshold: boolean;
   financialFinalized: boolean;
   lotFinancialFinalized?: Record<string, boolean>;
+  /** Per-lot technical outcome, keyed by lotId — present only on lot-wise tenders, where
+   * each lot is scored (and passes the threshold) on its own rather than as a blend. */
+  lotTechnicalSummary?: Record<string, EvaluationCommitteeScoresLotTechnicalSummary>;
   evaluations: EvaluationCommitteeScoresMemberEvaluation[];
+}
+
+export interface EvaluationCommitteeScoresLotTechnicalSummary {
+  quorumMet: boolean;
+  memberCount: number;
+  averageScore?: string | null;
+  rawAverage?: string | null;
+  passedThreshold: boolean;
 }
 
 export interface EvaluationCommitteeScores {
   committeeMembers: Array<{ id: string; name: string }>;
   scoreLimits: Record<string, number>;
   technicalScoreTotal: number;
+  /** The financial stage's contribution to the combined 100 (30 by default). The stored
+   * financial score is a 0-100 price score, so it is scaled by this when shown out of 30. */
+  financialWeight: number;
   technicalThreshold: number;
   isLotWise: boolean;
   lots?: Array<{ lotId: string; lotName: string }>;
@@ -1430,6 +1447,8 @@ export interface InstallationReport {
   status: InstallationStatus;
   submittedAt: string;
   beneficiaryName?: string;
+  /** Masked for TAC/Auditor and withheld from DOE Officer / UNDP Donor by the API. */
+  beneficiaryPhone?: string;
   householdType?: string;
   installationDate?: string;
   verificationStatus?: string;

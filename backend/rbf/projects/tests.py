@@ -33,6 +33,7 @@ from .models import (
 )
 from .gis import GpsValidator
 from .kpi import KpiService
+from .milestone_reviews import milestone_cleared_to_proceed, next_milestone_blocker
 from .models import MilestoneCompletionReview
 from .integrations import ProspectService, queue_installation_sync, queue_project_targets_sync
 from rbf.tenders.models import ContractStatus, Tender, TenderContract
@@ -2280,6 +2281,53 @@ class ProjectApiTests(APITestCase):
         self.assertEqual(first_call.args[1]["size"], 25)
         self.assertEqual(first_call.kwargs["record_type"], "sync_panel")
 
+    def test_beneficiary_phone_is_masked_for_tac_and_withheld_from_doe_and_undp(self):
+        """A beneficiary contact number is PII of comparable sensitivity to the national
+        ID, so it follows the same redaction rules rather than being exposed in full."""
+        from rbf.projects.serializers import InstallationReportSerializer
+        from rbf.users.models import UserRole
+
+        User = get_user_model()
+        vendor = User.objects.create_user(
+            username="phone_vendor",
+            password="securePass123",
+            role="Vendor",
+            status="Active",
+            region="Maseru",
+        )
+        project = Project.objects.create(
+            vendor_id=str(vendor.id),
+            vendor_name=vendor.username,
+            tech_type="SHS",
+            region="Maseru",
+            district="Maseru",
+            status=ProjectStatus.ACTIVE,
+        )
+        installation = InstallationReport.objects.create(
+            project=project,
+            vendor=vendor,
+            gps_lat=-29.31,
+            gps_lng=27.48,
+            serial_number="SERIAL-PHONE-1",
+            beneficiary_id="1234567890",
+            beneficiary_phone="+266 2212 3456",
+        )
+
+        def render_for(role):
+            request = type('R', (), {'user': type('U', (), {'role': role})()})()
+            data = InstallationReportSerializer(installation, context={'request': request}).data
+            return data.get('beneficiary_phone')
+
+        self.assertEqual(render_for(UserRole.TAC), '*********3456')
+        self.assertEqual(render_for(UserRole.AUDITOR), '*********3456')
+        self.assertEqual(render_for(UserRole.DOE_OFFICER), '')
+        self.assertEqual(render_for(UserRole.UNDP_DONOR), '')
+        # RMT / Super Admin / the owning vendor see it in full.
+        self.assertEqual(render_for(UserRole.RBF_OFFICIAL), '+266 2212 3456')
+        self.assertEqual(render_for(UserRole.ADMIN), '+266 2212 3456')
+        self.assertEqual(render_for(UserRole.VENDOR), '+266 2212 3456')
+
+
 class ProjectKpiTests(APITestCase):
     def setUp(self):
         User = get_user_model()
@@ -2433,6 +2481,54 @@ class ProjectKpiTests(APITestCase):
         self.assertTrue(summary["milestone_eligibility"]["milestone_1"]["eligible"])
         milestone1 = self.project_refresh().milestones.order_by("created_at", "id").first()
         self.assertEqual(milestone1.status, "claimable")
+
+    def test_zero_pct_milestone_is_skipped_and_does_not_block_the_next(self):
+        """A 0% milestone has no amount, so it can never be claimed and no claim can be
+        raised against it. It used to deadlock the project: the next milestone is gated on
+        this one being verified, and a verification review can only follow a claim — so a
+        Mobilization milestone paid entirely on performance left M2 locked forever."""
+        milestone1 = self.project.milestones.get(milestone_number=1)
+        milestone1.disbursement_pct = 0
+        milestone1.percentage = 0
+        milestone1.amount = 0
+        milestone1.amount_lsl = 0
+        milestone1.status = "pending"
+        milestone1.save()
+        milestone2 = self.project.milestones.get(milestone_number=2)
+        milestone2.status = "locked"
+        milestone2.save()
+        cache.clear()
+
+        self.assertTrue(milestone_cleared_to_proceed(milestone1))
+        self.assertIn("0% disbursement", next_milestone_blocker(milestone1))
+
+        summary = KpiService.for_project(str(self.project.id)).getFullKpiSummary()
+
+        m1 = summary["milestone_eligibility"]["milestone_1"]
+        self.assertTrue(m1["skipped"])
+        self.assertEqual(m1["status"], "Skipped")
+        self.assertFalse(m1["eligible"])
+        # M2 is unlocked by the skipped M1 rather than waiting on a review that can never come.
+        self.assertTrue(summary["milestone_eligibility"]["milestone_2"]["conditions"]["milestone_1_verified"])
+        self.assertEqual(self.project_refresh().milestones.get(milestone_number=2).status, "claimable")
+
+    def test_zero_pct_milestone_two_does_not_block_milestone_three(self):
+        """M3 requires M2 to be paid. A skipped 0% M2 can never be paid, so it has to count
+        as satisfied or Milestone 3 would be unreachable."""
+        milestone2 = self.project.milestones.get(milestone_number=2)
+        milestone2.disbursement_pct = 0
+        milestone2.percentage = 0
+        milestone2.amount = 0
+        milestone2.amount_lsl = 0
+        milestone2.save()
+        cache.clear()
+
+        summary = KpiService.for_project(str(self.project.id)).getFullKpiSummary()
+
+        m2 = summary["milestone_eligibility"]["milestone_2"]
+        self.assertTrue(m2["skipped"])
+        self.assertEqual(m2["status"], "Skipped")
+        self.assertTrue(summary["milestone_eligibility"]["milestone_3"]["conditions"]["milestone_2_paid"])
 
     def test_kpi_summary_syncs_project_snapshot_fields(self):
         summary = KpiService.for_project(str(self.project.id)).getFullKpiSummary()

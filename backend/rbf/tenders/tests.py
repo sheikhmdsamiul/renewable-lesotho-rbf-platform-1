@@ -3383,6 +3383,10 @@ class TenderContractSigningTests(APITestCase):
             template_name="Performance-Based Agreement",
             status=ContractStatus.GENERATED,
         )
+        # A contract in GENERATED status always has its PBA rendered — that file is the
+        # thing the vendor downloads and signs, and `sign` refuses to accept a signature
+        # against an agreement that was never generated.
+        self.contract.generated_file = "tender_contracts/generated/pba.pdf"
         self.contract.annex_a_file = "tender_contracts/annexes/a.pdf"
         self.contract.annex_b_file = "tender_contracts/annexes/b.pdf"
         self.contract.annex_c_file = "tender_contracts/annexes/c.pdf"
@@ -3426,6 +3430,104 @@ class TenderContractSigningTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.contract.refresh_from_db()
         self.assertEqual(self.contract.signature_status, ContractSignatureStatus.UPLOADED)
+
+    def test_vendor_can_sign_when_the_bid_omitted_one_annex_source(self):
+        """A bid that never attached, say, an Implementation Plan leaves Annex B without
+        a source document. That is normal — the PBA builder still emits the Annex B page,
+        just without the source attached — and it must not stop the vendor signing the
+        agreement it was sent. It used to: `sign` required all five annexes to resolve and
+        rejected the upload with "The contract package is incomplete", asking the vendor
+        for a document the bid form never required of them."""
+        self.contract.annex_b_file = None
+        self.contract.save(update_fields=["annex_b_file", "updated_at"])
+        self.client.force_authenticate(self.vendor)
+
+        response = self.client.post(
+            f"/api/tender-contracts/{self.contract.id}/sign/",
+            {"signed_file": SimpleUploadedFile("signed.pdf", b"%PDF-1.4 test", content_type="application/pdf")},
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertNotIn("annexes", response.data)
+        self.contract.refresh_from_db()
+        self.assertEqual(self.contract.status, ContractStatus.SUBMITTED)
+        self.assertTrue(self.contract.signed_file)
+
+    def test_sign_requires_the_agreement_to_have_been_generated(self):
+        """Without a rendered PBA there is nothing for the vendor to have signed, so the
+        upload is refused — with a message that says to contact RMT rather than implying
+        the vendor did something wrong."""
+        self.contract.generated_file = None
+        self.contract.save(update_fields=["generated_file", "updated_at"])
+        self.client.force_authenticate(self.vendor)
+
+        response = self.client.post(
+            f"/api/tender-contracts/{self.contract.id}/sign/",
+            {"signed_file": SimpleUploadedFile("signed.pdf", b"%PDF-1.4 test", content_type="application/pdf")},
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("has not been generated", str(response.data["detail"]))
+        self.contract.refresh_from_db()
+        self.assertFalse(self.contract.signed_file)
+
+    def test_sign_is_not_blocked_by_a_document_the_tender_never_required(self):
+        """The tender only ever asked for a Technical Proposal, and the vendor supplied it.
+        Annex B's source (Implementation Plan) is absent, but because no
+        TenderRequiredDocument row requests it, that must not stand in the way of signing —
+        the contract package is made up of what THIS tender required and the vendor
+        actually uploaded."""
+        from .models import TenderRequiredDocument
+        TenderRequiredDocument.objects.create(
+            tender=self.tender, name="Technical Proposal",
+            bid_stage="technical", field_key="technical_proposal_file", position=1,
+        )
+        self.bid.technical_proposal_file.save(
+            "technical-proposal.pdf",
+            SimpleUploadedFile("technical-proposal.pdf", b"%PDF-1.4 proposal"),
+            save=True,
+        )
+        self.bid.implementation_plan_file = None
+        self.bid.save(update_fields=["implementation_plan_file", "updated_at"])
+        self.client.force_authenticate(self.vendor)
+
+        response = self.client.post(
+            f"/api/tender-contracts/{self.contract.id}/sign/",
+            {"signed_file": SimpleUploadedFile("signed.pdf", b"%PDF-1.4 test", content_type="application/pdf")},
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertNotIn("required_documents", response.data)
+        self.contract.refresh_from_db()
+        self.assertEqual(self.contract.status, ContractStatus.SUBMITTED)
+
+    def test_sign_is_blocked_by_a_required_document_the_vendor_never_uploaded(self):
+        """A document the tender genuinely required, that the vendor never supplied, is a
+        real gap in their own bid — so signing is refused, naming the actual document
+        rather than an unrelated annex section."""
+        from .models import TenderRequiredDocument
+        TenderRequiredDocument.objects.create(
+            tender=self.tender, name="Implementation Plan",
+            bid_stage="technical", field_key="implementation_plan_file", position=1,
+        )
+        self.bid.implementation_plan_file = None
+        self.bid.save(update_fields=["implementation_plan_file", "updated_at"])
+        self.client.force_authenticate(self.vendor)
+
+        response = self.client.post(
+            f"/api/tender-contracts/{self.contract.id}/sign/",
+            {"signed_file": SimpleUploadedFile("signed.pdf", b"%PDF-1.4 test", content_type="application/pdf")},
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Implementation Plan", str(response.data["required_documents"]))
+        self.assertNotIn("Annex B", str(response.data))
+        self.contract.refresh_from_db()
+        self.assertFalse(self.contract.signed_file)
 
     def test_reject_resets_contract_to_generated_for_reupload(self):
         """Rejecting a signed contract must not be a dead end — the vendor should be
@@ -3710,6 +3812,145 @@ class TenderContractAssignmentTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("m3_installation_required_pct", response.data)
         self.assertFalse(Project.objects.filter(contract=self.contract).exists())
+
+    @patch("rbf.tenders.views.queue_project_targets_sync")
+    def test_assign_post_allows_zero_milestone_1_disbursement(self, queue_targets):
+        """Milestone 1 is Mobilization and carries no installation target, so paying
+        nothing up front is legitimate — the vendor is paid entirely on delivery and
+        performance. M2 + M3 still have to total 100%, and each of those installation-linked
+        milestones must disburse something."""
+        self.client.force_authenticate(self.rmt_user)
+
+        response = self.client.post(
+            f"/api/tender-contracts/{self.contract.id}/assign/",
+            {
+                "project_duration_months": 12,
+                "installation_target": 250,
+                "technology_type": "SHS",
+                "energy_output_target_kwh": "20000.00",
+                "district_zones": ["Maseru"],
+                "verification_method": "manual",
+                "m1_disbursement_pct": 0,
+                "m2_disbursement_pct": 60,
+                "m3_disbursement_pct": 40,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        project = Project.objects.get(contract=self.contract)
+        self.assertEqual(project.milestones.filter(milestone_number=1).first().disbursement_pct, 0)
+
+    @patch("rbf.tenders.views.queue_project_targets_sync")
+    def test_assign_post_rejects_zero_milestone_2_or_3_disbursement(self, queue_targets):
+        """M2 and M3 are the installation-linked milestones, so a 0% disbursement there
+        leaves a meaningless milestone. M1 at 0 is fine; these are not."""
+        self.client.force_authenticate(self.rmt_user)
+        base_payload = {
+            "project_duration_months": 12,
+            "installation_target": 250,
+            "technology_type": "SHS",
+            "energy_output_target_kwh": "20000.00",
+            "district_zones": ["Maseru"],
+            "verification_method": "manual",
+        }
+
+        response = self.client.post(
+            f"/api/tender-contracts/{self.contract.id}/assign/",
+            {**base_payload, "m1_disbursement_pct": 0, "m2_disbursement_pct": 0, "m3_disbursement_pct": 100},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("m2_disbursement_pct", response.data)
+
+        response = self.client.post(
+            f"/api/tender-contracts/{self.contract.id}/assign/",
+            {**base_payload, "m1_disbursement_pct": 0, "m2_disbursement_pct": 100, "m3_disbursement_pct": 0},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("m3_disbursement_pct", response.data)
+        self.assertFalse(Project.objects.filter(contract=self.contract).exists())
+
+    @patch("rbf.tenders.views.queue_project_targets_sync")
+    def test_lot_wise_assignment_identifies_the_lot_and_scopes_the_project(self, queue_targets):
+        """A lot-wise award must be attributable to its lot, or two lots won by the same
+        vendor produce indistinguishable projects with colliding references. The lot name
+        is surfaced on the assignment screen and carried onto the created project, whose
+        reference is lot-suffixed."""
+        lot = TenderLot.objects.create(
+            tender=self.tender,
+            name="Lot 77",
+            position=0,
+            target_districts=["Butha-Buthe", "Mokhotlong"],
+            estimated_installation_target=40,
+            budget=50000,
+        )
+        self.tender.target_districts = ["Maseru"]
+        self.tender.approximate_installation_target = 500
+        self.tender.save(update_fields=["target_districts", "approximate_installation_target", "updated_at"])
+        self.contract.lot = lot
+        self.contract.reference_number = f"{self.contract.reference_number}-LOT{lot.id}"
+        self.contract.save(update_fields=["lot", "reference_number", "updated_at"])
+        self.bid.preferred_district = ""
+        self.bid.save(update_fields=["preferred_district", "updated_at"])
+        self.client.force_authenticate(self.rmt_user)
+
+        response = self.client.get(f"/api/tender-contracts/{self.contract.id}/assign/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["contract_details"]["lot_name"], "Lot 77")
+        self.assertEqual(response.data["contract_details"]["lot_id"], str(lot.id))
+        # The lot's own scope wins over the tender-wide figures.
+        self.assertEqual(response.data["assignment_defaults"]["district_zones"], ["Butha-Buthe", "Mokhotlong"])
+        self.assertEqual(response.data["assignment_defaults"]["installation_target"], 40)
+
+        response = self.client.post(
+            f"/api/tender-contracts/{self.contract.id}/assign/",
+            {
+                "project_duration_months": 12,
+                "installation_target": 40,
+                "technology_type": "SHS",
+                "energy_output_target_kwh": "20000.00",
+                "district_zones": ["Butha-Buthe", "Mokhotlong"],
+                "verification_method": "manual",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        project = Project.objects.get(contract=self.contract)
+        self.assertEqual(project.lot, lot)
+        self.assertTrue(project.project_reference.endswith(f"-LOT{lot.id}"), project.project_reference)
+        self.assertTrue(project.milestone_plan_id.endswith(f"-LOT{lot.id}"), project.milestone_plan_id)
+
+    @patch("rbf.tenders.views.queue_project_targets_sync")
+    def test_single_award_assignment_has_no_lot(self, queue_targets):
+        """A non-lot-wise contract must not gain a lot or a lot-suffixed reference."""
+        self.client.force_authenticate(self.rmt_user)
+
+        response = self.client.get(f"/api/tender-contracts/{self.contract.id}/assign/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(response.data["contract_details"]["lot_name"])
+
+        response = self.client.post(
+            f"/api/tender-contracts/{self.contract.id}/assign/",
+            {
+                "project_duration_months": 12,
+                "installation_target": 250,
+                "technology_type": "SHS",
+                "energy_output_target_kwh": "20000.00",
+                "district_zones": ["Maseru"],
+                "verification_method": "manual",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        project = Project.objects.get(contract=self.contract)
+        self.assertIsNone(project.lot_id)
+        self.assertNotIn("-LOT", project.project_reference)
 
     @patch("rbf.tenders.views.queue_project_targets_sync")
     def test_assign_post_normalizes_legacy_mini_grid_label(self, queue_targets):
@@ -6203,6 +6444,85 @@ class EvaluationCommitteeOversightTests(APITestCase):
         self.assertEqual(len(financial_rows), 2)
         self.assertEqual(financial_rows[0]["lot_name"], "Lot A - South")
         self.assertEqual(financial_rows[0]["lot"], str(lot.id))
+
+    def test_evaluation_scores_lot_wise_technical_summary_is_per_lot(self):
+        """Each lot's technical verdict must be reported for that lot alone — a lot-wise
+        tender is scored lot by lot, so the management view must not be handed a single
+        blended technical number for the bid."""
+        lot_a = TenderLot.objects.create(tender=self.tender, name="Lot A - South")
+        lot_b = TenderLot.objects.create(tender=self.tender, name="Lot B - North")
+        lot_bid = TenderBid.objects.create(
+            tender=self.tender,
+            vendor_id=f"{self.vendor.id}-lots",
+            vendor_name=f"{self.vendor.full_name} (Both Lots)",
+            vendor_email=self.vendor.email,
+            bid_amount=100000,
+            bid_stage=BidStage.TECHNICAL,
+            status=BidStatus.SUBMITTED,
+        )
+        for lot in (lot_a, lot_b):
+            TenderBidLotOffer.objects.create(bid=lot_bid, lot=lot, bid_amount=100000, subsidy_requested=60000)
+
+        # Lot A is marked strongly by the full quorum; Lot B only by one member, so it has
+        # no quorum and no verdict at all.
+        for member in self.ec_members[:2]:
+            TenderBidEvaluation.objects.create(
+                bid=lot_bid, evaluator=member, stage=EvaluationStage.TECHNICAL, lot=lot_a,
+                status=EvaluationStatus.SCORED, technical_score=20, feasibility_score=15,
+                kpi_score=10, gender_score=10, environmental_score=5, om_score=10,
+                total_score=70,
+            )
+        TenderBidEvaluation.objects.create(
+            bid=lot_bid, evaluator=self.ec_members[0], stage=EvaluationStage.TECHNICAL, lot=lot_b,
+            status=EvaluationStatus.SCORED, technical_score=4, feasibility_score=3,
+            kpi_score=2, gender_score=1, environmental_score=1, om_score=1, total_score=12,
+        )
+
+        self.client.force_authenticate(self.rmt_user)
+        response = self.client.get(f"/api/tenders/{self.tender.id}/evaluation_scores/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        bid_row = next(b for b in response.data["bids"] if b["bid_id"] == str(lot_bid.id))
+        summary = bid_row["lot_technical_summary"]
+        self.assertEqual(sorted(summary), sorted([str(lot_a.id), str(lot_b.id)]))
+
+        lot_a_summary = summary[str(lot_a.id)]
+        self.assertTrue(lot_a_summary["quorum_met"])
+        self.assertEqual(lot_a_summary["member_count"], 2)
+        self.assertTrue(lot_a_summary["passed_threshold"])
+        self.assertEqual(Decimal(lot_a_summary["average_score"]), Decimal("100"))
+        self.assertEqual(Decimal(lot_a_summary["raw_average"]), Decimal("70"))
+
+        # One member's mark is not a committee decision, so Lot B stays unresolved.
+        lot_b_summary = summary[str(lot_b.id)]
+        self.assertFalse(lot_b_summary["quorum_met"])
+        self.assertEqual(lot_b_summary["member_count"], 1)
+        self.assertIsNone(lot_b_summary["average_score"])
+        self.assertIsNone(lot_b_summary["raw_average"])
+        self.assertFalse(lot_b_summary["passed_threshold"])
+
+    def test_evaluation_scores_single_tender_has_no_lot_breakdown(self):
+        """A tender with no lots is scored once for the whole bid — the scoreboard must
+        carry no lot grouping at all rather than an empty one."""
+        TenderBid.objects.create(
+            tender=self.tender,
+            vendor_id=f"{self.vendor.id}-single",
+            vendor_name=f"{self.vendor.full_name} (Single)",
+            vendor_email=self.vendor.email,
+            bid_amount=100000,
+            bid_stage=BidStage.TECHNICAL,
+            status=BidStatus.SUBMITTED,
+        )
+
+        self.client.force_authenticate(self.rmt_user)
+        response = self.client.get(f"/api/tenders/{self.tender.id}/evaluation_scores/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data["is_lot_wise"])
+        self.assertEqual(response.data["lots"], [])
+        for bid_row in response.data["bids"]:
+            self.assertEqual(bid_row["lot_financial_finalized"], {})
+            self.assertEqual(bid_row["lot_technical_summary"], {})
 
     def test_rmt_comment_blocked_until_evaluation_complete(self):
         self.client.force_authenticate(self.rmt_user)

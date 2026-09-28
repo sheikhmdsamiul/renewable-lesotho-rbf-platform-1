@@ -1089,6 +1089,8 @@ function mapProjectFromApi(api: any): Project {
     contractReference: api.contract_reference ?? undefined,
     contractStatus: api.contract_status ?? undefined,
     contractSignedFile: api.contract_signed_file ?? undefined,
+    lotId: api.lot != null ? String(api.lot) : undefined,
+    lotName: api.lot_name ?? undefined,
     milestoneTotalAmount: api.milestone_total_amount != null ? Number(api.milestone_total_amount) : undefined,
     milestoneCount: api.milestone_count != null ? Number(api.milestone_count) : undefined,
     milestonePlanId: api.milestone_plan_id ?? undefined,
@@ -1263,6 +1265,7 @@ function mapInstallationReportFromApi(api: any): InstallationReport {
     gpsLng: Number(api.gps_lng ?? 0),
     serialNumber: api.serial_number ?? "",
     beneficiaryId: api.beneficiary_id ?? "",
+    beneficiaryPhone: api.beneficiary_phone || undefined,
     receiptFile: normalizeFileUrl(api.receipt_file ?? undefined),
     receiptFileUrl: normalizeFileUrl(api.receipt_file_url ?? undefined),
     photoFiles: Array.isArray(api.photo_files) ? api.photo_files.map(normalizeFileUrl) : [],
@@ -2283,6 +2286,11 @@ export async function approveIntentToAward(
 ): Promise<Tender> {
   const data = await http<any>(`/api/tenders/${tenderId}/approve_intent_award/`, {
     method: "POST",
+    // Issuing the intent to award stands the whole platform up: it starts the
+    // cooling-off clock, fans out notices to every bidder and commits an audit entry.
+    // Given a longer ceiling than the default GET budget, because a slow answer here is
+    // still a correct answer — see the retry-safety note on IntentToAwardApprovals.
+    timeoutMs: 45000,
     body: JSON.stringify({
       notes: payload?.notes ?? "",
       ...(payload?.lotId ? { lot_id: payload.lotId } : {}),
@@ -2949,6 +2957,7 @@ export async function fetchEvaluationCommitteeScores(tenderId: string): Promise<
     committeeMembers: (data.committee_members || []).map((m: any) => ({ id: String(m.id ?? ""), name: m.name ?? "" })),
     scoreLimits: data.score_limits || {},
     technicalScoreTotal: Number(data.technical_score_total ?? 70),
+    financialWeight: Number(data.financial_weight ?? 30),
     technicalThreshold: Number(data.technical_threshold ?? 70),
     isLotWise: Boolean(data.is_lot_wise),
     committeeSize: Number(data.committee_size ?? 0),
@@ -2965,6 +2974,18 @@ export async function fetchEvaluationCommitteeScores(tenderId: string): Promise<
       passedTechnicalThreshold: Boolean(b.passed_technical_threshold),
       financialFinalized: Boolean(b.financial_finalized),
       lotFinancialFinalized: b.lot_financial_finalized || {},
+      lotTechnicalSummary: Object.fromEntries(
+        Object.entries(b.lot_technical_summary || {}).map(([lotId, s]: [string, any]) => [
+          lotId,
+          {
+            quorumMet: Boolean(s?.quorum_met),
+            memberCount: Number(s?.member_count ?? 0),
+            averageScore: s?.average_score != null ? s.average_score : null,
+            rawAverage: s?.raw_average != null ? s.raw_average : null,
+            passedThreshold: Boolean(s?.passed_threshold),
+          },
+        ]),
+      ),
       evaluations: (b.evaluations || []).map(mapEval),
     })),
     lots: Array.isArray(data.lots)
@@ -3524,6 +3545,7 @@ export async function createInstallationReport(payload: {
   gpsLng: number;
   serialNumber: string;
   beneficiaryId: string;
+  beneficiaryPhone?: string;
   receiptFile?: File | null;
   photoFiles?: File[];
   meterId?: string;
@@ -3538,6 +3560,7 @@ export async function createInstallationReport(payload: {
   form.append("gps_lng", String(payload.gpsLng));
   form.append("serial_number", payload.serialNumber);
   form.append("beneficiary_id", payload.beneficiaryId);
+  if (payload.beneficiaryPhone) form.append("beneficiary_phone", payload.beneficiaryPhone);
   if (payload.meterId) form.append("meter_id", payload.meterId);
   if (payload.kwhReading != null) form.append("kwh_reading", String(payload.kwhReading));
   if (payload.householdType) form.append("household_type", payload.householdType);

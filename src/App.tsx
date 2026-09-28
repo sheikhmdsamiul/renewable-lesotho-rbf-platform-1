@@ -732,13 +732,23 @@ const isNotificationError = (msg: string) => {
 const isServerError = (err: any) =>
   Number(err?.status) >= 500 || /^HTTP (5\d\d) /.test(String(err?.message || ""));
 
+// DRF renders a field-keyed error dict as "key: message". These are machine keys that add
+// nothing for the user, so drop the prefix and show the sentence. Listed explicitly rather
+// than matched generically so a legitimate message ("note: ...") is never mangled.
+const API_ERROR_KEY_PREFIXES = ["required_documents", "signed_file", "annexes"];
+
 const toFriendlyApiMessage = (raw: string): string => {
   const cleaned = raw
     .replace(/^http\s+\d+\s+[a-z ]+:\s*/i, "")
     .replace(/^error:\s*/i, "")
     .trim();
-  if (!cleaned || cleaned.length > 220) return "";
-  return cleaned;
+  const withoutKey = cleaned.replace(
+    new RegExp(`^(?:${API_ERROR_KEY_PREFIXES.join("|")}):\\s*`, "i"),
+    "",
+  ).trim();
+  const finalText = withoutKey || cleaned;
+  if (!finalText || finalText.length > 220) return "";
+  return finalText;
 };
 
 const BID_ERROR_MAP: Record<string, string> = {
@@ -1498,6 +1508,38 @@ const IntentToAwardApprovals = ({ onOpenTender }: { onOpenTender?: (tenderId: st
     return toFriendlyApiMessage(raw) || fallback;
   };
 
+  /**
+   * A decision that times out is ambiguous, not failed: the server may well have applied
+   * it and only the response was slow. Rather than tell the Super Admin "cannot connect"
+   * and invite a second click, re-sync the queue — if the request is gone from it the
+   * decision landed, and if it is still there it genuinely did not. Re-clicking is safe
+   * either way, because `approve_intent_award` re-reads the request under a row lock and
+   * only acts on a PENDING one.
+   */
+  const decisionError = async (err: any, fallback: string, decidedId: string) => {
+    const raw = String(err?.message || "");
+    if (!isConnectivityError(raw)) {
+      setError(actionError(err, fallback));
+      return;
+    }
+    setError("The server did not confirm in time. Checking whether the decision was applied...");
+    try {
+      const fresh = await fetchPendingIntentToAwardApprovals();
+      setPending(fresh);
+      if (fresh.some((r) => r.id === decidedId)) {
+        setActive(null);
+        setError("The request is still awaiting your decision — nothing was applied. Please try again.");
+      } else {
+        setActive(null);
+        setToast("The decision was applied. The server was slow to confirm it, so the queue has been refreshed for you.");
+      }
+    } catch {
+      setError(
+        "The server did not confirm in time and could not be reached to check. Refresh the page to see whether the decision was applied before clicking again."
+      );
+    }
+  };
+
   const load = async () => {
     try {
       setLoading(true);
@@ -1542,7 +1584,7 @@ const IntentToAwardApprovals = ({ onOpenTender }: { onOpenTender?: (tenderId: st
       setPending((prev) => prev.filter((r) => r.id !== request.id));
       setActive(null);
     } catch (err: any) {
-      setError(actionError(err, "Failed to process the decision."));
+      await decisionError(err, "Failed to process the decision.", request.id);
     } finally {
       setBusyId(null);
     }
@@ -1800,7 +1842,12 @@ function getMilestonePlanErrors(draft: typeof DEFAULT_MILESTONE_PLAN_DRAFT): str
   const errors: string[] = [];
   const [m1, m2, m3] = draft.milestoneDisbursementPcts;
   if (m1 + m2 + m3 !== 100) errors.push(`Milestone disbursement percentages must total 100% (currently ${m1 + m2 + m3}%).`);
-  if ([m1, m2, m3].some((pct) => pct < 1)) errors.push("Each milestone must disburse at least 1%.");
+  // The 1% floor applies to Milestones 2 and 3 only. Those are the installation-linked
+  // milestones (see _create_project_assignment: "N% Implementation" and "Final"), so a 0%
+  // disbursement would make them meaningless. Milestone 1 is Mobilization, which carries no
+  // installation target and is legitimately 0% when the vendor is paid entirely on delivery
+  // and performance — M2 + M3 still have to total 100%.
+  if (m2 < 1 || m3 < 1) errors.push("Milestones 2 and 3 must each disburse at least 1%.");
   if (draft.m2InstallationRequiredPct < 1 || draft.m3InstallationRequiredPct < 1) errors.push("Installation requirements must be at least 1%.");
   if (draft.m3InstallationRequiredPct < draft.m2InstallationRequiredPct) errors.push("Milestone 3 installation requirement cannot be lower than Milestone 2.");
   return errors;
@@ -1809,6 +1856,128 @@ function getMilestonePlanErrors(draft: typeof DEFAULT_MILESTONE_PLAN_DRAFT): str
 export const lesothoDistrictOptions = ["Berea", "Butha-Buthe", "Leribe", "Mafeteng", "Maseru", "Mohale's Hoek", "Mokhotlong", "Qacha's Nek", "Quthing", "Thaba-Tseka"];
 export const tenderTechnologyTypeOptions = ["SHS", "ICS", "GMG", "SWP", "PUE"];
 export const advertisementChannelOptions = ["Platform Notice Board", "National Gazette", "Local Newspaper", "UNGM"];
+
+/**
+ * The bidder's own bid documents, as they appear inside the generated PBA. These are
+ * NOT separate uploads: the backend resolves each one from the awarded bid (falling back
+ * to the tender) and the PBA builder compiles them into Annexes A-E of the single
+ * generated file. So they are listed here for traceability only — the reviewable
+ * artefact is the PBA, and the only thing the bidder actually submits at this step is
+ * the signed copy of it. Mirrors ANNEX_SECTION_SPECS in backend/rbf/tenders/pba_pdf.py.
+ */
+const CONTRACT_PACKAGE_DOCUMENTS: { key: keyof TenderContract; label: string; title: string }[] = [
+  { key: "annexAFile", label: "Annex A", title: "Results Framework (from the Gender Action Plan)" },
+  { key: "annexBFile", label: "Annex B", title: "Implementation Schedule (from the Implementation Plan)" },
+  { key: "annexCFile", label: "Annex C", title: "Payment Terms (BOQ and disbursement table)" },
+  { key: "annexDFile", label: "Annex D", title: "Reporting Formats (standardized system templates)" },
+  { key: "annexEFile", label: "Annex E", title: "Technical Standards (from the Technical Proposal)" },
+];
+
+/** The three states a contract passes through on its way to approval. "Signed" is a
+ * legacy status the API accepts but the upload flow never sets, so it is left out rather
+ * than shown as a step that can never be reached. Rejected is terminal and rendered as
+ * its own banner instead of a step. */
+const CONTRACT_REVIEW_STEPS = ["Generated", "Submitted", "Approved"] as const;
+
+const contractStatusTone = (status: string) => {
+  if (status === "Approved") return "bg-emerald-100 text-emerald-800";
+  if (status === "Submitted") return "bg-amber-100 text-amber-800";
+  if (status === "Rejected") return "bg-rose-100 text-rose-700";
+  return "bg-slate-100 text-slate-700";
+};
+
+/** Which of CONTRACT_REVIEW_STEPS the contract has reached. "Generated" is step 0 (nobody
+ * has returned a signed copy yet), "Submitted"/"Signed" is step 1, "Approved" is step 2.
+ * Derived from the real status rather than defaulting to the middle, so a freshly
+ * generated contract does not appear to be awaiting a review it has not reached. */
+const contractStepIndex = (status: string) =>
+  status === "Approved" ? 2 : status === "Generated" ? 0 : 1;
+
+/** Generated -> Submitted -> Approved. Rejected is a terminal branch rather than a step,
+ * so it renders nothing here and is shown as its own banner by the caller. Shared by the
+ * admin review screen and the vendor contracting screen so the two always agree. */
+const ContractStepper = ({ status }: { status: string }) => {
+  if (status === "Rejected") return null;
+  const current = contractStepIndex(status);
+  return (
+    <ol className="flex items-center gap-1 border-b border-slate-100 px-4 py-3">
+      {CONTRACT_REVIEW_STEPS.map((step, i) => {
+        const reached = i <= current;
+        const isCurrent = i === current;
+        return (
+          <li key={step} className="flex flex-1 items-center gap-1">
+            <span
+              className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold ${
+                isCurrent
+                  ? "bg-slate-900 text-white"
+                  : reached
+                    ? "bg-emerald-100 text-emerald-700"
+                    : "bg-slate-100 text-slate-400"
+              }`}
+            >
+              {reached && !isCurrent ? <Check size={11} /> : i + 1}
+            </span>
+            <span
+              className={`truncate text-[11px] font-medium ${
+                isCurrent ? "text-slate-900" : reached ? "text-slate-500" : "text-slate-300"
+              }`}
+            >
+              {step}
+            </span>
+            {i < CONTRACT_REVIEW_STEPS.length - 1 && (
+              <span className={`h-px flex-1 ${i < current ? "bg-emerald-200" : "bg-slate-200"}`} />
+            )}
+          </li>
+        );
+      })}
+    </ol>
+  );
+};
+
+/**
+ * One document in the contract package. The two that matter — the generated agreement
+ * and the bidder's signed copy — are told apart by `step`, so the reviewer can see at a
+ * glance which side produced it and whether the one they need is still outstanding.
+ */
+const ContractDocumentRow = ({
+  step,
+  title,
+  description,
+  href,
+  pending,
+}: {
+  step: string;
+  title: string;
+  description: string;
+  href?: string;
+  pending?: string;
+}) => (
+  <div className="flex items-center gap-3 px-4 py-3">
+    <div
+      className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[11px] font-bold ${
+        href ? "bg-slate-900 text-white" : "border border-dashed border-slate-300 text-slate-400"
+      }`}
+    >
+      {step}
+    </div>
+    <div className="min-w-0 flex-1">
+      <p className={`text-sm font-medium ${href ? "text-slate-900" : "text-slate-500"}`}>{title}</p>
+      <p className="mt-0.5 text-xs text-slate-400">{href ? description : pending || description}</p>
+    </div>
+    {href ? (
+      <a
+        href={href}
+        target="_blank"
+        rel="noreferrer"
+        className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs font-semibold text-slate-700 transition-colors hover:border-slate-300 hover:bg-slate-50"
+      >
+        <Download size={13} /> Open
+      </a>
+    ) : (
+      <span className="shrink-0 text-xs font-medium text-slate-400">Pending</span>
+    )}
+  </div>
+);
 
 const Tenders = ({
   initialView = "list",
@@ -6776,100 +6945,143 @@ const Tenders = ({
                 )}
                 {activeContract && (
                   <div className="space-y-3">
-                    <div className="flex items-center justify-between text-sm">
-                      <span className="font-medium text-slate-700">{activeContract.referenceNumber}</span>
-                      <span className="badge bg-slate-100 text-slate-700">{activeContract.status}</span>
-                    </div>
-                    {(activeContract.vendorName || activeContract.lotName) && (
-                      <p className="text-xs text-slate-500 -mt-1">
-                        {activeContract.lotName ? `${activeContract.lotName} — ` : ""}{activeContract.vendorName || ""}
-                      </p>
-                    )}
-                    <div className="space-y-3">
-                        <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
-                          <p className="font-semibold text-slate-700">Signed Contract Review</p>
-                          <p className="mt-1 text-[11px] text-slate-500">The awarded bid package is locked into Annexes A-E and must be complete before final activation.</p>
-                          {activeContract.generatedFile && (
-                            <a
-                              href={activeContract.generatedFile}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="block text-blue-700 hover:text-blue-800 underline mt-1"
-                            >
-                              Download generated Performance-Based Agreement
-                            </a>
-                          )}
-                          <div className="mt-2 flex flex-wrap gap-2">
-                            {[
-                              ["Annex A", activeContract.annexAFile],
-                              ["Annex B", activeContract.annexBFile],
-                              ["Annex C", activeContract.annexCFile],
-                              ["Annex D", activeContract.annexDFile],
-                              ["Annex E", activeContract.annexEFile],
-                            ].map(([label, file]) => (
-                              file ? (
-                                <a
-                                  key={label}
-                                  href={String(file)}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="text-blue-700 hover:text-blue-800 underline"
-                                >
-                                  {label}
-                                </a>
-                              ) : (
-                                <span key={label} className="text-rose-600">{label} missing</span>
-                              )
-                            ))}
-                          </div>
-                          {activeContract.signedFile ? (
-                            <a
-                              href={activeContract.signedFile}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="text-emerald-700 hover:text-emerald-800 underline"
-                            >
-                              View uploaded contract
-                            </a>
-                          ) : (
-                            <p className="text-rose-600">No signed file uploaded yet.</p>
-                          )}
-                          <p className="text-[10px] text-slate-400 mt-2">
-                            Status: {activeContract.status}
-                          </p>
-                        </div>
-                        {String(activeContract.status).toLowerCase() === "approved" ? (
-                          <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-3 text-xs text-emerald-800">
-                            <p className="font-semibold">Contract approved</p>
-                            <p className="mt-1">Continue to the "Project Assignment" tab to create the project and milestones.</p>
-                          </div>
-                        ) : (
-                          <>
-                            <button
-                              onClick={() => handleApproveContractOnly(activeContract.id)}
-                              disabled={isActioning}
-                              className="btn-primary w-full"
-                            >
-                              {isActioning ? "Approving..." : "Approve Contract"}
-                            </button>
-                            <div className="space-y-2">
-                              <input
-                                className="input-field"
-                                value={contractRejectionReason}
-                                onChange={(e) => setContractRejectionReason(e.target.value)}
-                                placeholder="Rejection reason (optional)"
-                              />
-                              <button
-                                onClick={() => handleRejectContract(activeContract.id)}
-                                disabled={isActioning}
-                                className="btn-secondary w-full"
-                              >
-                                Reject Contract
-                              </button>
+                        {(() => {
+                          const status = activeContract.status;
+                          const isRejected = status === "Rejected";
+                          const isApproved = status === "Approved";
+                          const provided = CONTRACT_PACKAGE_DOCUMENTS.filter((d) => activeContract[d.key]);
+                          // Approving is only meaningful once there is a signed copy to
+                          // review. The API rejects it outright (views.py `approve`), so
+                          // rather than let the reviewer click through to that error,
+                          // say up front what is still outstanding.
+                          const canApprove = Boolean(activeContract.signedFile) && !isApproved && !isRejected;
+
+                          return (
+                            <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+                              <div className="flex items-start justify-between gap-3 border-b border-slate-100 px-4 py-3">
+                                <div className="min-w-0">
+                                  <p className="text-sm font-bold text-slate-900">Contract Review</p>
+                                  <p className="mt-0.5 text-xs text-slate-500">
+                                    {activeContract.referenceNumber}
+                                    {activeContract.lotName ? ` · ${activeContract.lotName}` : ""}
+                                    {activeContract.vendorName ? ` · ${activeContract.vendorName}` : ""}
+                                  </p>
+                                </div>
+                                <span className={`badge shrink-0 ${contractStatusTone(status)}`}>{status}</span>
+                              </div>
+
+                              <ContractStepper status={status} />
+
+                              <div className="divide-y divide-slate-100">
+                                <ContractDocumentRow
+                                  step="1"
+                                  title="Performance-Based Agreement"
+                                  description="Generated from the awarded bid"
+                                  href={activeContract.generatedFile}
+                                  pending="Not generated yet"
+                                />
+                                <ContractDocumentRow
+                                  step="2"
+                                  title="Signed Performance-Based Agreement"
+                                  description={
+                                    activeContract.signedAt
+                                      ? `Returned by the bidder on ${new Date(activeContract.signedAt).toLocaleString()}`
+                                      : "The bidder's signed copy of the agreement"
+                                  }
+                                  href={activeContract.signedFile}
+                                  pending="Waiting for the bidder to upload their signed copy"
+                                />
+                              </div>
+
+                              {provided.length > 0 && (
+                                <details className="group border-t border-slate-100">
+                                  <summary className="flex cursor-pointer list-none items-center justify-between px-4 py-3 text-xs font-semibold text-slate-600 hover:bg-slate-50">
+                                    <span>Bidder documents in this package ({provided.length})</span>
+                                    <ChevronDown size={14} className="text-slate-400 transition-transform group-open:rotate-180" />
+                                  </summary>
+                                  <div className="px-4 pb-3">
+                                    <ul className="space-y-1">
+                                      {provided.map((doc) => (
+                                        <li key={doc.label} className="flex items-baseline justify-between gap-3 text-xs">
+                                          <span className="text-slate-500">
+                                            {doc.label} — {doc.title}
+                                          </span>
+                                          <a
+                                            href={String(activeContract[doc.key])}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            className="shrink-0 font-medium text-blue-700 hover:text-blue-800 underline"
+                                          >
+                                            View
+                                          </a>
+                                        </li>
+                                      ))}
+                                    </ul>
+                                    <p className="mt-2 text-[10px] text-slate-400">
+                                      Compiled into the agreement above. Listed for traceability — no separate
+                                      file is expected from the bidder.
+                                    </p>
+                                  </div>
+                                </details>
+                              )}
+
+                              {isRejected && (
+                                <div className="border-t border-rose-100 bg-rose-50 px-4 py-3 text-xs text-rose-800">
+                                  <p className="font-semibold">Returned to the bidder</p>
+                                  <p className="mt-1">
+                                    {activeContract.rejectionReason || "No reason was recorded."}
+                                  </p>
+                                </div>
+                              )}
+
+                              {!isApproved && !isRejected && (
+                                <div className="space-y-3 border-t border-slate-100 bg-slate-50 px-4 py-3">
+                                  {!canApprove && (
+                                    <p className="flex items-start gap-2 text-xs text-amber-700">
+                                      <AlertCircle size={14} className="mt-px shrink-0" />
+                                      <span>
+                                        Nothing to approve until the bidder uploads their signed copy of the
+                                        agreement. You can still reject it below if the package is wrong.
+                                      </span>
+                                    </p>
+                                  )}
+                                  <button
+                                    onClick={() => handleApproveContractOnly(activeContract.id)}
+                                    disabled={isActioning || !canApprove}
+                                    className="btn-primary w-full disabled:opacity-50 disabled:cursor-not-allowed"
+                                  >
+                                    {isActioning ? "Approving..." : "Approve contract"}
+                                  </button>
+                                  <div className="space-y-2">
+                                    <input
+                                      className="input-field"
+                                      value={contractRejectionReason}
+                                      onChange={(e) => setContractRejectionReason(e.target.value)}
+                                      placeholder="Reason for rejection (required to reject)"
+                                    />
+                                    <button
+                                      onClick={() => handleRejectContract(activeContract.id)}
+                                      disabled={isActioning}
+                                      className="btn-secondary w-full"
+                                    >
+                                      Reject contract
+                                    </button>
+                                  </div>
+                                </div>
+                              )}
+
+                              {isApproved && (
+                                <div className="flex items-start gap-2 border-t border-emerald-100 bg-emerald-50 px-4 py-3 text-xs text-emerald-800">
+                                  <CheckCircle2 size={14} className="mt-px shrink-0" />
+                                  <span>
+                                    Approved{activeContract.approvedBy ? ` by ${activeContract.approvedBy}` : ""}.
+                                    Continue to the &quot;Project Assignment&quot; tab to create the project and milestones.
+                                  </span>
+                                </div>
+                              )}
                             </div>
-                          </>
-                        )}
-                    </div>
+                          );
+                        })()}
                   </div>
                 )}
                 {contractMessage && <p className="text-xs text-slate-600">{contractMessage}</p>}
@@ -6934,10 +7146,22 @@ const Tenders = ({
                                 : "Review the signed contract, configure the milestone plan below, then save. The system will create Milestones 1, 2, and 3 with these percentages when the project is created."}
                             </p>
                           </div>
+                          {assignmentMeta?.contract_details?.lot_name && (
+                            <div className="rounded-xl border border-indigo-200 bg-indigo-50 p-3 text-xs text-indigo-900">
+                              <p className="font-semibold text-indigo-950">Lot-wise Tender</p>
+                              <p className="mt-1">
+                                This contract and the project created from it cover{" "}
+                                <span className="font-semibold">{assignmentMeta.contract_details.lot_name}</span> only. Milestone targets and the new project's reference are scoped to this lot.
+                              </p>
+                            </div>
+                          )}
                           {assignmentMeta?.contract_details && (
                             <div className="grid grid-cols-1 gap-3 rounded-xl border border-slate-100 bg-slate-50 p-3 text-xs text-slate-600 md:grid-cols-2">
                               <p><span className="font-semibold text-slate-700">Contract Ref:</span> {assignmentMeta.contract_details.contract_ref}</p>
                               <p><span className="font-semibold text-slate-700">Vendor Name:</span> {assignmentMeta.contract_details.vendor_name}</p>
+                              {assignmentMeta.contract_details.lot_name && (
+                                <p><span className="font-semibold text-slate-700">Lot:</span> {assignmentMeta.contract_details.lot_name}</p>
+                              )}
                               <p><span className="font-semibold text-slate-700">Technology:</span> {assignmentMeta.contract_details.technology}</p>
                               <p><span className="font-semibold text-slate-700">Bid Amount:</span> LSL {Number(assignmentMeta.contract_details.bid_amount || 0).toLocaleString()}</p>
                               <p><span className="font-semibold text-slate-700">Signed Date:</span> {assignmentMeta.contract_details.signed_date ? new Date(assignmentMeta.contract_details.signed_date).toLocaleString() : "N/A"}</p>
@@ -6948,7 +7172,9 @@ const Tenders = ({
                               <p className="font-semibold text-emerald-900 mb-1">District Source</p>
                               {assignmentMeta.contract_details?.bid_preferred_district
                                 ? `Vendor's preferred district: ${assignmentMeta.contract_details.bid_preferred_district}`
-                                : `Tender target districts: ${assignmentMeta.assignment_defaults.district_zones.join(", ")}`}
+                                : assignmentMeta.contract_details?.lot_name
+                                  ? `Lot target districts: ${assignmentMeta.assignment_defaults.district_zones.join(", ")}`
+                                  : `Tender target districts: ${assignmentMeta.assignment_defaults.district_zones.join(", ")}`}
                             </div>
                           )}
                           <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
@@ -7180,7 +7406,7 @@ const Tenders = ({
                                     </p>
                                     <div className="flex items-center gap-2">
                                       <span className="text-slate-500">Disbursement</span>
-                                      {pctInput(pcts[index], (value) => setPct(index, value), 1)}
+                                      {pctInput(pcts[index], (value) => setPct(index, value), index === 0 ? 0 : 1)}
                                       {contractValue > 0 && (
                                         <span className="w-32 text-right font-semibold text-slate-700">LSL {(contractValue * pcts[index] / 100).toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>
                                       )}
@@ -13309,12 +13535,6 @@ const VendorDashboard = ({
     [bidHistory]
   );
 
-  const contractTone = (status: TenderContract["status"]) => {
-    if (status === "Approved") return "bg-emerald-100 text-emerald-800";
-    if (status === "Submitted") return "bg-amber-100 text-amber-800";
-    if (status === "Rejected") return "bg-rose-100 text-rose-700";
-    return "bg-slate-100 text-slate-700";
-  };
   const vendorDashboardMapProjectId = useMemo(() => {
     const latestReportedProjectId = [...installationReports]
       .sort((a, b) => (b.submittedAt || "").localeCompare(a.submittedAt || ""))
@@ -17310,15 +17530,30 @@ const VendorDashboard = ({
           <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
             <div>
               <p className="text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-400">Contract Workflow</p>
-              <h3 className="text-2xl font-bold text-slate-900 mt-2">Contracting & Project Setup</h3>
-              <p className="text-sm text-slate-500">After final award, the generated PBA appears here. Download it, review the locked Annexes A-E, sign it digitally or by scanned wet-signature PDF, upload it, and wait for RMT approval before project setup opens.</p>
+              <h3 className="text-2xl font-bold text-slate-900 mt-2">Contracting &amp; Project Setup</h3>
+              <p className="text-sm text-slate-500 max-w-2xl">
+                Once your tender is awarded, the Performance-Based Agreement is generated from your bid and appears
+                here. Download it, sign it, and upload the signed copy. RMT reviews it, then project setup opens.
+              </p>
             </div>
-            <div className="flex flex-wrap gap-2 text-[11px]">
-              <span className="badge bg-slate-100 text-slate-700">Generated</span>
-              <span className="badge bg-amber-100 text-amber-800">Submitted</span>
-              <span className="badge bg-emerald-100 text-emerald-800">Approved</span>
-              <span className="badge bg-rose-100 text-rose-700">Rejected</span>
-            </div>
+            {sortedContracts.length > 0 && (
+              <div className="flex flex-wrap gap-2 text-[11px]">
+                {CONTRACT_REVIEW_STEPS.map((step) => {
+                  const count = sortedContracts.filter((c) => c.status === step).length;
+                  if (count === 0) return null;
+                  return (
+                    <span key={step} className={`badge ${contractStatusTone(step)}`}>
+                      {count} {step.toLowerCase()}
+                    </span>
+                  );
+                })}
+                {sortedContracts.some((c) => c.status === "Rejected") && (
+                  <span className="badge bg-rose-100 text-rose-700">
+                    {sortedContracts.filter((c) => c.status === "Rejected").length} rejected
+                  </span>
+                )}
+              </div>
+            )}
           </div>
         </div>
 
@@ -17334,111 +17569,159 @@ const VendorDashboard = ({
           )}
 
           {sortedContracts.length > 0 && (
-            <div className="grid grid-cols-1 gap-5 xl:grid-cols-2">
+            <div className="grid grid-cols-1 gap-5 2xl:grid-cols-2">
               {sortedContracts.map((contract) => (
-                <div key={contract.id} className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-[0_12px_30px_-24px_rgba(15,23,42,0.5)]">
-                  <div className="flex items-start justify-between gap-4">
-                    <div>
-                      <p className="text-xs font-semibold text-slate-400">Contract Reference</p>
-                      <p className="text-base font-bold text-slate-900">{contract.referenceNumber}</p>
-                      {contract.lotName && <p className="text-xs font-semibold text-emerald-700 mt-0.5">{contract.lotName}</p>}
-                      <p className="text-xs text-slate-500 mt-1">Status: {contract.status}</p>
-                      <p className="text-xs text-slate-500">Signature: {contract.signatureStatus || "awaiting"}</p>
-                    </div>
-                    <span className={`badge ${contractTone(contract.status)}`}>{contract.status}</span>
-                  </div>
-
-                  <div className="mt-4 grid grid-cols-4 gap-2 text-[10px] font-semibold text-slate-500">
-                    {["Generated", "Submitted", "Approved", "Rejected"].map((label) => (
-                      <div
-                        key={label}
-                        className={`rounded-full px-3 py-1 text-center ${
-                          label === contract.status ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-500"
-                        }`}
-                      >
-                        {label}
-                      </div>
-                    ))}
-                  </div>
-
-                  {contract.generatedFile && (
-                    <div className="mt-5 space-y-2">
-                      <a
-                        href={contract.generatedFile}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="inline-flex text-xs font-semibold text-blue-700 underline"
-                      >
-                        Download generated Performance-Based Agreement
-                      </a>
-                      <div className="flex flex-wrap gap-3 text-xs text-slate-600">
-                        {[
-                          ["Annex A: Results Framework", contract.annexAFile],
-                          ["Annex B: Implementation Schedule", contract.annexBFile],
-                          ["Annex C: Payment Terms", contract.annexCFile],
-                          ["Annex D: Reporting Formats", contract.annexDFile],
-                          ["Annex E: Technical Standards", contract.annexEFile],
-                        ].map(([label, file]) => (
-                          file ? (
-                            <a key={label} href={String(file)} target="_blank" rel="noreferrer" className="underline text-slate-700">
-                              {label}
-                            </a>
-                          ) : (
-                            <span key={label} className="text-slate-400">{label} missing</span>
-                          )
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {contract.status === "Generated" && (
-                    <div className="mt-5 space-y-3">
-                      {contract.rejectionReason && (
-                        <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
-                          <p className="font-semibold">Previously rejected: {contract.rejectionReason}</p>
-                          <p className="mt-1">Please review the reason above and upload a corrected signed copy below.</p>
-                        </div>
+                <div
+                  key={contract.id}
+                  className="flex flex-col overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_12px_30px_-24px_rgba(15,23,42,0.5)]"
+                >
+                  <div className="flex items-start justify-between gap-4 px-5 py-4">
+                    <div className="min-w-0">
+                      <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-400">
+                        Contract Reference
+                      </p>
+                      <p className="truncate text-base font-bold text-slate-900">{contract.referenceNumber}</p>
+                      {contract.lotName && (
+                        <p className="mt-0.5 text-xs font-semibold text-emerald-700">{contract.lotName}</p>
                       )}
-                      <label className="text-xs font-semibold text-slate-600">Upload Signed Contract</label>
-                      <input
-                        type="file"
-                        accept=".pdf,application/pdf"
-                        onChange={(e) => {
-                          const file = e.target.files?.[0] || null;
-                          setContractFiles(prev => ({ ...prev, [contract.id]: file }));
-                        }}
-                        className="input-field"
-                      />
-                      <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600 space-y-1">
-                        <p className="font-semibold text-slate-700">Locked Contract Annexes</p>
-                        <p>Upload a signed PDF only. Digitally signed PDFs and scanned wet-signature PDFs are both accepted.</p>
-                        <p>Maximum file size: 10MB.</p>
-                        <p>After upload, the admin will review and finalize the contract before the project becomes active.</p>
-                        <p>Annex A: {contract.annexAFile ? "Results Framework from the awarded Gender Action Plan is attached" : "Missing"}</p>
-                        <p>Annex B: {contract.annexBFile ? "Implementation Schedule from the awarded Implementation Plan is attached" : "Missing"}</p>
-                        <p>Annex C: {contract.annexCFile ? "Payment Terms including the BOQ and disbursement table are attached" : "Missing"}</p>
-                        <p>Annex D: {contract.annexDFile ? "Reporting Formats from the standardized system templates are attached" : "Missing"}</p>
-                        <p>Annex E: {contract.annexEFile ? "Technical Standards from the awarded Technical Proposal are attached" : "Missing"}</p>
-                      </div>
-                      <button
-                        onClick={() => handleSignContract(contract.id)}
-                        disabled={isContractSubmitting}
-                        className="btn-primary px-6 disabled:opacity-60"
-                      >
-                        {isContractSubmitting ? "Submitting..." : "Submit"}
-                      </button>
                     </div>
-                  )}
+                    <span className={`badge shrink-0 ${contractStatusTone(contract.status)}`}>{contract.status}</span>
+                  </div>
 
-                  {contract.status === "Submitted" && (
-                    <p className="mt-5 text-xs text-amber-700">Signed contract submitted successfully. RMT can now open the review screen, read the uploaded PDF, and approve the contract.</p>
-                  )}
-                  {contract.status === "Approved" && (
-                    <p className="mt-5 text-xs text-emerald-700">Contract approved. The vendor project is active, milestone assignments are saved, and you can now complete project setup to unlock Milestone 1.</p>
-                  )}
-                  {contract.status === "Rejected" && (
-                    <p className="mt-5 text-xs text-rose-600">Rejected: {contract.rejectionReason || "Please contact admin."}</p>
-                  )}
+                  <ContractStepper status={contract.status} />
+
+                  <div className="divide-y divide-slate-100">
+                    <ContractDocumentRow
+                      step="1"
+                      title="Performance-Based Agreement"
+                      description="Generated from your bid"
+                      href={contract.generatedFile}
+                      pending="Not generated yet"
+                    />
+                    <ContractDocumentRow
+                      step="2"
+                      title="Your signed copy"
+                      description={
+                        contract.signedAt
+                          ? `Uploaded on ${new Date(contract.signedAt).toLocaleString()}`
+                          : "The copy you sign and return"
+                      }
+                      href={contract.signedFile}
+                      pending="Not uploaded yet"
+                    />
+                  </div>
+
+                  {(() => {
+                    const included = CONTRACT_PACKAGE_DOCUMENTS.filter((d) => contract[d.key]);
+                    if (included.length === 0) return null;
+                    return (
+                      <details className="group border-t border-slate-100">
+                        <summary className="flex cursor-pointer list-none items-center justify-between px-5 py-3 text-xs font-semibold text-slate-600 hover:bg-slate-50">
+                          <span>Your documents in this agreement ({included.length})</span>
+                          <ChevronDown size={14} className="text-slate-400 transition-transform group-open:rotate-180" />
+                        </summary>
+                        <div className="px-5 pb-3">
+                          <ul className="space-y-1">
+                            {included.map((doc) => (
+                              <li key={doc.label} className="text-xs text-slate-500">
+                                {doc.label} — {doc.title}
+                              </li>
+                            ))}
+                          </ul>
+                          <p className="mt-2 text-[10px] text-slate-400">
+                            These are already compiled into the agreement above. There is nothing separate to
+                            download or upload — you sign and return that one file.
+                          </p>
+                        </div>
+                      </details>
+                    );
+                  })()}
+
+                  <div className="mt-auto border-t border-slate-100">
+                    {contract.status === "Generated" && (
+                      <div className="space-y-3 px-5 py-4">
+                        {contract.rejectionReason && (
+                          <div className="flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">
+                            <AlertCircle size={14} className="mt-px shrink-0" />
+                            <span>
+                              <span className="font-semibold">Returned to you.</span> {contract.rejectionReason}
+                            </span>
+                          </div>
+                        )}
+
+                        <div>
+                          <p className="text-xs font-semibold text-slate-700">Sign and return the agreement</p>
+                          <p className="mt-0.5 text-[11px] text-slate-500">
+                            Download the agreement above, sign it, then choose the signed PDF below. Digitally signed
+                            and scanned wet-signature PDFs are both accepted. Maximum 10MB.
+                          </p>
+                        </div>
+
+                        <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-3 py-3 transition-colors focus-within:border-slate-400 focus-within:bg-slate-100">
+                          <label className="flex cursor-pointer flex-col items-center gap-1.5 text-center">
+                            <Upload size={16} className="text-slate-400" />
+                            <span className="text-xs font-semibold text-slate-600">
+                              {contractFiles[contract.id]
+                                ? contractFiles[contract.id]!.name
+                                : "Choose signed PDF"}
+                            </span>
+                            <span className="text-[10px] text-slate-400">
+                              {contractFiles[contract.id]
+                                ? `${(contractFiles[contract.id]!.size / 1024 / 1024).toFixed(2)} MB selected`
+                                : "PDF only"}
+                            </span>
+                            <input
+                              type="file"
+                              accept=".pdf,application/pdf"
+                              className="sr-only"
+                              onChange={(e) => {
+                                const file = e.target.files?.[0] || null;
+                                setContractFiles(prev => ({ ...prev, [contract.id]: file }));
+                              }}
+                            />
+                          </label>
+                        </div>
+
+                        <button
+                          onClick={() => handleSignContract(contract.id)}
+                          disabled={isContractSubmitting || !contractFiles[contract.id]}
+                          className="btn-primary w-full disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          {isContractSubmitting ? "Submitting..." : "Submit signed agreement"}
+                        </button>
+                      </div>
+                    )}
+
+                    {contract.status === "Submitted" && (
+                      <p className="flex items-start gap-2 px-5 py-4 text-xs text-amber-800">
+                        <Clock size={14} className="mt-px shrink-0" />
+                        <span>
+                          <span className="font-semibold">With RMT for review.</span> Your signed copy has been
+                          received. You will be notified once it is approved or returned.
+                        </span>
+                      </p>
+                    )}
+
+                    {contract.status === "Approved" && (
+                      <p className="flex items-start gap-2 bg-emerald-50 px-5 py-4 text-xs text-emerald-800">
+                        <CheckCircle2 size={14} className="mt-px shrink-0" />
+                        <span>
+                          <span className="font-semibold">Approved.</span> Your project is now active and milestone
+                          assignments are saved. Continue in Project Setup to unlock Milestone 1.
+                        </span>
+                      </p>
+                    )}
+
+                    {contract.status === "Rejected" && (
+                      <p className="flex items-start gap-2 bg-rose-50 px-5 py-4 text-xs text-rose-800">
+                        <AlertCircle size={14} className="mt-px shrink-0" />
+                        <span>
+                          <span className="font-semibold">Returned to you.</span>{" "}
+                          {contract.rejectionReason || "Please contact RMT for details."}
+                        </span>
+                      </p>
+                    )}
+                  </div>
                 </div>
               ))}
             </div>
@@ -18922,6 +19205,7 @@ const ProjectsHub = ({
   const [reportDraft, setReportDraft] = useState({
     serialNumber: "",
     beneficiaryId: "",
+    beneficiaryPhone: "",
     householdType: "",
     gpsLat: "",
     gpsLng: "",
@@ -19377,7 +19661,11 @@ const ProjectsHub = ({
   const milestoneProgress = (milestone: Milestone) => Math.min(100, Math.max(0, Number(milestone.progressPercentage ?? 0)));
   const milestoneCompleted = (milestone: Milestone) => milestoneProgress(milestone) >= 100 || Boolean(milestone.completedDate);
   const nextOpenMilestoneForProject = (projectId: string) => {
-    const openMilestones = milestonesForProject(projectId).filter(m => !milestoneCompleted(m));
+    // Zero-value milestones are skipped, so they must not be offered as "the next
+    // milestone" — the vendor would be pointed at a 0% milestone they can never claim.
+    const openMilestones = milestonesForProject(projectId)
+      .filter(m => !milestoneCompleted(m))
+      .filter(m => (m.disbursementPct ?? m.percentage ?? 0) > 0 || (m.amountLsl ?? m.amount ?? 0) > 0);
     if (openMilestones.length === 0) return undefined;
     return openMilestones
       .slice()
@@ -19497,7 +19785,15 @@ const ProjectsHub = ({
   const getProjectContract = (projectId: string) => contracts.find(contract => contract.projectId === projectId);
   const getMilestoneDisplayName = (milestone: Milestone, index: number) =>
     `Milestone ${index + 1} - ${milestone.percentage}%${milestone.name ? ` (${milestone.name})` : ""}`;
+  // Mirrors is_zero_value_milestone in backend/rbf/projects/milestone_reviews.py: a
+  // milestone set to 0% has no amount, so it can never be claimed. It is skipped, and the
+  // following milestone unlocks without it.
+  const isZeroValueMilestone = (milestone: Milestone) =>
+    !((milestone.disbursementPct ?? milestone.percentage ?? 0) > 0) ||
+    !((milestone.amountLsl ?? milestone.amount ?? 0) > 0);
+
   const getMilestoneStateLabel = (milestone: Milestone, projectId: string) => {
+    if (isZeroValueMilestone(milestone)) return "SKIPPED";
     if (milestone.status === "paid" || milestone.status === "Paid") return "PAID";
     if (milestone.status === "cancelled") return "CANCELLED";
     const relatedClaim = claimsForProject(projectId).find(claim => claim.milestoneId === milestone.id);
@@ -19513,6 +19809,7 @@ const ProjectsHub = ({
     if (label === "PAID") return "text-emerald-700";
     if (label === "CLAIMABLE" || label === "APPROVED" || label === "VERIFIED") return "text-sky-700";
     if (label === "UNDER REVIEW" || label === "PENDING") return "text-amber-700";
+    if (label === "SKIPPED") return "text-slate-400";
     return "text-slate-500";
   };
   const getSetupStatusLabel = (project: Project) => {
@@ -19871,6 +20168,20 @@ const ProjectsHub = ({
       errors.beneficiaryId = "Beneficiary ID looks too short (min 6 characters). Double-check the NID.";
     }
 
+    // Optional, but reject obvious typos rather than storing a contact number nobody can
+    // dial. Permissive on format (spaces, +, -, parentheses all appear in the field).
+    const beneficiaryPhone = (reportDraft.beneficiaryPhone || "").trim();
+    if (beneficiaryPhone) {
+      const digitsOnly = beneficiaryPhone.replace(/\D/g, "");
+      if (digitsOnly.length < 7) {
+        errors.beneficiaryPhone = "Phone number looks too short. Enter the household's contact number, e.g. +266 2212 3456.";
+      } else if (beneficiaryPhone.length > 32) {
+        errors.beneficiaryPhone = "Phone number is too long (max 32 characters).";
+      } else if (!/^[0-9+()\-\s.]+$/.test(beneficiaryPhone)) {
+        errors.beneficiaryPhone = "Phone number contains invalid characters. Use digits, spaces and + ( ) - only.";
+      }
+    }
+
     if (!householdType) {
       errors.householdType = "Select a household type. This drives the gender/inclusion KPIs for your project.";
     }
@@ -19979,6 +20290,7 @@ const ProjectsHub = ({
         gpsLng,
         serialNumber,
         beneficiaryId,
+        beneficiaryPhone: reportDraft.beneficiaryPhone.trim() || undefined,
         householdType: reportDraft.householdType || undefined,
         meterId: reportDraft.meterId.trim() || undefined,
         kwhReading: reportDraft.kwhReading ? Number(reportDraft.kwhReading) : undefined,
@@ -19987,7 +20299,7 @@ const ProjectsHub = ({
       });
       setInstallationReports(prev => [created.report, ...prev]);
       await refreshProjectUpdates(selectedProject.id);
-      setReportDraft({ serialNumber: "", beneficiaryId: "", householdType: "", gpsLat: "", gpsLng: "", meterId: "", kwhReading: "" });
+      setReportDraft({ serialNumber: "", beneficiaryId: "", beneficiaryPhone: "", householdType: "", gpsLat: "", gpsLng: "", meterId: "", kwhReading: "" });
       setReportPhotos([]);
       setReportReceipt(null);
       setReportMessageTone(created.warning ? "info" : "success");
@@ -20709,6 +21021,9 @@ const ProjectsHub = ({
               <div>
                 <p className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Project ID</p>
                 <h3 className="mt-1 text-2xl font-semibold text-slate-900">{project.projectReference || `PRJ-${project.id}`}</h3>
+                {project.lotName && (
+                  <span className="badge mt-2 bg-indigo-100 text-indigo-700">{project.lotName}</span>
+                )}
                 <p className="mt-1 text-base text-slate-700">{project.tenderName || project.projectTitle || "Project"}</p>
                 <p className="mt-1 text-sm text-slate-500">
                   {[!isUndpPortal ? project.vendorName : null, project.techType || "N/A", project.assignedDistrict || project.district || project.region || "N/A"].filter(Boolean).join("  |  ")}
@@ -22443,6 +22758,9 @@ const ProjectsHub = ({
               <div>
                 <p className="text-[11px] uppercase tracking-[0.3em] text-slate-400">Project ID</p>
                 <h3 className="mt-1 text-2xl font-semibold text-slate-900">{project.projectReference || `PRJ-${project.id}`}</h3>
+                {project.lotName && (
+                  <span className="badge mt-2 bg-indigo-100 text-indigo-700">{project.lotName}</span>
+                )}
                 <p className="mt-1 text-base text-slate-700">{project.tenderName || project.projectTitle || "Project"}</p>
                 <p className="mt-1 text-sm text-slate-500">{project.techType || "N/A"} • District: {project.assignedDistrict || project.district || project.region || "N/A"}</p>
               </div>
@@ -22478,7 +22796,10 @@ const ProjectsHub = ({
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-3 text-[11px] text-slate-500 sm:grid-cols-3 xl:grid-cols-6">
+          <div className={`grid grid-cols-2 gap-3 text-[11px] text-slate-500 sm:grid-cols-3 ${project.lotName ? "xl:grid-cols-7" : "xl:grid-cols-6"}`}>
+            {project.lotName && (
+              <div className="rounded-xl border border-indigo-100 bg-indigo-50 px-3 py-2"><p className="uppercase tracking-wider text-indigo-400">Lot</p><p className="font-semibold text-indigo-900">{project.lotName}</p></div>
+            )}
             <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">Start</p><p className="font-semibold text-slate-700">{formatDate(startDateForProject(project))}</p></div>
             <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">End</p><p className="font-semibold text-slate-700">{formatDate(endDateForProject(project))}</p></div>
             <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2"><p className="uppercase tracking-wider text-slate-400">District</p><p className="font-semibold text-slate-700">{project.assignedDistrict || project.district || project.region || "N/A"}</p></div>
@@ -22917,10 +23238,16 @@ const ProjectsHub = ({
                           <p className="mt-1 text-sm text-slate-500">{milestone.description?.trim() || "Milestone progress unlocks based on project KPIs and verification conditions."}</p>
                         </div>
                         <div className="text-right">
-                          <span className={`rounded-full px-3 py-1 text-xs font-semibold ${stateLabel === "PAID" ? "bg-emerald-100 text-emerald-700" : stateLabel === "CLAIMABLE" ? "bg-sky-100 text-sky-700" : stateLabel === "UNDER REVIEW" ? "bg-amber-100 text-amber-700" : "bg-slate-100 text-slate-700"}`}>{stateLabel}</span>
+                          <span className={`rounded-full px-3 py-1 text-xs font-semibold ${stateLabel === "PAID" ? "bg-emerald-100 text-emerald-700" : stateLabel === "CLAIMABLE" ? "bg-sky-100 text-sky-700" : stateLabel === "UNDER REVIEW" ? "bg-amber-100 text-amber-700" : stateLabel === "SKIPPED" ? "bg-slate-100 text-slate-500" : "bg-slate-100 text-slate-700"}`}>{stateLabel}</span>
                           <p className="mt-2 text-sm font-semibold text-slate-900">{formatCurrency((milestone.amountLsl ?? milestone.amount) || 0)}</p>
                         </div>
                       </div>
+                      {stateLabel === "SKIPPED" && (
+                        <p className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-500">
+                          This milestone is set to 0% disbursement, so there is no amount to claim.
+                          It has been skipped automatically — continue with the next milestone.
+                        </p>
+                      )}
                       <div className="grid gap-3 md:grid-cols-3">
                         <div className="rounded-xl border border-slate-100 bg-slate-50 p-3"><p className="text-[11px] uppercase tracking-wide text-slate-500">Milestone</p><p className="mt-1 text-sm font-medium text-slate-900">{milestone.milestoneNumber || index + 1}</p></div>
                         <div className="rounded-xl border border-slate-100 bg-slate-50 p-3"><p className="text-[11px] uppercase tracking-wide text-slate-500">Percentage</p><p className="mt-1 text-sm font-medium text-slate-900">{milestone.disbursementPct || milestone.percentage}%</p></div>
@@ -23082,6 +23409,19 @@ const ProjectsHub = ({
                       onChange={(e) => { setReportDraft(prev => ({ ...prev, beneficiaryId: e.target.value })); clearReportError("beneficiaryId"); }}
                     />
                     {reportErrors.beneficiaryId && <p className="mt-1 text-xs font-medium text-rose-600">{reportErrors.beneficiaryId}</p>}
+                  </div>
+                  <div>
+                    <input
+                      type="tel"
+                      inputMode="tel"
+                      className={`input-field ${reportErrors.beneficiaryPhone ? "border-rose-400 ring-1 ring-rose-200" : ""}`}
+                      placeholder="Beneficiary phone number (optional)"
+                      value={reportDraft.beneficiaryPhone}
+                      onChange={(e) => { setReportDraft(prev => ({ ...prev, beneficiaryPhone: e.target.value })); clearReportError("beneficiaryPhone"); }}
+                    />
+                    {reportErrors.beneficiaryPhone
+                      ? <p className="mt-1 text-xs font-medium text-rose-600">{reportErrors.beneficiaryPhone}</p>
+                      : <p className="mt-1 text-[11px] text-slate-400">Household contact for follow-up. Masked for TAC and Auditors; withheld from DOE and UNDP.</p>}
                   </div>
                   <div>
                     <select
@@ -24457,11 +24797,17 @@ const ProjectsHub = ({
                     </button>
                   </div>
                 </div>
-                <div className="grid grid-cols-2 gap-3 text-[11px] text-slate-500 sm:grid-cols-5">
+                <div className={`grid grid-cols-2 gap-3 text-[11px] text-slate-500 ${project.lotName ? "sm:grid-cols-6" : "sm:grid-cols-5"}`}>
                   <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
                     <p className="uppercase tracking-wider text-slate-400">Project ID</p>
                     <p className="font-semibold text-slate-700">{project.projectReference || `PRJ-${project.id}`}</p>
                   </div>
+                  {project.lotName && (
+                    <div className="rounded-xl border border-indigo-100 bg-indigo-50 px-3 py-2">
+                      <p className="uppercase tracking-wider text-indigo-400">Lot</p>
+                      <p className="font-semibold text-indigo-900">{project.lotName}</p>
+                    </div>
+                  )}
                   <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
                     <p className="uppercase tracking-wider text-slate-400">Technology</p>
                     <p className="font-semibold text-slate-700">{project.techType || "N/A"}</p>
@@ -24567,6 +24913,10 @@ export const TACView = ({ mode, onNavigate, initialTenderId }: { mode: "technica
   const [isAttestingCoi, setIsAttestingCoi] = useState(false);
   const [declaredCoiVendorId, setDeclaredCoiVendorId] = useState<string | null>(null);
   const [isSubmitScoreSubmitting, setIsSubmitScoreSubmitting] = useState(false);
+  // When the currently-open evaluation was last persisted as a draft. Seeded from the
+  // server row on open and refreshed on every successful save so the header status can
+  // say "Saved as draft <time>" rather than relying on the 3-second toast alone.
+  const [evalDraftSavedAt, setEvalDraftSavedAt] = useState<string | null>(null);
 
   const showNotification = (msg: string) => {
     setNotification(msg);
@@ -25080,6 +25430,9 @@ export const TACView = ({ mode, onNavigate, initialTenderId }: { mode: "technica
       },
     });
     navigateView("evaluate");
+    // A previously-saved draft carries its own last-saved stamp; a submitted row shows
+    // the lock state instead, so leave the draft stamp empty for it.
+    setEvalDraftSavedAt(existing?.submissionStatus === "draft" ? existing?.updatedAt ?? null : null);
     setDeclaredCoiVendorId(null);
     // Fresh conflict-of-interest posture every time an evaluator opens a bid, so the
     // attestation gate and any unresolved declarations are always current.
@@ -25190,6 +25543,7 @@ export const TACView = ({ mode, onNavigate, initialTenderId }: { mode: "technica
       await loadEvaluations();
       window.dispatchEvent(new Event("rbf-bid-updated"));
       setSelectedEval(prev => prev ? { ...prev, evaluationId: saved.id, submissionStatus: saved.submissionStatus, submittedAt: saved.submittedAt } : prev);
+      setEvalDraftSavedAt(saved.submissionStatus === "submitted" ? null : saved.updatedAt ?? new Date().toISOString());
       showNotification(`${isFinancialEvaluationMode ? "Financial" : "Technical"} evaluation draft saved for ${selectedEval.bid.vendor_name}.`);
       return true;
     } catch (err: any) {
@@ -25244,6 +25598,7 @@ export const TACView = ({ mode, onNavigate, initialTenderId }: { mode: "technica
       await loadEvaluations();
       window.dispatchEvent(new Event("rbf-bid-updated"));
       setSelectedEval(prev => prev ? { ...prev, evaluationId: saved.id, submissionStatus: saved.submissionStatus, submittedAt: saved.submittedAt } : prev);
+      setEvalDraftSavedAt(null);
       showNotification(`${isFinancialEvaluationMode ? "Financial" : "Technical"} evaluation submitted and locked for ${selectedEval.bid.vendor_name}.`);
     } catch (err: any) {
       const raw = String(err?.message || "");
@@ -25258,6 +25613,7 @@ export const TACView = ({ mode, onNavigate, initialTenderId }: { mode: "technica
     try {
       const unlocked = await unlockBidEvaluation(selectedEval.evaluationId);
       setSelectedEval(prev => prev ? { ...prev, evaluationId: unlocked.id, submissionStatus: unlocked.submissionStatus, submittedAt: unlocked.submittedAt } : prev);
+      setEvalDraftSavedAt(new Date().toISOString());
       await loadEvaluations();
       showNotification("Evaluation reopened. Adjust the marks and re-submit when ready.");
     } catch (err: any) {
@@ -25672,7 +26028,33 @@ export const TACView = ({ mode, onNavigate, initialTenderId }: { mode: "technica
       );
     }
 
+  // The three states of the open evaluation, shown next to the title so the outcome of
+  // Save Draft / Submit & Lock is visible for as long as the screen is open — the toast
+  // alone disappears after 3 seconds. Unscored -> "Not started", a saved working copy ->
+  // "Saved as draft", a sealed one -> "Evaluated & locked".
+  const renderEvalStatusBadge = () => {
+    if (selectedEval?.submissionStatus === "submitted") {
+      return (
+        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2.5 py-1 text-[11px] font-bold text-emerald-700">
+          <Lock size={12} /> Evaluated &amp; locked
+        </span>
+      );
+    }
+    if (selectedEval?.submissionStatus === "draft") {
+      return (
+        <span className="inline-flex items-center gap-1 rounded-full bg-sky-100 px-2.5 py-1 text-[11px] font-bold text-sky-700">
+          <PenLine size={12} /> Saved as draft
+        </span>
+      );
+    }
     return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-bold text-slate-500">
+        <CircleDashed size={12} /> Not started
+      </span>
+    );
+  };
+
+  return (
       <>
           <div className="space-y-6 max-w-7xl mx-auto">
             <div className="flex items-center gap-4 mb-8">
@@ -25683,8 +26065,15 @@ export const TACView = ({ mode, onNavigate, initialTenderId }: { mode: "technica
                 <div className="flex flex-wrap items-center gap-2">
                   <h1 className="text-2xl font-bold text-slate-900">{isFinancialEvaluationMode ? "Financial Evaluation" : "Technical Evaluation"}</h1>
                   <span className="inline-flex items-center rounded-full bg-slate-900 px-2.5 py-1 text-[11px] font-bold text-white">{currentEvalSerialLabel}</span>
+                  {renderEvalStatusBadge()}
                 </div>
               <p className="text-slate-500">{selectedEval.bid.vendor_name} • {selectedEval.bid.tender}</p>
+              {evalDraftSavedAt && selectedEval.submissionStatus === "draft" && (
+                <p className="mt-0.5 text-xs text-sky-700">Last saved {new Date(evalDraftSavedAt).toLocaleString()}</p>
+              )}
+              {selectedEval.submittedAt && selectedEval.submissionStatus === "submitted" && (
+                <p className="mt-0.5 text-xs text-emerald-700">Evaluated &amp; locked {new Date(selectedEval.submittedAt).toLocaleString()}</p>
+              )}
               {evalBiddingOnLotNames.length > 0 && (
                 <div className="mt-2 flex flex-wrap items-center gap-1.5">
                   <span className="text-xs font-semibold text-slate-500">Bidding on:</span>
@@ -26556,10 +26945,19 @@ export const TACView = ({ mode, onNavigate, initialTenderId }: { mode: "technica
                             // Any unscored unit that isn't the due one is locked behind the queue.
                             const isSerialLocked = Boolean(dueUnit) && !existing && !isCurrentBid;
                             const serialLabel = unit ? getSerialDisplay(item.tender, unit) : "";
+                            // This member's own state wins over the bid-level aggregate: a
+                            // working copy must not read as "Evaluated" just because the
+                            // committee as a whole has scored the bid.
                             const rowStatus =
+                              existing?.submissionStatus === "submitted" ? "Evaluated & locked" :
+                              existing?.submissionStatus === "draft" ? "Saved as draft" :
                               item.evaluation_status === "evaluated" ? "Evaluated" :
                               item.evaluation_status === "technical_scored" ? (isFinancialEvaluationMode ? "Pending Financial" : "Evaluated") :
                               "Pending";
+                            const rowStatusTone =
+                              existing?.submissionStatus === "submitted" ? "text-emerald-600" :
+                              existing?.submissionStatus === "draft" ? "text-sky-600" :
+                              rowStatus === "Pending" ? "text-slate-400" : "text-slate-900";
                             const committeeCount = technicalScoredCountByKey.get(getEvalKey(item.id, sectionKey)) || 0;
                             return (
                               <div key={item.id} className={`p-6 flex items-center justify-between transition-colors ${needsEval ? (isCurrentBid ? "bg-amber-50/50 border-l-4 border-amber-500" : "bg-amber-50/30 border-l-4 border-amber-200") : "hover:bg-slate-50"}`}>
@@ -26612,7 +27010,7 @@ export const TACView = ({ mode, onNavigate, initialTenderId }: { mode: "technica
                                     </div>
                                     <div>
                                       <p className="text-xs font-bold text-slate-400 uppercase">Status</p>
-                                      <p className="text-sm font-semibold text-slate-900">{rowStatus}</p>
+                                      <p className={`text-sm font-semibold ${rowStatusTone}`}>{rowStatus}</p>
                                     </div>
                                   </div>
                                   <button

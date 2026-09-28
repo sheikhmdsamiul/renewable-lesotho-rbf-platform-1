@@ -272,13 +272,36 @@ def _attach_awarded_bid_annexes(contract: TenderContract, tender: Tender, bid: T
         setattr(contract, contract_field, _resolve_contract_source_file(tender, bid, source_fields))
 
 
-def _missing_contract_annexes(contract: TenderContract):
-    bid = _get_contract_bid(contract)
+def _missing_required_bid_documents(tender: Tender, bid: TenderBid | None):
+    """Required bid documents THIS tender configured that the awarded vendor did not upload.
+
+    This is the only bid-completeness rule that applies when signing. It deliberately does
+    not consider the Annex A-E contract sections: those are structural pages of the
+    generated PBA rather than vendor uploads (see ANNEX_SECTION_SPECS in pba_pdf.py), so an
+    absent annex source is never a reason to refuse a signature — gating on it blocked
+    vendors whose bid legitimately omitted a source document, and asked them to upload a
+    document the tender never required of them. What genuinely matters is whether the
+    vendor delivered what this tender asked for, configured at tender creation.
+
+    Mirrors the submission-time rule in TenderBidSerializer.validate so both agree on what
+    "required" means and on how custom documents are matched.
+    """
+    if not bid:
+        return []
+    uploaded_custom = {}
+    for entry in (bid.custom_documents or []):
+        if isinstance(entry, dict) and entry.get('name'):
+            uploaded_custom[str(entry['name']).strip()] = entry
+
     missing = []
-    for contract_field, label, title, _source_name, source_fields in CONTRACT_ANNEX_SPECS:
-        if getattr(contract, contract_field) or _resolve_contract_source_file(contract.tender, bid, source_fields):
+    for required in tender.required_documents.all():
+        if required.field_key:
+            if not getattr(bid, required.field_key, None):
+                missing.append(required.name)
             continue
-        missing.append(f'{label} ({title})')
+        uploaded = uploaded_custom.get(str(required.name).strip())
+        if not (uploaded and (uploaded.get('file_url') or uploaded.get('file_name'))):
+            missing.append(required.name)
     return missing
 
 
@@ -317,6 +340,15 @@ def _assignment_defaults(contract: TenderContract):
             bid_technology_type = _normalize_technology_type(getattr(bid, 'technology_type', ''))
         if bid_technology_type and bid_technology_type in technology_choices:
             technology_type = bid_technology_type
+    # For a lot-wise award the lot's own target districts are the relevant scope, not the
+    # whole tender's — a lot may cover districts the tender-level list does not.
+    lot_target_districts = []
+    if contract.lot_id:
+        lot_target_districts = [
+            str(value or '').strip()
+            for value in (contract.lot.target_districts if isinstance(contract.lot.target_districts, list) else [])
+            if str(value or '').strip()
+        ]
     tender_target_districts = [
         str(value or '').strip()
         for value in (contract.tender.target_districts if isinstance(contract.tender.target_districts, list) else [])
@@ -326,7 +358,7 @@ def _assignment_defaults(contract: TenderContract):
     if bid:
         bid_preferred_district = str(getattr(bid, 'preferred_district', '') or '').strip()
     
-    # Priority: bid_preferred_district > tender_target_districts > site districts > vendor zone
+    # Priority: bid_preferred_district > lot_target_districts > tender_target_districts > site districts > vendor zone
     assignment_districts = []
     if bid_preferred_district:
         assignment_districts = [bid_preferred_district]
@@ -335,7 +367,9 @@ def _assignment_defaults(contract: TenderContract):
     # But requirement says "District should get the value of the selected primary district of the Bid"
     
     if not assignment_districts:
-        if tender_target_districts:
+        if lot_target_districts:
+            assignment_districts = lot_target_districts
+        elif tender_target_districts:
             assignment_districts = tender_target_districts
         elif bid:
             for site in bid.sites.all():
@@ -351,7 +385,12 @@ def _assignment_defaults(contract: TenderContract):
         if str(fallback_district or '').strip():
             assignment_districts = [str(fallback_district).strip()]
     
-    installation_target = contract.tender.approximate_installation_target or (len(list(bid.sites.all())) if bid else 0)
+    # A lot's estimated installation target describes just that lot's scope, so it is the
+    # better default than the tender-wide figure.
+    lot_installation_target = 0
+    if contract.lot_id:
+        lot_installation_target = int(contract.lot.estimated_installation_target or 0)
+    installation_target = lot_installation_target or contract.tender.approximate_installation_target or (len(list(bid.sites.all())) if bid else 0)
     start_date = contract.tender.awarded_at.date() if contract.tender.awarded_at else timezone.now().date()
     contract_value = _contract_value(contract)
     platform_config = _platform_configuration()
@@ -473,12 +512,19 @@ def _create_project_assignment(request, contract: TenderContract, assignment_dat
     end_date = start_date + timedelta(days=duration_months * 30)
     project_reference = f'PRJ-{tender.reference_number}-{contract.vendor_id}'
     milestone_plan_id = f'MS-{tender.reference_number}-{contract.vendor_id}'
+    # A vendor can win several lots of the same tender under a single bid, so without a lot
+    # suffix every one of those projects would carry an identical reference and plan id.
+    # Mirrors the contract reference convention (see TenderContract creation).
+    if contract.lot_id:
+        project_reference = f'{project_reference}-LOT{contract.lot_id}'
+        milestone_plan_id = f'{milestone_plan_id}-LOT{contract.lot_id}'
 
     project_budget = _contract_value(contract)
 
     project = Project.objects.create(
         tender=tender,
         contract=contract,
+        lot=contract.lot,
         project_title=tender.name,
         project_reference=project_reference,
         milestone_plan_id=milestone_plan_id,
@@ -1381,11 +1427,32 @@ def _tender_evaluation_scoreboard(tender: Tender):
             )
 
         lot_financial_finalized = {}
+        # A lot-wise tender is scored lot by lot, so the bid-level technical average
+        # above is only a roll-up. Report the same quorum/average/threshold facts per
+        # lot as well — otherwise the oversight view would show one blended technical
+        # number for a bid that was actually marked separately for each lot.
+        lot_technical_summary = {}
         if lots:
             scored_financial = financial_bid.evaluations.filter(stage=EvaluationStage.FINANCIAL, status=EvaluationStatus.SCORED)
             for lot in lots:
                 member_ids = {mid for mid in scored_financial.filter(lot_id=lot.id).values_list('evaluator_id', flat=True) if mid is not None}
                 lot_financial_finalized[str(lot.id)] = quorum_count > 0 and len(member_ids) >= quorum_count
+
+                lot_technical_rows = list(
+                    bid.evaluations.filter(lot_id=lot.id, stage=EvaluationStage.TECHNICAL, status=EvaluationStatus.SCORED)
+                )
+                lot_quorum_rows = _quorum_met_evaluations(bid, EvaluationStage.TECHNICAL, lot_technical_rows)
+                lot_average = lot_raw_average = None
+                if lot_quorum_rows:
+                    lot_average = sum(_technical_evaluation_score(ev) for ev in lot_quorum_rows) / Decimal(len(lot_quorum_rows))
+                    lot_raw_average = sum(_sum_score_fields(ev, score_limits) for ev in lot_quorum_rows) / Decimal(len(lot_quorum_rows))
+                lot_technical_summary[str(lot.id)] = {
+                    'quorum_met': lot_quorum_rows is not None,
+                    'member_count': len(lot_technical_rows),
+                    'average_score': str(lot_average) if lot_average is not None else None,
+                    'raw_average': str(lot_raw_average) if lot_raw_average is not None else None,
+                    'passed_threshold': lot_average is not None and lot_average >= Decimal(str(tender.technical_threshold or 70)),
+                }
 
         evaluation_rows = []
         evaluations = list(bid.evaluations.all())
@@ -1447,6 +1514,7 @@ def _tender_evaluation_scoreboard(tender: Tender):
             'passed_technical_threshold': technical_average is not None and technical_average >= Decimal(str(tender.technical_threshold or 70)),
             'financial_finalized': _bid_financial_finalized(tender, bid, quorum_count),
             'lot_financial_finalized': lot_financial_finalized,
+            'lot_technical_summary': lot_technical_summary,
             'evaluations': evaluation_rows,
         })
 
@@ -1460,6 +1528,11 @@ def _tender_evaluation_scoreboard(tender: Tender):
         ],
         'score_limits': score_limits,
         'technical_score_total': technical_total,
+        # The technical rubric is Super-Admin-configurable (technical_score_total), but
+        # the financial stage still contributes exactly this tender's financial_weight
+        # (30 by default) to the combined 100 — the client needs both to report a
+        # member's per-stage marks on a common scale.
+        'financial_weight': tender.financial_weight or 30,
         'technical_threshold': tender.technical_threshold or 70,
         'is_lot_wise': bool(lots),
         'lots': [{'lot_id': str(l.id), 'lot_name': l.name} for l in lots],
@@ -1879,6 +1952,9 @@ def _notify_intent_to_award(tender: Tender, ranking_payload: dict, send_email=Tr
     email_enabled = send_email and email_configured()
     lot_suffix = f' — {lot_name}' if lot_name else ''
 
+    # (address, subject, body) collected now, sent after the transaction commits.
+    outbound = []
+
     vendors = User.objects.filter(id__in=list(bids_by_vendor.keys())).only('id', 'email', 'full_name', 'username')
     for vendor in vendors:
         row = bids_by_vendor.get(str(vendor.id))
@@ -1926,7 +2002,21 @@ def _notify_intent_to_award(tender: Tender, ranking_payload: dict, send_email=Tr
         )
 
         if email_enabled and vendor.email:
-            NotificationService.dispatch_email(title, body, [vendor.email])
+            outbound.append((vendor.email, title, body))
+
+    if not outbound:
+        return
+
+    def _send_all():
+        for address, title, body in outbound:
+            NotificationService.dispatch_email(title, body, [address])
+
+    # Issued from inside the award transaction, so the SMTP round trips used to hold the
+    # request — and the request's SELECT ... FOR UPDATE row lock — open for the whole
+    # fan-out, which left the Super Admin staring at a spinner long after the award had
+    # been decided. on_commit also means a bidder can never be told they won by an award
+    # that then rolled back. Outside a transaction this runs immediately, as before.
+    transaction.on_commit(_send_all)
 
 
 class _IntentToAwardError(Exception):
@@ -2199,6 +2289,7 @@ def _notify_intent_award_decision(tender, intent_request, *, status_value, title
         for user in User.objects.filter(role__in={UserRole.RBF_OFFICIAL, UserRole.ADMIN}).only('id')
     )
     users = User.objects.filter(id__in=recipients).only('id', 'full_name', 'username', 'email')
+    emails = []
     for user in users:
         Notification.objects.update_or_create(
             recipient_id=str(user.id),
@@ -2212,8 +2303,16 @@ def _notify_intent_award_decision(tender, intent_request, *, status_value, title
                 'status': NotificationStatus.SENT,
             },
         )
-        if email_configured() and user.email:
-            NotificationService.dispatch_email(title, body, [user.email])
+        if user.email:
+            emails.append(user.email)
+
+    # One SMTP session for the whole list, not one per recipient: the subject and body
+    # are identical for everyone, so a per-user send bought nothing but a full TCP +
+    # TLS handshake (and its timeout) multiplied by the number of RBF officials and
+    # administrators on the platform. This runs after the award has committed, but it is
+    # still in the request that the Super Admin is staring at, so it has to stay cheap.
+    if emails and email_configured():
+        NotificationService.dispatch_email(title, body, emails)
 
 
 class IsRbfOfficialOrReadOnly(BasePermission):
@@ -6013,9 +6112,27 @@ class TenderContractViewSet(viewsets.ModelViewSet):
             raise ValidationError({'signed_file': 'Signed contract must be uploaded as a PDF.'})
         if getattr(signed_file, 'size', 0) > 10 * 1024 * 1024:
             raise ValidationError({'signed_file': 'Signed contract PDF must not exceed 10MB.'})
-        missing_annexes = _missing_contract_annexes(contract)
-        if missing_annexes:
-            raise ValidationError({'annexes': f"The contract package is incomplete. Missing: {', '.join(missing_annexes)}."})
+        # The vendor signs ONE document: the generated PBA. Annexes A-E are not separate
+        # uploads they have to supply — they are sections compiled into that PDF from
+        # whatever the vendor attached to its own bid, and the PBA builder emits a page
+        # for each one even when the bid left it empty (see ANNEX_SECTION_SPECS in
+        # pba_pdf.py). Gating on "all five annexes resolved" therefore blocked signature
+        # whenever a bid legitimately omitted one of those source documents — for example
+        # Annex B, whose only source is implementation_plan_file, a field the bid form does
+        # not always require — and told the vendor to upload a document it was never asked
+        # for. The package is complete by construction.
+        #
+        # What we do require is the agreement itself, plus the bid documents this tender
+        # actually asked for at creation time.
+        if not contract.generated_file:
+            raise ValidationError({
+                'detail': 'The Performance-Based Agreement has not been generated yet, so there is nothing to sign. Please contact RMT.'
+            })
+        missing_required = _missing_required_bid_documents(contract.tender, _get_contract_bid(contract))
+        if missing_required:
+            raise ValidationError({
+                'required_documents': f"Your bid submission is missing required documents for this tender: {', '.join(missing_required)}. Please contact RMT to resolve before signing."
+            })
         contract.signed_file = signed_file
         contract.signed_at = timezone.now()
         contract.status = ContractStatus.SUBMITTED
@@ -6096,6 +6213,8 @@ class TenderContractViewSet(viewsets.ModelViewSet):
                     'bid_amount': str(contract_value),
                     'signed_date': contract.signed_at.isoformat() if contract.signed_at else None,
                     'bid_preferred_district': bid_preferred_district,
+                    'lot_id': str(contract.lot_id) if contract.lot_id else None,
+                    'lot_name': contract.lot.name if contract.lot_id else None,
                 },
                 'assignment_defaults': defaults,
                 'assignment_fields': {
