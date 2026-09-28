@@ -131,6 +131,9 @@ class ProjectSerializer(serializers.ModelSerializer):
     latest_audit_entry = serializers.SerializerMethodField()
     contract_value = serializers.SerializerMethodField()
     awarded_bid_device_info = serializers.SerializerMethodField()
+    # For a lot-wise award the project is scoped to a single lot, so its name needs to be
+    # visible wherever the project is (the assignment screen, project lists, details).
+    lot_name = serializers.SerializerMethodField()
 
     def _get_contract(self, obj: Project):
         if not hasattr(self, '_contract_cache'):
@@ -255,6 +258,9 @@ class ProjectSerializer(serializers.ModelSerializer):
         if not audit:
             return None
         return AuditLogSerializer(audit, context=self.context).data
+
+    def get_lot_name(self, obj: Project):
+        return obj.lot.name if obj.lot_id else None
 
     def get_contract_value(self, obj: Project):
         total = obj.milestones.aggregate(total=Sum('amount_lsl'))['total']
@@ -686,9 +692,15 @@ class InstallationReportSerializer(serializers.ModelSerializer):
             beneficiary_id = str(data.get('beneficiary_id') or '')
             if beneficiary_id:
                 data['beneficiary_id'] = f"{'*' * max(0, len(beneficiary_id) - 4)}{beneficiary_id[-4:]}"
+            # A contact number is PII of comparable sensitivity to the national ID, so it
+            # gets the same treatment rather than being exposed in full to these roles.
+            beneficiary_phone = str(data.get('beneficiary_phone') or '')
+            if beneficiary_phone:
+                data['beneficiary_phone'] = f"{'*' * max(0, len(beneficiary_phone) - 4)}{beneficiary_phone[-4:]}"
         elif role in {UserRole.DOE_OFFICER, UserRole.UNDP_DONOR}:
             data['beneficiary_id'] = ''
             data['beneficiary_name'] = None
+            data['beneficiary_phone'] = ''
 
         return data
 

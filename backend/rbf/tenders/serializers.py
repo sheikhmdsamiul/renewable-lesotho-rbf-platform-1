@@ -1614,7 +1614,11 @@ class ProjectAssignmentSerializer(serializers.Serializer):
     start_date = serializers.DateField(required=False, allow_null=True, input_formats=['%Y-%m-%d'])
     # Milestone plan — disbursement share of the contract value per milestone
     # (must total 100) and the verified-installation checklist thresholds.
-    m1_disbursement_pct = serializers.IntegerField(min_value=1, max_value=98, required=False, default=20)
+    # Milestone 1 is Mobilization, which carries no installation target, so it is
+    # legitimately 0% when the vendor is paid entirely on delivery and performance.
+    # Milestones 2 and 3 are installation-linked ("N% Implementation" / "Final") and
+    # must disburse something. The 100% total is enforced separately in validate().
+    m1_disbursement_pct = serializers.IntegerField(min_value=0, max_value=98, required=False, default=20)
     m2_disbursement_pct = serializers.IntegerField(min_value=1, max_value=98, required=False, default=50)
     m3_disbursement_pct = serializers.IntegerField(min_value=1, max_value=98, required=False, default=30)
     m2_installation_required_pct = serializers.IntegerField(min_value=1, max_value=100, required=False)

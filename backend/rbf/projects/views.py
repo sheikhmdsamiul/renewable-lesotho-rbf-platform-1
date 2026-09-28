@@ -2281,7 +2281,7 @@ class InstallationReportViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['project', 'status', 'vendor']
-    search_fields = ['serial_number', 'beneficiary_id', 'meter_id']
+    search_fields = ['serial_number', 'beneficiary_id', 'beneficiary_phone', 'meter_id']
     ordering_fields = ['submitted_at']
 
     WRITE_ROLES = {UserRole.VENDOR, UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.DOE_OFFICER}

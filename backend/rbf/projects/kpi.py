@@ -16,7 +16,7 @@ from rbf.tenders.models import ContractStatus, TenderContract
 from rbf.users.models import PlatformConfiguration, User, UserRole
 
 from .audit import log_audit
-from .milestone_reviews import TERMINAL_PROJECT_STATUSES, milestone_cleared_to_proceed
+from .milestone_reviews import TERMINAL_PROJECT_STATUSES, is_zero_value_milestone, milestone_cleared_to_proceed
 from .models import (
     AnomalyFlag,
     InstallationReport,
@@ -443,6 +443,21 @@ class KpiService:
             )
         )
         milestone_three_claimable = bool(milestone_three and str(milestone_three.status).strip().lower() in {"claimable", "claimed", "paid"})
+        # A 0% milestone has no amount, so it can never be claimed and is never "paid" in
+        # the usual sense — but it is skipped, so it must not hold up the milestones after
+        # it. Marking it not-claimable keeps the vendor from being offered a claim button
+        # for money that does not exist, and counting it as paid keeps Milestone 3's
+        # "milestone_2_paid" condition satisfiable when M2 was skipped.
+        milestone_one_skipped = is_zero_value_milestone(milestone_one)
+        milestone_two_skipped = is_zero_value_milestone(milestone_two)
+        milestone_three_skipped = is_zero_value_milestone(milestone_three)
+        if milestone_one_skipped:
+            milestone_one_claimable = False
+        if milestone_two_skipped:
+            milestone_two_claimable = False
+            milestone_two_paid = True
+        if milestone_three_skipped:
+            milestone_three_claimable = False
         platform_config = PlatformConfiguration.objects.order_by("id").first() or PlatformConfiguration()
         m2_installation_pct = self._required_installation_pct(milestone_two, platform_config.m2_verification_required_pct or 80)
         m3_installation_pct = self._required_installation_pct(milestone_three, platform_config.m3_verification_required_pct or 100)
@@ -478,16 +493,18 @@ class KpiService:
         )
         summary = {
             "milestone_1": {
-                "eligible": m1_eligible,
-                "status": "PAID" if milestone_one_paid else "CLAIMABLE" if (m1_eligible or milestone_one_claimable) else "Pending",
+                "eligible": False if milestone_one_skipped else m1_eligible,
+                "skipped": milestone_one_skipped,
+                "status": "Skipped" if milestone_one_skipped else "PAID" if milestone_one_paid else "CLAIMABLE" if (m1_eligible or milestone_one_claimable) else "Pending",
                 "conditions": {
                     "contract_approved": contract_approved,
                     "setup_complete": setup_complete,
                 },
             },
             "milestone_2": {
-                "eligible": m2_eligible,
-                "status": "PAID" if milestone_two_paid else "CLAIMABLE" if (m2_eligible or milestone_two_claimable) else "Pending",
+                "eligible": False if milestone_two_skipped else m2_eligible,
+                "skipped": milestone_two_skipped,
+                "status": "Skipped" if milestone_two_skipped else "PAID" if milestone_two_paid else "CLAIMABLE" if (m2_eligible or milestone_two_claimable) else "Pending",
                 "conditions": {
                     "milestone_1_verified": milestone_one_verified,
                     "installations_80_pct": m2_installations_met,
@@ -503,8 +520,9 @@ class KpiService:
                 },
             },
             "milestone_3": {
-                "eligible": m3_eligible,
-                "status": "PAID" if milestone_three_paid else "CLAIMABLE" if (m3_eligible or milestone_three_claimable) else "Pending",
+                "eligible": False if milestone_three_skipped else m3_eligible,
+                "skipped": milestone_three_skipped,
+                "status": "Skipped" if milestone_three_skipped else "PAID" if milestone_three_paid else "CLAIMABLE" if (m3_eligible or milestone_three_claimable) else "Pending",
                 "conditions": {
                     "installations_100_pct": m3_installations_met,
                     "female_pct_50": female_pct_met,

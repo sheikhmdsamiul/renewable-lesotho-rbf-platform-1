@@ -113,19 +113,10 @@ REST_FRAMEWORK = {
     ],
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': env.int('API_PAGE_SIZE', default=50),
-    'DEFAULT_THROTTLE_CLASSES': [
-        'rest_framework.throttling.AnonRateThrottle',
-        'rest_framework.throttling.UserRateThrottle',
-    ],
-    'DEFAULT_THROTTLE_RATES': {
-        'anon': env('API_THROTTLE_ANON', default='120/hour'),
-        'user': env('API_THROTTLE_USER', default='600/hour'),
-    },
+    # No API rate limiting: an hourly per-user cap was exhausted by normal use (the SPA polls
+    # badges/KPIs every 20-30s) and locked users out mid-session with "Request was throttled".
+    'DEFAULT_THROTTLE_CLASSES': [],
 }
-if DEBUG:
-    # Keep local QA/demo flows stable during repeated manual testing.
-    REST_FRAMEWORK['DEFAULT_THROTTLE_CLASSES'] = []
-    REST_FRAMEWORK['DEFAULT_THROTTLE_RATES'] = {}
 
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(minutes=env.int('JWT_ACCESS_MINUTES', default=30)),
@@ -206,6 +197,12 @@ EMAIL_PORT = env.int('EMAIL_PORT', default=587)
 EMAIL_USE_TLS = env.bool('EMAIL_USE_TLS', default=True)
 EMAIL_HOST_USER = env('EMAIL_HOST_USER', default='')
 EMAIL_HOST_PASSWORD = env('EMAIL_HOST_PASSWORD', default='')
+# Without this Django passes timeout=None to smtplib, so an unreachable SMTP host blocks
+# on the OS TCP connect timer (~2 min on Linux). Any flow that sends mail inline would
+# then hold its request — and, where mail is sent inside a transaction, its row locks —
+# open for that long. 10s is long enough for a healthy relay and short enough that a
+# broken one degrades to a logged failure instead of a hung request.
+EMAIL_TIMEOUT = env.int('EMAIL_TIMEOUT', default=10)
 DEFAULT_FROM_EMAIL = env('DEFAULT_FROM_EMAIL', default=EMAIL_HOST_USER or 'no-reply@rbf.local')
 OTP_LENGTH = env.int('OTP_LENGTH', default=6)
 OTP_EXPIRY_SECONDS = env.int('OTP_EXPIRY_SECONDS', default=600)

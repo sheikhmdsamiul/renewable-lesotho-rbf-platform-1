@@ -45,6 +45,10 @@ class VerificationMethod(models.TextChoices):
 class Project(models.Model):
     tender = models.ForeignKey('tenders.Tender', related_name='projects', on_delete=models.SET_NULL, null=True, blank=True)
     contract = models.ForeignKey('tenders.TenderContract', related_name='projects', on_delete=models.SET_NULL, null=True, blank=True)
+    # Set only for lot-wise tenders. A vendor can win several lots under one bid, so the
+    # project must remember WHICH lot it delivers — it drives the lot-aware project
+    # reference and distinguishes otherwise identical projects from the same vendor.
+    lot = models.ForeignKey('tenders.TenderLot', related_name='projects', on_delete=models.SET_NULL, null=True, blank=True)
     project_title = models.CharField(max_length=255, blank=True)
     project_reference = models.CharField(max_length=64, blank=True)
     milestone_plan_id = models.CharField(max_length=64, blank=True)
@@ -465,6 +469,11 @@ class InstallationReport(models.Model):
     serial_number = models.CharField(max_length=128)
     beneficiary_id = models.CharField(max_length=128)
     beneficiary_name = models.CharField(max_length=255, blank=True)
+    # Contact number for the beneficiary household. Optional (many installations are
+    # recorded without one) and treated as PII: masked for TAC/Auditor and withheld from
+    # DOE Officer / UNDP Donor in InstallationReportSerializer.to_representation. The
+    # prospect sync hashes it rather than sending it in clear (see integrations.py).
+    beneficiary_phone = models.CharField(max_length=32, blank=True)
     household_type = models.CharField(max_length=64, blank=True)
     installation_date = models.DateField(null=True, blank=True)
     receipt_file = models.FileField(upload_to='installation_receipts/', null=True, blank=True)
