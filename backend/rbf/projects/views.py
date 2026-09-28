@@ -4,7 +4,6 @@ import tempfile
 import html
 import logging
 import os
-import re
 
 from rest_framework import viewsets, filters
 from rest_framework.permissions import IsAuthenticated
@@ -20,7 +19,7 @@ from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
 from django.db import transaction
 from django.db.models import Q, F, Value, OuterRef, Subquery, Count, Avg, CharField, Case, When, Sum
-from django.db.models.functions import Coalesce
+from django.db.models.functions import Coalesce, NullIf
 from django.utils import timezone
 import csv
 import io
@@ -98,6 +97,13 @@ from .integrations import (
     SyncToProspectJob,
 )
 from .gis import GpsValidator
+from .district_scope import (
+    field_verifier_district_filter,
+    field_verifier_districts,
+    field_verifier_installation_filter,
+    field_verifier_task_scope_filter,
+    resolve_installation_district,
+)
 from .kpi import KpiService, invalidate_kpi_cache, render_kpi_pdf
 from .milestone_reviews import is_last_milestone, next_milestone_blocker, open_completion_review
 from rbf.notifications.models import Notification, NotificationChannel, NotificationStatus
@@ -152,46 +158,6 @@ def vendor_query_filter(user, prefix: str = ''):
     vendor_names = {user.full_name, user.organization_name, user.username}
     vendor_names = {name for name in vendor_names if name}
     return Q(**{f'{prefix}vendor_id__in': vendor_ids}) | Q(**{f'{prefix}vendor_name__in': vendor_names})
-
-
-def field_verifier_district_filter(user, project_prefix: str = 'project__'):
-    user_districts = getattr(user, 'districts', None) or []
-    normalized_districts: list[str] = []
-    if isinstance(user_districts, list):
-        normalized_districts = [str(d or '').strip() for d in user_districts if str(d or '').strip()]
-    if not normalized_districts:
-        raw_scope = (
-            getattr(user, 'verification_zone', '')
-            or getattr(user, 'district', '')
-            or getattr(user, 'region', '')
-            or ''
-        )
-        normalized_districts = [part.strip() for part in str(raw_scope).split(',') if part.strip()]
-    if not normalized_districts:
-        return Q(pk__in=[])
-    district_queries = Q()
-    for district in normalized_districts:
-        # `district` holds only the PRIMARY district, while `district_zone` holds every
-        # district the project covers. A lot-wise project spans all of a lot's districts,
-        # so scoping on `district` alone hid its installations from the field verifiers
-        # serving the lot's other districts. Match the full zone list as whole
-        # comma-separated tokens (a bare icontains would let "Maseru" match "Maseru
-        # Urban" as an unrelated token), plus the lot's own target districts.
-        zone_token = rf'(^|,\s*){re.escape(district)}(,\s*|$)'
-        district_queries |= (
-            Q(**{f'{project_prefix}district__iexact': district})
-            | Q(**{f'{project_prefix}region__iexact': district})
-            | Q(**{f'{project_prefix}district_zone__iregex': zone_token})
-            | Q(**{f'{project_prefix}lot__target_districts__icontains': district})
-        )
-    return district_queries
-
-
-def field_verifier_task_scope_filter(user, task_prefix: str = ''):
-    return Q(**{f'{task_prefix}assigned_verifier': user}) | field_verifier_district_filter(
-        user,
-        project_prefix=f'{task_prefix}report__project__',
-    )
 
 
 def doe_region_filter(user, prefix: str = ''):
@@ -328,7 +294,13 @@ def build_installation_map_queryset(user: User):
     queryset = InstallationReport.objects.select_related('project', 'vendor', 'verification_task').annotate(
         verification_status=Coalesce(F('verification_task__status'), Value(VerificationStatus.PENDING)),
         technology_type=F('project__tech_type'),
-        district_name=Coalesce(F('project__district'), F('project__region'), Value('')),
+        # The installation's own district first: a lot-wise project spans several districts.
+        district_name=Coalesce(
+            NullIf(F('district'), Value('')),
+            NullIf(F('project__district'), Value('')),
+            F('project__region'),
+            Value(''),
+        ),
         vendor_name=Coalesce(
             F('project__vendor_name'),
             Case(
@@ -346,7 +318,7 @@ def build_installation_map_queryset(user: User):
     if user.role == UserRole.VENDOR:
         queryset = queryset.filter(vendor=user)
     elif user.role == UserRole.FIELD_VERIFIER:
-        queryset = queryset.filter(field_verifier_district_filter(user))
+        queryset = queryset.filter(field_verifier_installation_filter(user))
     elif user.role == UserRole.DOE_OFFICER:
         queryset = queryset.filter(doe_region_filter(user, prefix='project__'))
 
@@ -2306,7 +2278,7 @@ class InstallationReportViewSet(viewsets.ModelViewSet):
             return qs.filter(vendor=user)
         if user.role == UserRole.FIELD_VERIFIER:
             return qs.filter(
-                Q(verification_task__assigned_verifier=user) | field_verifier_district_filter(user)
+                Q(verification_task__assigned_verifier=user) | field_verifier_installation_filter(user)
             ).distinct()
         return qs
 
@@ -2337,7 +2309,7 @@ class InstallationReportViewSet(viewsets.ModelViewSet):
         data = request.data.copy()
         project_id = str(data.get('project') or '')
         self._assert_project_access(project_id)
-        project = Project.objects.filter(id=project_id).only('id', 'district', 'district_zone', 'region').first()
+        project = Project.objects.select_related('lot').filter(id=project_id).first()
 
         errors: dict[str, list[str]] = {}
         lat_raw = data.get('gps_lat')
@@ -2429,10 +2401,11 @@ class InstallationReportViewSet(viewsets.ModelViewSet):
 
         serializer = self.get_serializer(data=data)
         serializer.is_valid(raise_exception=True)
+        installation_district = resolve_installation_district(project, latitude, longitude)
         if request.user.role == UserRole.VENDOR:
-            report = serializer.save(vendor=request.user, gis_status=GisStatus.YELLOW)
+            report = serializer.save(vendor=request.user, gis_status=GisStatus.YELLOW, district=installation_district)
         else:
-            report = serializer.save(gis_status=GisStatus.YELLOW)
+            report = serializer.save(gis_status=GisStatus.YELLOW, district=installation_district)
 
         photo_paths: list[str] = []
         files = request.FILES.getlist('photos')
@@ -2447,7 +2420,7 @@ class InstallationReportViewSet(viewsets.ModelViewSet):
 
         assigned_verifier = User.objects.filter(
             role=UserRole.FIELD_VERIFIER,
-            verification_zone__iexact=report.project.district,
+            verification_zone__iexact=report.district or report.project.district,
         ).first()
 
         task = VerificationTask.objects.create(
@@ -2537,15 +2510,10 @@ class VerificationTaskViewSet(viewsets.ModelViewSet):
             raise PermissionDenied('You do not have permission to verify installations.')
         task = self.get_object()
         if request.user.role == UserRole.FIELD_VERIFIER:
-            user_districts = getattr(request.user, 'districts', []) or []
-            if isinstance(user_districts, list) and len(user_districts) > 0:
-                assigned_districts = [d.strip().lower() for d in user_districts if d]
-            else:
-                assigned_districts = [
-                    (getattr(request.user, 'verification_zone', '') or '').strip().lower(),
-                    (getattr(request.user, 'region', '') or '').strip().lower(),
-                ]
-            task_district = (task.report.project.district or task.report.project.region or '').strip().lower()
+            assigned_districts = [d.lower() for d in field_verifier_districts(request.user)]
+            task_district = (
+                task.report.district or task.report.project.district or task.report.project.region or ''
+            ).strip().lower()
             if task_district and task_district not in assigned_districts:
                 raise PermissionDenied('You can only verify installations in your assigned district.')
         if task.status == VerificationStatus.PAUSED:
@@ -2734,7 +2702,7 @@ class VerificationTaskViewSet(viewsets.ModelViewSet):
                 'status': NotificationStatus.SENT,
             },
         )
-        district_name = report.project.district or report.project.region or ''
+        district_name = report.district or report.project.district or report.project.region or ''
         oversight_users = User.objects.filter(role__in={UserRole.RBF_OFFICIAL, UserRole.ADMIN}).only('id', 'full_name', 'username')
         Notification.objects.bulk_create(
             [
@@ -2805,13 +2773,16 @@ class MapInstallationView(APIView):
                 'serial_number',
                 'installation_date',
                 'uptime_pct',
+                'district_name',
                 project_vendor_id=F('project__vendor_id'),
                 project_vendor_name=F('project__vendor_name'),
                 latitude=F('gps_lat'),
                 longitude=F('gps_lng'),
-                district=F('district_name'),
             )[:1000]
         )
+        # `district` is a model field, so values() cannot alias the annotation to it.
+        for record in records:
+            record['district'] = record.pop('district_name')
         vendor_keys = {
             str(record.get('project_vendor_id') or '').strip()
             for record in records
@@ -3326,7 +3297,9 @@ class AnomalyFlagViewSet(viewsets.ReadOnlyModelViewSet):
             return qs.filter(project__region__iexact=user.region)
         if user.role == UserRole.FIELD_VERIFIER:
             return qs.filter(
-                Q(installation__verification_task__assigned_verifier=user) | field_verifier_district_filter(user)
+                Q(installation__verification_task__assigned_verifier=user)
+                | field_verifier_installation_filter(user, report_prefix='installation__')
+                | (Q(installation__isnull=True) & field_verifier_district_filter(user))
             ).distinct()
         return qs
 

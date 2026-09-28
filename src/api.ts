@@ -1263,6 +1263,7 @@ function mapInstallationReportFromApi(api: any): InstallationReport {
     milestoneId: api.milestone != null ? String(api.milestone) : undefined,
     gpsLat: Number(api.gps_lat ?? 0),
     gpsLng: Number(api.gps_lng ?? 0),
+    district: api.district || undefined,
     serialNumber: api.serial_number ?? "",
     beneficiaryId: api.beneficiary_id ?? "",
     beneficiaryPhone: api.beneficiary_phone || undefined,

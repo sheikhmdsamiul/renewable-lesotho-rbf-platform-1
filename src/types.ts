@@ -1437,6 +1437,8 @@ export interface InstallationReport {
   milestoneId?: string;
   gpsLat: number;
   gpsLng: number;
+  /** District the installation was captured in; for a lot-wise project this can differ from the project's primary district. */
+  district?: string;
   serialNumber: string;
   beneficiaryId: string;
   receiptFile?: string;

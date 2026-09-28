@@ -2261,72 +2261,90 @@ class ProjectApiTests(APITestCase):
         task.refresh_from_db()
         self.assertEqual(task.status, VerificationStatus.VERIFIED)
 
-    def test_field_verifier_sees_lot_wise_installations_in_every_lot_district(self):
-        """A lot-wise project stores only its PRIMARY district on `district`, and the full
-        set on `district_zone`. Scoping verifiers on `district` alone hid the lot's
-        installations from the verifiers serving its other districts, so a lot spanning
-        three districts was only ever visible to one of them."""
-        User = get_user_model()
-        vendor = User.objects.create_user(
-            username="lotwise_vendor",
-            password="securePass123",
-            role="Vendor",
-            status="Active",
-        )
+    def _create_lot_project(self, vendor, districts):
         tender = Tender.objects.create(
-            reference_number="REF-LOTSCOPE-1",
+            reference_number=f"REF-LOTSCOPE-{vendor.username}",
             name="Lot Scope Tender",
-            category="SWP",
+            category="SHS",
             status=TenderStatus.AWARDED,
             deadline=timezone.now(),
         )
-        lot = TenderLot.objects.create(
-            tender=tender,
-            name="Lot 77",
-            position=0,
-            target_districts=["Qacha's Nek", "Quthing", "Mohale's Hoek"],
-        )
+        lot = TenderLot.objects.create(tender=tender, name="Lot 1", position=0, target_districts=districts)
         project = Project.objects.create(
             tender=tender,
             lot=lot,
             vendor_id=str(vendor.id),
             vendor_name=vendor.username,
-            tech_type="SWP",
-            region="Qacha's Nek",
-            district="Qacha's Nek",
-            district_zone="Qacha's Nek, Quthing, Mohale's Hoek",
-            status=ProjectStatus.ACTIVE,
+            tech_type="SHS",
+            region=districts[0],
+            district=districts[0],
+            district_zone=", ".join(districts),
+            status=ProjectStatus.INSTALLATION,
         )
-        report = InstallationReport.objects.create(
-            project=project,
-            vendor=vendor,
-            gps_lat=-29.31,
-            gps_lng=27.48,
-            serial_number="SERIAL-LOTSCOPE-1",
-            beneficiary_id="BEN-LOTSCOPE-1",
-            status=InstallationStatus.SUBMITTED,
+        self._create_completed_setup(project, vendor)
+        return project
+
+    def _create_verifier(self, zone):
+        return get_user_model().objects.create_user(
+            username=f"lot_verifier_{zone}".replace(" ", "_").replace("'", ""),
+            password="securePass123",
+            role="Field Verifier",
+            status="Active",
+            verification_zone=zone,
         )
 
-        def visible_to(zone):
-            verifier = User.objects.create_user(
-                username=f"lot_verifier_{zone}".replace(" ", "_").replace("'", ""),
-                password="securePass123",
-                role="Field Verifier",
-                status="Active",
-                verification_zone=zone,
-            )
-            self.client.force_authenticate(verifier)
-            installations = self.client.get("/api/projects/installations/")
-            projects = self.client.get("/api/projects/")
+    def test_field_verifier_sees_lot_wise_project_in_every_lot_district(self):
+        """A lot-wise project stores only its PRIMARY district on `district`, and the full
+        set on `district_zone`; verifiers in any of the lot's districts must see it."""
+        vendor = get_user_model().objects.create_user(
+            username="lotwise_vendor", password="securePass123", role="Vendor", status="Active"
+        )
+        self._create_lot_project(vendor, ["Qacha's Nek", "Quthing", "Mohale's Hoek"])
+
+        def projects_visible_to(zone):
+            self.client.force_authenticate(self._create_verifier(zone))
+            count = self.client.get("/api/projects/").data["count"]
             self.client.logout()
-            return installations.data["count"], projects.data["count"]
+            return count
 
-        # A verifier in any of the lot's districts sees the installation...
         for zone in ("Qacha's Nek", "Quthing", "Mohale's Hoek"):
-            self.assertEqual(visible_to(zone), (1, 1), f"{zone} should see the lot's installation")
+            self.assertEqual(projects_visible_to(zone), 1, f"{zone} should see the lot's project")
+        self.assertEqual(projects_visible_to("Maseru"), 0)
 
-        # ...while a verifier outside the lot sees nothing.
-        self.assertEqual(visible_to("Maseru"), (0, 0))
+    @patch("rbf.projects.views.queue_installation_sync")
+    def test_lot_wise_installation_is_queued_for_the_district_it_was_captured_in(self, _sync):
+        """An installation in a lot's second district must reach that district's verifier
+        queue, not the queue of the project's primary district."""
+        self._write_district_geojson()
+        vendor = get_user_model().objects.create_user(
+            username="lotwise_submit_vendor", password="securePass123", role="Vendor", status="Active"
+        )
+        project = self._create_lot_project(vendor, ["Maseru", "Berea"])
+        self.client.force_authenticate(vendor)
+        response = self.client.post(
+            "/api/projects/installations/",
+            {
+                "project": project.id,
+                "gps_lat": -30.0,
+                "gps_lng": 28.5,
+                "serial_number": "SERIAL-LOT-BEREA-1",
+                "beneficiary_id": "BEN-LOT-BEREA-1",
+            },
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        report = InstallationReport.objects.get(serial_number="SERIAL-LOT-BEREA-1")
+        self.assertEqual(report.district, "Berea")
+        self.assertEqual(response.data["data"]["district"], "Berea")
+
+        def queue_for(zone):
+            self.client.force_authenticate(self._create_verifier(zone))
+            tasks = self.client.get("/api/projects/verification-tasks/").data["count"]
+            installations = self.client.get("/api/projects/installations/").data["count"]
+            self.client.logout()
+            return tasks, installations
+
+        self.assertEqual(queue_for("Berea"), (1, 1))
+        self.assertEqual(queue_for("Maseru"), (0, 0))
 
     @patch("rbf.projects.views.SyncToProspectJob.dispatch_async")
     def test_prospect_sync_panel_refresh_queues_read_endpoints_on_demand(self, dispatch_async):

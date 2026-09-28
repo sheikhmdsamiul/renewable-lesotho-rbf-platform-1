@@ -707,7 +707,7 @@ class InstallationReportSerializer(serializers.ModelSerializer):
     class Meta:
         model = InstallationReport
         fields = '__all__'
-        read_only_fields = ['id', 'vendor', 'vendor_username', 'submitted_at', 'status', 'gis_status', 'receipt_file_url']
+        read_only_fields = ['id', 'vendor', 'vendor_username', 'submitted_at', 'status', 'gis_status', 'receipt_file_url', 'district']
 
 
 class VerificationTaskSerializer(serializers.ModelSerializer):
