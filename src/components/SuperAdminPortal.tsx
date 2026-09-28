@@ -42,6 +42,7 @@ import {
   fetchProspectSyncLogs,
   fetchProspectSyncSummary,
   fetchSuperAdminDashboardSummary,
+  fetchRolePermissions,
   fetchSystemAuditLogs,
   fetchSystemHealth,
   fetchUserManagementMeta,
@@ -53,6 +54,7 @@ import {
   updateAdminManagedUser,
   updateOrganization,
   updatePlatformConfiguration,
+  updateRolePermissions,
   USER_KEY,
 } from "../api";
 import {
@@ -60,8 +62,10 @@ import {
   Notification,
   Organization,
   PlatformConfiguration,
+  ProcurementVisibilityMode,
   ProspectSyncLog,
   SuperAdminDashboardSummary,
+  RolePermissionMatrix,
   SystemHealthPayload,
   User,
   UserRole,
@@ -79,6 +83,23 @@ const DISTRICTS = [
   "Thaba-Tseka",
   "Butha-Buthe",
 ];
+
+// Mirrors backend/rbf/users/models.py PROCUREMENT_METHOD_BUILTINS — permanent,
+// non-removable procurement methods every tender's dropdown always offers.
+const PROCUREMENT_METHOD_BUILTINS: { value: string; visibilityMode: ProcurementVisibilityMode }[] = [
+  { value: "Open Tendering", visibilityMode: "open" },
+  { value: "Restricted Tendering", visibilityMode: "restricted" },
+];
+
+// Mirrors backend PROCUREMENT_VISIBILITY_MODES — the 5 standard e-tendering
+// vendor-visibility categories a procurement method can have.
+const PROCUREMENT_VISIBILITY_MODE_LABELS: Record<ProcurementVisibilityMode, string> = {
+  open: "Open — any pre-qualified vendor",
+  restricted: "Restricted — invite-only",
+  limited: "Limited/Single-Source — one nominated vendor",
+  framework: "Framework/Pre-Qualified Pool — tier & technology match",
+  rfq: "Request for Quotation (RFQ) — small invited set",
+};
 
 const ADMIN_DISTRICT_REQUIRED_ROLES: ReadonlyArray<{ value: UserRole; label: string; reason: string; scope: "regional" | "national" }> = [
   { value: UserRole.FIELD_VERIFIER, label: "Field Verifier", reason: "Verification tasks, installations and KPIs are scoped to assigned districts.", scope: "regional" },
@@ -174,13 +195,27 @@ const toneForNotification = (status: Notification["status"]) => {
 type AdminSection =
   | "dashboard"
   | "users"
+  | "permissions"
   | "organizations"
   | "system_configuration"
+  | "master_data"
   | "prospect_sync"
   | "audit_logs"
   | "reports"
   | "notifications"
   | "system_health";
+
+type MasterDataTab =
+  | "organizations"
+  | "permissions"
+  | "general"
+  | "notifications_files"
+  | "contact"
+  | "email"
+  | "scoring"
+  | "procurement"
+  | "currencies"
+  | "thresholds";
 
 type Props = {
   section: AdminSection;
@@ -194,6 +229,7 @@ type Props = {
 export default function SuperAdminPortal({ section, notifications, onNotificationSelect, initialAction, initialId, onNavigate }: Props) {
   const [banner, setBanner] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [masterDataTab, setMasterDataTab] = useState<MasterDataTab>("organizations");
 
   const [dashboard, setDashboard] = useState<SuperAdminDashboardSummary | null>(null);
   const [dashboardLoading, setDashboardLoading] = useState(false);
@@ -209,6 +245,9 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
   const [userForm, setUserForm] = useState(emptyUserForm);
   const [usersLoading, setUsersLoading] = useState(false);
   const [userSubmitting, setUserSubmitting] = useState(false);
+  const [permissionMatrix, setPermissionMatrix] = useState<RolePermissionMatrix | null>(null);
+  const [permissionsLoading, setPermissionsLoading] = useState(false);
+  const [permissionsSubmitting, setPermissionsSubmitting] = useState(false);
 
   const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [organizationForm, setOrganizationForm] = useState(emptyOrganizationForm);
@@ -340,6 +379,49 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
     }
   };
 
+  const loadPermissions = async () => {
+    setPermissionsLoading(true);
+    try {
+      setPermissionMatrix(await fetchRolePermissions());
+    } catch (err: any) {
+      setError(String(err?.message || "Unable to load role permissions."));
+    } finally {
+      setPermissionsLoading(false);
+    }
+  };
+
+  const savePermissions = async () => {
+    if (!permissionMatrix) return;
+    setPermissionsSubmitting(true);
+    try {
+      await updateRolePermissions(permissionMatrix);
+      setBanner("Role permissions updated successfully.");
+      await loadPermissions();
+    } catch (err: any) {
+      setError(String(err?.message || "Unable to update role permissions."));
+    } finally {
+      setPermissionsSubmitting(false);
+    }
+  };
+
+  const togglePermission = (role: string, module: string, action: string) => {
+    setPermissionMatrix((current) => {
+      if (!current || role === UserRole.ADMIN) return current;
+      return {
+        ...current,
+        roles: current.roles.map((roleEntry) => roleEntry.role !== role ? roleEntry : {
+          ...roleEntry,
+          permissions: roleEntry.permissions.map((permission) => permission.module !== module ? permission : {
+            ...permission,
+            actions: permission.actions.includes(action)
+              ? permission.actions.filter((value) => value !== action)
+              : [...permission.actions, action],
+          }),
+        }),
+      };
+    });
+  };
+
   useEffect(() => {
     clearFlash();
     if (section === "dashboard") void loadDashboard();
@@ -358,7 +440,15 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
     if (section === "prospect_sync") void loadProspect();
     if (section === "audit_logs") void loadAudit();
     if (section === "system_health") void loadHealth();
+    if (section === "permissions") void loadPermissions();
   }, [section]);
+
+  useEffect(() => {
+    if (section !== "master_data") return;
+    if (masterDataTab === "organizations") void loadOrganizations();
+    else if (masterDataTab === "permissions") void loadPermissions();
+    else void loadConfiguration(); // the 6 "Platform Settings" tabs all share the one config object
+  }, [section, masterDataTab]);
 
   useEffect(() => {
     if (section === "users") void loadUsers();
@@ -634,6 +724,8 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
     users: ["User Management", "Create, edit, deactivate, and audit all non-vendor accounts."],
     organizations: ["Organizations", "Manage stakeholder organizations and their points of contact."],
     system_configuration: ["System Configuration", "Control thresholds, notification behavior, and boundary assets."],
+    permissions: ["Role Permissions", "Control which modules and actions each platform role can access."],
+    master_data: ["Master Data", "Manage organizations, role permissions, and platform-wide configuration."],
     prospect_sync: ["Prospect Sync", "Monitor connectivity, failed jobs, and recent sync activity."],
     audit_logs: ["Audit Logs", "Filter the full platform audit trail and export reports."],
     reports: ["Reports", "Generate and export KPI, financial, verification, and portfolio reports."],
@@ -657,6 +749,12 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
             if (section === "prospect_sync") void loadProspect();
             if (section === "audit_logs") void loadAudit();
             if (section === "system_health") void loadHealth();
+            if (section === "permissions") void loadPermissions();
+            if (section === "master_data") {
+              if (masterDataTab === "organizations") void loadOrganizations();
+              else if (masterDataTab === "permissions") void loadPermissions();
+              else void loadConfiguration();
+            }
           }}
           className="btn-secondary flex items-center gap-2"
         >
@@ -666,6 +764,53 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
 
       {banner && <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">{banner}</div>}
       {error && <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div>}
+
+      {section === "master_data" && (
+        <div className="card p-4 space-y-3">
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-2">Directory</p>
+            <div className="flex flex-wrap gap-2">
+              {([
+                ["organizations", "Organizations"],
+                ["permissions", "Role Permissions"],
+              ] as const).map(([tab, label]) => (
+                <button
+                  key={tab}
+                  type="button"
+                  onClick={() => setMasterDataTab(tab)}
+                  className={`px-4 py-2 rounded-lg text-sm font-bold transition-colors ${masterDataTab === tab ? "bg-emerald-600 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-2">Platform Settings</p>
+            <div className="flex flex-wrap gap-2">
+              {([
+                ["general", "General Settings"],
+                ["notifications_files", "Notifications & Files"],
+                ["contact", "Public Contact"],
+                ["email", "Email Configuration"],
+                ["scoring", "Evaluation Committee Scoring"],
+                ["procurement", "Procurement Methods"],
+                ["currencies", "Currencies"],
+                ["thresholds", "Thresholds"],
+              ] as const).map(([tab, label]) => (
+                <button
+                  key={tab}
+                  type="button"
+                  onClick={() => setMasterDataTab(tab)}
+                  className={`px-4 py-2 rounded-lg text-sm font-bold transition-colors ${masterDataTab === tab ? "bg-emerald-600 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
 
       {section === "dashboard" && (
         <div className="space-y-6">
@@ -800,6 +945,54 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
                     </>
                   );
                 })()}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {(section === "permissions" || (section === "master_data" && masterDataTab === "permissions")) && (
+        <div className="card overflow-hidden">
+          {permissionsLoading || !permissionMatrix ? (
+            <div className="p-10 text-center text-slate-500">Loading role permissions...</div>
+          ) : (
+            <>
+              <div className="flex flex-col gap-3 border-b border-slate-100 p-5 md:flex-row md:items-center md:justify-between">
+                <p className="text-sm text-slate-600">Super Admin always has full access. Configure permissions for every other role.</p>
+                <button type="button" onClick={() => void savePermissions()} disabled={permissionsSubmitting} className="btn-primary disabled:opacity-60">
+                  {permissionsSubmitting ? "Saving..." : "Save Permissions"}
+                </button>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="min-w-[980px] w-full text-left text-sm">
+                  <thead className="bg-slate-50 text-xs uppercase tracking-wider text-slate-500">
+                    <tr>
+                      <th className="sticky left-0 z-10 bg-slate-50 px-5 py-3">Role / Module</th>
+                      {permissionMatrix.actions.map((action) => <th key={action} className="px-3 py-3 text-center">{action}</th>)}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {permissionMatrix.roles.map((roleEntry) => roleEntry.permissions.map((permission, index) => (
+                      <tr key={`${roleEntry.role}-${permission.module}`} className={index === 0 ? "border-t-2 border-slate-200" : ""}>
+                        <td className="sticky left-0 z-10 bg-white px-5 py-3">
+                          <div className="font-semibold text-slate-900">{index === 0 ? roleEntry.label : ""}</div>
+                          <div className="text-xs text-slate-500">{permission.label}</div>
+                        </td>
+                        {permissionMatrix.actions.map((action) => (
+                          <td key={action} className="px-3 py-3 text-center">
+                            <input
+                              type="checkbox"
+                              checked={permission.actions.includes(action)}
+                              disabled={roleEntry.role === UserRole.ADMIN}
+                              onChange={() => togglePermission(roleEntry.role, permission.module, action)}
+                              className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 disabled:opacity-60"
+                            />
+                          </td>
+                        ))}
+                      </tr>
+                    )))}
+                  </tbody>
+                </table>
               </div>
             </>
           )}
@@ -1133,7 +1326,7 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
         </div>
       )}
 
-      {section === "organizations" && (
+      {(section === "organizations" || (section === "master_data" && masterDataTab === "organizations")) && (
         <div className="grid grid-cols-1 gap-6 xl:grid-cols-[1.1fr,0.9fr]">
           <div className="card overflow-hidden">
             <div className="border-b border-slate-100 p-6">
@@ -1208,9 +1401,11 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
         </div>
       )}
 
-      {section === "system_configuration" && configuration && (
+      {section === "master_data" && configuration && (
         <><form onSubmit={saveConfiguration} className="space-y-6">
+          {(masterDataTab === "general" || masterDataTab === "notifications_files") && (
           <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+            {masterDataTab === "general" && (
             <div className="card p-6 space-y-4">
               <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
                 <Settings size={18} className="text-emerald-600" />
@@ -1236,7 +1431,9 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
                 </div>
               </div>
             </div>
+            )}
 
+            {masterDataTab === "notifications_files" && (
             <div className="card p-6 space-y-4">
               <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
                 <Bell size={18} className="text-emerald-600" />
@@ -1282,8 +1479,11 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
                 </div>
               </div>
             </div>
+            )}
           </div>
+          )}
 
+          {masterDataTab === "contact" && (
           <div className="card p-6 space-y-4">
             <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
               <Globe size={18} className="text-emerald-600" />
@@ -1317,7 +1517,9 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
               </div>
             </div>
           </div>
+          )}
 
+          {masterDataTab === "email" && (
           <div className="card p-6 space-y-4">
             <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
               <Mail size={18} className="text-emerald-600" />
@@ -1360,7 +1562,259 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
               </div>
             </div>
           </div>
+          )}
 
+          {masterDataTab === "scoring" && (
+          <div className="card p-6 space-y-4">
+            <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+              <ShieldCheck size={18} className="text-emerald-600" />
+              Evaluation Committee Scoring
+            </h3>
+            <p className="text-sm text-slate-600">
+              The technical rubric and financial formula the Evaluation Committee uses to score bids. Changes apply platform-wide to every tender's evaluation.
+            </p>
+            <div className="overflow-x-auto rounded-2xl border border-slate-100">
+              <table className="min-w-full text-sm">
+                <thead className="bg-slate-50 text-slate-500">
+                  <tr>
+                    <th className="px-4 py-2 text-left font-semibold">Field</th>
+                    <th className="px-4 py-2 text-left font-semibold">Label</th>
+                    <th className="px-4 py-2 text-left font-semibold w-32">Max Score</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {configuration.technicalScoringCriteria.map((criterion, index) => (
+                    <tr key={criterion.key} className="border-t border-slate-100">
+                      <td className="px-4 py-2 text-xs font-mono text-slate-400">{criterion.key}</td>
+                      <td className="px-4 py-2">
+                        <input
+                          className="input-field"
+                          value={criterion.label}
+                          onChange={(e) => setConfiguration((prev) => {
+                            if (!prev) return prev;
+                            const next = [...prev.technicalScoringCriteria];
+                            next[index] = { ...next[index], label: e.target.value };
+                            return { ...prev, technicalScoringCriteria: next };
+                          })}
+                        />
+                      </td>
+                      <td className="px-4 py-2">
+                        <input
+                          className="input-field"
+                          type="number"
+                          min="0"
+                          max="100"
+                          value={criterion.maxScore}
+                          onChange={(e) => setConfiguration((prev) => {
+                            if (!prev) return prev;
+                            const next = [...prev.technicalScoringCriteria];
+                            next[index] = { ...next[index], maxScore: Number(e.target.value || 0) };
+                            return { ...prev, technicalScoringCriteria: next };
+                          })}
+                        />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot>
+                  <tr className="border-t border-slate-200 bg-slate-50 font-bold text-slate-900">
+                    <td className="px-4 py-2" colSpan={2}>Technical Total</td>
+                    <td className="px-4 py-2">{configuration.technicalScoringCriteria.reduce((sum, c) => sum + Number(c.maxScore || 0), 0)} points</td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1">Financial Scoring Formula</label>
+              <select
+                className="input-field"
+                value={configuration.financialScoringFormula}
+                onChange={(e) => setConfiguration((prev) => prev ? { ...prev, financialScoringFormula: e.target.value as typeof prev.financialScoringFormula } : prev)}
+              >
+                <option value="lowest_price_100">Lowest price scores 100 (proportional)</option>
+                <option value="linear_deviation_100">Linear deviation from lowest price</option>
+              </select>
+              <p className="text-xs text-slate-500 mt-1">
+                {configuration.financialScoringFormula === "linear_deviation_100"
+                  ? "Score = 100 − (this bid's price − lowest) ÷ lowest × 100, floored at 0."
+                  : "Score = 100 × lowest qualifying price ÷ this bid's price."}
+              </p>
+            </div>
+          </div>
+          )}
+
+          {masterDataTab === "procurement" && (
+          <div className="card p-6 space-y-4">
+            <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+              <Users size={18} className="text-emerald-600" />
+              Procurement Methods
+            </h3>
+            <p className="text-sm text-slate-600">
+              "Open Tendering" and "Restricted Tendering" are built into the platform and can't be renamed or removed. Add further custom methods below with any of the standard e-tendering vendor-visibility modes: Open, Restricted, Limited/Single-Source (one nominated vendor), Framework/Pre-Qualified Pool (tier &amp; technology match, no invite list), or Request for Quotation (a small invited set).
+            </p>
+            <div className="overflow-x-auto rounded-2xl border border-slate-100">
+              <table className="min-w-full text-sm">
+                <thead className="bg-slate-50 text-slate-500">
+                  <tr>
+                    <th className="px-4 py-2 text-left font-semibold">Method Name</th>
+                    <th className="px-4 py-2 text-left font-semibold w-56">Vendor Visibility</th>
+                    <th className="px-4 py-2 text-left font-semibold w-16"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {PROCUREMENT_METHOD_BUILTINS.map((method) => (
+                    <tr key={method.value} className="border-t border-slate-100 bg-slate-50/60">
+                      <td className="px-4 py-2 flex items-center gap-2">
+                        {method.value}
+                        <span className="px-2 py-0.5 rounded-full bg-slate-200 text-slate-600 text-[10px] font-bold uppercase">Built-in</span>
+                      </td>
+                      <td className="px-4 py-2 text-slate-500">{PROCUREMENT_VISIBILITY_MODE_LABELS[method.visibilityMode]}</td>
+                      <td className="px-4 py-2"></td>
+                    </tr>
+                  ))}
+                  {configuration.procurementMethods.map((method, index) => (
+                    <tr key={index} className="border-t border-slate-100">
+                      <td className="px-4 py-2">
+                        <input
+                          className="input-field"
+                          value={method.value}
+                          onChange={(e) => setConfiguration((prev) => {
+                            if (!prev) return prev;
+                            const next = [...prev.procurementMethods];
+                            next[index] = { ...next[index], value: e.target.value };
+                            return { ...prev, procurementMethods: next };
+                          })}
+                          placeholder="e.g. Sole Source"
+                        />
+                      </td>
+                      <td className="px-4 py-2">
+                        <select
+                          className="input-field"
+                          value={method.visibilityMode}
+                          onChange={(e) => setConfiguration((prev) => {
+                            if (!prev) return prev;
+                            const next = [...prev.procurementMethods];
+                            next[index] = { ...next[index], visibilityMode: e.target.value as ProcurementVisibilityMode };
+                            return { ...prev, procurementMethods: next };
+                          })}
+                        >
+                          {(Object.keys(PROCUREMENT_VISIBILITY_MODE_LABELS) as ProcurementVisibilityMode[]).map((mode) => (
+                            <option key={mode} value={mode}>{PROCUREMENT_VISIBILITY_MODE_LABELS[mode]}</option>
+                          ))}
+                        </select>
+                      </td>
+                      <td className="px-4 py-2">
+                        <button
+                          type="button"
+                          onClick={() => setConfiguration((prev) => {
+                            if (!prev) return prev;
+                            return { ...prev, procurementMethods: prev.procurementMethods.filter((_, i) => i !== index) };
+                          })}
+                          className="p-1.5 rounded-lg text-rose-500 hover:bg-rose-50"
+                          aria-label="Remove procurement method"
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <button
+              type="button"
+              onClick={() => setConfiguration((prev) => prev ? {
+                ...prev,
+                procurementMethods: [...prev.procurementMethods, { value: "", visibilityMode: "open" }],
+              } : prev)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-50 text-emerald-700 text-sm font-semibold hover:bg-emerald-100"
+            >
+              <Plus size={16} /> Add Method
+            </button>
+          </div>
+          )}
+
+          {masterDataTab === "currencies" && (
+          <div className="card p-6 space-y-4">
+            <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+              <Globe size={18} className="text-emerald-600" />
+              Currencies
+            </h3>
+            <p className="text-sm text-slate-600">
+              The currencies offered by every tender's "Base Currency" and "Additional Currencies Accepted" pickers. Pick exactly one as the Default — it pre-fills new tenders (and new EOI Invites).
+            </p>
+            <div className="overflow-x-auto rounded-2xl border border-slate-100">
+              <table className="min-w-full text-sm">
+                <thead className="bg-slate-50 text-slate-500">
+                  <tr>
+                    <th className="px-4 py-2 text-left font-semibold">Currency</th>
+                    <th className="px-4 py-2 text-left font-semibold w-24">Default</th>
+                    <th className="px-4 py-2 text-left font-semibold w-16"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {configuration.currencies.map((currency, index) => (
+                    <tr key={index} className="border-t border-slate-100">
+                      <td className="px-4 py-2">
+                        <input
+                          className="input-field"
+                          value={currency.value}
+                          onChange={(e) => setConfiguration((prev) => {
+                            if (!prev) return prev;
+                            const next = [...prev.currencies];
+                            next[index] = { ...next[index], value: e.target.value };
+                            return { ...prev, currencies: next };
+                          })}
+                          placeholder="e.g. EUR"
+                        />
+                      </td>
+                      <td className="px-4 py-2 text-center">
+                        <input
+                          type="radio"
+                          name="default-currency"
+                          className="w-4 h-4 text-emerald-600"
+                          checked={currency.isDefault}
+                          onChange={() => setConfiguration((prev) => {
+                            if (!prev) return prev;
+                            return { ...prev, currencies: prev.currencies.map((c, i) => ({ ...c, isDefault: i === index })) };
+                          })}
+                        />
+                      </td>
+                      <td className="px-4 py-2">
+                        <button
+                          type="button"
+                          disabled={configuration.currencies.length <= 1}
+                          onClick={() => setConfiguration((prev) => {
+                            if (!prev) return prev;
+                            const next = prev.currencies.filter((_, i) => i !== index);
+                            if (next.length && !next.some((c) => c.isDefault)) next[0].isDefault = true;
+                            return { ...prev, currencies: next };
+                          })}
+                          className="p-1.5 rounded-lg text-rose-500 hover:bg-rose-50 disabled:opacity-30 disabled:cursor-not-allowed"
+                          aria-label="Remove currency"
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <button
+              type="button"
+              onClick={() => setConfiguration((prev) => prev ? {
+                ...prev,
+                currencies: [...prev.currencies, { value: "", isDefault: prev.currencies.length === 0 }],
+              } : prev)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-50 text-emerald-700 text-sm font-semibold hover:bg-emerald-100"
+            >
+              <Plus size={16} /> Add Currency
+            </button>
+          </div>
+          )}
+
+          {masterDataTab === "thresholds" && (
           <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
             <div className="card p-6 space-y-4">
               <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
@@ -1418,6 +1872,7 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
               </div>
             </div>
           </div>
+          )}
 
           <div className="flex items-center justify-end gap-3">
             <button type="button" onClick={() => void loadConfiguration()} className="btn-secondary">

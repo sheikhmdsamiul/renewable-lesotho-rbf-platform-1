@@ -5,6 +5,7 @@ from .models import (
     ProjectSetup,
     ProjectSetupReviewStatus,
     Milestone,
+    MilestoneCompletionReview,
     ProjectUpdate,
     ProjectDocument,
     InstallationReport,
@@ -29,7 +30,38 @@ from rbf.users.models import UserRole
 from .bank_details import get_vendor_bank_snapshot
 
 
+class MilestoneReviewDecisionSerializer(serializers.Serializer):
+    decision = serializers.ChoiceField(choices=['proceed', 'close', 'transfer', 'complete'])
+    verification_notes = serializers.CharField(allow_blank=False, trim_whitespace=True)
+    new_vendor_id = serializers.CharField(required=False, allow_blank=True)
+
+    def validate(self, attrs):
+        if attrs['decision'] == 'transfer' and not str(attrs.get('new_vendor_id') or '').strip():
+            raise serializers.ValidationError({'new_vendor_id': 'Select the vendor the project will be transferred to.'})
+        return attrs
+
+
+class MilestoneCompletionReviewSerializer(serializers.ModelSerializer):
+    reviewed_by_name = serializers.SerializerMethodField()
+
+    def get_reviewed_by_name(self, obj):
+        user = obj.reviewed_by
+        if not user:
+            return ''
+        return user.full_name or user.username
+
+    class Meta:
+        model = MilestoneCompletionReview
+        fields = [
+            'id', 'milestone', 'project', 'status', 'decision', 'verification_notes',
+            'vendor_id', 'vendor_name', 'transferred_to_vendor_id', 'transferred_to_vendor_name',
+            'reviewed_by', 'reviewed_by_name', 'reviewed_at', 'created_at',
+        ]
+        read_only_fields = fields
+
+
 class MilestoneSerializer(serializers.ModelSerializer):
+    completion_review = serializers.SerializerMethodField()
     target_date = serializers.DateField(
         required=False,
         allow_null=True,
@@ -61,6 +93,11 @@ class MilestoneSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({'progress_percentage': 'Progress must be between 0 and 100.'})
 
         return attrs
+
+    def get_completion_review(self, obj):
+        # Reverse one-to-one raises RelatedObjectDoesNotExist (an AttributeError) when absent.
+        review = getattr(obj, 'completion_review', None)
+        return MilestoneCompletionReviewSerializer(review).data if review else None
 
     class Meta:
         model = Milestone
@@ -183,6 +220,7 @@ class ProjectSerializer(serializers.ModelSerializer):
                 'milestone_number': milestone.milestone_number,
                 'name': milestone.name,
                 'disbursement_pct': milestone.disbursement_pct,
+                'required_installation_pct': milestone.required_installation_pct,
                 'status': milestone.status,
             }
             for milestone in milestones
@@ -702,11 +740,12 @@ class SmartMeterReadingSerializer(serializers.ModelSerializer):
 
 class AuditLogSerializer(serializers.ModelSerializer):
     actor_username = serializers.CharField(source='actor.username', read_only=True)
+    actor_full_name = serializers.CharField(source='actor.full_name', read_only=True)
 
     class Meta:
         model = AuditLog
         fields = '__all__'
-        read_only_fields = ['id', 'created_at', 'actor_username']
+        read_only_fields = ['id', 'created_at', 'actor_username', 'actor_full_name']
 
 
 class ProspectSyncLogSerializer(serializers.ModelSerializer):

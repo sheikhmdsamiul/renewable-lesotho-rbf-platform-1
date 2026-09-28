@@ -12,6 +12,7 @@ export enum UserRole {
   ADMIN = "Platform Administrator (Super Admin)",
   UNDP_DONOR = "Project Steering Committee",
   AUDITOR = "Auditor",
+  EVALUATION_COMMITTEE = "Evaluation Committee",
 }
 
 export type ReportFormat = "csv" | "pdf" | "excel";
@@ -38,6 +39,7 @@ export interface ReportHistoryItem {
 
 export enum TenderStatus {
   DRAFT = "Draft",
+  PENDING_PUBLISH_APPROVAL = "Pending Publish Approval",
   PUBLISHED = "Published",
   EVALUATION = "Evaluation",
   STANDSTILL = "Standstill",
@@ -88,6 +90,7 @@ export enum ProjectStatus {
   DISBURSEMENT = "Disbursement",
   HALTED = "Halted",
   COMPLETED = "Completed",
+  CLOSED = "closed",
 }
 
 export type UserStatus = 
@@ -169,10 +172,25 @@ export interface Tender {
   category: string;
   status: TenderStatus;
   deadline: string;
+  procurementWorkflow?: "sequential" | "combined" | "eoi_combined";
+  eoiDeadline?: string;
+  technicalDeadline?: string;
+  financialDeadline?: string;
   budget?: number;
   applicationType?: "Access Window" | "Application Window";
   stageType?: "Stage 1: Concept" | "Stage 2: Detailed" | "Pre-Qualification" | "Site-Specific";
-  procurementMethod?: string;
+  procurementMethod?: "Open Tendering" | "Restricted Tendering" | string;
+  // An EOI Invite tender exists solely to run an EOI stage and shortlist vendors — it
+  // never itself collects a Combined bid. A tender with linkedEoiTenderId set inherits
+  // that EOI Invite's name and shortlist and skips running its own EOI stage.
+  isEoiInviteOnly?: boolean;
+  linkedEoiTenderId?: string;
+  linkedEoiTenderName?: string;
+  skipsEoiStage?: boolean;
+  // Tenders created by linking to this EOI Invite tender (reverse of linkedEoiTenderId).
+  linkedTendersSummary?: { id: string; name: string; referenceNumber: string; status: string }[];
+  /** Number of tenders linked to this EOI Invite (present in list views). */
+  linkedTenderCount?: number;
   addressForDocument?: string;
   addressForSecurity?: string;
   placeForOpening?: string;
@@ -180,13 +198,29 @@ export interface Tender {
   timeForCompletion?: string;
   invitedBy?: string;
   biddingCurrency?: string;
+  // Additional currencies this tender accepts beyond biddingCurrency (its base), each
+  // mapped to a fixed exchange rate INTO the base currency, e.g. { USD: 19.5 }.
+  currencyRates?: Record<string, number>;
   instruction?: string;
-  lastDateSecurity?: string;
-  lastDateSubmission?: string;
-  dateOpening?: string;
+  openingDateOptional?: boolean;
   preTenderMeetingInfo?: string;
   biddersSchedulePurchase?: boolean;
+  documentFeeAmount?: number;
+  documentFeeType?: string;
+  documentFeeRefundable?: boolean;
   tenderSecurityRequired?: boolean;
+  // Informational-only procurement metadata (not enforced by any workflow logic).
+  languageOfBidSubmission?: string;
+  budgetDisclosure?: "confidential" | "published" | "";
+  clarificationDeadline?: string;
+  siteVisitDate?: string;
+  bidValidityPeriodDays?: number;
+  minimumWarrantyPeriodMonths?: number;
+  submissionMethod?: "online_only" | "hybrid";
+  digitalSignatureRequired?: boolean;
+  // EOI Invite-only, advisory (never enforced against actual shortlist size).
+  maxVendorsToShortlist?: number;
+  advertisementChannels?: string[];
   contactDetails?: string;
   technologyTypes?: string[];
   targetDistricts?: string[];
@@ -212,10 +246,115 @@ export interface Tender {
   verifiedAt?: string;
   awardedAt?: string;
   closedAt?: string;
+  publishApprovalStatus?: "not_requested" | "pending" | "approved" | "rejected" | "changes_requested";
+  publishApprovalRequestedAt?: string;
+  publishApprovalReviewedAt?: string;
+  publishApprovalReviewedBy?: string;
+  publishApprovalNotes?: string;
   awardedVendorName?: string;
   awardedVendorId?: string;
   bidCount?: number;
+  invitedVendorCount?: number;
   challenges?: TenderChallenge[];
+  requiredDocuments?: TenderRequiredDocument[];
+  governingDocuments?: GoverningDocument[];
+  /** A tender with no lots is awarded as a single whole. One or more lots switches the
+   * tender into lot-wise mode: bidders price whichever lots they choose (up to
+   * maxLotsPerBidder if set), and each lot can be awarded to a different vendor. */
+  lots?: TenderLot[];
+  /** Lightweight lot-wise summary — present even in list views where `lots` itself
+   * isn't sent (e.g. Tender Management's list endpoint). Prefer these over deriving
+   * from `lots.length` so counts are correct regardless of which endpoint loaded this
+   * tender. `lotCount` is 0 (not undefined) for a non-lot-wise tender. */
+  lotCount?: number;
+  awardedLotCount?: number;
+  maxLotsPerBidder?: number;
+  /** This tender's own designed BOQ — only meaningful when `lots` is empty (a
+   * lot-wise tender designs its BOQ per lot instead, on each TenderLot.boqItems). An
+   * empty list falls back to letting the bidder freely author their own BOQ. */
+  boqItems?: TenderBoqTemplateItem[];
+  /** Only present for Super Admin or a member of this tender's committee. */
+  evaluationCommitteeMembers?: TenderEvaluationCommitteeMember[];
+  /** Only present for Super Admin, RBF Official, or an invited vendor viewing their own invitation. */
+  invitedVendors?: TenderInvitedVendor[];
+  /** RBF Official's comment after the whole committee evaluation is complete. */
+  evaluationComment?: string;
+  evaluationCommentAuthor?: string;
+  evaluationCommentUpdatedAt?: string;
+}
+
+export interface TenderBoqTemplateItem {
+  id?: string;
+  description: string;
+  unit?: string;
+  quantity: number;
+  position?: number;
+}
+
+export interface TenderLot {
+  id?: string;
+  name: string;
+  description?: string;
+  technologyTypes?: string[];
+  targetDistricts?: string[];
+  estimatedInstallationTarget?: number;
+  budget?: number;
+  position?: number;
+  /** This lot's own designed BOQ — set by the RBF Official at tender creation.
+   * A bidder pricing this lot must use these exact line items (see
+   * TenderBidLotOffer.boq_items); an empty list falls back to a plain typed bid
+   * amount for this lot. */
+  boqItems?: TenderBoqTemplateItem[];
+  /** Set only once this lot's award is CONFIRMED (alongside awardedAt) — not at
+   * intent-to-award time. Use intentToAwardBidId/intentToAwardAt to detect "intent
+   * issued, pending confirmation". */
+  awardedVendorId?: string;
+  awardedVendorName?: string;
+  intentToAwardBidId?: string;
+  intentToAwardAt?: string;
+  /** This lot's own standstill/cooling-off deadline, independent of other lots. */
+  coolingOffUntil?: string;
+  awardedAt?: string;
+}
+
+export type GoverningDocumentFieldKey = "schedule_file" | "rfp_documents_file" | "milestone_payment_schedule_file";
+
+export interface GoverningDocument {
+  label: string;
+  expected_type?: string;
+  file_name?: string;
+  file_url?: string;
+  /** When set, this entry is backed by one of the tender's structured file fields
+   * (schedule/RFP/milestone-payment) instead of the generic governing_documents JSON,
+   * so existing detail views, PDF exports, and vendor screens keep reading it as before. */
+  field_key?: GoverningDocumentFieldKey;
+}
+
+export type RequiredDocumentFieldKey =
+  | "company_credentials_file"
+  | "financial_standing_file"
+  | "technical_experience_file"
+  | "track_record_file"
+  | "technical_proposal_file"
+  | "boq_file"
+  | "gender_action_plan_file"
+  | "implementation_plan_file"
+  | "om_plan_file"
+  | "reporting_templates_file"
+  | "distribution_map_file"
+  | "financial_proposal_file"
+  | "tender_security_file";
+
+export interface TenderRequiredDocument {
+  id?: string;
+  name: string;
+  expected_type?: string;
+  bid_stage?: "eoi" | "technical" | "financial" | "combined";
+  bid_stage_label?: string;
+  /** When set, this requirement binds to a structured TenderBid file field instead of
+   * a fully custom upload — the vendor wizard renders the correct native upload slot. */
+  field_key?: RequiredDocumentFieldKey;
+  position?: number;
 }
 
 export interface TenderChallenge {
@@ -235,18 +374,37 @@ export interface TenderChallenge {
 
 export interface TenderBidSite {
   id?: string;
+  lot?: string | null;
   siteName: string;
   district?: string;
   villageSubDistrict?: string;
   latitude?: number;
   longitude?: number;
-  estimatedHouseholds?: number;
   numberOfHouseholds?: number;
   targetTechnology?: string;
   targetBeneficiaryType?: "female_headed" | "vulnerable" | "low_income" | "standard";
   estimatedEnergyDemandKwhMonth?: number;
   roadAccessAvailable?: boolean;
   notes?: string;
+}
+
+export interface TenderBidLotOffer {
+  lot: string;
+  lot_name?: string;
+  bid_amount: number | string;
+  bid_amount_base_currency?: number | string;
+  subsidy_requested?: number | string | null;
+  /** Populated only when this lot has a designed BOQ (TenderLot.boqItems) — the
+   * vendor's priced version of that template, one entry per template item. */
+  boq_items?: Array<{
+    template_item_id?: number | string;
+    item_number?: number;
+    description: string;
+    unit?: string;
+    qty: number | string;
+    unit_price: number | string;
+    total?: number | string;
+  }>;
 }
 
 export interface TenderViewer {
@@ -277,7 +435,17 @@ export interface TenderBid {
   preferred_district?: string;
   technology_types?: string[];
   bid_amount?: number;
+  // Blank/undefined means "the tender's base currency" (bidding_currency).
+  bid_currency?: string;
+  // Read-only: bid_amount converted into the tender's base currency, for comparison.
+  bid_amount_base_currency?: number;
   subsidy_requested?: number;
+  /** Per-lot pricing for a lot-wise tender — used instead of bid_amount/subsidy_requested
+   * when the tender has lots. A vendor may offer on any subset of the tender's lots. */
+  lot_offers?: TenderBidLotOffer[];
+  /** Lot IDs the vendor declared intent to bid on at EOI stage, for lot-wise tenders.
+   * Scopes which lots may later be tagged to sites and priced. */
+  declared_lots?: string[];
   stage?: string;
   stage_key?: string;
   stage_badge?: string;
@@ -306,6 +474,7 @@ export interface TenderBid {
     inverter_type?: string;
   };
   boq_details?: Array<{
+    template_item_id?: number | string;
     item_number?: number;
     description: string;
     qty: number;
@@ -314,6 +483,7 @@ export interface TenderBid {
     total?: number;
   }>;
   boq_items?: Array<{
+    template_item_id?: number | string;
     item_number?: number;
     description: string;
     qty: number;
@@ -354,6 +524,26 @@ export interface TenderBid {
   stage_two_unlocked_at?: string;
   stage_two_source_bid?: string;
   stage_two_ready?: boolean;
+  bid_stage?: "eoi" | "technical" | "financial" | "combined";
+  eoi_narrative?: string;
+  company_credentials_file?: string;
+  financial_standing_file?: string;
+  technical_experience_file?: string;
+  track_record_file?: string;
+  financial_standing_summary?: string;
+  technical_experience_summary?: string;
+  track_record_summary?: string;
+  technical_stage_unlocked?: boolean;
+  technical_stage_unlocked_at?: string;
+  technical_stage_source_bid?: string;
+  financial_stage_unlocked?: boolean;
+  financial_stage_unlocked_at?: string;
+  financial_stage_source_bid?: string;
+  financial_sealed?: boolean;
+  financial_unsealed_at?: string;
+  tender_procurement_workflow?: "sequential" | "combined" | "eoi_combined";
+  tender_skips_eoi_stage?: boolean;
+  financial_stage_open?: boolean;
   document_requirements?: Array<{ field: string; required: boolean; uploaded: boolean }>;
   document_counts?: { uploaded: number; required: number };
   deadline?: string;
@@ -379,6 +569,12 @@ export interface TenderBid {
   created_at?: string;
   updated_at?: string;
   sites?: TenderBidSite[];
+  customDocuments?: Array<{
+    name: string;
+    expected_type?: string;
+    file_name?: string;
+    file_url?: string;
+  }>;
 }
 
 export interface Project {
@@ -410,6 +606,7 @@ export interface Project {
   endDate?: string;
   budget?: number;
   targetInstallations?: number;
+  installationTarget?: number;
   targetFemalePct?: number;
   targetVulnerablePct?: number;
   targetLowIncomePct?: number;
@@ -576,7 +773,7 @@ export interface ProjectKpiSummary {
     total_verified: number;
     target: number;
   };
-  milestone_eligibility: Record<string, { eligible: boolean; status?: string; conditions: Record<string, boolean> }>;
+  milestone_eligibility: Record<string, { eligible: boolean; status?: string; conditions: Record<string, boolean>; thresholds?: MilestoneConditionThresholds }>;
   generated_at: string;
 }
 
@@ -648,6 +845,7 @@ export interface User {
   prospectSyncStatus?: ProspectSyncLog[];
   vendorTag?: string | null;
   blacklistSummary?: BlacklistSummary | null;
+  permissions?: Record<string, string[]>;
 }
 
 export interface Organization {
@@ -690,11 +888,46 @@ export interface PlatformConfiguration {
   contactAddress: string;
   contactOfficeHours: string;
   contactOrganisationName: string;
+  technicalScoringCriteria: TechnicalScoringCriterion[];
+  financialScoringFormula: FinancialScoringFormula;
+  /** Custom procurement methods added beyond the two permanent built-ins
+   * (Open Tendering / Restricted Tendering) — use fetchProcurementMethodsConfig()
+   * to read the full normalized list (built-ins + custom) for display. */
+  procurementMethods: ProcurementMethodOption[];
+  /** Super-Admin-managed currency list for the tender-creation Base Currency /
+   * Additional Currencies Accepted pickers — use fetchCurrenciesConfig() to read it. */
+  currencies: CurrencyOption[];
   lesothoBoundary?: {
     path: string;
     exists: boolean;
     lastModified?: string | null;
   };
+}
+
+export interface TechnicalScoringCriterion {
+  key: string;
+  label: string;
+  maxScore: number;
+}
+
+export type FinancialScoringFormula = "lowest_price_100" | "linear_deviation_100";
+
+export type ProcurementVisibilityMode = "open" | "restricted" | "limited" | "framework" | "rfq";
+
+export interface ProcurementMethodOption {
+  value: string;
+  visibilityMode: ProcurementVisibilityMode;
+}
+
+export interface CurrencyOption {
+  value: string;
+  isDefault: boolean;
+}
+
+export interface EvaluationScoringConfig {
+  technicalScoringCriteria: TechnicalScoringCriterion[];
+  financialScoringFormula: FinancialScoringFormula;
+  technicalScoreTotal: number;
 }
 
 export interface SystemHealthPayload {
@@ -757,6 +990,16 @@ export interface SuperAdminDashboardSummary {
   };
 }
 
+export interface RolePermissionMatrix {
+  actions: string[];
+  modules: Array<{ value: string; label: string }>;
+  roles: Array<{
+    role: string;
+    label: string;
+    permissions: Array<{ module: string; label: string; actions: string[] }>;
+  }>;
+}
+
 export interface ProspectSyncLog {
   id: string;
   methodName: string;
@@ -773,12 +1016,18 @@ export interface ProspectSyncLog {
 export interface TenderBidEvaluation {
   id: string;
   bid: string;
+  lot?: string | null;
+  stage: "technical" | "financial";
   evaluator?: string;
   evaluatorUsername?: string;
   evaluatorRole?: UserRole;
   status: "Pending" | "Scored";
+  submissionStatus?: "draft" | "submitted";
+  submittedAt?: string;
+  justifications?: Record<string, string>;
   technicalScore: number;
   financialScore: number;
+  financialScoreAutoCalculated?: boolean;
   feasibilityScore: number;
   kpiScore: number;
   genderScore: number;
@@ -791,27 +1040,286 @@ export interface TenderBidEvaluation {
   updatedAt?: string;
 }
 
+export type EvaluationSubmissionStatus = "draft" | "submitted";
+
+export interface EvaluationRevisionChange {
+  field: string;
+  before: string | number | boolean | null;
+  after: string | number | boolean | null;
+}
+
+export interface EvaluationRevision {
+  action: string;
+  reason: string;
+  changedBy: string;
+  changedAt?: string;
+  changes: EvaluationRevisionChange[];
+}
+
+export interface EvaluationCommitteeScoresMemberEvaluation {
+  evaluationId: string;
+  evaluator?: string | null;
+  evaluatorName: string;
+  stage: "technical" | "financial";
+  lot?: string | null;
+  lotName?: string | null;
+  status: "Pending" | "Scored";
+  submissionStatus?: "draft" | "submitted";
+  submittedAt?: string;
+  justifications?: Record<string, string>;
+  revisions?: EvaluationRevision[];
+  technicalScore: number;
+  feasibilityScore: number;
+  kpiScore: number;
+  genderScore: number;
+  environmentalScore: number;
+  omScore: number;
+  inclusivityScore: number;
+  financialScore: number;
+  financialScoreAutoCalculated?: boolean;
+  totalScore: number;
+  comments?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface EvaluationCommitteeScoresBid {
+  bidId: string;
+  vendorId: string;
+  vendorName: string;
+  bidStage: string;
+  status: string;
+  technicalQuorumMet: boolean;
+  technicalAverageScore?: string | null;
+  technicalRawAverage?: string | null;
+  passedTechnicalThreshold: boolean;
+  financialFinalized: boolean;
+  lotFinancialFinalized?: Record<string, boolean>;
+  evaluations: EvaluationCommitteeScoresMemberEvaluation[];
+}
+
+export interface EvaluationCommitteeScores {
+  committeeMembers: Array<{ id: string; name: string }>;
+  scoreLimits: Record<string, number>;
+  technicalScoreTotal: number;
+  technicalThreshold: number;
+  isLotWise: boolean;
+  lots?: Array<{ lotId: string; lotName: string }>;
+  bids: EvaluationCommitteeScoresBid[];
+  committeeSize: number;
+  quorum: number;
+}
+
+export interface EvaluationConflictOfInterestDeclaration {
+  id?: string;
+  evaluatorId?: string;
+  evaluatorName?: string;
+  vendorId?: string;
+  vendorName?: string;
+  relationship?: string;
+  details?: string;
+  resolved: boolean;
+  resolvedAt?: string;
+  resolutionNotes?: string;
+  declaredAt?: string;
+}
+
+export interface EvaluationCommitteeCoIStatus {
+  committee: Array<{
+    memberId: string;
+    name: string;
+    coiAttested: boolean;
+    coiAttestedAt?: string | null;
+  }>;
+  declarations: EvaluationConflictOfInterestDeclaration[];
+}
+
+export interface TenderEvaluationComment {
+  comment: string;
+  author: string;
+  updatedAt?: string | null;
+  evaluationComplete: boolean;
+  incompleteReasons: string[];
+  committeeSize: number;
+}
+
+export interface TenderEvaluationCommitteeMember {
+  id: string;
+  member: string;
+  memberName?: string;
+  memberEmail?: string;
+  assignedBy?: string;
+  assignedByName?: string;
+  assignedAt?: string;
+}
+
+export interface TenderInvitedVendor {
+  id: string;
+  vendor: string;
+  vendorName?: string;
+  vendorEmail?: string;
+  vendorOrganizationName?: string;
+  invitedBy?: string;
+  invitedByName?: string;
+  invitedAt?: string;
+}
+
+export interface FinancialEvaluationRow {
+  bidId: string;
+  vendorId: string;
+  vendorName: string;
+  bidAmount: number;
+  bidCurrency?: string;
+  bidAmountBaseCurrency?: number;
+  subsidyRequested?: number | null;
+  computedFinancialScore: number;
+  finalized: boolean;
+  finalizedByMe: boolean;
+  submissionStatus?: "draft" | "submitted";
+  submittedAt?: string;
+}
+
+export interface FinancialEvaluationLot {
+  lotId: string;
+  lotName: string;
+  rows: FinancialEvaluationRow[];
+}
+
 export interface TenderAwardRankingRow {
   rank: number;
   bid_id: string;
   vendor_id: string;
   vendor_name: string;
   bid_amount: number;
+  bid_currency?: string;
+  bid_amount_base_currency?: number;
+  subsidy_requested?: number | null;
   technical_score?: number | null;
   financial_score?: number | null;
   combined_score?: number | null;
   gender_score?: number | null;
   female_headed_household_target?: number;
   passed_technical_threshold: boolean;
-  financial_opened: boolean;
+  financial_opened?: boolean;
   is_recommended_winner: boolean;
   disqualification_reason?: string;
+}
+
+export interface TenderLotAwardRanking {
+  lot_id: string;
+  lot_name: string;
+  rows: TenderAwardRankingRow[];
+  recommended: TenderAwardRankingRow | null;
+  awarded_vendor_id: string | null;
+  awarded_vendor_name: string | null;
+  intent_to_award_bid_id: string | null;
+  intent_to_award_at?: string | null;
+  cooling_off_until?: string | null;
+  awarded_at?: string | null;
+  /** The lot's pending request, if the RBF has queued an intent for this lot. */
+  pending_intent_award_request?: IntentToAwardRequest | null;
+}
+
+export interface TenderAwardRecommendation {
+  id: string;
+  tender: string;
+  lot: string | null;
+  lot_name?: string;
+  bid: string;
+  vendor_name?: string;
+  bid_vendor_name?: string;
+  suggested_by: string;
+  suggested_by_name?: string;
+  rationale?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface AwardConsensusMember {
+  member_id: string;
+  member_name: string;
+}
+
+export interface AwardConsensusUnit {
+  lot_id: string | null;
+  lot_name: string;
+  assigned_members: AwardConsensusMember[];
+  suggestions: TenderAwardRecommendation[];
+  pending_member_ids: string[];
+  consensus: boolean;
+  agreed_bid_id: string | null;
+  agreed_vendor_name: string | null;
+  intent_to_award_bid_id: string | null;
+}
+
+export interface TenderAwardConsensus {
+  is_lot_wise: boolean;
+  evaluation_complete: boolean;
+  units: AwardConsensusUnit[];
+}
+
+export interface TenderEvaluationStatusInfo {
+  complete: boolean;
+  reasons: string[];
+  committee_size: number;
+  detailed_bid_count: number;
+}
+
+export type IntentToAwardRequestStatus =
+  | "pending"
+  | "approved"
+  | "changes_requested"
+  | "rejected"
+  | "withdrawn";
+
+/** One RBF proposal to issue an intent to award, waiting on a Super Admin decision. */
+export interface IntentToAwardRequest {
+  id: string;
+  tender: string;
+  tender_reference_number: string;
+  tender_name: string;
+  lot: string | null;
+  lot_id: string | null;
+  lot_name: string;
+  bid: string;
+  bid_id: string;
+  proposed_vendor_id: string;
+  proposed_vendor_name: string;
+  ec_agreed_bid_id: string;
+  ec_consensus: boolean | null;
+  ec_override_reason: string;
+  status: IntentToAwardRequestStatus;
+  status_label: string;
+  notes: string;
+  requested_by: string | null;
+  requested_by_name: string;
+  requested_at: string;
+  from_challenge: boolean;
+  reviewed_by: string | null;
+  reviewed_by_name: string;
+  reviewed_at: string | null;
+}
+
+export interface TenderAwardRankingResponse {
+  is_lot_wise?: boolean;
+  cooling_off_days?: number;
+  technical_weight?: number;
+  financial_weight?: number;
+  technical_threshold?: number;
+  rows?: TenderAwardRankingRow[];
+  recommended?: TenderAwardRankingRow | null;
+  lots?: TenderLotAwardRanking[];
+  evaluation_status?: TenderEvaluationStatusInfo;
+  /** Set on the whole-tender award decision unit; each lot carries its own. */
+  pending_intent_award_request?: IntentToAwardRequest | null;
 }
 
 export interface TenderContract {
   id: string;
   tender: string;
   bid?: string;
+  lot?: string;
+  lotName?: string;
   vendorId: string;
   vendorName: string;
   vendorEmail?: string;
@@ -836,6 +1344,13 @@ export interface TenderContract {
   updatedAt?: string;
 }
 
+export interface MilestoneConditionThresholds {
+  installations_pct?: number;
+  female_pct?: number;
+  vulnerable_pct?: number;
+  low_income_pct?: number;
+}
+
 export interface Milestone {
   id: string;
   projectId: string;
@@ -844,13 +1359,34 @@ export interface Milestone {
   name: string;
   description?: string;
   percentage: number;
-  status: "locked" | "pending" | "claimable" | "claimed" | "paid" | "Pending" | "Submitted" | "Verified" | "Paid";
+  status: "locked" | "pending" | "claimable" | "claimed" | "paid" | "cancelled" | "Pending" | "Submitted" | "Verified" | "Paid";
   amount: number;
   progressPercentage: number;
   targetDate?: string;
   completedDate?: string;
   unlockedAt?: string;
   amountLsl?: number;
+  requiredInstallationPct?: number;
+  completionReview?: MilestoneCompletionReview | null;
+}
+
+export type MilestoneReviewDecision = "proceed" | "close" | "transfer" | "complete";
+
+// RBF / Super Admin verification opened when a milestone is paid; decides
+// whether the project proceeds, closes, or moves to another vendor.
+export interface MilestoneCompletionReview {
+  id: string;
+  milestoneId: string;
+  status: "pending" | "decided";
+  decision?: MilestoneReviewDecision | "";
+  verificationNotes: string;
+  vendorId: string;
+  vendorName: string;
+  transferredToVendorId?: string;
+  transferredToVendorName?: string;
+  reviewedByName?: string;
+  reviewedAt?: string;
+  createdAt?: string;
 }
 
 export interface ProjectUpdate {
@@ -1159,6 +1695,8 @@ export interface VendorProfile {
   organization_type?: string;
   technology_types: string[];
   registration_certificate_name?: string;
+  registration_certificate_url?: string | null;
+  company_registration_number?: string;
   tax_id?: string;
   bank_name?: string;
   bank_branch?: string;
@@ -1431,6 +1969,7 @@ export interface AuditLog {
   details: Record<string, any>;
   actor?: string;
   actorUsername?: string;
+  actorFullName?: string;
   createdAt: string;
   notes?: string;
   recordId?: string;

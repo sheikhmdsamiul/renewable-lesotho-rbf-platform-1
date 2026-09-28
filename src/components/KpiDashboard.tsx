@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 
 import { downloadProjectKpiPdf, fetchProjectKpiSummary } from "../api";
 import { ProjectKpiSummary } from "../types";
+import { formatMilestoneConditionLabel } from "../milestoneConditions";
 
 declare global {
   interface Window {
@@ -49,23 +50,6 @@ function milestoneStatusTone(status?: string) {
   if (status === "CLAIMABLE") return "bg-sky-100 text-sky-700";
   if (status === "PENDING") return "bg-amber-100 text-amber-700";
   return "bg-slate-100 text-slate-700";
-}
-
-function formatMilestoneConditionLabel(conditionKey: string) {
-  const labels: Record<string, string> = {
-    contract_approved: "Contract approved",
-    setup_complete: "Project setup completed",
-    installations_80_pct: "At least 80% of target installations verified",
-    female_pct_50: "Female-headed households at or above 50%",
-    no_blocking_anomaly_flags: "No unresolved blocking anomaly flags",
-    meter_data_present: "Meter data received within the last 30 days",
-    installations_100_pct: "100% of target installations verified",
-    vulnerable_pct_30: "Vulnerable households at or above 30%",
-    low_income_pct_60: "Low-income households at or above 60%",
-    all_anomaly_flags_resolved: "All anomaly flags resolved",
-    milestone_2_paid: "Milestone 2 fully paid",
-  };
-  return labels[conditionKey] || conditionKey.replace(/_/g, " ");
 }
 
 function formatMilestoneStatusLabel(status?: string) {
@@ -511,7 +495,7 @@ export default function KpiDashboard({ projectId, projectKpi }: { projectId?: st
         <h5 className="text-sm font-semibold text-slate-900">Milestone Readiness</h5>
         <div className="mt-4 space-y-4">
           {Object.entries(summary.milestone_eligibility).map(([key, value], index) => {
-            const eligibility = value as { eligible: boolean; status?: string; conditions: Record<string, boolean> };
+            const eligibility = value as ProjectKpiSummary["milestone_eligibility"][string];
             return (
             <div key={key} className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
               <div className="flex items-center justify-between">
@@ -530,7 +514,7 @@ export default function KpiDashboard({ projectId, projectKpi }: { projectId?: st
                         : "border-slate-200 bg-white text-slate-600"
                     }`}
                   >
-                    <div className="font-medium">{formatMilestoneConditionLabel(condition)}</div>
+                    <div className="font-medium">{formatMilestoneConditionLabel(condition, eligibility.thresholds)}</div>
                     <div className="mt-1 text-xs uppercase tracking-wide">{met ? "Met" : "Pending"}</div>
                   </div>
                 ))}

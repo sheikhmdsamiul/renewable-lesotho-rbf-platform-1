@@ -25,6 +25,7 @@ class ProjectStatus(models.TextChoices):
     DISBURSEMENT = 'Disbursement', 'Disbursement'
     HALTED = 'Halted', 'Halted'
     COMPLETED = 'completed', 'Completed'
+    CLOSED = 'closed', 'Closed'
     LEGACY_COMPLETED = 'Completed', 'Completed (Legacy)'
 
 
@@ -232,6 +233,7 @@ class MilestoneStatus(models.TextChoices):
     CLAIMED = 'claimed', 'Claimed'
     PENDING = 'pending', 'Pending'
     PAID = 'paid', 'Paid'
+    CANCELLED = 'cancelled', 'Cancelled'
     LEGACY_PENDING = 'Pending', 'Pending (Legacy)'
     LEGACY_SUBMITTED = 'Submitted', 'Submitted (Legacy)'
     LEGACY_VERIFIED = 'Verified', 'Verified (Legacy)'
@@ -250,6 +252,10 @@ class Milestone(models.Model):
     amount_lsl = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     unlocked_at = models.DateTimeField(null=True, blank=True)
     progress_percentage = models.PositiveIntegerField(default=0)
+    # Checklist threshold set on the Milestone Assignment form: share (%) of the
+    # project's installation target that must be verified before this milestone
+    # becomes claimable. 0 = no installation requirement (e.g. M1).
+    required_installation_pct = models.PositiveIntegerField(default=0)
     target_date = models.DateField(null=True, blank=True)
     completed_date = models.DateField(null=True, blank=True)
 
@@ -269,6 +275,50 @@ class Milestone(models.Model):
         elif self.amount and not self.amount_lsl:
             self.amount_lsl = self.amount
         super().save(*args, **kwargs)
+
+
+class MilestoneReviewStatus(models.TextChoices):
+    PENDING = 'pending', 'Pending Verification'
+    DECIDED = 'decided', 'Decided'
+
+
+class MilestoneReviewDecision(models.TextChoices):
+    PROCEED = 'proceed', 'Proceed to Next Milestone'
+    CLOSE = 'close', 'Close Project'
+    TRANSFER = 'transfer', 'Transfer to Another Vendor'
+    COMPLETE = 'complete', 'Complete Project'
+
+
+class MilestoneCompletionReview(models.Model):
+    """RBF / Super Admin verification opened when a milestone is paid. The next
+    milestone cannot unlock until the decision is 'proceed' (or 'transfer', which
+    hands the remaining milestones to a new vendor)."""
+
+    milestone = models.OneToOneField(Milestone, related_name='completion_review', on_delete=models.CASCADE)
+    project = models.ForeignKey(Project, related_name='milestone_reviews', on_delete=models.CASCADE)
+    status = models.CharField(max_length=16, choices=MilestoneReviewStatus.choices, default=MilestoneReviewStatus.PENDING)
+    decision = models.CharField(max_length=16, choices=MilestoneReviewDecision.choices, blank=True, default='')
+    verification_notes = models.TextField(blank=True)
+    vendor_id = models.CharField(max_length=64, blank=True)
+    vendor_name = models.CharField(max_length=255, blank=True)
+    transferred_to_vendor_id = models.CharField(max_length=64, blank=True)
+    transferred_to_vendor_name = models.CharField(max_length=255, blank=True)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        related_name='milestone_completion_reviews',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Review for milestone {self.milestone_id} ({self.status})"
 
 
 class ProjectUpdate(models.Model):

@@ -16,6 +16,7 @@ from rbf.tenders.models import ContractStatus, TenderContract
 from rbf.users.models import PlatformConfiguration, User, UserRole
 
 from .audit import log_audit
+from .milestone_reviews import TERMINAL_PROJECT_STATUSES, milestone_cleared_to_proceed
 from .models import (
     AnomalyFlag,
     InstallationReport,
@@ -136,6 +137,16 @@ class KpiService:
             "on_track": progress_pct >= max(0.0, expected_pct - 10.0),
         }
 
+    def _gender_targets(self) -> dict[str, int]:
+        """Per-project thresholds set on the Milestone Assignment form, falling
+        back to the programme defaults for projects without them."""
+        project = self.project
+        return {
+            "female_headed": int(project.female_target_pct or project.target_female_pct or self.GENDER_TARGETS["female_headed"]),
+            "vulnerable": int(project.vulnerable_target_pct or project.target_vulnerable_pct or self.GENDER_TARGETS["vulnerable"]),
+            "low_income": int(project.low_income_target_pct or project.target_low_income_pct or self.GENDER_TARGETS["low_income"]),
+        }
+
     def getGenderKpi(self) -> dict[str, Any]:
         verified = self._verified_installations()
         total = verified.count()
@@ -168,9 +179,10 @@ class KpiService:
                 "met": percentage >= float(target),
             }
 
-        female = build(int(grouped["female_count"] or 0), self.GENDER_TARGETS["female_headed"])
-        vulnerable = build(int(grouped["vulnerable_count"] or 0), self.GENDER_TARGETS["vulnerable"])
-        low_income = build(int(grouped["low_income_count"] or 0), self.GENDER_TARGETS["low_income"])
+        targets = self._gender_targets()
+        female = build(int(grouped["female_count"] or 0), targets["female_headed"])
+        vulnerable = build(int(grouped["vulnerable_count"] or 0), targets["vulnerable"])
+        low_income = build(int(grouped["low_income_count"] or 0), targets["low_income"])
 
         return {
             "total_verified": total,
@@ -367,6 +379,11 @@ class KpiService:
             )
         return True
 
+    @staticmethod
+    def _required_installation_pct(milestone: Milestone | None, fallback: int) -> int:
+        value = int(getattr(milestone, "required_installation_pct", 0) or 0)
+        return value if value > 0 else fallback
+
     def _get_milestone_eligibility(self) -> MilestoneEligibilityResult:
         installation = self.getInstallationProgress()
         gender = self.getGenderKpi()
@@ -426,62 +443,82 @@ class KpiService:
             )
         )
         milestone_three_claimable = bool(milestone_three and str(milestone_three.status).strip().lower() in {"claimable", "claimed", "paid"})
+        platform_config = PlatformConfiguration.objects.order_by("id").first() or PlatformConfiguration()
+        m2_installation_pct = self._required_installation_pct(milestone_two, platform_config.m2_verification_required_pct or 80)
+        m3_installation_pct = self._required_installation_pct(milestone_three, platform_config.m3_verification_required_pct or 100)
+        m2_installations_met = verified_ratio * 100 >= m2_installation_pct
+        m3_installations_met = verified_ratio * 100 >= m3_installation_pct
         female_pct_met = bool(gender["female_headed"]["met"])
         vulnerable_pct_met = bool(gender["vulnerable"]["met"])
         low_income_pct_met = bool(gender["low_income"]["met"])
+        # Each milestone after the first also needs the previous one verified by
+        # RBF / Super Admin with a "proceed" (or "transfer") decision, and nothing
+        # unlocks once the project is closed or completed.
+        project_open = self.project.status not in TERMINAL_PROJECT_STATUSES
+        milestone_one_verified = milestone_cleared_to_proceed(milestone_one)
+        milestone_two_verified = milestone_cleared_to_proceed(milestone_two)
+        m1_eligible = project_open and contract_approved and setup_complete
+        m2_eligible = (
+            project_open
+            and milestone_one_verified
+            and m2_installations_met
+            and female_pct_met
+            and blocking_flags == 0
+            and meter_present
+        )
+        m3_eligible = (
+            project_open
+            and milestone_two_verified
+            and m3_installations_met
+            and female_pct_met
+            and vulnerable_pct_met
+            and low_income_pct_met
+            and all_flags == 0
+            and milestone_two_paid
+        )
         summary = {
             "milestone_1": {
-                "eligible": contract_approved and setup_complete,
-                "status": "PAID" if milestone_one_paid else "CLAIMABLE" if (contract_approved and setup_complete or milestone_one_claimable) else "Pending",
+                "eligible": m1_eligible,
+                "status": "PAID" if milestone_one_paid else "CLAIMABLE" if (m1_eligible or milestone_one_claimable) else "Pending",
                 "conditions": {
                     "contract_approved": contract_approved,
                     "setup_complete": setup_complete,
                 },
             },
             "milestone_2": {
-                "eligible": (
-                    verified_ratio >= 0.8
-                    and gender["female_headed"]["met"]
-                    and blocking_flags == 0
-                    and meter_present
-                ),
-                "status": "PAID" if milestone_two_paid else "CLAIMABLE" if (
-                    verified_ratio >= 0.8
-                    and female_pct_met
-                    and blocking_flags == 0
-                    and meter_present
-                ) or milestone_two_claimable else "Pending",
+                "eligible": m2_eligible,
+                "status": "PAID" if milestone_two_paid else "CLAIMABLE" if (m2_eligible or milestone_two_claimable) else "Pending",
                 "conditions": {
-                    "installations_80_pct": verified_ratio >= 0.8,
+                    "milestone_1_verified": milestone_one_verified,
+                    "installations_80_pct": m2_installations_met,
                     "female_pct_50": female_pct_met,
                     "no_blocking_anomaly_flags": blocking_flags == 0,
                     "meter_data_present": meter_present,
                 },
+                # Condition keys are kept stable for existing clients; the actual
+                # configured percentages behind them are reported here.
+                "thresholds": {
+                    "installations_pct": m2_installation_pct,
+                    "female_pct": gender["female_headed"]["target"],
+                },
             },
             "milestone_3": {
-                "eligible": (
-                    verified_ratio >= 1.0
-                    and female_pct_met
-                    and vulnerable_pct_met
-                    and low_income_pct_met
-                    and all_flags == 0
-                    and milestone_two_paid
-                ),
-                "status": "PAID" if milestone_three_paid else "CLAIMABLE" if (
-                    verified_ratio >= 1.0
-                    and female_pct_met
-                    and vulnerable_pct_met
-                    and low_income_pct_met
-                    and all_flags == 0
-                    and milestone_two_paid
-                ) or milestone_three_claimable else "Pending",
+                "eligible": m3_eligible,
+                "status": "PAID" if milestone_three_paid else "CLAIMABLE" if (m3_eligible or milestone_three_claimable) else "Pending",
                 "conditions": {
-                    "installations_100_pct": verified_ratio >= 1.0,
+                    "installations_100_pct": m3_installations_met,
                     "female_pct_50": female_pct_met,
                     "vulnerable_pct_30": vulnerable_pct_met,
                     "low_income_pct_60": low_income_pct_met,
                     "all_anomaly_flags_resolved": all_flags == 0,
                     "milestone_2_paid": milestone_two_paid,
+                    "milestone_2_verified": milestone_two_verified,
+                },
+                "thresholds": {
+                    "installations_pct": m3_installation_pct,
+                    "female_pct": gender["female_headed"]["target"],
+                    "vulnerable_pct": gender["vulnerable"]["target"],
+                    "low_income_pct": gender["low_income"]["target"],
                 },
             },
         }
@@ -508,7 +545,10 @@ class KpiService:
             milestone=milestone_three,
             milestone_number=3,
             eligible=summary["milestone_3"]["eligible"],
-            reason_notes="M3 conditions met automatically: 100% verified, all KPIs met, all anomaly flags resolved, and M2 paid.",
+            reason_notes=(
+                f"M3 conditions met automatically: at least {m3_installation_pct}% verified, all KPIs met, "
+                "all anomaly flags resolved, and M2 paid."
+            ),
         ):
             newly_claimable.append(3)
         return MilestoneEligibilityResult(summary=summary, newly_claimable=newly_claimable)
