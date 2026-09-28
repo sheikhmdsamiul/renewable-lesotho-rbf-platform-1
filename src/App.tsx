@@ -183,6 +183,7 @@ import {
   registerVendor,
   getStoredUser,
   fetchCurrentUser,
+  fetchAllProjects,
   requestRegistrationOtp,
   verifyRegistrationOtp,
   changeOwnPassword,
@@ -27592,7 +27593,7 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
       const [taskData, reportData, projectData] = await Promise.all([
         fetchVerificationTasks(),
         fetchInstallationReports(),
-        fetchProjects(),
+        fetchAllProjects(),
       ]);
       setTasks(taskData);
       setReports(reportData);
