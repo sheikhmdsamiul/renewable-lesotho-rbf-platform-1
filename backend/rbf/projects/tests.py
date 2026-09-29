@@ -1,3 +1,4 @@
+from decimal import Decimal
 from datetime import timedelta
 from pathlib import Path
 import shutil
@@ -34,7 +35,7 @@ from .models import (
 from .gis import GpsValidator
 from .kpi import KpiService
 from .milestone_reviews import milestone_cleared_to_proceed, next_milestone_blocker
-from .models import MilestoneCompletionReview
+from .models import MeterDataBatch, MeterDataBatchStatus, MilestoneCompletionReview
 from .integrations import ProspectService, queue_installation_sync, queue_project_targets_sync
 from rbf.tenders.models import ContractStatus, Tender, TenderContract, TenderLot, TenderStatus
 
@@ -1133,6 +1134,176 @@ class ProjectApiTests(APITestCase):
         self.assertEqual(payload["data"][0]["output_energy_cumulative_wh"], 206000.0)
         self.assertEqual(payload["data"][0]["output_power_w"], None)
         self.assertTrue(payload["data"][0]["metered_at"].endswith("+00:00"))
+
+    def _meter_review_fixture(self, suffix):
+        User = get_user_model()
+        vendor = User.objects.create_user(
+            username=f"meter_review_vendor_{suffix}", password="securePass123", role="Vendor", status="Active"
+        )
+        project = Project.objects.create(
+            vendor_id=str(vendor.id),
+            vendor_name=vendor.username,
+            tech_type="SHS",
+            region="Maseru",
+            district="Maseru",
+            status=ProjectStatus.ACTIVE,
+        )
+        self._create_completed_setup(project, vendor)
+        installation = InstallationReport.objects.create(
+            project=project,
+            vendor=vendor,
+            gps_lat=-29.31,
+            gps_lng=27.48,
+            serial_number=f"SERIAL-REVIEW-{suffix}",
+            beneficiary_id=f"BEN-REVIEW-{suffix}",
+            meter_id=f"MTR-REVIEW-{suffix}",
+            status=InstallationStatus.VERIFIED,
+        )
+        rbf_user = User.objects.create_user(
+            username=f"meter_review_rbf_{suffix}", password="securePass123", role="RBF Management Team", status="Active"
+        )
+        return vendor, project, installation, rbf_user
+
+    def _upload_meter_rows(self, vendor, project, rows):
+        header = "meter_id,installation_id,kwh_generated,uptime_pct,latitude,longitude,reading_datetime\n"
+        self.client.force_authenticate(vendor)
+        response = self.client.post(
+            f"/api/projects/{project.id}/meter-csv-upload/",
+            {"file": SimpleUploadedFile("meter.csv", (header + "".join(rows)).encode("utf-8"), content_type="text/csv")},
+            format="multipart",
+        )
+        self.client.logout()
+        return response
+
+    @patch("rbf.projects.views.SyncToProspectJob.dispatch_async")
+    def test_meter_upload_is_traceable_and_flags_implausible_readings(self, _dispatch):
+        vendor, project, installation, _rbf = self._meter_review_fixture("flag")
+        meter = installation.meter_id
+        recorded = timezone.now() - timedelta(days=2)
+        SmartMeterReading.objects.create(
+            project=project, installation=installation, meter_id=meter, kwh=5, uptime_pct=99, recorded_at=recorded
+        )
+        future = (timezone.now() + timedelta(days=5)).isoformat()
+        response = self._upload_meter_rows(vendor, project, [
+            f"{meter},{installation.id},5,99,-29.31,27.48,{recorded.isoformat()}\n",  # same interval again
+            f"{meter},{installation.id},5,99,-29.31,27.48,{future}\n",  # dated in the future
+            f"{meter},{installation.id},5,99,-28.00,28.50,{(timezone.now() - timedelta(hours=3)).isoformat()}\n",  # ~170 km away
+        ])
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        batch = MeterDataBatch.objects.get(id=response.data["batch_id"])
+        self.assertEqual(batch.status, MeterDataBatchStatus.FLAGGED)
+        self.assertEqual(batch.uploaded_by, vendor)
+        self.assertIsNotNone(batch.source_document)
+        codes = {finding["code"] for finding in batch.integrity_findings if finding["severity"] == "high"}
+        self.assertEqual(codes, {"duplicate_reading", "future_timestamp", "gps_mismatch"})
+        reading = batch.readings.get(latitude=Decimal("-28.000000"))
+        self.assertEqual(reading.source, "csv_upload")
+        self.assertEqual(reading.submitted_by, vendor)
+        self.assertIn("gps_mismatch", reading.integrity_flags)
+        summary = KpiService(str(project.id))._get_milestone_eligibility().summary
+        self.assertFalse(summary["milestone_2"]["conditions"]["meter_data_integrity_cleared"])
+
+    @patch("rbf.projects.views.SyncToProspectJob.dispatch_async")
+    def test_rbf_rejects_meter_upload_and_its_readings_stop_counting(self, _dispatch):
+        vendor, project, installation, rbf_user = self._meter_review_fixture("reject")
+        response = self._upload_meter_rows(vendor, project, [
+            f"{installation.meter_id},{installation.id},4.5,98,,,{(timezone.now() - timedelta(hours=2)).isoformat()}\n",
+        ])
+        batch_id = response.data["batch_id"]
+        self.assertEqual(response.data["batch_status"], MeterDataBatchStatus.PENDING_REVIEW)
+        self.assertEqual(KpiService(str(project.id))._readings_queryset().count(), 1)
+
+        self.client.force_authenticate(vendor)
+        denied = self.client.post(f"/api/projects/meter-data-batches/{batch_id}/reject/", {"reason": "self"}, format="json")
+        self.assertEqual(denied.status_code, status.HTTP_403_FORBIDDEN)
+
+        self.client.force_authenticate(rbf_user)
+        missing_reason = self.client.post(f"/api/projects/meter-data-batches/{batch_id}/reject/", {}, format="json")
+        self.assertEqual(missing_reason.status_code, status.HTTP_400_BAD_REQUEST)
+        rejected = self.client.post(
+            f"/api/projects/meter-data-batches/{batch_id}/reject/",
+            {"reason": "Readings do not match the site visit."},
+            format="json",
+        )
+        self.assertEqual(rejected.status_code, status.HTTP_200_OK, rejected.data)
+        self.assertEqual(rejected.data["status"], MeterDataBatchStatus.REJECTED)
+        self.assertEqual(rejected.data["reviewed_by"], rbf_user.id)
+        self.assertEqual(KpiService(str(project.id))._readings_queryset().count(), 0)
+        self.assertTrue(Notification.objects.filter(recipient_id=str(vendor.id), event="meter_data_batch_rejected").exists())
+        self.assertTrue(AuditLog.objects.filter(action="meter_data_batch_rejected").exists())
+
+    @patch("rbf.projects.views.SyncToProspectJob.dispatch_async")
+    def test_meter_correction_request_blocks_claims_until_vendor_reuploads(self, _dispatch):
+        vendor, project, installation, rbf_user = self._meter_review_fixture("correct")
+        first = self._upload_meter_rows(vendor, project, [
+            f"{installation.meter_id},{installation.id},4.5,98,,,{(timezone.now() - timedelta(hours=5)).isoformat()}\n",
+        ])
+        self.client.force_authenticate(rbf_user)
+        response = self.client.post(
+            f"/api/projects/meter-data-batches/{first.data['batch_id']}/request-correction/",
+            {"reason": "Meter IDs are swapped between households.", "due_date": "2026-12-31"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.client.logout()
+        summary = KpiService(str(project.id))._get_milestone_eligibility().summary
+        self.assertFalse(summary["milestone_2"]["conditions"]["meter_data_integrity_cleared"])
+
+        second = self._upload_meter_rows(vendor, project, [
+            f"{installation.meter_id},{installation.id},4.6,98,,,{(timezone.now() - timedelta(hours=4)).isoformat()}\n",
+        ])
+        self.assertEqual(second.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(MeterDataBatch.objects.get(id=first.data["batch_id"]).status, MeterDataBatchStatus.SUPERSEDED)
+        summary = KpiService(str(project.id))._get_milestone_eligibility().summary
+        self.assertTrue(summary["milestone_2"]["conditions"]["meter_data_integrity_cleared"])
+
+    @patch("rbf.projects.views.SyncToProspectJob.dispatch_async")
+    def test_flagged_meter_upload_needs_notes_to_verify_and_single_readings_can_be_rejected(self, _dispatch):
+        vendor, project, installation, rbf_user = self._meter_review_fixture("verify")
+        future = (timezone.now() + timedelta(days=3)).isoformat()
+        response = self._upload_meter_rows(vendor, project, [
+            f"{installation.meter_id},{installation.id},4.5,98,,,{(timezone.now() - timedelta(hours=2)).isoformat()}\n",
+            f"{installation.meter_id},{installation.id},4.5,98,,,{future}\n",
+        ])
+        batch_id = response.data["batch_id"]
+        batch = MeterDataBatch.objects.get(id=batch_id)
+        self.assertEqual(batch.status, MeterDataBatchStatus.FLAGGED)
+        bad_reading = batch.readings.get(integrity_flags__contains=["future_timestamp"])
+
+        self.client.force_authenticate(rbf_user)
+        no_notes = self.client.post(f"/api/projects/meter-data-batches/{batch_id}/verify/", {}, format="json")
+        self.assertEqual(no_notes.status_code, status.HTTP_400_BAD_REQUEST)
+        partial = self.client.post(
+            f"/api/projects/meter-data-batches/{batch_id}/reject-readings/",
+            {"reading_ids": [bad_reading.id], "reason": "Reading dated in the future."},
+            format="json",
+        )
+        self.assertEqual(partial.status_code, status.HTTP_200_OK, partial.data)
+        self.assertEqual(partial.data["readings_rejected"], 1)
+        verified = self.client.post(
+            f"/api/projects/meter-data-batches/{batch_id}/verify/",
+            {"notes": "Future-dated row rejected; remaining row matches the site visit."},
+            format="json",
+        )
+        self.assertEqual(verified.status_code, status.HTTP_200_OK, verified.data)
+        self.assertEqual(verified.data["status"], MeterDataBatchStatus.VERIFIED)
+        self.assertEqual(KpiService(str(project.id))._readings_queryset().count(), 1)
+
+    def test_meter_readings_cannot_be_edited_or_deleted_through_the_api(self):
+        vendor, project, installation, rbf_user = self._meter_review_fixture("immutable")
+        reading = SmartMeterReading.objects.create(
+            project=project, installation=installation, meter_id=installation.meter_id,
+            kwh=3, uptime_pct=97, recorded_at=timezone.now(),
+        )
+        for user in (vendor, rbf_user, self.admin_user):
+            self.client.force_authenticate(user)
+            patched = self.client.patch(f"/api/projects/smart-meter-readings/{reading.id}/", {"kwh": 300}, format="json")
+            deleted = self.client.delete(f"/api/projects/smart-meter-readings/{reading.id}/")
+            self.assertEqual(patched.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+            self.assertEqual(deleted.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+        reading.refresh_from_db()
+        self.assertEqual(reading.kwh, 3)
 
     @patch("rbf.projects.views.SyncToProspectJob.dispatch_async")
     def test_meter_csv_upload_accepts_non_numeric_installation_identifier(self, dispatch_async):

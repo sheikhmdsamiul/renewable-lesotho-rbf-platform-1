@@ -8,6 +8,7 @@ from .views import (
     InstallationReportViewSet,
     VerificationTaskViewSet,
     SmartMeterReadingViewSet,
+    MeterDataBatchViewSet,
     PaymentClaimViewSet,
     DisbursementViewSet,
     AuditLogViewSet,
@@ -33,6 +34,7 @@ router.register(r'documents', ProjectDocumentViewSet, basename='project-document
 router.register(r'installations', InstallationReportViewSet, basename='installation-report')
 router.register(r'verification-tasks', VerificationTaskViewSet, basename='verification-task')
 router.register(r'smart-meter-readings', SmartMeterReadingViewSet, basename='smart-meter-reading')
+router.register(r'meter-data-batches', MeterDataBatchViewSet, basename='meter-data-batch')
 router.register(r'milestones', MilestoneViewSet, basename='milestone')
 router.register(r'concerns', ConcernViewSet, basename='concern')
 router.register(r'concern-responses', ConcernResponseViewSet, basename='concern-response')

@@ -13,6 +13,7 @@ import {
   ProjectDocument,
   InstallationReport,
   SmartMeterReading,
+  MeterDataBatch,
   VerificationTask,
   FieldVerificationRecord,
   VendorPrequalification,
@@ -1762,6 +1763,50 @@ function mapSmartMeterReadingFromApi(api: any): SmartMeterReading {
     uptimePct: api.uptime_pct != null ? Number(api.uptime_pct) : undefined,
     recordedAt: api.recorded_at ?? "",
     createdAt: api.created_at ?? "",
+    batchId: api.batch != null ? String(api.batch) : undefined,
+    source: api.source || undefined,
+    submittedByUsername: api.submitted_by_username || undefined,
+    outputPowerW: api.output_power_w != null ? Number(api.output_power_w) : undefined,
+    latitude: api.latitude != null ? Number(api.latitude) : undefined,
+    longitude: api.longitude != null ? Number(api.longitude) : undefined,
+    integrityFlags: Array.isArray(api.integrity_flags) ? api.integrity_flags.map(String) : [],
+    reviewStatus: api.review_status === "rejected" ? "rejected" : "accepted",
+    rejectionReason: api.rejection_reason || undefined,
+  };
+}
+
+function mapMeterDataBatchFromApi(api: any): MeterDataBatch {
+  return {
+    id: String(api.id ?? ""),
+    projectId: String(api.project ?? ""),
+    projectReference: api.project_reference || undefined,
+    vendorId: api.vendor_id != null ? String(api.vendor_id) : undefined,
+    vendorName: api.vendor_name || undefined,
+    uploadedByUsername: api.uploaded_by_username || undefined,
+    uploadedByName: api.uploaded_by_name || undefined,
+    fileName: api.file_name || undefined,
+    sourceFileUrl: normalizeFileUrl(api.source_file_url ?? undefined),
+    rowsIngested: Number(api.rows_ingested ?? 0),
+    rowsRejectedOnUpload: Number(api.rows_rejected_on_upload ?? 0),
+    readingsRejected: Number(api.readings_rejected ?? 0),
+    totalKwh: Number(api.total_kwh ?? 0),
+    integrityFindings: Array.isArray(api.integrity_findings)
+      ? api.integrity_findings.map((finding: any) => ({
+          code: String(finding.code ?? ""),
+          label: String(finding.label ?? finding.code ?? ""),
+          severity: finding.severity === "high" || finding.severity === "low" ? finding.severity : "medium",
+          meterId: String(finding.meter_id ?? ""),
+          message: String(finding.message ?? ""),
+          readingIds: Array.isArray(finding.reading_ids) ? finding.reading_ids.map(String) : [],
+        }))
+      : [],
+    status: api.status ?? "pending_review",
+    reviewNotes: api.review_notes || undefined,
+    reviewedByUsername: api.reviewed_by_username || undefined,
+    reviewedAt: api.reviewed_at || undefined,
+    correctionDueDate: api.correction_due_date || undefined,
+    createdAt: api.created_at ?? "",
+    readings: Array.isArray(api.readings) ? api.readings.map(mapSmartMeterReadingFromApi) : undefined,
   };
 }
 
@@ -4362,10 +4407,50 @@ export async function rejectProjectSetup(projectId: string, notes: string): Prom
   };
 }
 
-export async function uploadProjectMeterCsv(projectId: string, file: File): Promise<{ status: string; rows_ingested: number; uploaded_at: string }> {
+export async function fetchMeterDataBatches(projectId: string): Promise<MeterDataBatch[]> {
+  const rows = await fetchAllPages<any>(`/api/projects/meter-data-batches/?project=${encodeURIComponent(projectId)}`);
+  return rows.map(mapMeterDataBatchFromApi);
+}
+
+export async function fetchMeterDataBatch(batchId: string): Promise<MeterDataBatch> {
+  const data = await http<any>(`/api/projects/meter-data-batches/${batchId}/`);
+  return mapMeterDataBatchFromApi(data);
+}
+
+export type MeterDataBatchReviewAction =
+  | { action: "verify"; notes?: string }
+  | { action: "reject"; reason: string }
+  | { action: "request-correction"; reason: string; dueDate?: string }
+  | { action: "reject-readings"; readingIds: string[]; reason: string }
+  | { action: "restore-readings"; readingIds: string[]; notes: string };
+
+export async function reviewMeterDataBatch(batchId: string, review: MeterDataBatchReviewAction): Promise<MeterDataBatch> {
+  const body: Record<string, any> = {};
+  if ("notes" in review && review.notes) body.notes = review.notes;
+  if ("reason" in review) body.reason = review.reason;
+  if ("dueDate" in review && review.dueDate) body.due_date = review.dueDate;
+  if ("readingIds" in review) body.reading_ids = review.readingIds.map(Number);
+  const data = await http<any>(`/api/projects/meter-data-batches/${batchId}/${review.action}/`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  return mapMeterDataBatchFromApi(data);
+}
+
+export type MeterCsvUploadResult = {
+  status: string;
+  rows_ingested: number;
+  rows_rejected?: number;
+  uploaded_at: string;
+  batch_id?: number;
+  batch_status?: MeterDataBatch["status"];
+  integrity_findings?: Array<{ code: string; label: string; severity: string; message: string }>;
+};
+
+export async function uploadProjectMeterCsv(projectId: string, file: File): Promise<MeterCsvUploadResult> {
   const form = new FormData();
   form.append("file", file);
-  return await http<{ status: string; rows_ingested: number; uploaded_at: string }>(`/api/projects/${projectId}/meter-csv-upload/`, {
+  return await http<MeterCsvUploadResult>(`/api/projects/${projectId}/meter-csv-upload/`, {
     method: "POST",
     body: form,
   });

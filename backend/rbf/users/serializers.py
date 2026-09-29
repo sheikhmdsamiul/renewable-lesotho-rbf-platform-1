@@ -1363,7 +1363,7 @@ class VendorProfileSerializer(serializers.ModelSerializer):
         project_ids = [project.id for project in projects]
         installations = InstallationReport.objects.filter(project_id__in=project_ids, vendor=obj)
         anomalies = AnomalyFlag.objects.filter(project_id__in=project_ids)
-        readings = SmartMeterReading.objects.filter(project_id__in=project_ids)
+        readings = SmartMeterReading.objects.filter(project_id__in=project_ids).exclude(review_status='rejected')
 
         installation_summary = installations.aggregate(
             total_submitted=Count('id'),

@@ -1467,6 +1467,59 @@ export interface SmartMeterReading {
   uptimePct?: number;
   recordedAt: string;
   createdAt: string;
+  batchId?: string;
+  source?: "csv_upload" | "installation_report" | "api" | "legacy";
+  submittedByUsername?: string;
+  outputPowerW?: number;
+  latitude?: number;
+  longitude?: number;
+  /** Integrity check codes this reading tripped at upload. */
+  integrityFlags: string[];
+  /** Rejected readings no longer count toward KPIs or milestones. */
+  reviewStatus: "accepted" | "rejected";
+  rejectionReason?: string;
+}
+
+export type MeterDataBatchStatus =
+  | "pending_review"
+  | "flagged"
+  | "verified"
+  | "rejected"
+  | "correction_requested"
+  | "superseded";
+
+export interface MeterIntegrityFinding {
+  code: string;
+  label: string;
+  severity: "high" | "medium" | "low";
+  meterId: string;
+  message: string;
+  readingIds: string[];
+}
+
+/** One vendor meter-data upload, reviewed by RBF / Super Admin for authenticity. */
+export interface MeterDataBatch {
+  id: string;
+  projectId: string;
+  projectReference?: string;
+  vendorId?: string;
+  vendorName?: string;
+  uploadedByUsername?: string;
+  uploadedByName?: string;
+  fileName?: string;
+  sourceFileUrl?: string;
+  rowsIngested: number;
+  rowsRejectedOnUpload: number;
+  readingsRejected: number;
+  totalKwh: number;
+  integrityFindings: MeterIntegrityFinding[];
+  status: MeterDataBatchStatus;
+  reviewNotes?: string;
+  reviewedByUsername?: string;
+  reviewedAt?: string;
+  correctionDueDate?: string;
+  createdAt: string;
+  readings?: SmartMeterReading[];
 }
 
 export interface VerificationTask {

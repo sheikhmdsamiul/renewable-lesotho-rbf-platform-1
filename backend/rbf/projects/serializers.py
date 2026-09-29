@@ -11,7 +11,9 @@ from .models import (
     InstallationReport,
     FieldVerification,
     VerificationTask,
+    MeterDataBatch,
     SmartMeterReading,
+    SmartMeterReadingReviewStatus,
     PaymentClaim,
     PaymentClaimStatus,
     Disbursement,
@@ -744,10 +746,55 @@ class FieldVerificationSerializer(serializers.ModelSerializer):
 
 
 class SmartMeterReadingSerializer(serializers.ModelSerializer):
+    submitted_by_username = serializers.CharField(source='submitted_by.username', read_only=True, default=None)
+    batch_status = serializers.CharField(source='batch.status', read_only=True, default=None)
+
     class Meta:
         model = SmartMeterReading
         fields = '__all__'
-        read_only_fields = ['id', 'created_at']
+        read_only_fields = [
+            'id', 'created_at', 'batch', 'source', 'submitted_by', 'integrity_flags',
+            'review_status', 'rejection_reason',
+        ]
+
+
+class MeterDataBatchSerializer(serializers.ModelSerializer):
+    uploaded_by_username = serializers.CharField(source='uploaded_by.username', read_only=True, default=None)
+    uploaded_by_name = serializers.SerializerMethodField()
+    reviewed_by_username = serializers.CharField(source='reviewed_by.username', read_only=True, default=None)
+    source_file_url = serializers.SerializerMethodField()
+    project_reference = serializers.CharField(source='project.project_reference', read_only=True)
+    vendor_id = serializers.CharField(source='project.vendor_id', read_only=True)
+    vendor_name = serializers.CharField(source='project.vendor_name', read_only=True)
+    readings_rejected = serializers.SerializerMethodField()
+    total_kwh = serializers.SerializerMethodField()
+
+    def get_uploaded_by_name(self, obj: MeterDataBatch):
+        user = obj.uploaded_by
+        if not user:
+            return None
+        return user.organization_name or user.full_name or user.username
+
+    def get_source_file_url(self, obj: MeterDataBatch):
+        document = obj.source_document
+        if document and document.file:
+            return document.file.url
+        return None
+
+    def get_readings_rejected(self, obj: MeterDataBatch):
+        return sum(1 for reading in obj.readings.all() if reading.review_status == SmartMeterReadingReviewStatus.REJECTED)
+
+    def get_total_kwh(self, obj: MeterDataBatch):
+        return round(sum(float(reading.kwh or 0) for reading in obj.readings.all()), 3)
+
+    class Meta:
+        model = MeterDataBatch
+        fields = '__all__'
+        read_only_fields = [field.name for field in MeterDataBatch._meta.fields]
+
+
+class MeterDataBatchDetailSerializer(MeterDataBatchSerializer):
+    readings = SmartMeterReadingSerializer(many=True, read_only=True)
 
 
 class AuditLogSerializer(serializers.ModelSerializer):

@@ -7,7 +7,7 @@ import os
 
 from rest_framework import viewsets, filters
 from rest_framework.permissions import IsAuthenticated
-from rest_framework.exceptions import PermissionDenied
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework import status
@@ -43,7 +43,11 @@ from .models import (
     FieldVerificationStatus,
     VerificationTask,
     VerificationStatus,
+    MeterDataBatch,
+    MeterDataBatchStatus,
     SmartMeterReading,
+    SmartMeterReadingReviewStatus,
+    SmartMeterReadingSource,
     PaymentClaim,
     PaymentClaimStatus,
     Disbursement,
@@ -71,6 +75,8 @@ from .serializers import (
     FieldVerificationSerializer,
     VerificationTaskSerializer,
     SmartMeterReadingSerializer,
+    MeterDataBatchSerializer,
+    MeterDataBatchDetailSerializer,
     PaymentClaimSerializer,
     DisbursementSerializer,
     AuditLogSerializer,
@@ -105,6 +111,7 @@ from .district_scope import (
     resolve_installation_district,
 )
 from .kpi import KpiService, invalidate_kpi_cache, render_kpi_pdf
+from .meter_integrity import initial_batch_status, run_integrity_checks
 from .milestone_reviews import is_last_milestone, next_milestone_blocker, open_completion_review
 from rbf.notifications.models import Notification, NotificationChannel, NotificationStatus
 from rbf.notifications.services import NotificationService
@@ -289,7 +296,7 @@ def mark_project_completed(project: Project, actor):
 def build_installation_map_queryset(user: User):
     latest_reading_subquery = SmartMeterReading.objects.filter(
         installation=OuterRef('pk')
-    ).order_by('-recorded_at')
+    ).exclude(review_status=SmartMeterReadingReviewStatus.REJECTED).order_by('-recorded_at')
 
     queryset = InstallationReport.objects.select_related('project', 'vendor', 'verification_task').annotate(
         verification_status=Coalesce(F('verification_task__status'), Value(VerificationStatus.PENDING)),
@@ -1127,6 +1134,13 @@ class ProjectViewSet(viewsets.ModelViewSet):
         upload_time = timezone.now()
         invalid_rows = []
         anomaly_counts = {'zero_uptime': 0, 'no_data': 0, 'output_deviation': 0}
+        platform_config = PlatformConfiguration.objects.order_by('id').first()
+        deviation_threshold_pct = float(getattr(platform_config, 'anomaly_deviation_threshold', 5) or 5)
+        batch = MeterDataBatch.objects.create(
+            project=project,
+            uploaded_by=request.user,
+            file_name=str(getattr(csv_file, 'name', '') or '')[:255],
+        )
 
         for row_number, row in enumerate(reader, start=2):
             meter_id = str(row.get('meter_id') or '').strip()
@@ -1208,14 +1222,20 @@ class ProjectViewSet(viewsets.ModelViewSet):
                 project=project,
                 meter_id=meter_id,
                 recorded_at__lt=recorded_at,
-            ).order_by('-recorded_at', '-id').first()
+            ).exclude(review_status=SmartMeterReadingReviewStatus.REJECTED).order_by('-recorded_at', '-id').first()
 
             reading = SmartMeterReading.objects.create(
                 project=project,
                 installation=installation,
+                batch=batch,
+                source=SmartMeterReadingSource.CSV_UPLOAD,
+                submitted_by=request.user,
                 meter_id=meter_id,
                 kwh=kwh_value,
                 uptime_pct=uptime_pct,
+                output_power_w=output_power_w,
+                latitude=round(latitude, 6) if latitude is not None else None,
+                longitude=round(longitude, 6) if longitude is not None else None,
                 recorded_at=recorded_at,
             )
             rows_created.append(reading)
@@ -1238,7 +1258,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
                 anomaly_counts['zero_uptime'] += 1
             if installation and previous_reading and previous_reading.kwh > 0:
                 deviation_pct = abs(kwh_value - float(previous_reading.kwh)) / float(previous_reading.kwh) * 100.0
-                if deviation_pct > 5:
+                if deviation_pct > deviation_threshold_pct:
                     signed_change_pct = (kwh_value - float(previous_reading.kwh)) / float(previous_reading.kwh) * 100.0
                     current_recorded = timezone.localtime(reading.recorded_at).strftime('%Y-%m-%d %H:%M %Z')
                     current_uploaded = timezone.localtime(reading.created_at).strftime('%Y-%m-%d %H:%M %Z')
@@ -1249,7 +1269,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
                         project=project,
                         flag_type='output_deviation',
                         description=(
-                            f'Meter {meter_id} changed by {signed_change_pct:+.1f}% (review threshold: >5%). '
+                            f'Meter {meter_id} changed by {signed_change_pct:+.1f}% (review threshold: >{deviation_threshold_pct:g}%). '
                             f'Current reading: {kwh_value:.2f} kWh, recorded {current_recorded}, uploaded {current_uploaded}. '
                             f'Compared with: {float(previous_reading.kwh):.2f} kWh, recorded {previous_recorded}, uploaded {previous_uploaded}.'
                         ),
@@ -1257,6 +1277,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
                     anomaly_counts['output_deviation'] += 1
 
         if not rows_created:
+            batch.delete()
             return Response(
                 {
                     'detail': 'No valid meter rows were found in the uploaded CSV.',
@@ -1272,10 +1293,14 @@ class ProjectViewSet(viewsets.ModelViewSet):
             project=project,
             vendor=request.user,
         ).exclude(meter_id='').exclude(
-            smart_meter_readings__recorded_at__gte=cutoff,
+            id__in=SmartMeterReading.objects.filter(recorded_at__gte=cutoff)
+            .exclude(review_status=SmartMeterReadingReviewStatus.REJECTED)
+            .values('installation_id'),
         ).distinct()
         for installation in stale_installations:
-            last_reading = installation.smart_meter_readings.order_by('-recorded_at', '-id').first()
+            last_reading = installation.smart_meter_readings.exclude(
+                review_status=SmartMeterReadingReviewStatus.REJECTED,
+            ).order_by('-recorded_at', '-id').first()
             checked_at = timezone.localtime(upload_time).strftime('%Y-%m-%d %H:%M %Z')
             if last_reading:
                 last_recorded = timezone.localtime(last_reading.recorded_at).strftime('%Y-%m-%d %H:%M %Z')
@@ -1318,12 +1343,39 @@ class ProjectViewSet(viewsets.ModelViewSet):
             f'project_documents/meter_csv_{project.id}_{upload_time.strftime("%Y%m%d%H%M%S")}.csv',
             ContentFile(decoded.encode('utf-8')),
         )
-        ProjectDocument.objects.create(
+        source_document = ProjectDocument.objects.create(
             project=project,
             title=f'Meter Data CSV Upload ({len(rows_created)} rows)',
             file=stored_path,
             uploaded_by=request.user,
         )
+        integrity_findings = run_integrity_checks(batch, rows_created)
+        batch.integrity_findings = integrity_findings
+        batch.status = initial_batch_status(integrity_findings)
+        batch.source_document = source_document
+        batch.rows_ingested = len(rows_created)
+        batch.rows_rejected_on_upload = len(invalid_rows)
+        batch.save(update_fields=['integrity_findings', 'status', 'source_document', 'rows_ingested', 'rows_rejected_on_upload'])
+        # A fresh upload is the vendor's answer to any outstanding correction request.
+        MeterDataBatch.objects.filter(
+            project=project,
+            status=MeterDataBatchStatus.CORRECTION_REQUESTED,
+        ).exclude(pk=batch.pk).update(status=MeterDataBatchStatus.SUPERSEDED)
+        if batch.status == MeterDataBatchStatus.FLAGGED:
+            high_findings = [finding for finding in integrity_findings if finding['severity'] == 'high']
+            notify_vendor_and_oversight(
+                project,
+                vendor=request.user,
+                event='meter_data_batch_flagged',
+                title='Meter Data Flagged for Review',
+                body=(
+                    f'Meter upload {batch.id} for project {project.project_reference or project.id} failed '
+                    f'{len(high_findings)} integrity check(s): '
+                    + '; '.join(sorted({finding['label'] for finding in high_findings}))
+                    + '. Milestone claims are blocked until RBF reviews it.'
+                ),
+                linked_entity_id=str(project.id),
+            )
         create_project_activity_update(
             project,
             request.user,
@@ -1340,6 +1392,9 @@ class ProjectViewSet(viewsets.ModelViewSet):
                 'rows_ingested': len(rows_created),
                 'rows_rejected': len(invalid_rows),
                 'anomaly_counts': anomaly_counts,
+                'meter_data_batch_id': batch.id,
+                'meter_data_batch_status': batch.status,
+                'integrity_finding_codes': sorted({finding['code'] for finding in integrity_findings}),
             },
         )
         # Build timeseries payload with cumulative data
@@ -1393,6 +1448,9 @@ class ProjectViewSet(viewsets.ModelViewSet):
                 'invalid_rows': invalid_rows,
                 'anomaly_counts': anomaly_counts,
                 'uploaded_at': upload_time.isoformat(),
+                'batch_id': batch.id,
+                'batch_status': batch.status,
+                'integrity_findings': integrity_findings,
             },
             status=status.HTTP_201_CREATED,
         )
@@ -2451,6 +2509,8 @@ class InstallationReportViewSet(viewsets.ModelViewSet):
             SmartMeterReading.objects.create(
                 project=report.project,
                 installation=report,
+                source=SmartMeterReadingSource.INSTALLATION_REPORT,
+                submitted_by=request.user,
                 meter_id=report.meter_id or f"installation-{report.id}",
                 kwh=report.kwh_reading or 0,
                 uptime_pct=float(report.project.uptime or 0),
@@ -2836,7 +2896,10 @@ class MapBoundaryView(APIView):
 
 
 class SmartMeterReadingViewSet(viewsets.ModelViewSet):
-    queryset = SmartMeterReading.objects.select_related('project').all()
+    queryset = SmartMeterReading.objects.select_related('project', 'batch', 'submitted_by').all()
+    # Readings are evidence for KPI and payment decisions: they are never edited or
+    # deleted in place. Wrong data is rejected through the meter data batch review.
+    http_method_names = ['get', 'post', 'head', 'options']
     serializer_class = SmartMeterReadingSerializer
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
@@ -2868,11 +2931,219 @@ class SmartMeterReadingViewSet(viewsets.ModelViewSet):
                 return Response({'detail': 'installation not found.'}, status=status.HTTP_400_BAD_REQUEST)
             data['project'] = installation.project_id
             data.setdefault('meter_id', installation.meter_id)
+        if request.user.role == UserRole.VENDOR:
+            assert_user_not_blacklisted_for_writes(
+                request.user,
+                'Your vendor account is suspended or blacklisted. Meter data submission is restricted.',
+            )
+            project_id = str(data.get('project') or '')
+            if not Project.objects.filter(id=project_id).filter(vendor_query_filter(request.user)).exists():
+                raise PermissionDenied('You can only submit meter readings for your own projects.')
         serializer = self.get_serializer(data=data)
         serializer.is_valid(raise_exception=True)
-        reading = serializer.save(installation=installation)
+        reading = serializer.save(installation=installation, source=SmartMeterReadingSource.API, submitted_by=request.user)
         refresh_project_kpis(str(reading.project_id))
         return Response(self.get_serializer(reading).data, status=status.HTTP_201_CREATED)
+
+
+class MeterDataBatchViewSet(viewsets.ReadOnlyModelViewSet):
+    """Vendor meter-data uploads, and the RBF Official / Super Admin review of whether
+    they are genuine: verify, reject (whole batch or single readings), or send back for
+    correction. Rejected readings stop counting toward KPIs and milestone eligibility."""
+
+    queryset = MeterDataBatch.objects.select_related(
+        'project', 'uploaded_by', 'reviewed_by', 'source_document'
+    ).prefetch_related('readings')
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
+    filterset_fields = ['project', 'status']
+    ordering_fields = ['created_at']
+
+    REVIEW_ROLES = {UserRole.RBF_OFFICIAL, UserRole.ADMIN}
+    OPEN_STATUSES = {MeterDataBatchStatus.PENDING_REVIEW, MeterDataBatchStatus.FLAGGED, MeterDataBatchStatus.VERIFIED}
+
+    def get_serializer_class(self):
+        return MeterDataBatchDetailSerializer if self.action != 'list' else MeterDataBatchSerializer
+
+    def get_queryset(self):
+        qs = self.queryset.order_by('-created_at')
+        user = self.request.user
+        if user.role == UserRole.VENDOR:
+            return qs.filter(vendor_query_filter(user, prefix='project__'))
+        if user.role == UserRole.FIELD_VERIFIER:
+            return qs.filter(field_verifier_district_filter(user)).distinct()
+        if user.role == UserRole.DOE_OFFICER:
+            return qs.filter(doe_region_filter(user, prefix='project__')).distinct()
+        return qs
+
+    def _assert_reviewer(self):
+        if self.request.user.role not in self.REVIEW_ROLES:
+            raise PermissionDenied('Only the RBF Management Team or the Super Admin can review meter data.')
+
+    def _required_text(self, field: str, label: str) -> str:
+        value = str(self.request.data.get(field) or '').strip()
+        if not value:
+            raise ValidationError({field: f'{label} is required.'})
+        return value
+
+    def _reading_ids(self, batch: MeterDataBatch) -> list[int]:
+        raw = self.request.data.get('reading_ids')
+        if hasattr(self.request.data, 'getlist') and not isinstance(raw, list):
+            raw = self.request.data.getlist('reading_ids')
+        try:
+            ids = sorted({int(value) for value in (raw or [])})
+        except (TypeError, ValueError):
+            raise ValidationError({'reading_ids': 'reading_ids must be a list of reading ids.'})
+        if not ids:
+            raise ValidationError({'reading_ids': 'Select at least one reading.'})
+        found = set(batch.readings.filter(id__in=ids).values_list('id', flat=True))
+        missing = [value for value in ids if value not in found]
+        if missing:
+            raise ValidationError({'reading_ids': f'Readings {missing} are not part of this upload.'})
+        return ids
+
+    def _finish(self, batch: MeterDataBatch, *, action: str, vendor_title: str, vendor_body: str, details: dict):
+        batch.reviewed_by = self.request.user
+        batch.reviewed_at = timezone.now()
+        batch.save()
+        project = batch.project
+        log_audit(self.request.user, f'meter_data_batch_{action}', project, {
+            'meter_data_batch_id': batch.id,
+            'status': batch.status,
+            **details,
+        })
+        create_project_activity_update(project, self.request.user, vendor_title, vendor_body)
+        vendor = User.objects.filter(id=str(project.vendor_id or '')).only('id', 'full_name', 'username').first() if str(project.vendor_id or '').isdigit() else None
+        if vendor:
+            Notification.objects.create(
+                recipient_id=str(vendor.id),
+                recipient_name=vendor.full_name or vendor.username,
+                type=NotificationChannel.IN_APP,
+                event=f'meter_data_batch_{action}',
+                title=vendor_title,
+                body=vendor_body,
+                status=NotificationStatus.SENT,
+                linked_entity_id=str(project.id),
+            )
+        refresh_project_kpis(str(project.id))
+        batch.refresh_from_db()
+        return Response(MeterDataBatchDetailSerializer(batch, context={'request': self.request}).data)
+
+    def _label(self, batch: MeterDataBatch) -> str:
+        return f'meter upload #{batch.id} ({batch.file_name or "CSV"}) for project {batch.project.project_reference or batch.project_id}'
+
+    @action(detail=True, methods=['post'])
+    def verify(self, request, pk=None):
+        self._assert_reviewer()
+        batch = self.get_object()
+        if batch.status not in {MeterDataBatchStatus.PENDING_REVIEW, MeterDataBatchStatus.FLAGGED}:
+            raise ValidationError({'detail': f'An upload that is {batch.get_status_display().lower()} cannot be verified.'})
+        notes = str(request.data.get('notes') or '').strip()
+        if batch.status == MeterDataBatchStatus.FLAGGED and not notes:
+            raise ValidationError({'notes': 'Explain why the failed integrity checks are acceptable before verifying.'})
+        batch.status = MeterDataBatchStatus.VERIFIED
+        batch.review_notes = notes
+        return self._finish(
+            batch,
+            action='verified',
+            vendor_title='Meter Data Verified',
+            vendor_body=f'RBF verified {self._label(batch)}.' + (f' Notes: {notes}' if notes else ''),
+            details={'notes': notes},
+        )
+
+    @action(detail=True, methods=['post'])
+    def reject(self, request, pk=None):
+        self._assert_reviewer()
+        batch = self.get_object()
+        if batch.status not in self.OPEN_STATUSES:
+            raise ValidationError({'detail': f'An upload that is {batch.get_status_display().lower()} cannot be rejected.'})
+        reason = self._required_text('reason', 'A rejection reason')
+        rejected = batch.readings.exclude(review_status=SmartMeterReadingReviewStatus.REJECTED).update(
+            review_status=SmartMeterReadingReviewStatus.REJECTED,
+            rejection_reason=reason,
+        )
+        batch.status = MeterDataBatchStatus.REJECTED
+        batch.review_notes = reason
+        return self._finish(
+            batch,
+            action='rejected',
+            vendor_title='Meter Data Rejected',
+            vendor_body=f'RBF rejected {self._label(batch)}; its {batch.rows_ingested} readings no longer count toward KPIs or milestones. Reason: {reason}',
+            details={'reason': reason, 'readings_rejected': rejected},
+        )
+
+    @action(detail=True, methods=['post'], url_path='request-correction')
+    def request_correction(self, request, pk=None):
+        self._assert_reviewer()
+        batch = self.get_object()
+        if batch.status not in self.OPEN_STATUSES:
+            raise ValidationError({'detail': f'An upload that is {batch.get_status_display().lower()} cannot be sent back for correction.'})
+        reason = self._required_text('reason', 'What must be corrected')
+        due_raw = str(request.data.get('due_date') or '').strip()
+        due_date = None
+        if due_raw:
+            try:
+                due_date = timezone.datetime.fromisoformat(due_raw).date()
+            except ValueError:
+                raise ValidationError({'due_date': 'Use a YYYY-MM-DD date.'})
+        batch.readings.exclude(review_status=SmartMeterReadingReviewStatus.REJECTED).update(
+            review_status=SmartMeterReadingReviewStatus.REJECTED,
+            rejection_reason=f'Correction requested: {reason}',
+        )
+        batch.status = MeterDataBatchStatus.CORRECTION_REQUESTED
+        batch.review_notes = reason
+        batch.correction_due_date = due_date
+        due_text = f' Upload corrected data by {due_date:%Y-%m-%d}.' if due_date else ' Upload corrected data.'
+        return self._finish(
+            batch,
+            action='correction_requested',
+            vendor_title='Meter Data Correction Requested',
+            vendor_body=(
+                f'RBF sent back {self._label(batch)} for correction: {reason}.{due_text} '
+                'Milestone claims for this project are blocked until you upload a corrected file.'
+            ),
+            details={'reason': reason, 'due_date': due_raw},
+        )
+
+    @action(detail=True, methods=['post'], url_path='reject-readings')
+    def reject_readings(self, request, pk=None):
+        self._assert_reviewer()
+        batch = self.get_object()
+        if batch.status not in self.OPEN_STATUSES:
+            raise ValidationError({'detail': f'Readings of an upload that is {batch.get_status_display().lower()} cannot be changed.'})
+        ids = self._reading_ids(batch)
+        reason = self._required_text('reason', 'A rejection reason')
+        batch.readings.filter(id__in=ids).update(
+            review_status=SmartMeterReadingReviewStatus.REJECTED,
+            rejection_reason=reason,
+        )
+        return self._finish(
+            batch,
+            action='readings_rejected',
+            vendor_title='Meter Readings Rejected',
+            vendor_body=f'RBF rejected {len(ids)} reading(s) in {self._label(batch)}. Reason: {reason}',
+            details={'reason': reason, 'reading_ids': ids},
+        )
+
+    @action(detail=True, methods=['post'], url_path='restore-readings')
+    def restore_readings(self, request, pk=None):
+        self._assert_reviewer()
+        batch = self.get_object()
+        if batch.status not in self.OPEN_STATUSES:
+            raise ValidationError({'detail': f'Readings of an upload that is {batch.get_status_display().lower()} cannot be changed.'})
+        ids = self._reading_ids(batch)
+        notes = self._required_text('notes', 'A reason for restoring the readings')
+        batch.readings.filter(id__in=ids).update(
+            review_status=SmartMeterReadingReviewStatus.ACCEPTED,
+            rejection_reason='',
+        )
+        return self._finish(
+            batch,
+            action='readings_restored',
+            vendor_title='Meter Readings Restored',
+            vendor_body=f'RBF restored {len(ids)} previously rejected reading(s) in {self._label(batch)}. Notes: {notes}',
+            details={'notes': notes, 'reading_ids': ids},
+        )
 
 
 class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):

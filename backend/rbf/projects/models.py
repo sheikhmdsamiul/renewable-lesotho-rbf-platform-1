@@ -605,6 +605,82 @@ class FieldVerification(models.Model):
         return f"Field verification {self.id} - installation {self.installation_id}"
 
 
+class MeterDataBatchStatus(models.TextChoices):
+    # Clean upload awaiting an RBF / Super Admin look; its readings count meanwhile.
+    PENDING_REVIEW = 'pending_review', 'Pending Review'
+    # Automated integrity checks found high-severity problems; blocks milestone claims
+    # until an RBF Official / Super Admin verifies or rejects it.
+    FLAGGED = 'flagged', 'Flagged'
+    VERIFIED = 'verified', 'Verified'
+    REJECTED = 'rejected', 'Rejected'
+    # Readings excluded and milestone claims blocked until the vendor uploads again.
+    CORRECTION_REQUESTED = 'correction_requested', 'Correction Requested'
+    # A correction was requested and the vendor has since uploaded a new batch.
+    SUPERSEDED = 'superseded', 'Superseded'
+
+
+# Batch states that keep the project's milestones from becoming claimable.
+MILESTONE_BLOCKING_BATCH_STATUSES = (MeterDataBatchStatus.FLAGGED, MeterDataBatchStatus.CORRECTION_REQUESTED)
+
+
+class MeterDataBatch(models.Model):
+    """One vendor meter-data upload, so every reading can be traced to who submitted it
+    and when, reviewed as a unit, and rejected if it is not genuine."""
+
+    project = models.ForeignKey(Project, related_name='meter_data_batches', on_delete=models.CASCADE)
+    uploaded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        related_name='meter_data_batches',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    source_document = models.ForeignKey(
+        ProjectDocument,
+        related_name='meter_data_batches',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    file_name = models.CharField(max_length=255, blank=True)
+    rows_ingested = models.PositiveIntegerField(default=0)
+    rows_rejected_on_upload = models.PositiveIntegerField(default=0)
+    # [{code, severity, message, meter_id, reading_ids}] from integrity checks at upload.
+    integrity_findings = models.JSONField(default=list, blank=True)
+    status = models.CharField(max_length=32, choices=MeterDataBatchStatus.choices, default=MeterDataBatchStatus.PENDING_REVIEW)
+    review_notes = models.TextField(blank=True)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        related_name='reviewed_meter_data_batches',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    correction_due_date = models.DateField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['project', 'status'])]
+
+    def __str__(self):
+        return f"Meter batch {self.id} - project {self.project_id} ({self.status})"
+
+
+class SmartMeterReadingSource(models.TextChoices):
+    CSV_UPLOAD = 'csv_upload', 'CSV Upload'
+    INSTALLATION_REPORT = 'installation_report', 'Installation Report'
+    API = 'api', 'API'
+    LEGACY = 'legacy', 'Legacy (before provenance tracking)'
+
+
+class SmartMeterReadingReviewStatus(models.TextChoices):
+    ACCEPTED = 'accepted', 'Accepted'
+    # Excluded from KPIs and milestone eligibility.
+    REJECTED = 'rejected', 'Rejected'
+
+
 class SmartMeterReading(models.Model):
     project = models.ForeignKey(Project, related_name='smart_meter_readings', on_delete=models.CASCADE)
     installation = models.ForeignKey(
@@ -614,14 +690,41 @@ class SmartMeterReading(models.Model):
         null=True,
         blank=True,
     )
+    batch = models.ForeignKey(
+        MeterDataBatch,
+        related_name='readings',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    source = models.CharField(max_length=32, choices=SmartMeterReadingSource.choices, default=SmartMeterReadingSource.LEGACY)
+    submitted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        related_name='submitted_meter_readings',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
     meter_id = models.CharField(max_length=64)
     kwh = models.FloatField(default=0)
     uptime_pct = models.FloatField(default=0)
+    output_power_w = models.FloatField(null=True, blank=True)
+    latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    # Integrity check codes this reading tripped at upload (see meter_integrity.py).
+    integrity_flags = models.JSONField(default=list, blank=True)
+    review_status = models.CharField(
+        max_length=16,
+        choices=SmartMeterReadingReviewStatus.choices,
+        default=SmartMeterReadingReviewStatus.ACCEPTED,
+    )
+    rejection_reason = models.TextField(blank=True)
     recorded_at = models.DateTimeField()
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         ordering = ['-recorded_at']
+        indexes = [models.Index(fields=['project', 'meter_id', 'recorded_at'])]
 
     def __str__(self):
         return f"{self.meter_id} - {self.kwh} kWh"

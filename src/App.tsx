@@ -142,6 +142,7 @@ import {
 import { MOCK_TENDERS } from "./constants";
 import { formatMilestoneConditionLabel } from "./milestoneConditions";
 import MilestoneCompletionReviewPanel, { describeMilestoneReview } from "./components/MilestoneCompletionReviewPanel";
+import MeterDataReview from "./components/MeterDataReview";
 import VendorRegistration from "./components/VendorRegistration";
 import PreQualificationSubmission, { getLatestPrequalification } from "./components/PreQualificationSubmission";
 import {
@@ -9257,6 +9258,10 @@ const Disbursements = ({
       {
         label: "Meter data present (30+ days)",
         met: Boolean(conditions.meter_data_present ?? summary?.uptime_kpi.total_devices_monitored),
+      },
+      {
+        label: "Meter data uploads cleared by RBF review",
+        met: Boolean(conditions.meter_data_integrity_cleared ?? true),
       },
       {
         label: "RMT approved with workflow handoff",
@@ -20406,13 +20411,36 @@ const ProjectsHub = ({
     }
   };
 
+  // A meter data review changes which readings count, so KPIs and milestone eligibility move too.
+  const refreshMeterReviewData = async (projectId: string) => {
+    try {
+      const [readings, kpi, logs] = await Promise.all([
+        fetchSmartMeterReadings(projectId),
+        fetchProjectKpiSummary(projectId),
+        fetchAuditLogs(projectId),
+      ]);
+      setSmartMeterReadings(readings);
+      setSelectedProjectKpi(kpi);
+      setProjectAuditLogs(logs);
+    } catch {
+      // The review itself succeeded; stale figures refresh on the next project load.
+    }
+  };
+
   const handleUploadMeterCsv = async () => {
     if (!selectedProject || !meterCsvFile) return;
     setMeterCsvUploading(true);
     setMeterCsvMessage(null);
     try {
       const result = await uploadProjectMeterCsv(selectedProject.id, meterCsvFile);
-      setMeterCsvMessage(`Uploaded successfully. ${result.rows_ingested} rows ingested.`);
+      const highFindings = (result.integrity_findings || []).filter((finding) => finding.severity === "high");
+      setMeterCsvMessage(
+        result.batch_status === "flagged"
+          ? `Uploaded ${result.rows_ingested} rows, but the data failed ${highFindings.length} integrity check(s): `
+            + `${Array.from(new Set(highFindings.map((finding) => finding.label))).join("; ")}. `
+            + "RBF will review it, and milestone claims are on hold until then."
+          : `Uploaded successfully. ${result.rows_ingested} rows ingested and queued for RBF review.`,
+      );
       setMeterCsvFile(null);
       const [readings, logs] = await Promise.all([
         fetchSmartMeterReadings(selectedProject.id),
@@ -20793,6 +20821,12 @@ const ProjectsHub = ({
                           {
                             label: `Meter data in last 30 days: ${kpiSummary?.milestone_eligibility?.milestone_2?.conditions?.meter_data_present ? "Available" : "Not yet available"}`,
                             met: kpiSummary?.milestone_eligibility?.milestone_2?.conditions?.meter_data_present ?? false,
+                          },
+                          {
+                            label: kpiSummary?.milestone_eligibility?.milestone_2?.conditions?.meter_data_integrity_cleared === false
+                              ? "Meter data review: an upload is flagged or awaiting correction"
+                              : "Meter data review: no uploads on hold",
+                            met: kpiSummary?.milestone_eligibility?.milestone_2?.conditions?.meter_data_integrity_cleared ?? true,
                           },
                         ].map((item) => (
                           <div key={item.label} className={`flex items-center gap-2 rounded-xl border px-3 py-2 ${getConditionRowClass(item.met)}`}>
@@ -21540,210 +21574,14 @@ const ProjectsHub = ({
 
           {activeTab === "device_readings" && (
             <div className="space-y-6">
-              {(() => {
-                const now = new Date();
-                const rangeDays = deviceDateFilter === "7d" ? 7 : deviceDateFilter === "90d" ? 90 : 30;
-                const rangeStartMs = now.getTime() - rangeDays * 24 * 60 * 60 * 1000;
-                const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
-                const projectReadings = smartReadingsForProject(project.id).filter((reading) => {
-                  const recorded = new Date(reading.recordedAt).getTime();
-                  return Number.isFinite(recorded) && recorded >= rangeStartMs;
-                });
-
-                const readingGroups = new Map<string, SmartMeterReading[]>();
-                projectReadings.forEach((reading) => {
-                  const key = `${reading.installationId || "unknown"}::${reading.meterId || "unknown"}`;
-                  const list = readingGroups.get(key) || [];
-                  list.push(reading);
-                  readingGroups.set(key, list);
-                });
-
-                const rows = Array.from(readingGroups.entries()).map(([key, readings]) => {
-                  const [installationId, meterIdRaw] = key.split("::");
-                  const meterId = meterIdRaw || "N/A";
-                  const sorted = readings.slice().sort((a, b) => (b.recordedAt || "").localeCompare(a.recordedAt || ""));
-                  const last = sorted[0];
-                  const uptimeValues = readings
-                    .map((r) => Number(r.uptimePct))
-                    .filter((v) => Number.isFinite(v));
-                  const avgUptime = uptimeValues.length ? uptimeValues.reduce((sum, v) => sum + v, 0) / uptimeValues.length : 0;
-                  const totalKwh = readings.reduce((sum, r) => sum + Number(r.kwh || 0), 0);
-                  const lastReadingMs = last?.recordedAt ? new Date(last.recordedAt).getTime() : Number.NaN;
-                  const hoursSince = Number.isFinite(lastReadingMs) ? (now.getTime() - lastReadingMs) / (1000 * 60 * 60) : Number.POSITIVE_INFINITY;
-
-                  let status: "good" | "low" | "offline" = "good";
-                  let issueReason = "";
-                  if (avgUptime === 0 || hoursSince > 72) {
-                    status = "offline";
-                    issueReason = avgUptime === 0 ? "Uptime is 0%" : `No data for ${Math.floor(hoursSince / 24)} day(s)`;
-                  } else if ((avgUptime >= 80 && avgUptime < 99) || (hoursSince > 48 && hoursSince <= 72)) {
-                    status = "low";
-                    issueReason = avgUptime < 99 ? `Low uptime ${avgUptime.toFixed(1)}%` : "Data gap between 48-72 hours";
-                  }
-
-                  const installation = projectReports.find((report) => report.id === installationId);
-                  const installationLabel = installation?.serialNumber ? `INS-${installation.serialNumber}` : `INS-${installationId}`;
-                  return {
-                    installationId,
-                    installationLabel,
-                    meterId,
-                    lastReadingAt: last?.recordedAt,
-                    avgUptime,
-                    totalKwh,
-                    readingCount: readings.length,
-                    status,
-                    issueReason,
-                  };
-                });
-
-                const installationOptions = Array.from(
-                  new Set(rows.map((row) => row.installationId).filter((value) => value && value !== "unknown"))
-                );
-                const filteredRows = rows.filter((row) => {
-                  if (deviceInstallationFilter !== "all" && row.installationId !== deviceInstallationFilter) return false;
-                  if (deviceStatusFilter !== "all" && row.status !== deviceStatusFilter) return false;
-                  return true;
-                });
-
-                const devicesReporting = rows.filter((row) => row.readingCount > 0).length;
-                const verifiedDevices = projectReports.filter((report) => (report.verificationStatus || report.status) === "Verified").length;
-                const avgUptime30 = rows.length ? rows.reduce((sum, row) => sum + row.avgUptime, 0) / rows.length : 0;
-                const totalEnergyThisMonth = smartReadingsForProject(project.id)
-                  .filter((reading) => {
-                    const recorded = new Date(reading.recordedAt).getTime();
-                    return Number.isFinite(recorded) && recorded >= thisMonthStart;
-                  })
-                  .reduce((sum, reading) => sum + Number(reading.kwh || 0), 0);
-                const devicesWithIssues = rows.filter((row) => row.status !== "good");
-
-                const statusPill = (status: "good" | "low" | "offline") => {
-                  if (status === "good") return "bg-emerald-100 text-emerald-700";
-                  if (status === "low") return "bg-amber-100 text-amber-700";
-                  return "bg-rose-100 text-rose-700";
-                };
-                const statusLabel = (status: "good" | "low" | "offline") => {
-                  if (status === "good") return "Good";
-                  if (status === "low") return "Low";
-                  return "Offline";
-                };
-                const formatLastReading = (value?: string) => {
-                  if (!value) return "N/A";
-                  const timestamp = new Date(value).getTime();
-                  if (!Number.isFinite(timestamp)) return "N/A";
-                  const diffHours = Math.max(0, (now.getTime() - timestamp) / (1000 * 60 * 60));
-                  if (diffHours < 1) return "Just now";
-                  if (diffHours < 24) return `${Math.round(diffHours)}hr ago`;
-                  return `${Math.round(diffHours / 24)} day(s)`;
-                };
-
-                return (
-                  <>
-                    <div>
-                      <h4 className="text-sm font-semibold text-slate-800">Device Readings Overview</h4>
-                      <p className="text-xs text-slate-500">Monitor meter reporting health, uptime, and energy output from uploaded CSV telemetry.</p>
-                    </div>
-
-                    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                      <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
-                        <select className="input-field" value={deviceInstallationFilterDraft} onChange={(e) => setDeviceInstallationFilterDraft(e.target.value)}>
-                          <option value="all">Installation: All</option>
-                          {installationOptions.map((installationId) => (
-                            <option key={installationId} value={installationId}>{installationId}</option>
-                          ))}
-                        </select>
-                        <select className="input-field" value={deviceDateFilterDraft} onChange={(e) => setDeviceDateFilterDraft(e.target.value as "30d" | "7d" | "90d")}>
-                          <option value="30d">Date: Last 30 days</option>
-                          <option value="7d">Date: Last 7 days</option>
-                          <option value="90d">Date: Last 90 days</option>
-                        </select>
-                        <select className="input-field" value={deviceStatusFilterDraft} onChange={(e) => setDeviceStatusFilterDraft(e.target.value as "all" | "good" | "low" | "offline")}>
-                          <option value="all">Status: All</option>
-                          <option value="good">Status: Good</option>
-                          <option value="low">Status: Low</option>
-                          <option value="offline">Status: Offline</option>
-                        </select>
-                        <div className="md:col-span-2">
-                          <button
-                            onClick={() => {
-                              setDeviceInstallationFilter(deviceInstallationFilterDraft);
-                              setDeviceDateFilter(deviceDateFilterDraft);
-                              setDeviceStatusFilter(deviceStatusFilterDraft);
-                            }}
-                            className="btn-primary text-xs"
-                          >
-                            Apply
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
-                      <div className="rounded-2xl border border-slate-200 bg-white p-4">
-                        <p className="text-[11px] uppercase tracking-wide text-slate-500">Devices Reporting</p>
-                        <p className="mt-1 text-xl font-semibold text-slate-900">{devicesReporting}</p>
-                        <p className="text-xs text-slate-500">of {verifiedDevices} verified</p>
-                      </div>
-                      <div className="rounded-2xl border border-slate-200 bg-white p-4">
-                        <p className="text-[11px] uppercase tracking-wide text-slate-500">Avg Uptime ({rangeDays} days)</p>
-                        <p className="mt-1 text-xl font-semibold text-slate-900">{avgUptime30.toFixed(1)}%</p>
-                        <p className={`text-xs ${avgUptime30 >= 99 ? "text-emerald-700" : "text-amber-700"}`}>{avgUptime30 >= 99 ? ">=99% target met" : "Below 99% target"}</p>
-                      </div>
-                      <div className="rounded-2xl border border-slate-200 bg-white p-4">
-                        <p className="text-[11px] uppercase tracking-wide text-slate-500">Total Energy This Month</p>
-                        <p className="mt-1 text-xl font-semibold text-slate-900">{totalEnergyThisMonth.toLocaleString(undefined, { maximumFractionDigits: 1 })} kWh</p>
-                      </div>
-                      <div className="rounded-2xl border border-slate-200 bg-white p-4">
-                        <p className="text-[11px] uppercase tracking-wide text-slate-500">Devices With Issues</p>
-                        <p className="mt-1 text-xl font-semibold text-rose-700">{devicesWithIssues.length}</p>
-                        <p className="text-xs text-rose-600">See attention list below</p>
-                      </div>
-                    </div>
-
-                    <div className="overflow-x-auto rounded-2xl border border-slate-200">
-                      <table className="min-w-full divide-y divide-slate-200 text-sm">
-                        <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
-                          <tr>
-                            <th className="px-4 py-3">Installation ID</th>
-                            <th className="px-4 py-3">Device Serial (meter_id)</th>
-                            <th className="px-4 py-3">Last Reading</th>
-                            <th className="px-4 py-3">Avg Uptime %</th>
-                            <th className="px-4 py-3">Total kWh</th>
-                            <th className="px-4 py-3">Readings Count</th>
-                            <th className="px-4 py-3">Status</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100 bg-white">
-                          {filteredRows.map((row) => (
-                            <tr key={`${row.installationId}-${row.meterId}`} className="cursor-pointer hover:bg-slate-50" onClick={() => setSelectedDeviceReading(row)}>
-                              <td className="px-4 py-3 text-slate-700">{row.installationLabel}</td>
-                              <td className="px-4 py-3 text-slate-700">{row.meterId}</td>
-                              <td className="px-4 py-3 text-slate-700">{formatLastReading(row.lastReadingAt)}</td>
-                              <td className="px-4 py-3 text-slate-700">{row.avgUptime.toFixed(1)}%</td>
-                              <td className="px-4 py-3 text-slate-700">{row.totalKwh.toFixed(1)}</td>
-                              <td className="px-4 py-3 text-slate-700">{row.readingCount}</td>
-                              <td className="px-4 py-3">
-                                <span className={`rounded-full px-3 py-1 text-xs font-semibold ${statusPill(row.status)}`}>
-                                  {statusLabel(row.status)}
-                                </span>
-                              </td>
-                            </tr>
-                          ))}
-                          {filteredRows.length === 0 && (
-                            <tr>
-                              <td colSpan={7} className="px-4 py-6 text-center text-sm text-slate-500">No device readings found for the current filters.</td>
-                            </tr>
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
-                  </>
-                );
-              })()}
-            </div>
-          )}
-
-          {activeTab === "device_readings" && (
-            <div className="space-y-6">
+              <MeterDataReview
+                projectId={project.id}
+                vendorId={project.vendorId}
+                vendorName={project.vendorName}
+                canReview={canDecideMilestoneReviews}
+                canInitiateBlacklisting={currentUser?.role === UserRole.RBF_OFFICIAL}
+                onChanged={() => refreshMeterReviewData(project.id)}
+              />
               {(() => {
                 const now = new Date();
                 const rangeDays = deviceDateFilter === "7d" ? 7 : deviceDateFilter === "90d" ? 90 : 30;
@@ -23666,6 +23504,7 @@ const ProjectsHub = ({
 
           {projectTab === "device_readings" && (
             <div className="space-y-6">
+              <MeterDataReview projectId={project.id} canReview={false} />
               {(() => {
                 const now = new Date();
                 const rangeDays = deviceDateFilter === "7d" ? 7 : deviceDateFilter === "90d" ? 90 : 30;
@@ -28183,7 +28022,7 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
               <div>
                 <h1 className="text-2xl font-bold text-slate-900">Inspection Workspace</h1>
                 <p className="text-slate-500">
-                  {selectedQueueItem?.siteName} • Task {selectedTask.id} • {selectedProject?.district || selectedProject?.region || assignedDistrict}
+                  {selectedQueueItem?.siteName} • Task {selectedTask.id} • {selectedReport.district || selectedProject?.district || selectedProject?.region || assignedDistrict}
                 </p>
               </div>
             </div>
@@ -28255,6 +28094,20 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
                   <div>
                     <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Beneficiary NID</p>
                     <p className="mt-1 text-sm font-semibold text-slate-900">{selectedReport.beneficiaryId || "Not provided"}</p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Beneficiary Phone</p>
+                    {selectedReport.beneficiaryPhone ? (
+                      <a
+                        href={`tel:${selectedReport.beneficiaryPhone.replace(/[^0-9+]/g, "")}`}
+                        className="mt-1 inline-flex text-sm font-semibold text-blue-600 hover:text-blue-700"
+                        title="Call the beneficiary household"
+                      >
+                        {selectedReport.beneficiaryPhone}
+                      </a>
+                    ) : (
+                      <p className="mt-1 text-sm font-semibold text-slate-900">Not provided</p>
+                    )}
                   </div>
                   <div>
                     <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Household Type</p>
@@ -28490,6 +28343,7 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
                     </p>
                     <p className="text-sm font-bold text-slate-700">
                       Beneficiary record: {selectedReport.beneficiaryName || selectedReport.beneficiaryId || "Not captured"}
+                      {selectedReport.beneficiaryPhone ? ` • ${selectedReport.beneficiaryPhone}` : ""}
                     </p>
                   </div>
                   <div className="space-y-1">
@@ -28605,6 +28459,14 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
             <div className="card p-5">
               <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Beneficiary</p>
               <p className="mt-2 text-sm font-semibold text-slate-900">{selectedReport.beneficiaryName || selectedReport.beneficiaryId || "Not captured"}</p>
+              {selectedReport.beneficiaryPhone && (
+                <a
+                  href={`tel:${selectedReport.beneficiaryPhone.replace(/[^0-9+]/g, "")}`}
+                  className="mt-1 inline-flex text-xs font-semibold text-blue-600 hover:text-blue-700"
+                >
+                  {selectedReport.beneficiaryPhone}
+                </a>
+              )}
             </div>
             <div className="card p-5">
               <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Vendor</p>

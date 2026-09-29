@@ -27,7 +27,10 @@ from .models import (
     Project,
     ProjectUpdate,
     ProjectStatus,
+    MILESTONE_BLOCKING_BATCH_STATUSES,
+    MeterDataBatch,
     SmartMeterReading,
+    SmartMeterReadingReviewStatus,
 )
 
 
@@ -110,10 +113,11 @@ class KpiService:
     def _readings_queryset(self):
         verified_installations = self._verified_installations()
         meter_ids = [meter_id for meter_id in verified_installations.values_list("meter_id", flat=True) if meter_id]
+        # Readings RBF rejected as not genuine never count toward KPIs or milestones.
         return SmartMeterReading.objects.filter(
             Q(installation__in=verified_installations)
             | Q(installation__isnull=True, project=self.project, meter_id__in=meter_ids)
-        ).distinct()
+        ).exclude(review_status=SmartMeterReadingReviewStatus.REJECTED).distinct()
 
     def getInstallationProgress(self) -> dict[str, Any]:
         aggregates = InstallationReport.objects.filter(project=self.project).aggregate(
@@ -395,6 +399,12 @@ class KpiService:
         ).count()
         all_flags = AnomalyFlag.objects.filter(project=self.project, is_resolved=False).count()
         meter_present = self._readings_queryset().filter(recorded_at__gte=readings_cutoff).exists()
+        # A meter upload that failed integrity checks and is not yet reviewed, or was sent
+        # back for correction, holds the project's claims until RBF clears it.
+        meter_data_cleared = not MeterDataBatch.objects.filter(
+            project=self.project,
+            status__in=MILESTONE_BLOCKING_BATCH_STATUSES,
+        ).exists()
 
         contract_approved = TenderContract.objects.filter(
             project_id=str(self.project.id),
@@ -480,6 +490,7 @@ class KpiService:
             and female_pct_met
             and blocking_flags == 0
             and meter_present
+            and meter_data_cleared
         )
         m3_eligible = (
             project_open
@@ -490,6 +501,7 @@ class KpiService:
             and low_income_pct_met
             and all_flags == 0
             and milestone_two_paid
+            and meter_data_cleared
         )
         summary = {
             "milestone_1": {
@@ -511,6 +523,7 @@ class KpiService:
                     "female_pct_50": female_pct_met,
                     "no_blocking_anomaly_flags": blocking_flags == 0,
                     "meter_data_present": meter_present,
+                    "meter_data_integrity_cleared": meter_data_cleared,
                 },
                 # Condition keys are kept stable for existing clients; the actual
                 # configured percentages behind them are reported here.
@@ -531,6 +544,7 @@ class KpiService:
                     "all_anomaly_flags_resolved": all_flags == 0,
                     "milestone_2_paid": milestone_two_paid,
                     "milestone_2_verified": milestone_two_verified,
+                    "meter_data_integrity_cleared": meter_data_cleared,
                 },
                 "thresholds": {
                     "installations_pct": m3_installation_pct,
