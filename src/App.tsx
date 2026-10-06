@@ -26,6 +26,7 @@ import {
   Filter,
   Download,
   ExternalLink,
+  ArrowLeft as ArrowLeftIcon,
   Check,
   CheckCircle2,
   CircleDashed,
@@ -73,6 +74,11 @@ import {
   WifiOff,
   ArrowUpRight,
   ArrowRight,
+  Flag,
+  MessageSquare,
+  FileSignature,
+  Target,
+  CalendarClock,
 } from "lucide-react";
 import {
   LineChart,
@@ -128,6 +134,7 @@ import {
   VendorBlacklistCase,
   BlacklistAppeal,
   ProjectKpiSummary,
+  MeterCsvInvalidRow,
   AuditLog,
   SmartMeterReading,
   AnomalyFlag,
@@ -142,6 +149,7 @@ import {
 import { MOCK_TENDERS } from "./constants";
 import { formatMilestoneConditionLabel } from "./milestoneConditions";
 import MilestoneCompletionReviewPanel, { describeMilestoneReview } from "./components/MilestoneCompletionReviewPanel";
+import MeterDataReview from "./components/MeterDataReview";
 import VendorRegistration from "./components/VendorRegistration";
 import PreQualificationSubmission, { getLatestPrequalification } from "./components/PreQualificationSubmission";
 import {
@@ -231,10 +239,13 @@ import {
   fetchProjectDocuments,
   uploadProjectDocument,
   fetchInstallationReports,
+  fetchArchivedProjectsHubData,
   fetchVerificationTasks,
   verifyVerificationTask,
   createInstallationReport,
   fetchTenderBids,
+  downloadProjectKpiPdf,
+  fetchAllBidsForTender,
   submitTenderBid,
   updateTenderBid,
   reviewTenderBid,
@@ -305,15 +316,19 @@ import PortfolioKpiSummary from "./components/PortfolioKpiSummary";
 import PortfolioMonitoringView from "./components/PortfolioMonitoringView";
 import { FieldOperationalKpiPanel, MacroKpiPortal, VendorKpiPanel } from "./components/RoleBasedKpiPanels";
 import SuperAdminPortal from "./components/SuperAdminPortal";
-import { DoeDashboard, DoeRegionalMap, DoeReports } from "./components/DoePortal";
-import RmtIssuesFindings from "./components/RmtIssuesFindings";
+import { DoeDashboard } from "./components/DoePortal";
+import { DoeRegionalMonitoring } from "./components/DoeRegionalMonitoring";
+import { DoeBlacklistRecommendationPanel, RmtBlacklistRecommendationsPanel } from "./components/BlacklistRecommendations";
+import { DoeKpiReview } from "./components/DoeKpiReview";
+import { DoeDocumentUploader, DoeRegionalNotesPanel, confirmAndDeleteProjectDocument } from "./components/DoeProjectTools";
 import RmtNoticeManagement from "./components/RmtNoticeManagement";
-import { PscReports, PscDashboard, default as PscIssuesView } from "./components/PscPortal";
-import { TacDashboard, TacReports } from "./components/TacPortal";
+import { PscDashboard } from "./components/PscPortal";
+import { TacDashboard } from "./components/TacPortal";
 import { EvaluationCommitteeDashboard, FinancialEvaluationView } from "./components/EvaluationCommitteePortal";
 import { CommitteeScoresView } from "./components/CommitteeScoresView";
 import { SubmittedBidModal } from "./components/SubmittedBidModal";
 import { ReportsHub } from "./components/ReportsHub";
+import { getInclusionTargets, useInclusionTargets } from "./inclusionTargets";
 import { EoiInvites } from "./components/EoiInvites";
 import {
   FormKitShell,
@@ -344,10 +359,23 @@ import {
   AuditorKpiDashboard,
   AuditorAuditLogs,
   AuditorAnomalyReport,
-  AuditorAuditFindings,
   AuditorClaimsAudit,
   AuditorProspectSyncLog
 } from "./components/AuditorPortal";
+import {
+  AuditCasePrefill,
+  KpiOversightView,
+  OversightReviewsView,
+  TabbedSection,
+  VendorPerformanceView,
+  VerificationReviewView,
+} from "./components/OversightShared";
+import { ProcurementOversightView } from "./components/ProcurementOversight";
+import { AuditCasesView, SystemAccessAuditView } from "./components/AuditWorkspace";
+import { ArchivedProjectBanner, ProjectLifecycleArchive } from "./components/ProjectLifecycleArchive";
+import { toCsv } from "./csv";
+import { ResultsFramework } from "./components/ResultsFramework";
+import { ReportSchedules } from "./components/ReportSchedules";
 
 const getTenderDeadlineDefault = () => {
   const deadline = new Date();
@@ -364,6 +392,21 @@ const summarizeLotOffers = (bid?: { lot_offers?: TenderBidLotOffer[] } | null): 
 };
 
 // --- Components ---
+
+const TENDER_STATUS_BADGE: Record<string, string> = {
+  [TenderStatus.DRAFT]: "bg-slate-100 text-slate-600",
+  [TenderStatus.PENDING_PUBLISH_APPROVAL]: "bg-sky-100 text-sky-700",
+  [TenderStatus.PUBLISHED]: "bg-emerald-100 text-emerald-700",
+  [TenderStatus.EVALUATION]: "bg-blue-100 text-blue-700",
+  [TenderStatus.STANDSTILL]: "bg-amber-100 text-amber-700",
+  [TenderStatus.DISPUTED]: "bg-rose-100 text-rose-700",
+  [TenderStatus.AWARDED]: "bg-purple-100 text-purple-700",
+  [TenderStatus.CLOSED]: "bg-slate-200 text-slate-700",
+};
+
+/** A lot's own status in a lot-wise tender; each lot moves through award independently. */
+const LotStatusBadge = ({ status }: { status?: string }) =>
+  status ? <span className={`badge ${TENDER_STATUS_BADGE[status] || "bg-slate-100 text-slate-600"}`}>{status}</span> : null;
 
 const SidebarItem = ({ icon: Icon, label, active, onClick, badge, actionBadge }: any) => (
   <button
@@ -1897,6 +1940,83 @@ const contractStepIndex = (status: string) =>
 /** Generated -> Submitted -> Approved. Rejected is a terminal branch rather than a step,
  * so it renders nothing here and is shown as its own banner by the caller. Shared by the
  * admin review screen and the vendor contracting screen so the two always agree. */
+// What the vendor should do next (or who they are waiting for), in plain words.
+const contractNextStep = (contract: TenderContract): { tone: string; text: string } => {
+  if (contract.status === "Generated" && contract.rejectionReason) {
+    return { tone: "border-rose-200 bg-rose-50 text-rose-800", text: "Returned to you: read the reason below, then sign and upload the agreement again." };
+  }
+  if (contract.status === "Generated") {
+    return { tone: "border-amber-200 bg-amber-50 text-amber-800", text: "Action needed: download the agreement, sign it, and upload the signed PDF below." };
+  }
+  if (contract.status === "Submitted" || contract.status === "Signed") {
+    return { tone: "border-sky-200 bg-sky-50 text-sky-800", text: "Waiting for the RBF Management Team to review your signed agreement. You will be notified." };
+  }
+  if (contract.status === "Approved") {
+    return contract.projectId
+      ? { tone: "border-emerald-200 bg-emerald-50 text-emerald-800", text: "Agreement approved. Your project has been created: complete its setup in the Projects Hub." }
+      : { tone: "border-emerald-200 bg-emerald-50 text-emerald-800", text: "Agreement approved. The RBF Management Team is now creating your project; setup opens once it is ready." };
+  }
+  if (contract.status === "Rejected") {
+    return { tone: "border-rose-200 bg-rose-50 text-rose-800", text: "This agreement was rejected. See the reason below or contact the RBF Management Team." };
+  }
+  return { tone: "border-slate-200 bg-slate-50 text-slate-700", text: contract.status };
+};
+
+const formatContractMoney = (value?: number, currency = "LSL") => {
+  if (value == null || Number.isNaN(value)) return "Not available";
+  try {
+    return new Intl.NumberFormat("en-GB", { style: "currency", currency, maximumFractionDigits: 2 }).format(value);
+  } catch {
+    return `${currency} ${value.toLocaleString("en-GB", { maximumFractionDigits: 2 })}`;
+  }
+};
+
+const formatContractDate = (value?: string) => (value ? new Date(value).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" }) : "");
+
+const ContractHeader = ({ contract }: { contract: TenderContract }) => {
+  const next = contractNextStep(contract);
+  const facts: Array<[string, string]> = [
+    ["Contract value", formatContractMoney(contract.awardValue, contract.currency)],
+    ["Technology", contract.technologies?.length ? contract.technologies.join(", ") : "Not specified"],
+    ["Districts", contract.districts?.length ? contract.districts.join(", ") : "Not specified"],
+    ["Installation target", contract.installationTarget ? `${contract.installationTarget.toLocaleString()} installations` : "Set at project setup"],
+    ["Awarded on", formatContractDate(contract.awardedAt) || "Not recorded"],
+    ["Contract reference", contract.referenceNumber],
+  ];
+  if (contract.fundingSource) facts.push(["Funded by", contract.fundingSource]);
+  if (contract.projectReference) facts.push(["Project", contract.projectReference]);
+  const timeline = [
+    contract.generatedAt && `Agreement issued ${formatContractDate(contract.generatedAt)}`,
+    contract.signedAt && `signed copy uploaded ${formatContractDate(contract.signedAt)}`,
+    contract.approvedAt && `approved ${formatContractDate(contract.approvedAt)}${contract.approvedBy ? ` by ${contract.approvedBy}` : ""}`,
+  ].filter(Boolean).join(" · ");
+  return (
+    <div className="space-y-3 px-5 py-4">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-400">Performance-Based Agreement</p>
+          <p className="text-base font-bold leading-snug text-slate-900">{contract.tenderName || "Awarded contract"}</p>
+          <p className="mt-0.5 text-xs text-slate-500">
+            {contract.tenderReference ? `Tender ${contract.tenderReference}` : "Tender"}
+            {contract.lotName ? <> · <span className="font-semibold text-emerald-700">{contract.lotName}</span></> : " · Whole tender"}
+          </p>
+        </div>
+        <span className={`badge shrink-0 ${contractStatusTone(contract.status)}`}>{contract.status}</span>
+      </div>
+      <p className={`rounded-lg border px-3 py-2 text-xs font-medium ${next.tone}`}>{next.text}</p>
+      <dl className="grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-3">
+        {facts.map(([label, value]) => (
+          <div key={label} className="min-w-0">
+            <dt className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">{label}</dt>
+            <dd className="truncate text-xs font-semibold text-slate-800" title={value}>{value}</dd>
+          </div>
+        ))}
+      </dl>
+      {timeline && <p className="text-[11px] text-slate-500">{timeline.charAt(0).toUpperCase() + timeline.slice(1)}</p>}
+    </div>
+  );
+};
+
 const ContractStepper = ({ status }: { status: string }) => {
   if (status === "Rejected") return null;
   const current = contractStepIndex(status);
@@ -2082,6 +2202,8 @@ const Tenders = ({
   const [formStep, setFormStep] = useState(1);
   const currentUser = getStoredUser();
   const canViewCommitteeScores = currentUser?.role === UserRole.ADMIN || currentUser?.role === UserRole.RBF_OFFICIAL;
+  // Inclusion targets are configured by the Super Admin only; everyone else sees the programme minimums.
+  const canSetInclusionTargets = currentUser?.role === UserRole.ADMIN;
   const [ecModalOpen, setEcModalOpen] = useState(false);
   const [ecLoading, setEcLoading] = useState(false);
   const [ecSaving, setEcSaving] = useState(false);
@@ -2215,9 +2337,9 @@ const Tenders = ({
     energyOutput: 20000,
     districts: ["Maseru"],
     verificationMethod: "manual",
-    targetFemalePct: 50,
-    targetVulnerablePct: 30,
-    targetLowIncomePct: 60,
+    targetFemalePct: getInclusionTargets().female,
+    targetVulnerablePct: getInclusionTargets().vulnerable,
+    targetLowIncomePct: getInclusionTargets().lowIncome,
     ...DEFAULT_MILESTONE_PLAN_DRAFT,
   });
   const resetContractAssignmentDraft = () =>
@@ -2228,13 +2350,62 @@ const Tenders = ({
       energyOutput: 20000,
       districts: ["Maseru"],
       verificationMethod: "manual",
-      targetFemalePct: 50,
-      targetVulnerablePct: 30,
-      targetLowIncomePct: 60,
+      targetFemalePct: getInclusionTargets().female,
+      targetVulnerablePct: getInclusionTargets().vulnerable,
+      targetLowIncomePct: getInclusionTargets().lowIncome,
       ...DEFAULT_MILESTONE_PLAN_DRAFT,
     });
 
-  const isLotWiseTender = Boolean(selectedTender?.lots && selectedTender.lots.length > 0);
+  const isLotWiseTender = Boolean(
+    (selectedTender?.lots && selectedTender.lots.length > 0) || awardLotRankings.length > 0,
+  );
+
+  /** The tender's lots, in their designed order, whichever source has them. `selectedTender.lots`
+   * carries the design (name, position); the award rankings are the fallback when the tender
+   * summary was loaded without lot detail. */
+  const awardLots = useMemo<{ id: string; name: string; status?: TenderStatus | string }[]>(() => {
+    const fromTender = (selectedTender?.lots || []).filter((lot) => lot.id != null);
+    if (fromTender.length > 0) {
+      return fromTender.map((lot) => ({ id: String(lot.id), name: lot.name, status: lot.status }));
+    }
+    return awardLotRankings.map((lot) => ({
+      id: String(lot.lot_id),
+      name: lot.lot_name,
+      status: lot.status,
+    }));
+  }, [selectedTender?.lots, awardLotRankings]);
+
+  /** One row per lot of a lot-wise tender pairing that lot with its OWN contract and project.
+   * The Contract and Project Assignment tabs are driven by this rather than by the contract
+   * list, so a lot whose award is not confirmed yet — and therefore has no contract — still
+   * appears and reads as pending instead of silently vanishing from the tab. */
+  const lotContractRows = useMemo(() => {
+    if (!isLotWiseTender) return [];
+    const rankingByLot = new Map<string, TenderLotAwardRanking>(
+      awardLotRankings.map((lot) => [String(lot.lot_id), lot]),
+    );
+    return awardLots.map((lot) => {
+      const ranking = rankingByLot.get(lot.id);
+      const contract = tenderContracts.find((c) => c.lot != null && String(c.lot) === lot.id) || null;
+      return {
+        lotId: lot.id,
+        lotName: lot.name,
+        status: ranking?.status ?? lot.status,
+        awardedVendorName:
+          ranking?.awarded_vendor_name || contract?.vendorName || null,
+        contract,
+      };
+    });
+  }, [isLotWiseTender, awardLots, awardLotRankings, tenderContracts]);
+
+  /** Contracts of a lot-wise tender that belong to no lot — only reachable through the manual
+   * `tender-contracts/generate` endpoint, which takes no lot. Listed separately so a lot-driven
+   * tab never hides a contract that exists. Empty in the normal award flow, where every contract
+   * is created per lot by confirm_award. */
+  const contractsWithoutLot = useMemo(
+    () => (isLotWiseTender ? tenderContracts.filter((c) => c.lot == null) : []),
+    [isLotWiseTender, tenderContracts],
+  );
 
   const activeContract = useMemo(() => {
     if (!tenderContracts.length) return null;
@@ -2242,13 +2413,20 @@ const Tenders = ({
       const match = tenderContracts.find(item => item.id === manageContractId);
       if (match) return match;
     }
+    // For a lot-wise tender the tender-level awarded_vendor_id is not meaningful — every lot
+    // has its own winner — so follow the lot order and land on the first lot that has a
+    // contract, rather than whichever row the API happened to sort first.
+    if (isLotWiseTender) {
+      const firstLotContract = lotContractRows.find((row) => row.contract)?.contract;
+      return firstLotContract || contractsWithoutLot[0] || tenderContracts[0];
+    }
     const awardedId = selectedTender?.awardedVendorId;
     if (awardedId) {
       const match = tenderContracts.find(item => String(item.vendorId) === String(awardedId));
       if (match) return match;
     }
     return tenderContracts[0];
-  }, [tenderContracts, selectedTender, manageContractId]);
+  }, [tenderContracts, selectedTender, manageContractId, isLotWiseTender, lotContractRows, contractsWithoutLot]);
 
   React.useEffect(() => {
     if (!activeContract || String(activeContract.status).toLowerCase() !== "approved") {
@@ -2287,9 +2465,9 @@ const Tenders = ({
           energyOutput: Number(defaults.energy_output_target_kwh ?? 20000),
           districts: defaultDistricts.length ? defaultDistricts : [preferredDistrict],
           verificationMethod: String(defaults.verification_method || "manual").toLowerCase(),
-          targetFemalePct: Number(defaults.female_target_pct ?? 50),
-          targetVulnerablePct: Number(defaults.vulnerable_target_pct ?? 30),
-          targetLowIncomePct: Number(defaults.low_income_target_pct ?? 60),
+          targetFemalePct: Number(defaults.female_target_pct ?? getInclusionTargets().female),
+          targetVulnerablePct: Number(defaults.vulnerable_target_pct ?? getInclusionTargets().vulnerable),
+          targetLowIncomePct: Number(defaults.low_income_target_pct ?? getInclusionTargets().lowIncome),
           milestoneDisbursementPcts: [
             Number(defaults.m1_disbursement_pct ?? DEFAULT_MILESTONE_PLAN_DRAFT.milestoneDisbursementPcts[0]),
             Number(defaults.m2_disbursement_pct ?? DEFAULT_MILESTONE_PLAN_DRAFT.milestoneDisbursementPcts[1]),
@@ -2825,9 +3003,9 @@ const Tenders = ({
           energyOutput: 20000,
           districts: full.targetDistricts?.length ? full.targetDistricts : ["Maseru"],
           verificationMethod: "manual",
-          targetFemalePct: 50,
-          targetVulnerablePct: 30,
-          targetLowIncomePct: 60,
+          targetFemalePct: getInclusionTargets().female,
+          targetVulnerablePct: getInclusionTargets().vulnerable,
+          targetLowIncomePct: getInclusionTargets().lowIncome,
           ...DEFAULT_MILESTONE_PLAN_DRAFT,
         });
         setDistrictDropdownOpen(false);
@@ -2870,17 +3048,25 @@ const Tenders = ({
     showNotification(`Opening: ${docName}`);
   };
 
-  const exportBidList = () => {
+  const exportBidList = async () => {
     if (!selectedTender) {
       showNotification("Open a tender first to export bid list.");
       return;
     }
-    const csv = [
-      "bid_id,vendor,status,amount,tender_reference",
-      `BID-1001,SolarLease Ltd,Submitted,250000,${selectedTender.referenceNumber}`,
-      `BID-1002,EcoGrid Solutions,Verified,275000,${selectedTender.referenceNumber}`,
-      `BID-1003,Mountain Power,Submitted,240000,${selectedTender.referenceNumber}`,
-    ].join("\n");
+    let bids: TenderBid[];
+    try {
+      bids = await fetchAllBidsForTender(selectedTender.id);
+    } catch {
+      showNotification("Could not load the bids for this tender.");
+      return;
+    }
+    const csv = toCsv([
+      ["Bid ID", "Vendor", "Stage", "Status", "Bid amount", "Currency", "Submitted", "Rejection reason", "Tender reference"],
+      ...bids.map((bid) => [
+        bid.id, bid.vendor_name, bid.stage || "", bid.status, bid.bid_amount ?? "", bid.bid_currency || selectedTender.biddingCurrency || "",
+        bid.submitted_at || "", bid.rejection_reason || "", selectedTender.referenceNumber,
+      ]),
+    ]);
     triggerDownload(`bid_list_${selectedTender.referenceNumber}.csv`, csv, "text/csv;charset=utf-8");
     showNotification("Bid list exported.");
   };
@@ -3495,9 +3681,11 @@ const Tenders = ({
         energyOutput: contractAssignmentDraft.energyOutput,
         districts: contractAssignmentDraft.districts,
         verificationMethod: contractAssignmentDraft.verificationMethod,
-        targetFemalePct: contractAssignmentDraft.targetFemalePct,
-        targetVulnerablePct: contractAssignmentDraft.targetVulnerablePct,
-        targetLowIncomePct: contractAssignmentDraft.targetLowIncomePct,
+        ...(canSetInclusionTargets ? {
+          targetFemalePct: contractAssignmentDraft.targetFemalePct,
+          targetVulnerablePct: contractAssignmentDraft.targetVulnerablePct,
+          targetLowIncomePct: contractAssignmentDraft.targetLowIncomePct,
+        } : {}),
         milestoneDisbursementPcts: contractAssignmentDraft.milestoneDisbursementPcts,
         m2InstallationRequiredPct: contractAssignmentDraft.m2InstallationRequiredPct,
         m3InstallationRequiredPct: contractAssignmentDraft.m3InstallationRequiredPct,
@@ -5309,7 +5497,7 @@ const Tenders = ({
                     {(selectedTender.lots || []).map((lot, i) => (
                       <div key={lot.id ?? i} className="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-3">
                         <div className="flex items-center justify-between gap-3 flex-wrap">
-                          <p className="font-bold text-slate-900">{lot.name}</p>
+                          <p className="font-bold text-slate-900 flex items-center gap-2">{lot.name} <LotStatusBadge status={lot.status} /></p>
                           {lot.awardedVendorName ? (
                             <span className="badge bg-emerald-100 text-emerald-700">Awarded to {lot.awardedVendorName}</span>
                           ) : lot.intentToAwardBidId ? (
@@ -5450,7 +5638,7 @@ const Tenders = ({
                 <button onClick={sendBidReminder} className="btn-secondary w-full flex items-center justify-center gap-2">
                   <Bell size={16} /> Send Reminder
                 </button>
-                <button onClick={exportBidList} className="btn-secondary w-full flex items-center justify-center gap-2">
+                <button onClick={() => void exportBidList()} className="btn-secondary w-full flex items-center justify-center gap-2">
                   <Download size={16} /> Export Bid List
                 </button>
                 {!selectedTender.isEoiInviteOnly && (selectedTender.status === TenderStatus.PUBLISHED || selectedTender.status === TenderStatus.EVALUATION || selectedTender.status === TenderStatus.CLOSED) && (
@@ -6328,6 +6516,16 @@ const Tenders = ({
                       {" / "}
                       <span className={remainingLotCount > 0 ? "font-semibold text-amber-600" : "text-slate-400"}>{remainingLotCount} remaining</span>
                     </p>
+                    {(tender.lotStatuses || []).length > 0 && (
+                      <ul className="mt-2 space-y-1">
+                        {(tender.lotStatuses || []).map((lot) => (
+                          <li key={lot.id} className="flex items-center justify-between gap-2">
+                            <span className="truncate text-slate-600" title={lot.name}>{lot.name}</span>
+                            <LotStatusBadge status={lot.status} />
+                          </li>
+                        ))}
+                      </ul>
+                    )}
                   </div>
                 ) : (
                   <span className="text-xs font-medium text-slate-400">Single Award</span>
@@ -6590,7 +6788,9 @@ const Tenders = ({
                             <span className="badge bg-emerald-100 text-emerald-700">{awardedCount} awarded</span>
                             <span className="badge bg-amber-100 text-amber-700">{pendingCount} pending confirmation</span>
                             <span className="badge bg-slate-100 text-slate-600">{openCount} not yet started</span>
-                            {tenderContracts.length > 0 && <span className="badge bg-sky-100 text-sky-700">{tenderContracts.length} contract(s) generated</span>}
+                            {lotContractRows.some(r => r.contract) && (
+                              <span className="badge bg-sky-100 text-sky-700">{lotContractRows.filter(r => r.contract).length} contract(s) generated</span>
+                            )}
                             {projectsCreated > 0 && <span className="badge bg-indigo-100 text-indigo-700">{projectsCreated} project(s) created</span>}
                           </div>
                         );
@@ -6600,7 +6800,7 @@ const Tenders = ({
                         return (
                         <div key={lot.lot_id} className="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-2">
                           <div className="flex items-center justify-between gap-3">
-                            <p className="font-semibold text-slate-900">{lot.lot_name}</p>
+                            <p className="font-semibold text-slate-900 flex items-center gap-2">{lot.lot_name} <LotStatusBadge status={lot.status} /></p>
                             {lot.awarded_vendor_name ? (
                               <span className="badge bg-emerald-100 text-emerald-700">Awarded to {lot.awarded_vendor_name}</span>
                             ) : lot.pending_intent_award_request ? (
@@ -6641,7 +6841,8 @@ const Tenders = ({
                           </div>
                           {!lot.awarded_vendor_name && renderEcSnapshot(ecUnit)}
                           {lot.awarded_vendor_name && (() => {
-                            const lotContract = tenderContracts.find(c => String(c.lot) === String(lot.lot_id));
+                            const lotContract = lotContractRows.find(r => r.lotId === String(lot.lot_id))?.contract
+                              || tenderContracts.find(c => String(c.lot) === String(lot.lot_id));
                             return (
                               <div className="flex flex-wrap items-center gap-2 text-[11px]">
                                 <span className="text-slate-500">This lot has its own separate contract and project:</span>
@@ -6663,7 +6864,7 @@ const Tenders = ({
                                   </button>
                                 )}
                                 <span className={`badge ${lotContract?.projectId ? "bg-indigo-100 text-indigo-700" : "bg-slate-100 text-slate-500"}`}>
-                                  Project: {lotContract?.projectId ? `PRJ-${lotContract.projectId}` : "Not created yet"}
+                                  Project: {lotContract?.projectId ? (lotContract.projectReference || `PRJ-${lotContract.projectId}`) : "Not created yet"}
                                 </span>
                                 {lotContract && (
                                   <button
@@ -6909,39 +7110,87 @@ const Tenders = ({
                   <p>4. The vendor uploads a digitally signed PDF or scanned signed PDF.</p>
                   <p>5. Admin reviews the uploaded package, then approves it here before moving to Project Assignment.</p>
                 </div>
-                {tenderContracts.length === 0 && (
+                {!isLotWiseTender && tenderContracts.length === 0 && (
                   <p className="text-xs text-slate-500">No contract yet — request, get approved, and confirm the Intent to Award on the "Request Intent to Award" tab first. The Performance-Based Agreement will be generated automatically once the final award is confirmed.</p>
                 )}
-                {isLotWiseTender && tenderContracts.length > 1 && (
+                {isLotWiseTender && lotContractRows.length > 0 && (
                   <div className="rounded-lg border border-slate-200 bg-white p-3 space-y-1.5">
-                    <p className="text-xs font-semibold text-slate-700">Contracts Generated ({tenderContracts.length})</p>
-                    {tenderContracts.map((c) => (
-                      <div key={c.id} className={`flex items-center justify-between gap-2 rounded-md border px-2 py-1.5 text-xs ${activeContract?.id === c.id ? "border-emerald-300 bg-emerald-50" : "border-slate-100 bg-slate-50"}`}>
-                        <div className="flex items-center gap-2 min-w-0">
-                          <span className="text-slate-600 truncate">{c.lotName ? `${c.lotName} — ` : ""}{c.vendorName || c.referenceNumber}</span>
-                          <span className={`badge shrink-0 ${
-                            String(c.status).toLowerCase() === "approved" ? "bg-emerald-100 text-emerald-700" :
-                            String(c.status).toLowerCase() === "rejected" ? "bg-rose-100 text-rose-700" :
-                            "bg-sky-100 text-sky-700"
-                          }`}>{c.status}</span>
-                          {c.projectId && <span className="badge shrink-0 bg-indigo-100 text-indigo-700">PRJ-{c.projectId}</span>}
+                    <p className="text-xs font-semibold text-slate-700">
+                      Contract by Lot ({lotContractRows.filter((r) => r.contract).length} of {lotContractRows.length} generated)
+                    </p>
+                    {lotContractRows.map((row) => {
+                      const c = row.contract;
+                      return (
+                      <div key={row.lotId} className={`flex items-center justify-between gap-2 rounded-md border px-2 py-1.5 text-xs ${c && activeContract?.id === c.id ? "border-emerald-300 bg-emerald-50" : "border-slate-100 bg-slate-50"}`}>
+                        <div className="flex min-w-0 flex-col gap-1">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className="text-slate-800 font-semibold truncate">{row.lotName}</span>
+                            {row.awardedVendorName && (
+                              <span className="shrink-0 text-slate-500 truncate">— {row.awardedVendorName}</span>
+                            )}
+                          </div>
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className={`badge shrink-0 ${
+                              !c ? "bg-slate-100 text-slate-500" :
+                              String(c.status).toLowerCase() === "approved" ? "bg-emerald-100 text-emerald-700" :
+                              String(c.status).toLowerCase() === "rejected" ? "bg-rose-100 text-rose-700" :
+                              "bg-sky-100 text-sky-700"
+                            }`}>
+                              {c ? `Contract: ${c.status}` : row.awardedVendorName ? "Contract: pending generation" : "Not awarded yet"}
+                            </span>
+                            <span className={`badge shrink-0 ${c?.projectId ? "bg-indigo-100 text-indigo-700" : "bg-slate-100 text-slate-500"}`}>
+                              {c?.projectId ? `Project: ${c.projectReference || `PRJ-${c.projectId}`}` : "Project: not created yet"}
+                            </span>
+                          </div>
                         </div>
                         <div className="flex items-center gap-2 shrink-0">
-                          {c.generatedFile && (
+                          {c?.generatedFile && (
                             <a href={c.generatedFile} target="_blank" rel="noreferrer" className="text-blue-700 hover:text-blue-800 underline">Download PBA</a>
                           )}
                           <button
                             type="button"
                             onClick={() => { setManageContractId(c.id); resetContractAssignmentDraft(); }}
                             className="font-semibold text-emerald-700 underline disabled:opacity-40 disabled:cursor-not-allowed"
-                            disabled={activeContract?.id === c.id}
+                            disabled={!c || activeContract?.id === c.id}
+                            title={c ? undefined : "No contract for this lot yet — confirm this lot's final award to generate one."}
                           >
-                            {activeContract?.id === c.id ? "Managing" : "Manage this contract"}
+                            {c ? (activeContract?.id === c.id ? "Managing" : "Manage this contract") : "Awaiting award"}
                           </button>
                         </div>
                       </div>
-                    ))}
+                      );
+                    })}
                     <p className="text-[10px] text-slate-400 pt-1">Each lot's winner gets its own contract and project. Select "Manage this contract" to review, approve, and assign the project for that lot.</p>
+                  </div>
+                )}
+                {contractsWithoutLot.length > 0 && (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 space-y-1.5">
+                    <p className="text-xs font-semibold text-amber-900">
+                      Not linked to a lot ({contractsWithoutLot.length})
+                    </p>
+                    {contractsWithoutLot.map((c) => (
+                      <div key={c.id} className="flex items-center justify-between gap-2 rounded-md border border-amber-100 bg-white px-2 py-1.5 text-xs">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className="text-slate-700 truncate">{c.vendorName || c.referenceNumber}</span>
+                          <span className={`badge shrink-0 ${
+                            String(c.status).toLowerCase() === "approved" ? "bg-emerald-100 text-emerald-700" :
+                            String(c.status).toLowerCase() === "rejected" ? "bg-rose-100 text-rose-700" :
+                            "bg-sky-100 text-sky-700"
+                          }`}>{c.status}</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => { setManageContractId(c.id); resetContractAssignmentDraft(); }}
+                          className="font-semibold text-emerald-700 underline shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
+                          disabled={activeContract?.id === c.id}
+                        >
+                          {activeContract?.id === c.id ? "Managing" : "Manage this contract"}
+                        </button>
+                      </div>
+                    ))}
+                    <p className="text-[10px] text-amber-800 pt-1">
+                      These contracts were created outside the per-lot award flow, so no lot claims them. Assigning a project from one covers the whole tender rather than a single lot.
+                    </p>
                   </div>
                 )}
                 {activeContract && (
@@ -7092,19 +7341,65 @@ const Tenders = ({
               {awardScreen === "assignment" && (
               <div className="space-y-4">
                 <h3 className="text-sm font-bold text-slate-700">Project Assignment</h3>
-                {isLotWiseTender && tenderContracts.length > 1 && (
+                {isLotWiseTender && lotContractRows.length > 0 && (
                   <div className="rounded-lg border border-slate-200 bg-white p-3 space-y-1.5">
-                    <p className="text-xs font-semibold text-slate-700">Each Lot Gets Its Own Project — Select Which One to Assign</p>
-                    {tenderContracts.map((c) => (
-                      <div key={c.id} className={`flex items-center justify-between gap-2 rounded-md border px-2 py-1.5 text-xs ${activeContract?.id === c.id ? "border-emerald-300 bg-emerald-50" : "border-slate-100 bg-slate-50"}`}>
-                        <div className="flex items-center gap-2 min-w-0">
-                          <span className="text-slate-600 truncate">{c.lotName ? `${c.lotName} — ` : ""}{c.vendorName || c.referenceNumber}</span>
+                    <p className="text-xs font-semibold text-slate-700">
+                      Project Assignment by Lot ({lotContractRows.filter((r) => r.contract?.projectId).length} of {lotContractRows.length} assigned)
+                    </p>
+                    {lotContractRows.map((row) => {
+                      const c = row.contract;
+                      return (
+                      <div key={row.lotId} className={`flex items-center justify-between gap-2 rounded-md border px-2 py-1.5 text-xs ${c && activeContract?.id === c.id ? "border-emerald-300 bg-emerald-50" : "border-slate-100 bg-slate-50"}`}>
+                        <div className="flex min-w-0 flex-col gap-1">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className="text-slate-800 font-semibold truncate">{row.lotName}</span>
+                            {row.awardedVendorName && (
+                              <span className="shrink-0 text-slate-500 truncate">— {row.awardedVendorName}</span>
+                            )}
+                          </div>
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className={`badge shrink-0 ${
+                              !c ? "bg-slate-100 text-slate-500" :
+                              String(c.status).toLowerCase() === "approved" ? "bg-emerald-100 text-emerald-700" :
+                              String(c.status).toLowerCase() === "rejected" ? "bg-rose-100 text-rose-700" :
+                              "bg-sky-100 text-sky-700"
+                            }`}>
+                              {c ? `Contract: ${c.status}` : row.awardedVendorName ? "Contract: pending generation" : "Not awarded yet"}
+                            </span>
+                            <span className={`badge shrink-0 ${c?.projectId ? "bg-indigo-100 text-indigo-700" : "bg-slate-100 text-slate-500"}`}>
+                              {c?.projectId ? `Project: ${c.projectReference || `PRJ-${c.projectId}`}` : "Project: not created yet"}
+                            </span>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => { setManageContractId(c.id); resetContractAssignmentDraft(); }}
+                          className="font-semibold text-emerald-700 underline shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
+                          disabled={!c || activeContract?.id === c.id}
+                          title={c ? undefined : "No contract for this lot yet — confirm this lot's final award, then approve its contract."}
+                        >
+                          {!c ? "Awaiting award" : activeContract?.id === c.id ? "Managing" : c.projectId ? "View this project" : "Assign this lot"}
+                        </button>
+                      </div>
+                      );
+                    })}
+                    <p className="text-[10px] text-slate-400 pt-1">Each lot's project is scoped to that lot alone. Assignment unlocks once that lot's contract is approved on the "Contract" tab.</p>
+                  </div>
+                )}
+                {contractsWithoutLot.length > 0 && (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 space-y-1.5">
+                    <p className="text-xs font-semibold text-amber-900">
+                      Contracts not linked to a lot ({contractsWithoutLot.length})
+                    </p>
+                    {contractsWithoutLot.map((c) => (
+                      <div key={c.id} className="flex items-center justify-between gap-2 rounded-md border border-amber-100 bg-white px-2 py-1.5 text-xs">
+                        <div className="flex min-w-0 items-center gap-2">
+                          <span className="text-slate-700 truncate">{c.vendorName || c.referenceNumber}</span>
                           <span className={`badge shrink-0 ${
                             String(c.status).toLowerCase() === "approved" ? "bg-emerald-100 text-emerald-700" :
                             String(c.status).toLowerCase() === "rejected" ? "bg-rose-100 text-rose-700" :
                             "bg-sky-100 text-sky-700"
                           }`}>{c.status}</span>
-                          {c.projectId && <span className="badge shrink-0 bg-indigo-100 text-indigo-700">PRJ-{c.projectId}</span>}
                         </div>
                         <button
                           type="button"
@@ -7112,20 +7407,34 @@ const Tenders = ({
                           className="font-semibold text-emerald-700 underline shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
                           disabled={activeContract?.id === c.id}
                         >
-                          {activeContract?.id === c.id ? "Managing" : c.projectId ? "View this project" : "Assign this lot"}
+                          {activeContract?.id === c.id ? "Managing" : c.projectId ? "View this project" : "Assign project"}
                         </button>
                       </div>
                     ))}
+                    <p className="text-[10px] text-amber-800 pt-1">
+                      Not produced by a per-lot award, so assigning from one creates a tender-wide project rather than a per-lot one.
+                    </p>
                   </div>
                 )}
                 {!activeContract && (
-                  <p className="text-xs text-slate-500">No contract yet — issue and confirm the Intent to Award first, then approve the contract on the "Contract" tab.</p>
+                  <p className="text-xs text-slate-500">
+                    {isLotWiseTender
+                      ? "No lot has a contract yet — issue and confirm the Intent to Award for a lot on the \"Request Intent to Award\" tab, then approve its contract on the \"Contract\" tab."
+                      : "No contract yet — issue and confirm the Intent to Award first, then approve the contract on the \"Contract\" tab."}
+                  </p>
                 )}
                 {activeContract && (
                   <div className="space-y-3">
-                    <div className="flex items-center justify-between text-sm">
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
                       <span className="font-medium text-slate-700">{activeContract.referenceNumber}</span>
-                      <span className="badge bg-slate-100 text-slate-700">{activeContract.status}</span>
+                      <div className="flex items-center gap-1.5">
+                        <span className="badge bg-slate-100 text-slate-700">{activeContract.status}</span>
+                        {activeContract.projectId && (
+                          <span className="badge bg-indigo-100 text-indigo-700">
+                            {activeContract.projectReference || `PRJ-${activeContract.projectId}`}
+                          </span>
+                        )}
+                      </div>
                     </div>
                     {(activeContract.vendorName || activeContract.lotName) && (
                       <p className="text-xs text-slate-500 -mt-1">
@@ -7295,7 +7604,8 @@ const Tenders = ({
                                 type="number"
                                 min={0}
                                 max={100}
-                                disabled={Boolean(activeContract.projectId)}
+                                disabled={Boolean(activeContract.projectId) || !canSetInclusionTargets}
+                                title={canSetInclusionTargets ? undefined : "Set by the Super Admin in Platform Configuration"}
                                 value={contractAssignmentDraft.targetFemalePct}
                                 onChange={(e) => setContractAssignmentDraft(prev => ({ ...prev, targetFemalePct: Number(e.target.value) || 0 }))}
                               />
@@ -7307,7 +7617,8 @@ const Tenders = ({
                                 type="number"
                                 min={0}
                                 max={100}
-                                disabled={Boolean(activeContract.projectId)}
+                                disabled={Boolean(activeContract.projectId) || !canSetInclusionTargets}
+                                title={canSetInclusionTargets ? undefined : "Set by the Super Admin in Platform Configuration"}
                                 value={contractAssignmentDraft.targetVulnerablePct}
                                 onChange={(e) => setContractAssignmentDraft(prev => ({ ...prev, targetVulnerablePct: Number(e.target.value) || 0 }))}
                               />
@@ -7319,12 +7630,16 @@ const Tenders = ({
                                 type="number"
                                 min={0}
                                 max={100}
-                                disabled={Boolean(activeContract.projectId)}
+                                disabled={Boolean(activeContract.projectId) || !canSetInclusionTargets}
+                                title={canSetInclusionTargets ? undefined : "Set by the Super Admin in Platform Configuration"}
                                 value={contractAssignmentDraft.targetLowIncomePct}
                                 onChange={(e) => setContractAssignmentDraft(prev => ({ ...prev, targetLowIncomePct: Number(e.target.value) || 0 }))}
                               />
                             </div>
                           </div>
+                          {!canSetInclusionTargets && (
+                            <p className="text-xs text-slate-500">Inclusion targets are the programme minimums set by the Super Admin in Platform Configuration.</p>
+                          )}
                         </div>
                         {(() => {
                           const planLocked = Boolean(activeContract.projectId);
@@ -8212,8 +8527,10 @@ const Blacklisting = ({ currentUser }: { currentUser: User | null }) => {
 
   const role = currentUser?.role;
   const canInitiate = role === UserRole.RBF_OFFICIAL || role === UserRole.AUDITOR;
-  const canReview = role === UserRole.TAC || role === UserRole.DOE_OFFICER || role === UserRole.AUDITOR;
-  const canConfirm = role === UserRole.ADMIN || role === UserRole.DOE_OFFICER;
+  const canReview = role === UserRole.TAC || role === UserRole.AUDITOR;
+  const canConfirm = role === UserRole.ADMIN;
+  const isDoeOfficer = role === UserRole.DOE_OFFICER;
+  const canSeeRecommendations = role === UserRole.RBF_OFFICIAL || role === UserRole.ADMIN || role === UserRole.AUDITOR;
   const canReviewAppeals = role === UserRole.AUDITOR || role === UserRole.ADMIN;
   const canAppeal = role === UserRole.VENDOR;
 
@@ -8394,6 +8711,15 @@ const Blacklisting = ({ currentUser }: { currentUser: User | null }) => {
           <span className="badge bg-slate-100 text-slate-700">{appeals.length} Appeals</span>
         </div>
       </div>
+
+      {isDoeOfficer && <DoeBlacklistRecommendationPanel />}
+
+      {canSeeRecommendations && (
+        <RmtBlacklistRecommendationsPanel
+          canAct={role === UserRole.RBF_OFFICIAL || role === UserRole.ADMIN}
+          onCaseOpened={() => void loadBlacklisting()}
+        />
+      )}
 
       {canInitiate && (
         <div className="card p-6 space-y-4">
@@ -8855,12 +9181,13 @@ const Disbursements = ({
   }, [loadClaims]);
 
   const exportPaymentSchedule = () => {
-    const csv = [
-      "claim_id,vendor,project,milestone,amount,status",
-      ...claims.map((claim) =>
-        `${claim.id},${claim.vendorUsername || claim.vendorId},${claim.projectId},${claim.milestoneId || ""},${claim.claimAmount},${claim.status}`
-      ),
-    ].join("\n");
+    const csv = toCsv([
+      ["Claim ID", "Vendor", "Project", "Milestone", "Amount", "Status", "Submitted", "Approved", "Paid", "Payment reference"],
+      ...claims.map((claim) => [
+        claim.id, claim.vendorUsername || claim.vendorId, claim.projectId, claim.milestoneId || "", claim.claimAmount, claim.status,
+        claim.submittedAt || "", claim.approvedAt || "", claim.paidAt || "", claim.paymentReference || "",
+      ]),
+    ]);
     triggerDownload("payment_schedule.csv", csv, "text/csv;charset=utf-8");
     showNotification("Payment schedule exported.");
   };
@@ -9071,6 +9398,7 @@ const Disbursements = ({
       await flagProjectIssue(claim.projectId, {
         category: "payment_delay",
         details: details.trim(),
+        paymentClaimId: claim.id,
       });
       showNotification(`Issue flagged for project PRJ-${claim.projectId}.`);
     } catch (err: any) {
@@ -9257,6 +9585,10 @@ const Disbursements = ({
       {
         label: "Meter data present (30+ days)",
         met: Boolean(conditions.meter_data_present ?? summary?.uptime_kpi.total_devices_monitored),
+      },
+      {
+        label: "Meter data uploads cleared by RBF review",
+        met: Boolean(conditions.meter_data_integrity_cleared ?? true),
       },
       {
         label: "RMT approved with workflow handoff",
@@ -9862,17 +10194,17 @@ const Disbursements = ({
                       <div className={`rounded-2xl border p-4 ${selectedClaimTechnical?.summary?.gender_kpi.female_headed.met ? "border-emerald-200 bg-emerald-50" : "border-rose-200 bg-rose-50"}`}>
                         <p className="text-[11px] uppercase tracking-wide text-slate-500">Female-headed HH</p>
                         <p className="mt-2 text-2xl font-semibold text-slate-900">{selectedClaimTechnical?.summary ? `${selectedClaimTechnical.summary.gender_kpi.female_headed.percentage}%` : "No data"}</p>
-                        <p className="mt-1 text-xs text-slate-600">Target: {selectedClaimTechnical?.summary?.gender_kpi.female_headed.target ?? 50}%</p>
+                        <p className="mt-1 text-xs text-slate-600">Target: {selectedClaimTechnical?.summary?.gender_kpi.female_headed.target ?? getInclusionTargets().female}%</p>
                       </div>
                       <div className={`rounded-2xl border p-4 ${selectedClaimTechnical?.summary?.gender_kpi.vulnerable.met ? "border-emerald-200 bg-emerald-50" : "border-rose-200 bg-rose-50"}`}>
                         <p className="text-[11px] uppercase tracking-wide text-slate-500">Vulnerable Groups</p>
                         <p className="mt-2 text-2xl font-semibold text-slate-900">{selectedClaimTechnical?.summary ? `${selectedClaimTechnical.summary.gender_kpi.vulnerable.percentage}%` : "No data"}</p>
-                        <p className="mt-1 text-xs text-slate-600">Target: {selectedClaimTechnical?.summary?.gender_kpi.vulnerable.target ?? 30}%</p>
+                        <p className="mt-1 text-xs text-slate-600">Target: {selectedClaimTechnical?.summary?.gender_kpi.vulnerable.target ?? getInclusionTargets().vulnerable}%</p>
                       </div>
                       <div className={`rounded-2xl border p-4 ${selectedClaimTechnical?.summary?.gender_kpi.low_income.met ? "border-emerald-200 bg-emerald-50" : "border-rose-200 bg-rose-50"}`}>
                         <p className="text-[11px] uppercase tracking-wide text-slate-500">Low-income HH</p>
                         <p className="mt-2 text-2xl font-semibold text-slate-900">{selectedClaimTechnical?.summary ? `${selectedClaimTechnical.summary.gender_kpi.low_income.percentage}%` : "No data"}</p>
-                        <p className="mt-1 text-xs text-slate-600">Target: {selectedClaimTechnical?.summary?.gender_kpi.low_income.target ?? 60}%</p>
+                        <p className="mt-1 text-xs text-slate-600">Target: {selectedClaimTechnical?.summary?.gender_kpi.low_income.target ?? getInclusionTargets().lowIncome}%</p>
                       </div>
                       <div className={`rounded-2xl border p-4 ${selectedClaimTechnical?.summary?.installation_progress.on_track ? "border-emerald-200 bg-emerald-50" : "border-amber-200 bg-amber-50"}`}>
                         <p className="text-[11px] uppercase tracking-wide text-slate-500">Installation Progress</p>
@@ -10335,254 +10667,11 @@ const Disbursements = ({
   );
 };
 
-const Reports = ({ currentUser, onNavigate }: { currentUser: User | null; onNavigate?: (action: string, id?: string) => void }) => {
-  const [view, setView] = useState<'list' | 'analytics' | 'hub'>('hub');
-  const navigateView = (newView: typeof view, id?: string | null) => { setView(newView); onNavigate?.(newView, id ?? undefined); };
-  const [dateRange, setDateRange] = useState('Last 30 Days');
-  const [notification, setNotification] = useState<string | null>(null);
-
-  const stats = [
-    { label: 'Gender Participation', value: '42%', trend: '+5%', color: 'text-pink-600' },
-    { label: 'Installed Capacity', value: '1.2 MW', trend: '+12%', color: 'text-emerald-600' },
-    { label: 'Total Energy Output', value: '850 MWh', trend: '+8%', color: 'text-blue-600' },
-    { label: 'Regional Coverage', value: '8/10 Districts', trend: 'Stable', color: 'text-slate-600' },
-  ];
-
-  const regionalImpactData = [
-    { name: 'Maseru', capacity: 450, output: 320, gender: 45 },
-    { name: 'Leribe', capacity: 320, output: 210, gender: 38 },
-    { name: 'Berea', capacity: 210, output: 150, gender: 52 },
-    { name: 'Mafeteng', capacity: 180, output: 120, gender: 41 },
-    { name: 'Quthing', capacity: 150, output: 90, gender: 48 },
-  ];
-
-  const showNotification = (msg: string) => {
-    setNotification(msg);
-    setTimeout(() => setNotification(null), 2500);
-  };
-
-  const exportDashboard = () => {
-    const content = [
-      `Impact Analytics (${dateRange})`,
-      `Generated: ${new Date().toISOString()}`,
-      "",
-      ...regionalImpactData.map((row) => `${row.name}: capacity=${row.capacity}, output=${row.output}, gender=${row.gender}%`),
-    ].join("\n");
-    triggerDownload("impact_dashboard_export.txt", content);
-    showNotification("Analytics dashboard exported.");
-  };
-
-  const createCustomReport = () => {
-    showNotification("Custom report wizard opened (stub).");
-  };
-
-  const downloadReportCard = (title: string) => {
-    const content = `${title}\nGenerated: ${new Date().toISOString()}\n\nSample export content.`;
-    const safeName = title.replace(/[^a-z0-9]+/gi, "_").toLowerCase();
-    triggerDownload(`${safeName}.txt`, content);
-    showNotification(`${title} exported.`);
-  };
-
-  const requestApiAccess = () => {
-    showNotification("API access request submitted.");
-  };
-
-  if (view === 'hub') {
-    return (
-      <div className="p-6">
-        <div className="flex items-center gap-4 mb-6">
-          <button onClick={() => navigateView('list')} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
-            <ChevronRight className="rotate-180" size={20} />
-          </button>
-          <h1 className="text-2xl font-bold text-slate-900">Report Center</h1>
-        </div>
-        {currentUser ? <ReportsHub currentUser={currentUser} /> : <p>Please log in to access reports.</p>}
-      </div>
-    );
-  }
-
-  if (view === 'analytics') {
-    return (
-      <div className="space-y-8">
-        <AnimatePresence>
-          {notification && (
-            <motion.div
-              initial={{ opacity: 0, y: -12 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -12 }}
-              className="fixed top-24 right-8 z-[300] bg-blue-600 text-white px-5 py-2.5 rounded-xl shadow-xl text-sm font-medium"
-            >
-              {notification}
-            </motion.div>
-          )}
-        </AnimatePresence>
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <button onClick={() => navigateView('list')} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500">
-              <ChevronRight className="rotate-180" size={20} />
-            </button>
-            <div>
-              <h1 className="text-2xl font-bold text-slate-900">Impact Analytics</h1>
-              <p className="text-sm text-slate-500">Real-time performance metrics from Prospect database</p>
-            </div>
-          </div>
-          <div className="flex gap-3">
-            <select 
-              value={dateRange}
-              onChange={(e) => setDateRange(e.target.value)}
-              className="bg-white border-slate-200 rounded-xl px-4 py-2 text-sm font-bold text-slate-700 shadow-sm focus:ring-emerald-500"
-            >
-              <option>Last 7 Days</option>
-              <option>Last 30 Days</option>
-              <option>Last Quarter</option>
-              <option>Year to Date</option>
-            </select>
-            <button onClick={exportDashboard} className="btn-primary flex items-center gap-2">
-              <Download size={18} /> Export Dashboard
-            </button>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-          {stats.map((stat, i) => (
-            <div key={i} className="card p-6 space-y-2">
-              <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">{stat.label}</p>
-              <div className="flex items-end justify-between">
-                <h3 className={`text-3xl font-black ${stat.color}`}>{stat.value}</h3>
-                <span className="text-xs font-bold text-emerald-500 bg-emerald-50 px-2 py-0.5 rounded-full">
-                  {stat.trend}
-                </span>
-              </div>
-            </div>
-          ))}
-        </div>
-
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-          {/* Regional Output Chart */}
-          <div className="card p-8 space-y-6">
-            <div className="flex items-center justify-between">
-              <h3 className="font-bold text-slate-900">Energy Output by Region (kWh)</h3>
-              <div className="flex gap-2">
-                <span className="flex items-center gap-1 text-[10px] font-bold text-slate-400">
-                  <div className="w-2 h-2 rounded-full bg-emerald-500" /> Output
-                </span>
-                <span className="flex items-center gap-1 text-[10px] font-bold text-slate-400">
-                  <div className="w-2 h-2 rounded-full bg-slate-200" /> Capacity
-                </span>
-              </div>
-            </div>
-            <div className="h-80 w-full">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={regionalImpactData}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#64748b' }} />
-                  <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#64748b' }} />
-                  <Tooltip 
-                    contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
-                    cursor={{ fill: '#f8fafc' }}
-                  />
-                  <Bar dataKey="output" fill="#10b981" radius={[4, 4, 0, 0]} barSize={32} />
-                  <Bar dataKey="capacity" fill="#e2e8f0" radius={[4, 4, 0, 0]} barSize={32} />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-
-          {/* Gender Participation Chart */}
-          <div className="card p-8 space-y-6">
-            <h3 className="font-bold text-slate-900">Gender Participation Rate (%)</h3>
-            <div className="h-80 w-full">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={regionalImpactData}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#64748b' }} />
-                  <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#64748b' }} domain={[0, 100]} />
-                  <Tooltip 
-                    contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
-                  />
-                  <Line type="monotone" dataKey="gender" stroke="#db2777" strokeWidth={3} dot={{ r: 6, fill: '#db2777', strokeWidth: 2, stroke: '#fff' }} activeDot={{ r: 8 }} />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-        </div>
-
-        <div className="card overflow-hidden">
-          <div className="p-6 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between">
-            <h3 className="font-bold text-slate-900">Detailed Regional Impact Table</h3>
-            <button onClick={() => showNotification("Displaying all districts in the current table view.")} className="text-emerald-600 text-sm font-bold hover:underline">View All Districts</button>
-          </div>
-          <table className="w-full text-left">
-            <thead>
-              <tr className="border-b border-slate-100">
-                <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest">ID</th>
-                <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest">District</th>
-                <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest">Project Type</th>
-                <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest">Installed Capacity</th>
-                <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest">Energy Output</th>
-                <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest">Gender Impact</th>
-                <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest">Status</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-50">
-              {[
-                { district: 'Maseru', type: 'Mini-grid', capacity: '450 kW', output: '320 kWh', gender: '45%', status: 'Verified' },
-                { district: 'Leribe', type: 'SHS', capacity: '320 kW', output: '210 kWh', gender: '38%', status: 'Verified' },
-                { district: 'Berea', type: 'Cook Stove', capacity: '210 kW', output: '150 kWh', gender: '52%', status: 'Pending' },
-              ].map((row, i) => (
-                <tr key={i} className="hover:bg-slate-50/50 transition-colors">
-                  <td className="px-6 py-4 font-mono text-xs text-slate-500">{`RG-${String(i + 1).padStart(3, "0")}`}</td>
-                  <td className="px-6 py-4 font-bold text-slate-900">{row.district}</td>
-                  <td className="px-6 py-4 text-sm text-slate-600">{row.type}</td>
-                  <td className="px-6 py-4 text-sm text-slate-600">{row.capacity}</td>
-                  <td className="px-6 py-4 text-sm font-bold text-emerald-600">{row.output}</td>
-                  <td className="px-6 py-4 text-sm font-bold text-pink-600">{row.gender}</td>
-                  <td className="px-6 py-4">
-                    <span className={`px-2 py-1 rounded-full text-[10px] font-bold uppercase ${
-                      row.status === 'Verified' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'
-                    }`}>
-                      {row.status}
-                    </span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-8">
-      <AnimatePresence>
-        {notification && (
-          <motion.div
-            initial={{ opacity: 0, y: -12 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -12 }}
-            className="fixed top-24 right-8 z-[300] bg-blue-600 text-white px-5 py-2.5 rounded-xl shadow-xl text-sm font-medium"
-          >
-            {notification}
-          </motion.div>
-        )}
-      </AnimatePresence>
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900">Report Center</h1>
-          <p className="text-sm text-slate-500">Generate and download verified program reports</p>
-        </div>
-        <div className="flex gap-3">
-          <button onClick={() => navigateView('analytics')} className="btn-secondary flex items-center gap-2">
-            <BarChart3 size={18} /> View Analytics Dashboard
-          </button>
-        </div>
-      </div>
-
-      {currentUser ? <ReportsHub currentUser={currentUser} /> : <p>Please log in to access reports.</p>}
-    </div>
-  );
-};
+const Reports = ({ currentUser }: { currentUser: User | null; onNavigate?: (action: string, id?: string) => void }) => (
+  <div className="p-6">
+    {currentUser ? <ReportsHub currentUser={currentUser} /> : <p>Please log in to access reports.</p>}
+  </div>
+);
 
 const BidFieldError = ({ message }: { message?: string }) => (
   message ? <p className="mt-1 text-xs font-semibold text-rose-600">{message}</p> : null
@@ -13281,6 +13370,7 @@ const VendorDashboard = ({
   onViewProfile?: () => void;
   onNavigate?: (action: string, id?: string) => void;
 }) => {
+  const inclusionTargets = useInclusionTargets();
   const [view, setView] = useState<"dashboard" | "new-claim" | "details" | "bid">("dashboard");
   const navigateView = (newView: typeof view, id?: string | null) => { setView(newView); onNavigate?.(newView, id ?? undefined); };
   const [isPreQualified, setIsPreQualified] = useState(false);
@@ -13331,9 +13421,9 @@ const VendorDashboard = ({
     boqItems: [
       { itemNumber: 1, description: "", qty: "", unit: "", unitPrice: "", total: 0, templateItemId: undefined as string | undefined },
     ],
-    femaleTargetPct: "50",
-    vulnerableTargetPct: "30",
-    lowIncomeTargetPct: "60",
+    femaleTargetPct: String(getInclusionTargets().female),
+    vulnerableTargetPct: String(getInclusionTargets().vulnerable),
+    lowIncomeTargetPct: String(getInclusionTargets().lowIncome),
     inclusionCommitmentConfirmed: false,
     omStrategySummary: "",
     localTechniciansToBeTrained: "",
@@ -13712,9 +13802,9 @@ const VendorDashboard = ({
       boqItems: [
         { itemNumber: 1, description: "", qty: "", unit: "", unitPrice: "", total: 0 },
       ],
-      femaleTargetPct: "50",
-      vulnerableTargetPct: "30",
-      lowIncomeTargetPct: "60",
+      femaleTargetPct: String(getInclusionTargets().female),
+      vulnerableTargetPct: String(getInclusionTargets().vulnerable),
+      lowIncomeTargetPct: String(getInclusionTargets().lowIncome),
       inclusionCommitmentConfirmed: false,
       omStrategySummary: "",
       localTechniciansToBeTrained: "",
@@ -13914,9 +14004,9 @@ const VendorDashboard = ({
             }))
           : [{ itemNumber: 1, description: "", qty: "", unit: "", unitPrice: "", total: 0 }];
       })(),
-      femaleTargetPct: version.female_target_pct != null ? String(version.female_target_pct) : "50",
-      vulnerableTargetPct: version.vulnerable_target_pct != null ? String(version.vulnerable_target_pct) : "30",
-      lowIncomeTargetPct: version.low_income_target_pct != null ? String(version.low_income_target_pct) : "60",
+      femaleTargetPct: version.female_target_pct != null ? String(version.female_target_pct) : String(getInclusionTargets().female),
+      vulnerableTargetPct: version.vulnerable_target_pct != null ? String(version.vulnerable_target_pct) : String(getInclusionTargets().vulnerable),
+      lowIncomeTargetPct: version.low_income_target_pct != null ? String(version.low_income_target_pct) : String(getInclusionTargets().lowIncome),
       inclusionCommitmentConfirmed: Boolean(version.inclusion_commitment_confirmed),
       omStrategySummary: version.om_strategy_summary ?? "",
       localTechniciansToBeTrained: version.local_technicians_to_be_trained != null ? String(version.local_technicians_to_be_trained) : "",
@@ -14265,8 +14355,9 @@ const VendorDashboard = ({
     (d) => Boolean(bidCustomFiles[d.name]) || Boolean(customDocsExistingMap[d.name]?.file_url || customDocsExistingMap[d.name]?.file_name)
   ).length;
   const bidSiteCount = bidForm.sites.filter(site => site.siteName.trim()).length;
-  const requiredFemaleTarget = 50;
-  const requiredVulnerableTarget = 30;
+  const requiredFemaleTarget = inclusionTargets.female;
+  const requiredVulnerableTarget = inclusionTargets.vulnerable;
+  const requiredLowIncomeTarget = inclusionTargets.lowIncome;
   const approvedTierLevel = parseTierLevel(latestApprovedPrequal?.techTier);
   const selectedTierLevel = parseTierLevel(bidForm.techTier);
   const roundCurrency = (value: number) => Math.round((value + Number.EPSILON) * 100) / 100;
@@ -14336,7 +14427,7 @@ const VendorDashboard = ({
   const inclusionSectionComplete =
     Number(bidForm.femaleTargetPct || 0) >= requiredFemaleTarget
     && Number(bidForm.vulnerableTargetPct || 0) >= requiredVulnerableTarget
-    && Number(bidForm.lowIncomeTargetPct || 0) >= 60
+    && Number(bidForm.lowIncomeTargetPct || 0) >= requiredLowIncomeTarget
     && bidForm.inclusionCommitmentConfirmed;
   const inclusionSectionReady = inclusionSectionComplete && (!(isTechnicalStage || isCombinedStage) || genderActionPlanUploaded);
   const narrativeSectionComplete = true; // Optional supplementary narrative, Technical/Combined only.
@@ -14366,7 +14457,7 @@ const VendorDashboard = ({
           "GPS coordinates are optional at Stage 1 but recommended. If provided, they must fall within Lesotho.",
         ] },
         { heading: "Inclusion Targets (Section D)", points: [
-          "Commit to at least 50% female-headed, 30% vulnerable-group, and 60% low-income households.",
+          `Commit to at least ${requiredFemaleTarget}% female-headed, ${requiredVulnerableTarget}% vulnerable-group, and ${requiredLowIncomeTarget}% low-income households.`,
           "Confirm the inclusion commitment before submitting.",
         ] },
         { heading: "Document Rules", points: [
@@ -14403,17 +14494,17 @@ const VendorDashboard = ({
           "For SHS tenders offering PAYGO, the PAYGO platform, minimum daily payment, and collection method are required.",
         ] },
         { heading: "Inclusion Targets (Section D)", points: [
-          "Commit to at least 50% female-headed, 30% vulnerable-group, and 60% low-income households.",
+          `Commit to at least ${requiredFemaleTarget}% female-headed, ${requiredVulnerableTarget}% vulnerable-group, and ${requiredLowIncomeTarget}% low-income households.`,
           "Confirm the inclusion commitment and attach the Gender Action Plan before submitting.",
         ] },
       ];
   const inclusionTargetWarning =
-    Number(bidForm.femaleTargetPct || 0) < requiredFemaleTarget || Number(bidForm.vulnerableTargetPct || 0) < requiredVulnerableTarget || Number(bidForm.lowIncomeTargetPct || 0) < 60
-      ? `Minimum submission targets are ${requiredFemaleTarget}% female-headed households, ${requiredVulnerableTarget}% vulnerable-group households, and 60% low-income households.`
+    Number(bidForm.femaleTargetPct || 0) < requiredFemaleTarget || Number(bidForm.vulnerableTargetPct || 0) < requiredVulnerableTarget || Number(bidForm.lowIncomeTargetPct || 0) < requiredLowIncomeTarget
+      ? `Minimum submission targets are ${requiredFemaleTarget}% female-headed households, ${requiredVulnerableTarget}% vulnerable-group households, and ${requiredLowIncomeTarget}% low-income households.`
       : null;
   const femaleTargetInvalid = Number(bidForm.femaleTargetPct || 0) < requiredFemaleTarget;
   const vulnerableTargetInvalid = Number(bidForm.vulnerableTargetPct || 0) < requiredVulnerableTarget;
-  const lowIncomeTargetInvalid = Number(bidForm.lowIncomeTargetPct || 0) < 60;
+  const lowIncomeTargetInvalid = Number(bidForm.lowIncomeTargetPct || 0) < requiredLowIncomeTarget;
   const inclusionInputClass = (invalid: boolean) => `input-field text-lg font-bold ${invalid ? "border-rose-400 focus:border-rose-500 focus:ring-rose-200" : ""}`;
 
   const updateBoqItem = (index: number, field: string, value: string) => {
@@ -14691,8 +14782,8 @@ const VendorDashboard = ({
       if (Number(bidForm.vulnerableTargetPct || 0) < requiredVulnerableTarget) {
         fields.vulnerableTargetPct = `Vulnerable group target must be at least ${requiredVulnerableTarget}%.`;
       }
-      if (Number(bidForm.lowIncomeTargetPct || 0) < 60) {
-        fields.lowIncomeTargetPct = "Low-income household target must be at least 60%.";
+      if (Number(bidForm.lowIncomeTargetPct || 0) < requiredLowIncomeTarget) {
+        fields.lowIncomeTargetPct = `Low-income household target must be at least ${requiredLowIncomeTarget}%.`;
       }
       if (!bidForm.inclusionCommitmentConfirmed) {
         fields.inclusionCommitmentConfirmed = "You must confirm the inclusion commitment before submitting.";
@@ -15497,28 +15588,28 @@ const VendorDashboard = ({
                   <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                     <label className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Female-Headed *</label>
                     <div className="mt-3 flex items-end gap-2">
-                      <input type="number" required min={50} className={inclusionInputClass(femaleTargetInvalid)} value={bidForm.femaleTargetPct} onChange={(e) => { setBidForm((prev) => ({ ...prev, femaleTargetPct: e.target.value })); clearBidFieldError("femaleTargetPct"); }} />
+                      <input type="number" required min={requiredFemaleTarget} className={inclusionInputClass(femaleTargetInvalid)} value={bidForm.femaleTargetPct} onChange={(e) => { setBidForm((prev) => ({ ...prev, femaleTargetPct: e.target.value })); clearBidFieldError("femaleTargetPct"); }} />
                       <span className="pb-3 text-sm font-bold text-slate-500">%</span>
                     </div>
-                    <p className="mt-2 text-xs text-slate-500">Minimum 50%.</p>
+                    <p className="mt-2 text-xs text-slate-500">Minimum {requiredFemaleTarget}%.</p>
                     <BidFieldError message={bidFieldErrors["femaleTargetPct"]} />
                   </div>
                   <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                     <label className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Vulnerable Group *</label>
                     <div className="mt-3 flex items-end gap-2">
-                      <input type="number" required min={30} className={inclusionInputClass(vulnerableTargetInvalid)} value={bidForm.vulnerableTargetPct} onChange={(e) => { setBidForm((prev) => ({ ...prev, vulnerableTargetPct: e.target.value })); clearBidFieldError("vulnerableTargetPct"); }} />
+                      <input type="number" required min={requiredVulnerableTarget} className={inclusionInputClass(vulnerableTargetInvalid)} value={bidForm.vulnerableTargetPct} onChange={(e) => { setBidForm((prev) => ({ ...prev, vulnerableTargetPct: e.target.value })); clearBidFieldError("vulnerableTargetPct"); }} />
                       <span className="pb-3 text-sm font-bold text-slate-500">%</span>
                     </div>
-                    <p className="mt-2 text-xs text-slate-500">Minimum 30%.</p>
+                    <p className="mt-2 text-xs text-slate-500">Minimum {requiredVulnerableTarget}%.</p>
                     <BidFieldError message={bidFieldErrors["vulnerableTargetPct"]} />
                   </div>
                   <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                     <label className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Low-Income *</label>
                     <div className="mt-3 flex items-end gap-2">
-                      <input type="number" required min={60} className={inclusionInputClass(lowIncomeTargetInvalid)} value={bidForm.lowIncomeTargetPct} onChange={(e) => { setBidForm((prev) => ({ ...prev, lowIncomeTargetPct: e.target.value })); clearBidFieldError("lowIncomeTargetPct"); }} />
+                      <input type="number" required min={requiredLowIncomeTarget} className={inclusionInputClass(lowIncomeTargetInvalid)} value={bidForm.lowIncomeTargetPct} onChange={(e) => { setBidForm((prev) => ({ ...prev, lowIncomeTargetPct: e.target.value })); clearBidFieldError("lowIncomeTargetPct"); }} />
                       <span className="pb-3 text-sm font-bold text-slate-500">%</span>
                     </div>
-                    <p className="mt-2 text-xs text-slate-500">Minimum 60%.</p>
+                    <p className="mt-2 text-xs text-slate-500">Minimum {requiredLowIncomeTarget}%.</p>
                     <BidFieldError message={bidFieldErrors["lowIncomeTargetPct"]} />
                   </div>
                 </div>
@@ -15862,7 +15953,7 @@ const VendorDashboard = ({
                       (isTechnicalStage || isCombinedStage) ? "BOQ grand total exactly equals the bid amount" : isFinancialStage ? "Bid amount matches the Technical-stage BOQ total" : "Co-financing difference covered by the vendor",
                       (isTechnicalStage || isCombinedStage) ? "O&M strategy summary provided" : isEoiStage ? "Village sites target the tender districts" : null,
                       (isTechnicalStage || isCombinedStage) && isShsTender ? "PAYGO platform, daily payment and collection method completed" : null,
-                      "Inclusion targets meet 50% female-headed / 30% vulnerable / 60% low-income",
+                      `Inclusion targets meet ${requiredFemaleTarget}% female-headed / ${requiredVulnerableTarget}% vulnerable / ${requiredLowIncomeTarget}% low-income`,
                       "Inclusion commitment confirmed",
                       (isTechnicalStage || isCombinedStage) ? "Technology tier does not exceed your approved pre-qualification tier" : null,
                     ].filter((point): point is string => Boolean(point)).map((point) => (
@@ -16838,28 +16929,28 @@ const VendorDashboard = ({
                   <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
                     <label className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Female-Headed Household Target *</label>
                     <div className="mt-3 flex items-end gap-3">
-                      <input type="number" required min={50} className={inclusionInputClass(femaleTargetInvalid)} value={bidForm.femaleTargetPct} onChange={(e) => { setBidForm(prev => ({ ...prev, femaleTargetPct: e.target.value })); clearBidFieldError("femaleTargetPct"); }} />
+                      <input type="number" required min={requiredFemaleTarget} className={inclusionInputClass(femaleTargetInvalid)} value={bidForm.femaleTargetPct} onChange={(e) => { setBidForm(prev => ({ ...prev, femaleTargetPct: e.target.value })); clearBidFieldError("femaleTargetPct"); }} />
                       <span className="pb-3 text-sm font-bold text-slate-500">%</span>
                     </div>
-                    <p className="mt-2 text-xs text-slate-500">Minimum 50% — the share of your installations that go to households headed by a woman.</p>
+                    <p className="mt-2 text-xs text-slate-500">Minimum {requiredFemaleTarget}% — the share of your installations that go to households headed by a woman.</p>
                     <BidFieldError message={bidFieldErrors["femaleTargetPct"]} />
                   </div>
                   <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
                     <label className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Vulnerable Group Inclusion *</label>
                     <div className="mt-3 flex items-end gap-3">
-                      <input type="number" required min={30} className={inclusionInputClass(vulnerableTargetInvalid)} value={bidForm.vulnerableTargetPct} onChange={(e) => { setBidForm(prev => ({ ...prev, vulnerableTargetPct: e.target.value })); clearBidFieldError("vulnerableTargetPct"); }} />
+                      <input type="number" required min={requiredVulnerableTarget} className={inclusionInputClass(vulnerableTargetInvalid)} value={bidForm.vulnerableTargetPct} onChange={(e) => { setBidForm(prev => ({ ...prev, vulnerableTargetPct: e.target.value })); clearBidFieldError("vulnerableTargetPct"); }} />
                       <span className="pb-3 text-sm font-bold text-slate-500">%</span>
                     </div>
-                    <p className="mt-2 text-xs text-slate-500">Minimum 30% — households with elderly, disabled, or chronically ill (e.g. HIV-affected) members.</p>
+                    <p className="mt-2 text-xs text-slate-500">Minimum {requiredVulnerableTarget}% — households with elderly, disabled, or chronically ill (e.g. HIV-affected) members.</p>
                     <BidFieldError message={bidFieldErrors["vulnerableTargetPct"]} />
                   </div>
                   <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
                     <label className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Low-Income Household Target *</label>
                     <div className="mt-3 flex items-end gap-3">
-                      <input type="number" required min={60} className={inclusionInputClass(lowIncomeTargetInvalid)} value={bidForm.lowIncomeTargetPct} onChange={(e) => { setBidForm(prev => ({ ...prev, lowIncomeTargetPct: e.target.value })); clearBidFieldError("lowIncomeTargetPct"); }} />
+                      <input type="number" required min={requiredLowIncomeTarget} className={inclusionInputClass(lowIncomeTargetInvalid)} value={bidForm.lowIncomeTargetPct} onChange={(e) => { setBidForm(prev => ({ ...prev, lowIncomeTargetPct: e.target.value })); clearBidFieldError("lowIncomeTargetPct"); }} />
                       <span className="pb-3 text-sm font-bold text-slate-500">%</span>
                     </div>
-                    <p className="mt-2 text-xs text-slate-500">Minimum 60% — the share of your installations that go to households below the local low-income threshold.</p>
+                    <p className="mt-2 text-xs text-slate-500">Minimum {requiredLowIncomeTarget}% — the share of your installations that go to households below the local low-income threshold.</p>
                     <BidFieldError message={bidFieldErrors["lowIncomeTargetPct"]} />
                   </div>
                 </div>
@@ -17576,18 +17667,7 @@ const VendorDashboard = ({
                   key={contract.id}
                   className="flex flex-col overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_12px_30px_-24px_rgba(15,23,42,0.5)]"
                 >
-                  <div className="flex items-start justify-between gap-4 px-5 py-4">
-                    <div className="min-w-0">
-                      <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-400">
-                        Contract Reference
-                      </p>
-                      <p className="truncate text-base font-bold text-slate-900">{contract.referenceNumber}</p>
-                      {contract.lotName && (
-                        <p className="mt-0.5 text-xs font-semibold text-emerald-700">{contract.lotName}</p>
-                      )}
-                    </div>
-                    <span className={`badge shrink-0 ${contractStatusTone(contract.status)}`}>{contract.status}</span>
-                  </div>
+                  <ContractHeader contract={contract} />
 
                   <ContractStepper status={contract.status} />
 
@@ -18041,6 +18121,7 @@ type VendorProfileForm = {
 };
 
 const VendorProfileView = ({ vendorId, viewerRole, onClose, embedded = false, useOwnProfile = false }: VendorProfileViewProps) => {
+  const inclusionTargets = useInclusionTargets();
   const [activeTab, setActiveTab] = useState<VendorProfileTab>("company");
   const [profile, setProfile] = useState<VendorProfile | null>(null);
   const [loading, setLoading] = useState(true);
@@ -18332,19 +18413,19 @@ const VendorProfileView = ({ vendorId, viewerRole, onClose, embedded = false, us
             <div className="card p-4">
               <h4 className="font-bold text-slate-900 border-b pb-2 mb-3">Inclusion Commitments</h4>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <div className={`p-4 rounded-lg text-center ${(profile?.prequalification?.female_beneficiary_target || 50) >= 50 ? 'bg-emerald-50' : 'bg-red-50'}`}>
+                <div className={`p-4 rounded-lg text-center ${(profile?.prequalification?.female_beneficiary_target || inclusionTargets.female) >= inclusionTargets.female ? 'bg-emerald-50' : 'bg-red-50'}`}>
                   <p className="text-xs text-slate-600">Female HH Commitment</p>
-                  <p className={`text-2xl font-bold ${(profile?.prequalification?.female_beneficiary_target || 50) >= 50 ? 'text-emerald-600' : 'text-red-600'}`}>
-                    {profile?.prequalification?.female_beneficiary_target || 50}%
+                  <p className={`text-2xl font-bold ${(profile?.prequalification?.female_beneficiary_target || inclusionTargets.female) >= inclusionTargets.female ? 'text-emerald-600' : 'text-red-600'}`}>
+                    {profile?.prequalification?.female_beneficiary_target || inclusionTargets.female}%
                   </p>
-                  <p className="text-xs text-slate-500">min: 50%</p>
+                  <p className="text-xs text-slate-500">min: {inclusionTargets.female}%</p>
                 </div>
-                <div className={`p-4 rounded-lg text-center ${(profile?.prequalification?.vulnerable_group_target || 30) >= 30 ? 'bg-emerald-50' : 'bg-red-50'}`}>
+                <div className={`p-4 rounded-lg text-center ${(profile?.prequalification?.vulnerable_group_target || inclusionTargets.vulnerable) >= inclusionTargets.vulnerable ? 'bg-emerald-50' : 'bg-red-50'}`}>
                   <p className="text-xs text-slate-600">Vulnerable Group</p>
-                  <p className={`text-2xl font-bold ${(profile?.prequalification?.vulnerable_group_target || 30) >= 30 ? 'text-emerald-600' : 'text-red-600'}`}>
-                    {profile?.prequalification?.vulnerable_group_target || 30}%
+                  <p className={`text-2xl font-bold ${(profile?.prequalification?.vulnerable_group_target || inclusionTargets.vulnerable) >= inclusionTargets.vulnerable ? 'text-emerald-600' : 'text-red-600'}`}>
+                    {profile?.prequalification?.vulnerable_group_target || inclusionTargets.vulnerable}%
                   </p>
-                  <p className="text-xs text-slate-500">min: 30%</p>
+                  <p className="text-xs text-slate-500">min: {inclusionTargets.vulnerable}%</p>
                 </div>
                 <div className={`p-4 rounded-lg text-center bg-emerald-50`}>
                   <p className="text-xs text-slate-600">Low-income HH</p>
@@ -19115,6 +19196,46 @@ const ProjectsHub = ({
   const isUndpPortal = mode === "undp";
   const isAuditorPortal = mode === "auditor";
   const isOfficialPortal = !isVendorPortal;
+  // "Open Project" shows the project on its own page in the same tab, with its own URL
+  // (/app/<section>?view=project&projectId=<id>&projectTab=<tab>) so Back, refresh and links work.
+  const projectPageFromUrl = () => {
+    if (typeof window === "undefined") return null;
+    const query = new URLSearchParams(window.location.search);
+    return query.get("view") === "project" ? query.get("projectId") : null;
+  };
+  const [projectPageId, setProjectPageId] = useState<string | null>(projectPageFromUrl);
+  useEffect(() => {
+    const onPopState = () => {
+      const pageId = projectPageFromUrl();
+      setProjectPageId(pageId);
+      if (!pageId) setSelectedProject(null);
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+  const hubSection = (() => {
+    const fromPath = typeof window !== "undefined" ? window.location.pathname.replace(/^\/app\//, "").split("/")[0] : "";
+    if (fromPath && fromPath !== "/" && !fromPath.startsWith("/")) return fromPath;
+    return isVendorPortal ? "projects_hub" : isRbfPortal ? "rbf_projects" : isPscPortal ? "portfolio" : "projects";
+  })();
+  const openProjectPage = (project: Project, tab: string) => {
+    const url = `/app/${hubSection}?view=project&projectId=${encodeURIComponent(project.id)}&projectTab=${encodeURIComponent(tab)}`;
+    window.history.pushState({ __app: "rbf-spa", activeTab: hubSection, projectPage: project.id }, "", url);
+    setSelectedProject(project);
+    setProjectTab(tab as typeof projectTab);
+    setProjectPageId(project.id);
+    window.scrollTo({ top: 0 });
+  };
+  const closeProjectPage = () => {
+    window.history.pushState({ __app: "rbf-spa", activeTab: hubSection }, "", `/app/${hubSection}`);
+    setProjectPageId(null);
+    setSelectedProject(null);
+    window.scrollTo({ top: 0 });
+  };
+  // Completed projects are archived with their whole lifecycle and leave the active lists;
+  // the Archived view shows them (read-only) with their records.
+  const [archiveView, setArchiveView] = useState<"active" | "archived">("active");
+  const [archiveDetailView, setArchiveDetailView] = useState<"records" | "lifecycle">("lifecycle");
   const canDecideMilestoneReviews = currentUser?.role === UserRole.RBF_OFFICIAL || currentUser?.role === UserRole.ADMIN;
   const projectTabs = isRbfPortal
     ? ["overview", "planning", "kpi", "map", "milestones", "payments", "documents", "updates"] as const
@@ -19178,6 +19299,11 @@ const ProjectsHub = ({
   React.useEffect(() => {
     if (externalProjectId && projects.length > 0) {
       const matchedProject = projects.find((project) => project.id === externalProjectId);
+      if (!matchedProject && archiveView === "active") {
+        // A link to a completed project: it lives in the archive.
+        setArchiveView("archived");
+        return;
+      }
       if (matchedProject) {
         setSelectedProject(matchedProject);
         setTimeout(() => {
@@ -19188,7 +19314,13 @@ const ProjectsHub = ({
     } else if (!externalProjectId) {
       setSelectedProject(null);
     }
-  }, [externalProjectId, projects]);
+  }, [externalProjectId, projects, archiveView]);
+  // On a project's own page the project always stays selected.
+  useEffect(() => {
+    if (!projectPageId || selectedProject?.id === projectPageId) return;
+    const pageProject = projects.find((project) => project.id === projectPageId);
+    if (pageProject) setSelectedProject(pageProject);
+  }, [projectPageId, selectedProject, projects]);
   const [projectSetupDraft, setProjectSetupDraft] = useState(createEmptyProjectSetupDraft);
   const [planSaving, setPlanSaving] = useState(false);
   const [planMessage, setPlanMessage] = useState<string | null>(null);
@@ -19268,6 +19400,21 @@ const ProjectsHub = ({
   const loadData = React.useCallback(async () => {
     setLoading(true);
     try {
+      if (archiveView === "archived") {
+        const [archived, contractRows, tenderRows] = await Promise.all([
+          fetchArchivedProjectsHubData(),
+          fetchTenderContracts(),
+          fetchTenders(),
+        ]);
+        setProjects(archived.projects);
+        setMilestones(archived.milestones);
+        setClaims(archived.claims);
+        setContracts(contractRows);
+        setTenders(tenderRows);
+        setProjectUpdates(archived.updates);
+        setPortfolioReports(archived.installations);
+        return;
+      }
       const [projectRows, milestoneRows, claimRows, contractRows, tenderRows, updateRows, reportRows] = await Promise.all([
         fetchProjects(),
         fetchMilestones(),
@@ -19287,7 +19434,7 @@ const ProjectsHub = ({
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [archiveView]);
 
   React.useEffect(() => {
     void loadData();
@@ -19934,10 +20081,10 @@ const ProjectsHub = ({
         project.projectSetup?.reviewStatus || (isProjectSetupComplete(project) ? "approved" : "draft"),
         project.projectSetup?.submittedAt || "",
         project.projectSetup?.reviewedAt || "",
-        (project.projectSetup?.reviewNotes || "").replace(/[\n,]/g, " "),
-      ].join(",");
+        project.projectSetup?.reviewNotes || "",
+      ];
     });
-    triggerDownload("rbf_projects_rmt.csv", [header.join(","), ...rows].join("\n"), "text/csv;charset=utf-8");
+    triggerDownload("rbf_projects_rmt.csv", toCsv([header, ...rows]), "text/csv;charset=utf-8");
   };
 
   const handleSaveDeploymentPlan = async (mode: "draft" | "submit") => {
@@ -20406,13 +20553,46 @@ const ProjectsHub = ({
     }
   };
 
+  // A meter data review changes which readings count, so KPIs and milestone eligibility move too.
+  const refreshMeterReviewData = async (projectId: string) => {
+    try {
+      const [readings, kpi, logs] = await Promise.all([
+        fetchSmartMeterReadings(projectId),
+        fetchProjectKpiSummary(projectId),
+        fetchAuditLogs(projectId),
+      ]);
+      setSmartMeterReadings(readings);
+      setSelectedProjectKpi(kpi);
+      setProjectAuditLogs(logs);
+    } catch {
+      // The review itself succeeded; stale figures refresh on the next project load.
+    }
+  };
+
   const handleUploadMeterCsv = async () => {
     if (!selectedProject || !meterCsvFile) return;
     setMeterCsvUploading(true);
     setMeterCsvMessage(null);
     try {
       const result = await uploadProjectMeterCsv(selectedProject.id, meterCsvFile);
-      setMeterCsvMessage(`Uploaded successfully. ${result.rows_ingested} rows ingested.`);
+      const highFindings = (result.integrity_findings || []).filter((finding) => finding.severity === "high");
+      const rejected = result.rows_rejected || 0;
+      const invalidRows = result.invalid_rows || [];
+      const rejectDetail = invalidRows.length
+        ? ` ${invalidRows
+            .slice(0, 3)
+            .map((row) => `row ${row.row}${row.meter_id ? ` (${row.meter_id})` : ""}: ${row.errors.join("; ")}`)
+            .join(" | ")}${rejected > invalidRows.length ? ` (+${rejected - invalidRows.length} more)` : ""}`
+        : "";
+      setMeterCsvMessage(
+        rejected > 0
+          ? `Uploaded, but ${rejected} of ${rejected + (result.rows_ingested || 0)} row(s) were rejected and ${result.rows_ingested} ingested.${rejectDetail} See the upload report for the full list.`
+          : result.batch_status === "flagged"
+            ? `Uploaded ${result.rows_ingested} rows, but the data failed ${highFindings.length} integrity check(s): `
+              + `${Array.from(new Set(highFindings.map((finding) => finding.label))).join("; ")}. `
+              + "RBF will review it, and milestone claims are on hold until then."
+            : `Uploaded successfully. ${result.rows_ingested} rows ingested and queued for RBF review.`,
+      );
       setMeterCsvFile(null);
       const [readings, logs] = await Promise.all([
         fetchSmartMeterReadings(selectedProject.id),
@@ -20467,92 +20647,24 @@ const ProjectsHub = ({
   };
 
   const downloadMeterCsvTemplate = () => {
+    // A live example timestamp, so the template row does not fall outside the 30-day
+    // freshness window the moment it is downloaded.
+    const exampleTimestamp = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
     triggerDownload(
       "meter_data_template.csv",
-      "meter_id,installation_id,recorded_at,kwh_generated,uptime_pct,output_power_w\nMETER-001,INS-001,2026-04-01T08:00:00Z,12.5,98.7,\n",
+      `meter_id,installation_id,recorded_at,kwh_generated,uptime_pct,output_power_w\nMETER-001,INS-001,${exampleTimestamp},12.5,98.7,\n`,
       "text/csv;charset=utf-8"
     );
   };
 
-  const handleGenerateProjectReport = (project: Project) => {
-    const projectUpdatesForExport = updatesForProject(project.id);
-    const projectMilestones = milestonesForProject(project.id);
-    const nextMilestone = nextOpenMilestoneForProject(project.id);
-    const completedMilestones = projectMilestones.filter(m => milestoneCompleted(m));
-    const projectDocumentsForExport = documentsForProject(project.id);
-    const projectReports = reportsForProject(project.id);
-    const latestUpdate = projectUpdatesForExport[0];
-    const budgetValue = budgetForProject(project);
-    const reportLines = [
-      `PROJECT PERFORMANCE REPORT`,
-      `Generated on: ${new Date().toLocaleString()}`,
-      ``,
-      `1. Executive Summary`,
-      `Project Reference: ${project.projectReference || `Project ${project.id}`}`,
-      `Project Title: ${project.projectTitle || "N/A"}`,
-      `Vendor: ${project.vendorName}`,
-      `Technology: ${project.techType}`,
-      `Location: ${[project.region, project.district].filter(Boolean).join(", ") || "N/A"}`,
-      `Current Status: ${project.status}`,
-      `Overall Progress: ${project.progress}%`,
-      `Contract Value: ${budgetValue != null ? `M ${Number(budgetValue).toLocaleString()}` : "N/A"}`,
-      `Reporting Period Start: ${formatDate(startDateForProject(project))}`,
-      `Reporting Period End: ${formatDate(endDateForProject(project))}`,
-      ``,
-      `2. Immediate Priority`,
-      `Next Milestone To Finish: ${nextMilestone?.name || "All milestones completed"}`,
-      `Target Date: ${formatDate(nextMilestone?.targetDate)}`,
-      `Progress: ${nextMilestone ? `${milestoneProgress(nextMilestone)}%` : "100%"}`,
-      `Description: ${nextMilestone?.description?.trim() || "No open milestone description is available."}`,
-      ``,
-      `3. Milestone Status`,
-      ...(projectMilestones.length > 0
-        ? projectMilestones.map((milestone, index) => {
-            const badge = milestoneCompleted(milestone) ? "Completed" : milestoneBadge(milestone).label;
-            return [
-              `${index + 1}. ${milestone.name}`,
-              `   Status: ${badge}`,
-              `   Target Date: ${formatDate(milestone.targetDate)}`,
-              `   Completed Date: ${formatDate(milestone.completedDate)}`,
-              `   Progress: ${milestoneProgress(milestone)}%`,
-              `   Description: ${milestone.description?.trim() || "N/A"}`,
-            ].join("\n");
-          })
-        : ["No milestones have been recorded for this project."]),
-      ``,
-      `4. Project Activity Summary`,
-      `Completed Milestones: ${completedMilestones.length} of ${projectMilestones.length}`,
-      `Project Documents: ${projectDocumentsForExport.length}`,
-      `Installation Reports Submitted: ${projectReports.length}`,
-      `Latest Update: ${latestUpdate?.title || "No recent updates recorded"}`,
-      ``,
-      `5. Documents On Record`,
-      ...(projectDocumentsForExport.length > 0
-        ? projectDocumentsForExport.map((doc, index) => `${index + 1}. ${doc.title || doc.file.split("/").pop() || "Project Document"} - uploaded ${doc.uploadedAt ? new Date(doc.uploadedAt).toLocaleString() : "N/A"}`)
-        : ["No project documents have been uploaded."]),
-      ``,
-      `6. Field Work Summary`,
-      ...(projectReports.length > 0
-        ? projectReports.map((report, index) => `${index + 1}. Serial ${report.serialNumber} | Beneficiary ${report.beneficiaryId} | Status ${report.status} | Submitted ${report.submittedAt ? new Date(report.submittedAt).toLocaleString() : "N/A"}`)
-        : ["No installation reports have been submitted."]),
-      ``,
-      `7. Update Timeline`,
-      ...(projectUpdatesForExport.length > 0
-        ? projectUpdatesForExport.map((update, index) => {
-            const stamp = update.createdAt ? new Date(update.createdAt).toLocaleString() : "N/A";
-            const author = update.authorUsername ? ` | ${update.authorUsername}` : "";
-            return `${index + 1}. ${update.title || "Project Update"} | ${stamp}${author}\n${update.body}`;
-          })
-        : ["No project updates have been recorded yet."]),
-      ``,
-      `End of Report`,
-    ];
-
-    const safeReference = (project.projectReference || `project_${project.id}`)
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "_")
-      .replace(/^_|_$/g, "");
-    triggerDownload(`${safeReference || `project_${project.id}`}_report.txt`, reportLines.join("\n"));
+  // The project report is the server-generated KPI PDF: scoped to the viewer's role and
+  // free of beneficiary personal data.
+  const handleGenerateProjectReport = async (project: Project) => {
+    try {
+      await downloadProjectKpiPdf(project.id);
+    } catch (err: any) {
+      alert(toFriendlyApiMessage(String(err?.message || "")) || "Unable to generate the KPI report.");
+    }
   };
 
   const handleFlagProjectForRmt = async (project: Project) => {
@@ -20784,7 +20896,7 @@ const ProjectsHub = ({
                           },
                           {
                             label: `Female-headed households: ${kpiDisplay.genderLabel}`,
-                            met: kpiSummary?.milestone_eligibility?.milestone_2?.conditions?.female_pct_50 ?? (kpiSnapshot.femalePct >= (kpiSummary?.milestone_eligibility?.milestone_2?.thresholds?.female_pct ?? 50)),
+                            met: kpiSummary?.milestone_eligibility?.milestone_2?.conditions?.female_pct_50 ?? (kpiSnapshot.femalePct >= (kpiSummary?.milestone_eligibility?.milestone_2?.thresholds?.female_pct ?? getInclusionTargets().female)),
                           },
                           {
                             label: `Blocking anomaly flags: ${flaggedCount}`,
@@ -20793,6 +20905,12 @@ const ProjectsHub = ({
                           {
                             label: `Meter data in last 30 days: ${kpiSummary?.milestone_eligibility?.milestone_2?.conditions?.meter_data_present ? "Available" : "Not yet available"}`,
                             met: kpiSummary?.milestone_eligibility?.milestone_2?.conditions?.meter_data_present ?? false,
+                          },
+                          {
+                            label: kpiSummary?.milestone_eligibility?.milestone_2?.conditions?.meter_data_integrity_cleared === false
+                              ? "Meter data review: an upload is flagged or awaiting correction"
+                              : "Meter data review: no uploads on hold",
+                            met: kpiSummary?.milestone_eligibility?.milestone_2?.conditions?.meter_data_integrity_cleared ?? true,
                           },
                         ].map((item) => (
                           <div key={item.label} className={`flex items-center gap-2 rounded-xl border px-3 py-2 ${getConditionRowClass(item.met)}`}>
@@ -20971,6 +21089,7 @@ const ProjectsHub = ({
               ...(canAccessPayments ? ["payments"] as const : []),
               ...(canAccessAnomalyFlags ? ["anomaly_flags"] as const : []),
               ...(canAccessDocuments ? ["documents"] as const : []),
+              ...(isDoePortal ? ["updates"] as const : []),
               ...(canAccessProspectSync ? ["prospect_sync"] as const : []),
               ...(canAccessAuditTrail ? ["audit_trail"] as const : []),
             ];
@@ -21004,6 +21123,8 @@ const ProjectsHub = ({
           return "Anomaly Flags";
         case "prospect_sync":
           return "Prospect Sync";
+        case "updates":
+          return isDoePortal ? "Regional Notes" : "Updates";
         case "audit_trail":
           return "Audit Trail";
         default:
@@ -21044,24 +21165,25 @@ const ProjectsHub = ({
                   <button onClick={() => void handleAddProjectNote(project, "Project marked at risk", "Why should this project be marked at risk?")} className="btn-secondary text-xs">Mark At Risk</button>
                   <button onClick={() => void handleFlagProjectForRmt(project)} className="btn-secondary text-xs">Flag for Audit</button>
                   <button onClick={() => void handleAddProjectNote(project, "Message to vendor", "Enter the message to send to the vendor.")} className="btn-secondary text-xs">Send Message to Vendor</button>
-                  <button onClick={() => handleGenerateProjectReport(project)} className="btn-secondary text-xs">Export Project Report</button>
+                  <button onClick={() => void handleGenerateProjectReport(project)} className="btn-secondary text-xs">KPI Report (PDF)</button>
                   <button onClick={() => void handleProjectProspectSync(project, "sync_all_available", "Force Prospect Sync")} className="btn-secondary text-xs">Force Prospect Sync</button>
                 </>
               )}
               {canAddTechnicalComment && (
                 <>
                   <button onClick={() => void handleAddProjectNote(project, "Technical comment", "Add a technical comment for RMT.")} className="btn-secondary text-xs">Add Technical Comment</button>
-                  <button onClick={() => handleGenerateProjectReport(project)} className="btn-secondary text-xs">Download Project Report</button>
+                  <button onClick={() => void handleGenerateProjectReport(project)} className="btn-secondary text-xs">KPI Report (PDF)</button>
                 </>
               )}
               {canFlagConcern && (
                 <>
-                  <button onClick={() => window.location.href = "?tab=dashboard"} className="btn-secondary text-xs">Flag Concern to RMT</button>
-                  <button onClick={() => handleGenerateProjectReport(project)} className="btn-secondary text-xs">Export Regional Report</button>
+                  <button onClick={() => setProjectTab("updates")} className="btn-secondary text-xs">Add Regional Note</button>
+                  <button onClick={() => setProjectTab("documents")} className="btn-secondary text-xs">Upload Regional Document</button>
+                  <button onClick={() => void handleGenerateProjectReport(project)} className="btn-secondary text-xs">KPI Report (PDF)</button>
                   <button onClick={() => setProjectTab("installations")} className="btn-secondary text-xs">View on Regional Map</button>
                 </>
               )}
-              {isAuditorPortal && <button onClick={() => handleGenerateProjectReport(project)} className="btn-secondary text-xs">Export Audit Package</button>}
+              {isAuditorPortal && <button onClick={() => void handleGenerateProjectReport(project)} className="btn-secondary text-xs">KPI Report (PDF)</button>}
               {isPscPortal && <button onClick={() => setProjectTab("milestone_payments")} className="btn-secondary text-xs">Review Claims</button>}
             </div>
           </div>
@@ -21540,210 +21662,14 @@ const ProjectsHub = ({
 
           {activeTab === "device_readings" && (
             <div className="space-y-6">
-              {(() => {
-                const now = new Date();
-                const rangeDays = deviceDateFilter === "7d" ? 7 : deviceDateFilter === "90d" ? 90 : 30;
-                const rangeStartMs = now.getTime() - rangeDays * 24 * 60 * 60 * 1000;
-                const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
-                const projectReadings = smartReadingsForProject(project.id).filter((reading) => {
-                  const recorded = new Date(reading.recordedAt).getTime();
-                  return Number.isFinite(recorded) && recorded >= rangeStartMs;
-                });
-
-                const readingGroups = new Map<string, SmartMeterReading[]>();
-                projectReadings.forEach((reading) => {
-                  const key = `${reading.installationId || "unknown"}::${reading.meterId || "unknown"}`;
-                  const list = readingGroups.get(key) || [];
-                  list.push(reading);
-                  readingGroups.set(key, list);
-                });
-
-                const rows = Array.from(readingGroups.entries()).map(([key, readings]) => {
-                  const [installationId, meterIdRaw] = key.split("::");
-                  const meterId = meterIdRaw || "N/A";
-                  const sorted = readings.slice().sort((a, b) => (b.recordedAt || "").localeCompare(a.recordedAt || ""));
-                  const last = sorted[0];
-                  const uptimeValues = readings
-                    .map((r) => Number(r.uptimePct))
-                    .filter((v) => Number.isFinite(v));
-                  const avgUptime = uptimeValues.length ? uptimeValues.reduce((sum, v) => sum + v, 0) / uptimeValues.length : 0;
-                  const totalKwh = readings.reduce((sum, r) => sum + Number(r.kwh || 0), 0);
-                  const lastReadingMs = last?.recordedAt ? new Date(last.recordedAt).getTime() : Number.NaN;
-                  const hoursSince = Number.isFinite(lastReadingMs) ? (now.getTime() - lastReadingMs) / (1000 * 60 * 60) : Number.POSITIVE_INFINITY;
-
-                  let status: "good" | "low" | "offline" = "good";
-                  let issueReason = "";
-                  if (avgUptime === 0 || hoursSince > 72) {
-                    status = "offline";
-                    issueReason = avgUptime === 0 ? "Uptime is 0%" : `No data for ${Math.floor(hoursSince / 24)} day(s)`;
-                  } else if ((avgUptime >= 80 && avgUptime < 99) || (hoursSince > 48 && hoursSince <= 72)) {
-                    status = "low";
-                    issueReason = avgUptime < 99 ? `Low uptime ${avgUptime.toFixed(1)}%` : "Data gap between 48-72 hours";
-                  }
-
-                  const installation = projectReports.find((report) => report.id === installationId);
-                  const installationLabel = installation?.serialNumber ? `INS-${installation.serialNumber}` : `INS-${installationId}`;
-                  return {
-                    installationId,
-                    installationLabel,
-                    meterId,
-                    lastReadingAt: last?.recordedAt,
-                    avgUptime,
-                    totalKwh,
-                    readingCount: readings.length,
-                    status,
-                    issueReason,
-                  };
-                });
-
-                const installationOptions = Array.from(
-                  new Set(rows.map((row) => row.installationId).filter((value) => value && value !== "unknown"))
-                );
-                const filteredRows = rows.filter((row) => {
-                  if (deviceInstallationFilter !== "all" && row.installationId !== deviceInstallationFilter) return false;
-                  if (deviceStatusFilter !== "all" && row.status !== deviceStatusFilter) return false;
-                  return true;
-                });
-
-                const devicesReporting = rows.filter((row) => row.readingCount > 0).length;
-                const verifiedDevices = projectReports.filter((report) => (report.verificationStatus || report.status) === "Verified").length;
-                const avgUptime30 = rows.length ? rows.reduce((sum, row) => sum + row.avgUptime, 0) / rows.length : 0;
-                const totalEnergyThisMonth = smartReadingsForProject(project.id)
-                  .filter((reading) => {
-                    const recorded = new Date(reading.recordedAt).getTime();
-                    return Number.isFinite(recorded) && recorded >= thisMonthStart;
-                  })
-                  .reduce((sum, reading) => sum + Number(reading.kwh || 0), 0);
-                const devicesWithIssues = rows.filter((row) => row.status !== "good");
-
-                const statusPill = (status: "good" | "low" | "offline") => {
-                  if (status === "good") return "bg-emerald-100 text-emerald-700";
-                  if (status === "low") return "bg-amber-100 text-amber-700";
-                  return "bg-rose-100 text-rose-700";
-                };
-                const statusLabel = (status: "good" | "low" | "offline") => {
-                  if (status === "good") return "Good";
-                  if (status === "low") return "Low";
-                  return "Offline";
-                };
-                const formatLastReading = (value?: string) => {
-                  if (!value) return "N/A";
-                  const timestamp = new Date(value).getTime();
-                  if (!Number.isFinite(timestamp)) return "N/A";
-                  const diffHours = Math.max(0, (now.getTime() - timestamp) / (1000 * 60 * 60));
-                  if (diffHours < 1) return "Just now";
-                  if (diffHours < 24) return `${Math.round(diffHours)}hr ago`;
-                  return `${Math.round(diffHours / 24)} day(s)`;
-                };
-
-                return (
-                  <>
-                    <div>
-                      <h4 className="text-sm font-semibold text-slate-800">Device Readings Overview</h4>
-                      <p className="text-xs text-slate-500">Monitor meter reporting health, uptime, and energy output from uploaded CSV telemetry.</p>
-                    </div>
-
-                    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                      <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
-                        <select className="input-field" value={deviceInstallationFilterDraft} onChange={(e) => setDeviceInstallationFilterDraft(e.target.value)}>
-                          <option value="all">Installation: All</option>
-                          {installationOptions.map((installationId) => (
-                            <option key={installationId} value={installationId}>{installationId}</option>
-                          ))}
-                        </select>
-                        <select className="input-field" value={deviceDateFilterDraft} onChange={(e) => setDeviceDateFilterDraft(e.target.value as "30d" | "7d" | "90d")}>
-                          <option value="30d">Date: Last 30 days</option>
-                          <option value="7d">Date: Last 7 days</option>
-                          <option value="90d">Date: Last 90 days</option>
-                        </select>
-                        <select className="input-field" value={deviceStatusFilterDraft} onChange={(e) => setDeviceStatusFilterDraft(e.target.value as "all" | "good" | "low" | "offline")}>
-                          <option value="all">Status: All</option>
-                          <option value="good">Status: Good</option>
-                          <option value="low">Status: Low</option>
-                          <option value="offline">Status: Offline</option>
-                        </select>
-                        <div className="md:col-span-2">
-                          <button
-                            onClick={() => {
-                              setDeviceInstallationFilter(deviceInstallationFilterDraft);
-                              setDeviceDateFilter(deviceDateFilterDraft);
-                              setDeviceStatusFilter(deviceStatusFilterDraft);
-                            }}
-                            className="btn-primary text-xs"
-                          >
-                            Apply
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
-                      <div className="rounded-2xl border border-slate-200 bg-white p-4">
-                        <p className="text-[11px] uppercase tracking-wide text-slate-500">Devices Reporting</p>
-                        <p className="mt-1 text-xl font-semibold text-slate-900">{devicesReporting}</p>
-                        <p className="text-xs text-slate-500">of {verifiedDevices} verified</p>
-                      </div>
-                      <div className="rounded-2xl border border-slate-200 bg-white p-4">
-                        <p className="text-[11px] uppercase tracking-wide text-slate-500">Avg Uptime ({rangeDays} days)</p>
-                        <p className="mt-1 text-xl font-semibold text-slate-900">{avgUptime30.toFixed(1)}%</p>
-                        <p className={`text-xs ${avgUptime30 >= 99 ? "text-emerald-700" : "text-amber-700"}`}>{avgUptime30 >= 99 ? ">=99% target met" : "Below 99% target"}</p>
-                      </div>
-                      <div className="rounded-2xl border border-slate-200 bg-white p-4">
-                        <p className="text-[11px] uppercase tracking-wide text-slate-500">Total Energy This Month</p>
-                        <p className="mt-1 text-xl font-semibold text-slate-900">{totalEnergyThisMonth.toLocaleString(undefined, { maximumFractionDigits: 1 })} kWh</p>
-                      </div>
-                      <div className="rounded-2xl border border-slate-200 bg-white p-4">
-                        <p className="text-[11px] uppercase tracking-wide text-slate-500">Devices With Issues</p>
-                        <p className="mt-1 text-xl font-semibold text-rose-700">{devicesWithIssues.length}</p>
-                        <p className="text-xs text-rose-600">See attention list below</p>
-                      </div>
-                    </div>
-
-                    <div className="overflow-x-auto rounded-2xl border border-slate-200">
-                      <table className="min-w-full divide-y divide-slate-200 text-sm">
-                        <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
-                          <tr>
-                            <th className="px-4 py-3">Installation ID</th>
-                            <th className="px-4 py-3">Device Serial (meter_id)</th>
-                            <th className="px-4 py-3">Last Reading</th>
-                            <th className="px-4 py-3">Avg Uptime %</th>
-                            <th className="px-4 py-3">Total kWh</th>
-                            <th className="px-4 py-3">Readings Count</th>
-                            <th className="px-4 py-3">Status</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100 bg-white">
-                          {filteredRows.map((row) => (
-                            <tr key={`${row.installationId}-${row.meterId}`} className="cursor-pointer hover:bg-slate-50" onClick={() => setSelectedDeviceReading(row)}>
-                              <td className="px-4 py-3 text-slate-700">{row.installationLabel}</td>
-                              <td className="px-4 py-3 text-slate-700">{row.meterId}</td>
-                              <td className="px-4 py-3 text-slate-700">{formatLastReading(row.lastReadingAt)}</td>
-                              <td className="px-4 py-3 text-slate-700">{row.avgUptime.toFixed(1)}%</td>
-                              <td className="px-4 py-3 text-slate-700">{row.totalKwh.toFixed(1)}</td>
-                              <td className="px-4 py-3 text-slate-700">{row.readingCount}</td>
-                              <td className="px-4 py-3">
-                                <span className={`rounded-full px-3 py-1 text-xs font-semibold ${statusPill(row.status)}`}>
-                                  {statusLabel(row.status)}
-                                </span>
-                              </td>
-                            </tr>
-                          ))}
-                          {filteredRows.length === 0 && (
-                            <tr>
-                              <td colSpan={7} className="px-4 py-6 text-center text-sm text-slate-500">No device readings found for the current filters.</td>
-                            </tr>
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
-                  </>
-                );
-              })()}
-            </div>
-          )}
-
-          {activeTab === "device_readings" && (
-            <div className="space-y-6">
+              <MeterDataReview
+                projectId={project.id}
+                vendorId={project.vendorId}
+                vendorName={project.vendorName}
+                canReview={canDecideMilestoneReviews}
+                canInitiateBlacklisting={currentUser?.role === UserRole.RBF_OFFICIAL}
+                onChanged={() => refreshMeterReviewData(project.id)}
+              />
               {(() => {
                 const now = new Date();
                 const rangeDays = deviceDateFilter === "7d" ? 7 : deviceDateFilter === "90d" ? 90 : 30;
@@ -22171,7 +22097,7 @@ const ProjectsHub = ({
                 <div className="flex flex-wrap gap-2">
                   <button onClick={() => void handleAddProjectNote(project, "Performance note", "Add a performance note for this project.")} className="btn-secondary text-xs">Add Performance Note</button>
                   <button onClick={() => void handleAddProjectNote(project, "Project set at risk", "Why is this project at risk?")} className="btn-secondary text-xs">Set Project At Risk</button>
-                  <button onClick={() => handleGenerateProjectReport(project)} className="btn-secondary text-xs">Download KPI Report</button>
+                  <button onClick={() => void handleGenerateProjectReport(project)} className="btn-secondary text-xs">KPI Report (PDF)</button>
                   <button onClick={() => setProjectTab("prospect_sync")} className="btn-secondary text-xs">View Prospect Sync</button>
                 </div>
               )}
@@ -22489,6 +22415,12 @@ const ProjectsHub = ({
                    <h4 className="text-sm font-semibold text-slate-800">Documents</h4>
                    <p className="text-xs text-slate-500">Download project, contract, and implementation records.</p>
                  </div>
+                 {isDoePortal && (
+                   <DoeDocumentUploader
+                     projectId={project.id}
+                     onUploaded={(uploaded) => setProjectDocuments(prev => [uploaded, ...prev])}
+                   />
+                 )}
                </div>
 
                <div className="overflow-x-auto rounded-2xl border border-slate-200">
@@ -22515,7 +22447,22 @@ const ProjectsHub = ({
                         <td className="px-4 py-3 text-slate-700">{doc.title || doc.file.split("/").pop() || "Project Document"}</td>
                         <td className="px-4 py-3 text-slate-700">{doc.title?.split("—")[0]?.trim() || doc.title?.split("-")[0]?.trim() || "Other"}</td>
                         <td className="px-4 py-3 text-slate-700">{doc.uploadedAt ? new Date(doc.uploadedAt).toLocaleString() : "N/A"}</td>
-                        <td className="px-4 py-3"><a href={toFileUrl(doc.file) || "#"} target="_blank" rel="noreferrer" className="text-emerald-700 underline">Download</a></td>
+                        <td className="px-4 py-3">
+                          <a href={toFileUrl(doc.file) || "#"} target="_blank" rel="noreferrer" className="text-emerald-700 underline">Download</a>
+                          {isDoePortal && currentUser?.id && doc.uploadedBy === String(currentUser.id) && (
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                if (await confirmAndDeleteProjectDocument(doc)) {
+                                  setProjectDocuments(prev => prev.filter(item => item.id !== doc.id));
+                                }
+                              }}
+                              className="ml-3 text-rose-600 underline"
+                            >
+                              Delete
+                            </button>
+                          )}
+                        </td>
                       </tr>
                     ))}
                     {visibleDocuments.length === 0 && !contract?.signedFile && <tr><td colSpan={4} className="px-4 py-6 text-center text-sm text-slate-500">No documents available for this project.</td></tr>}
@@ -22523,6 +22470,15 @@ const ProjectsHub = ({
                 </table>
               </div>
             </div>
+          )}
+
+          {activeTab === "updates" && isDoePortal && (
+            <DoeRegionalNotesPanel
+              projectId={project.id}
+              notes={updatesForProject(project.id)}
+              currentUserId={currentUser?.id ? String(currentUser.id) : undefined}
+              onChanged={() => refreshProjectUpdates(project.id)}
+            />
           )}
 
           {activeTab === "prospect_sync" && (
@@ -22620,6 +22576,39 @@ const ProjectsHub = ({
   };
 
   const renderProjectDetail = (project: Project) => {
+    if (!project.archivedAt) return renderProjectDetailBody(project);
+    return (
+      <div className="mt-5 space-y-4">
+        <ArchivedProjectBanner project={project} />
+        <div className="flex flex-wrap gap-2">
+          {([["lifecycle", "Lifecycle Archive"], ["records", "Project Records"]] as const).map(([id, label]) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => setArchiveDetailView(id)}
+              className={`rounded-full px-4 py-1.5 text-xs font-bold ${archiveDetailView === id ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        {archiveDetailView === "lifecycle" ? (
+          <ProjectLifecycleArchive
+            project={project}
+            currentUser={currentUser}
+            onRestored={() => {
+              setSelectedProject(null);
+              setArchiveView("active");
+            }}
+          />
+        ) : (
+          renderProjectDetailBody(project)
+        )}
+      </div>
+    );
+  };
+
+  const renderProjectDetailBody = (project: Project) => {
     if (isOfficialPortal) {
       return renderOfficialProjectDetail(project);
     }
@@ -22693,6 +22682,7 @@ const ProjectsHub = ({
     const latestCsvAudit = meterCsvUploadHistory[0];
     const openMeterUploadReport = (entry: { fileName: string; uploadedAt?: string; rowsIngested: number; rowsRejected: number; details: Record<string, any> }) => {
       const anomaly = entry.details?.anomaly_counts || {};
+      const rejectedRows: MeterCsvInvalidRow[] = Array.isArray(entry.details?.rejected_rows) ? entry.details.rejected_rows : [];
       const lines = [
         `File: ${entry.fileName}`,
         `Uploaded: ${entry.uploadedAt ? new Date(entry.uploadedAt).toLocaleString() : "N/A"}`,
@@ -22704,6 +22694,17 @@ const ProjectsHub = ({
         `- No data: ${Number(anomaly.no_data || 0)}`,
         `- Output deviation: ${Number(anomaly.output_deviation || 0)}`,
       ];
+      if (rejectedRows.length) {
+        lines.push(``, `Rejected Rows (${entry.rowsRejected})`);
+        rejectedRows.forEach((row) => {
+          lines.push(`- Row ${row.row}${row.meter_id ? ` [${row.meter_id}]` : ""}: ${(row.errors || []).join("; ")}`);
+        });
+        if (entry.rowsRejected > rejectedRows.length) {
+          lines.push(`- ...and ${entry.rowsRejected - rejectedRows.length} more (only the first ${rejectedRows.length} are stored).`);
+        }
+      } else if (entry.rowsRejected > 0) {
+        lines.push(``, `Rejected Rows: ${entry.rowsRejected} row(s) were rejected, but no per-row detail was stored for this upload.`);
+      }
       window.alert(lines.join("\n"));
     };
     const installationPageSize = 20;
@@ -23189,7 +23190,7 @@ const ProjectsHub = ({
                 <div className="flex flex-wrap gap-2">
                   <button onClick={() => void handleAddProjectNote(project, "Performance note", "Add a performance note for this project.")} className="btn-secondary text-xs">Add Performance Note</button>
                   <button onClick={() => void handleAddProjectNote(project, "Project set at risk", "Why is this project at risk?")} className="btn-secondary text-xs">Set Project At Risk</button>
-                  <button onClick={() => handleGenerateProjectReport(project)} className="btn-secondary text-xs">Download KPI Report</button>
+                  <button onClick={() => void handleGenerateProjectReport(project)} className="btn-secondary text-xs">KPI Report (PDF)</button>
                   <button onClick={() => setProjectTab("prospect_sync")} className="btn-secondary text-xs">View Prospect Sync</button>
                 </div>
               )}
@@ -23578,7 +23579,7 @@ const ProjectsHub = ({
                   <ol className="list-decimal space-y-1 pl-4 text-xs text-slate-700">
                     <li><strong>Start from the template.</strong> Click <em>Download CSV Template</em> and fill it in &mdash; the column names must match exactly. Never rename, reorder, or remove the header row.</li>
                     <li><strong>Match the installation.</strong> Each row links to the installation you submitted earlier via its <code className="bg-blue-100 px-1 rounded">meter_id</code> (exactly as typed on the New Installation Report) or its numeric <code className="bg-blue-100 px-1 rounded">installation_id</code>. If you left the meter ID blank on the installation, the row can only be matched by <code className="bg-blue-100 px-1 rounded">installation_id</code>.</li>
-                    <li><strong>Use recent timestamps.</strong> <code className="bg-blue-100 px-1 rounded">recorded_at</code> must be valid ISO datetime (e.g. <code className="bg-blue-100 px-1 rounded">2026-08-13T08:00:00</code>) and within the last 30 days &mdash; this is what proves the meter is actively reporting (Milestone 2). Readings older than 48 hours will raise a &ldquo;no data&rdquo; flag.</li>
+                    <li><strong>Use recent timestamps, and include the time.</strong> <code className="bg-blue-100 px-1 rounded">recorded_at</code> (or <code className="bg-blue-100 px-1 rounded">reading_datetime</code>) must be within the last 30 days &mdash; this is what proves the meter is actively reporting (Milestone 2). Readings older than 48 hours will raise a &ldquo;no data&rdquo; flag. ISO 8601 (<code className="bg-blue-100 px-1 rounded">2026-08-13T08:00:00</code>), day-first (<code className="bg-blue-100 px-1 rounded">13/08/2026 08:00</code>) and month-first (<code className="bg-blue-100 px-1 rounded">08/13/2026 08:00</code>) are all accepted. A date with no time is rejected, because it would be stored as midnight and score the meter a full day stale. A bare local time is read as Lesotho time.</li>
                     <li><strong>Keep values in range.</strong> <code className="bg-blue-100 px-1 rounded">kwh_generated</code> must be 0 or more, <code className="bg-blue-100 px-1 rounded">uptime_pct</code> between 0 and 100. A 0% uptime row creates a &ldquo;zero uptime&rdquo; flag.</li>
                     <li><strong>Every meter in the file must belong to this project and your vendor account.</strong> Rows for installations from another vendor or project are rejected.</li>
                     <li><strong>One reading per row.</strong> Readings that deviate more than 5% from the previous reading for the same meter create an &ldquo;output deviation&rdquo; flag &mdash; submit realistic readings.</li>
@@ -23597,7 +23598,7 @@ const ProjectsHub = ({
                         <tbody className="divide-y divide-slate-100 text-slate-700">
                           <tr><td className="px-2 py-1"><code>meter_id</code></td><td className="px-2 py-1">Yes</td><td className="px-2 py-1">Meter ID as recorded on the installation</td></tr>
                           <tr><td className="px-2 py-1"><code>installation_id</code></td><td className="px-2 py-1">No</td><td className="px-2 py-1">Numeric installation ID (or meter ID / serial / NID)</td></tr>
-                          <tr><td className="px-2 py-1"><code>recorded_at</code></td><td className="px-2 py-1">Yes</td><td className="px-2 py-1">ISO datetime, e.g. <code>2026-08-13T08:00:00</code></td></tr>
+                          <tr><td className="px-2 py-1"><code>recorded_at</code></td><td className="px-2 py-1">Yes</td><td className="px-2 py-1">Datetime including a time, e.g. <code>2026-08-13T08:00:00</code> or <code>13/08/2026 08:00</code></td></tr>
                           <tr><td className="px-2 py-1"><code>kwh_generated</code></td><td className="px-2 py-1">Yes</td><td className="px-2 py-1">Energy generated, must be &ge; 0</td></tr>
                           <tr><td className="px-2 py-1"><code>uptime_pct</code></td><td className="px-2 py-1">Yes</td><td className="px-2 py-1">System uptime, 0&ndash;100</td></tr>
                           <tr><td className="px-2 py-1"><code>output_power_w</code></td><td className="px-2 py-1">No</td><td className="px-2 py-1">Instantaneous output in watts</td></tr>
@@ -23666,6 +23667,7 @@ const ProjectsHub = ({
 
           {projectTab === "device_readings" && (
             <div className="space-y-6">
+              <MeterDataReview projectId={project.id} canReview={false} />
               {(() => {
                 const now = new Date();
                 const rangeDays = deviceDateFilter === "7d" ? 7 : deviceDateFilter === "90d" ? 90 : 30;
@@ -24556,6 +24558,39 @@ const ProjectsHub = ({
               ["Flagged", String(flaggedProjects.length)],
             ];
 
+  if (projectPageId) {
+    const pageProject = projects.find((project) => project.id === projectPageId) || null;
+    return (
+      <div className="space-y-6">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <button type="button" onClick={closeProjectPage} className="mb-2 inline-flex items-center gap-1 text-sm font-semibold text-slate-500 hover:text-slate-700">
+              <ArrowLeftIcon size={16} /> All projects
+            </button>
+            <h1 className="text-2xl font-bold text-slate-900">{pageProject ? (pageProject.projectReference || `PRJ-${pageProject.id}`) : "Project"}</h1>
+            {pageProject && (
+              <p className="text-sm text-slate-500">
+                {[pageProject.projectTitle, pageProject.vendorName, pageProject.techType, pageProject.assignedDistrict || pageProject.district || pageProject.region].filter(Boolean).join(" • ")}
+              </p>
+            )}
+          </div>
+        </div>
+        {!pageProject && (loading || (archiveView === "active" && projects.length > 0)) ? (
+          // Not in the active list yet: the hub looks in the archive before giving up.
+          <p className="text-sm text-slate-500">Loading project...</p>
+        ) : pageProject ? (
+          <div id={`project-card-${pageProject.id}`} className="rounded-3xl border border-slate-100 bg-white p-5">
+            {renderProjectDetail(pageProject)}
+          </div>
+        ) : (
+          <div className="rounded-2xl border border-dashed border-slate-200 p-6 text-sm text-slate-500">
+            This project is not available to you, or it no longer exists.
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-8">
       <div className="rounded-[32px] border border-slate-200/80 bg-[radial-gradient(circle_at_top_left,#16a34a22,transparent_45%),radial-gradient(circle_at_top_right,#0ea5e922,transparent_40%),linear-gradient(125deg,#0f172a_0%,#0b1530_45%,#111827_100%)] text-white shadow-[0_35px_80px_-40px_rgba(15,23,42,0.95)]">
@@ -24612,6 +24647,19 @@ const ProjectsHub = ({
             <select className="input-field" value={techFilter} onChange={(e) => setTechFilter(e.target.value)}>
               {techOptions.map(opt => <option key={opt} value={opt}>{opt}</option>)}
             </select>
+            <div className="flex rounded-xl border border-slate-200 bg-white p-1 text-xs font-bold" role="group" aria-label="Project archive">
+              {([["active", "Active"], ["archived", "Archived"]] as const).map(([id, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => { setSelectedProject(null); setArchiveView(id); }}
+                  className={`rounded-lg px-3 py-1.5 ${archiveView === id ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100"}`}
+                  title={id === "archived" ? "Completed projects, archived with their full lifecycle" : "Projects in progress"}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
             <select className="input-field" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
               <option value="All">All Status</option>
               <option value="Active">Active</option>
@@ -24716,16 +24764,10 @@ const ProjectsHub = ({
                           <td className="px-4 py-3"><span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${statusMeta.badgeClass}`}>{statusMeta.label}</span></td>
                           <td className="px-4 py-3">
                             <button
-                              onClick={() => {
-                                const nextProject = selectedProject?.id === project.id ? null : project;
-                                setSelectedProject(nextProject);
-                                if (nextProject) {
-                                  setProjectTab(isPscPortal || isUndpPortal ? "summary" : "overview");
-                                }
-                              }}
-                              className="btn-primary text-xs"
+                              onClick={() => openProjectPage(project, isPscPortal || isUndpPortal ? "summary" : "overview")}
+                              className="btn-primary inline-flex items-center gap-1.5 whitespace-nowrap text-xs"
                             >
-                              {selectedProject?.id === project.id ? "Close" : "View"}
+                              Open Project
                             </button>
                           </td>
                         </tr>
@@ -24774,19 +24816,13 @@ const ProjectsHub = ({
                   </div>
                   <div className="flex items-center gap-3">
                     <button
-                      onClick={() => {
-                        setSelectedProject(prev => (prev?.id === project.id ? null : project));
-                        setProjectTab(project.status === ProjectStatus.SETUP_PENDING ? "planning" : "overview");
-                      }}
-                      className="btn-primary text-xs"
+                      onClick={() => openProjectPage(project, project.status === ProjectStatus.SETUP_PENDING ? "planning" : "overview")}
+                      className="btn-primary inline-flex items-center gap-1.5 text-xs"
                     >
-                      {selectedProject?.id === project.id ? "Close Project" : "Open Project"}
+                      Open Project
                     </button>
                     <button
-                      onClick={() => {
-                        setSelectedProject(project);
-                        setProjectTab("fieldwork");
-                      }}
+                      onClick={() => openProjectPage(project, "fieldwork")}
                       disabled={!isProjectSetupComplete(project)}
                       className={`text-xs px-4 py-2 rounded-xl font-semibold ${
                         isProjectSetupComplete(project)
@@ -24856,6 +24892,7 @@ const ProjectsHub = ({
 };
 
 export const TACView = ({ mode, onNavigate, initialTenderId }: { mode: "technical" | "financial" | "eoi"; onNavigate?: (action: string, id?: string) => void; initialTenderId?: string }) => {
+  const inclusionTargets = useInclusionTargets();
   // "eoi" reuses the same Stage-1 review machinery originally built under "financial"
   // mode (document checklist, inclusion checks, shortlist/reject) — see the
   // isStageOneBid branch below. "financial" itself is legacy/unused (superseded by the
@@ -25772,9 +25809,9 @@ export const TACView = ({ mode, onNavigate, initialTenderId }: { mode: "technica
         : selectedEval.bid.status === BidStatus.REJECTED ? "Rejected"
         : "Submitted";
       const inclusionChecks = [
-        { label: "Female-headed households", met: Number(selectedEval.bid.female_target_pct || 0) >= 50, value: `${selectedEval.bid.female_target_pct || 0}%`, required: "≥ 50%" },
-        { label: "Vulnerable groups", met: Number(selectedEval.bid.vulnerable_target_pct || 0) >= 30, value: `${selectedEval.bid.vulnerable_target_pct || 0}%`, required: "≥ 30%" },
-        { label: "Low-income households", met: Number(selectedEval.bid.low_income_target_pct || 0) >= 60, value: `${selectedEval.bid.low_income_target_pct || 0}%`, required: "≥ 60%" },
+        { label: "Female-headed households", met: Number(selectedEval.bid.female_target_pct || 0) >= inclusionTargets.female, value: `${selectedEval.bid.female_target_pct || 0}%`, required: `≥ ${inclusionTargets.female}%` },
+        { label: "Vulnerable groups", met: Number(selectedEval.bid.vulnerable_target_pct || 0) >= inclusionTargets.vulnerable, value: `${selectedEval.bid.vulnerable_target_pct || 0}%`, required: `≥ ${inclusionTargets.vulnerable}%` },
+        { label: "Low-income households", met: Number(selectedEval.bid.low_income_target_pct || 0) >= inclusionTargets.lowIncome, value: `${selectedEval.bid.low_income_target_pct || 0}%`, required: `≥ ${inclusionTargets.lowIncome}%` },
       ];
       const allInclusionMet = inclusionChecks.every(c => c.met);
       return (
@@ -27795,7 +27832,7 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
       .sort((a, b) => a.district.localeCompare(b.district));
   }, [filteredQueue]);
 
-  const pendingCount = queue.filter(({ task }) => task.status === "Pending").length;
+  const pendingCount = queue.filter(({ task }) => task.status === "Pending" || task.status === "Reverification Required").length;
   const completedCount = queue.filter(({ task }) => task.status === "Verified").length;
   const flaggedCount = queue.filter(({ task }) => task.status === "Flagged" || task.status === "Partial").length;
   const todayDate = new Date();
@@ -28073,6 +28110,7 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
     if (status === "Verified") return "bg-emerald-100 text-emerald-700";
     if (status === "Flagged") return "bg-rose-100 text-rose-700";
     if (status === "Partial") return "bg-amber-100 text-amber-700";
+    if (status === "Reverification Required") return "bg-violet-100 text-violet-700";
     if (status === "Paused" || status === "Terminated") return "bg-slate-200 text-slate-700";
     return "bg-blue-100 text-blue-700";
   };
@@ -28159,7 +28197,9 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
   }
 
   if (view === "inspect" && selectedTask && selectedReport) {
-    const lockedStatus = selectedTask.status === "Paused" || selectedTask.status === "Terminated";
+    // Submitted evidence is locked; only a DoE/RMT re-verification request reopens the task (as a new round).
+    const submittedLocked = selectedTask.status === "Verified" || selectedTask.status === "Flagged";
+    const lockedStatus = selectedTask.status === "Paused" || selectedTask.status === "Terminated" || submittedLocked;
     const submittedGisBadge =
       selectedReport.gisStatus === "green"
         ? "bg-emerald-100 text-emerald-700"
@@ -28183,7 +28223,7 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
               <div>
                 <h1 className="text-2xl font-bold text-slate-900">Inspection Workspace</h1>
                 <p className="text-slate-500">
-                  {selectedQueueItem?.siteName} • Task {selectedTask.id} • {selectedProject?.district || selectedProject?.region || assignedDistrict}
+                  {selectedQueueItem?.siteName} • Task {selectedTask.id} • {selectedReport.district || selectedProject?.district || selectedProject?.region || assignedDistrict}
                 </p>
               </div>
             </div>
@@ -28198,10 +28238,22 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
         {(message || error || lockedStatus) && (
           <div className={`rounded-2xl border px-4 py-3 text-sm ${error || lockedStatus ? "border-amber-200 bg-amber-50 text-amber-800" : "border-emerald-200 bg-emerald-50 text-emerald-700"}`}>
             {lockedStatus
-              ? (selectedTask.status === "Paused"
+              ? (submittedLocked
+                  ? (message || "This verification has been submitted and is locked. It can only be submitted again if a DoE officer or the RBF Management Team requests re-verification.")
+                  : selectedTask.status === "Paused"
                   ? "This task is paused. Submission is blocked until the vendor restriction is cleared."
                   : "This task was terminated and can no longer be submitted from the verifier portal.")
               : (error || message)}
+          </div>
+        )}
+
+        {selectedTask.status === "Reverification Required" && (
+          <div className="rounded-2xl border border-violet-200 bg-violet-50 px-4 py-3 text-sm text-violet-800">
+            <p className="font-semibold">Re-verification requested (round {selectedTask.verificationRound})</p>
+            {selectedTask.reverificationReason && <p className="mt-1">{selectedTask.reverificationReason}</p>}
+            <p className="mt-1 text-xs text-violet-600">
+              Requested by {selectedTask.reverificationRequestedByUsername || "a reviewer"}. Your earlier submission stays on record; this visit is saved as a new round.
+            </p>
           </div>
         )}
 
@@ -28255,6 +28307,20 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
                   <div>
                     <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Beneficiary NID</p>
                     <p className="mt-1 text-sm font-semibold text-slate-900">{selectedReport.beneficiaryId || "Not provided"}</p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Beneficiary Phone</p>
+                    {selectedReport.beneficiaryPhone ? (
+                      <a
+                        href={`tel:${selectedReport.beneficiaryPhone.replace(/[^0-9+]/g, "")}`}
+                        className="mt-1 inline-flex text-sm font-semibold text-blue-600 hover:text-blue-700"
+                        title="Call the beneficiary household"
+                      >
+                        {selectedReport.beneficiaryPhone}
+                      </a>
+                    ) : (
+                      <p className="mt-1 text-sm font-semibold text-slate-900">Not provided</p>
+                    )}
                   </div>
                   <div>
                     <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Household Type</p>
@@ -28490,6 +28556,7 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
                     </p>
                     <p className="text-sm font-bold text-slate-700">
                       Beneficiary record: {selectedReport.beneficiaryName || selectedReport.beneficiaryId || "Not captured"}
+                      {selectedReport.beneficiaryPhone ? ` • ${selectedReport.beneficiaryPhone}` : ""}
                     </p>
                   </div>
                   <div className="space-y-1">
@@ -28605,6 +28672,14 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
             <div className="card p-5">
               <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Beneficiary</p>
               <p className="mt-2 text-sm font-semibold text-slate-900">{selectedReport.beneficiaryName || selectedReport.beneficiaryId || "Not captured"}</p>
+              {selectedReport.beneficiaryPhone && (
+                <a
+                  href={`tel:${selectedReport.beneficiaryPhone.replace(/[^0-9+]/g, "")}`}
+                  className="mt-1 inline-flex text-xs font-semibold text-blue-600 hover:text-blue-700"
+                >
+                  {selectedReport.beneficiaryPhone}
+                </a>
+              )}
             </div>
             <div className="card p-5">
               <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Vendor</p>
@@ -28939,12 +29014,14 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
                                   const isLocked = item.task.status === "Paused" || item.task.status === "Terminated";
                                   const localEntry = submissionLog.find((entry) => entry.taskId === item.task.id);
                                   const actionLabel =
-                                    item.task.status === "Verified" ? "View" :
-                                    item.task.status === "Flagged" || item.task.status === "Partial" ? "Resume" :
+                                    item.task.status === "Verified" || item.task.status === "Flagged" ? "View" :
+                                    item.task.status === "Reverification Required" ? "Re-verify" :
+                                    item.task.status === "Partial" ? "Resume" :
                                     isLocked ? "View" : "Verify";
                                   return (
                                     <div key={item.task.id} className={`p-6 flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between ${
-                                      item.task.status === "Pending" ? "bg-amber-50/50 border-l-4 border-amber-400" : ""
+                                      item.task.status === "Pending" ? "bg-amber-50/50 border-l-4 border-amber-400" :
+                                      item.task.status === "Reverification Required" ? "bg-violet-50/50 border-l-4 border-violet-400" : ""
                                     }`}>
                                       <div className="flex gap-4 items-start">
                                         <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${
@@ -30188,6 +30265,7 @@ const PublicPortal = ({ onBack, onRegisterClick, publicSubView, publicTenderId, 
   publicTenderId?: string | null;
   onSubViewChange?: (view: null | "faq" | "tender", id?: string | null) => void;
 }) => {
+  const inclusionTargets = useInclusionTargets();
   const [tenders, setTenders] = useState<Tender[]>([]);
   const [eoiInvites, setEoiInvites] = useState<Tender[]>([]);
   const [selected, setSelected] = useState<Tender | null>(null);
@@ -31131,7 +31209,7 @@ const PublicPortal = ({ onBack, onRegisterClick, publicSubView, publicTenderId, 
           <div className="relative grid grid-cols-1 md:grid-cols-5 gap-4">
             <div className="hidden md:block absolute top-12 left-[10%] right-[10%] h-0.5 bg-gradient-to-r from-emerald-300 via-blue-300 via-purple-300 via-amber-300 to-rose-300 -z-10" />
             {[
-              { step: 1, title: "Check Eligibility", gradient: "from-emerald-500 to-teal-500", shadow: "shadow-emerald-500/30", items: ["Registered business or NGO in Lesotho", "Valid trading license", "Tax clearance certificate", "Company bank account in Lesotho", "Experience in renewable energy", "Commitment to inclusion targets (50% female, 30% vulnerable)"] },
+              { step: 1, title: "Check Eligibility", gradient: "from-emerald-500 to-teal-500", shadow: "shadow-emerald-500/30", items: ["Registered business or NGO in Lesotho", "Valid trading license", "Tax clearance certificate", "Company bank account in Lesotho", "Experience in renewable energy", `Commitment to inclusion targets (${inclusionTargets.female}% female-headed, ${inclusionTargets.vulnerable}% vulnerable, ${inclusionTargets.lowIncome}% low-income)`] },
               { step: 2, title: "Register Account", gradient: "from-blue-500 to-indigo-500", shadow: "shadow-blue-500/30", items: ["Company email address", "Mobile number for OTP", "Basic company info", "~5 minutes to complete"] },
               { step: 3, title: "Pre-Qualification", gradient: "from-purple-500 to-fuchsia-500", shadow: "shadow-purple-500/30", items: ["Upload trading license, tax clearance, registration cert", "Provide technical capacity details", "Submit inclusion commitment declaration", "Review takes 3-5 business days"] },
               { step: 4, title: "Browse & Bid", gradient: "from-amber-500 to-orange-500", shadow: "shadow-amber-500/30", items: ["View all open tenders", "Submit Stage 1 concept note", "Stage 2 full proposal if shortlisted", "Include gender action plan & O&M strategy"] },
@@ -31504,7 +31582,7 @@ const PublicPortal = ({ onBack, onRegisterClick, publicSubView, publicTenderId, 
                       questions: [
                         { q: "When do I receive payment?", a: "Payments are milestone-based: 20% after setup and contract signing, 50% after 80% of installations are independently verified, 30% after 100% verified and all KPI targets are met." },
                         { q: "Who verifies my installations?", a: "Independent field officers from the Department of Energy physically visit each installation site." },
-                        { q: "What are the gender inclusion targets?", a: "At least 50% of your installations must benefit female-headed households. At least 30% must benefit vulnerable groups (elderly, disabled, HIV-affected)." },
+                        { q: "What are the gender inclusion targets?", a: `At least ${inclusionTargets.female}% of your installations must benefit female-headed households, at least ${inclusionTargets.vulnerable}% vulnerable groups (elderly, disabled, HIV-affected) and at least ${inclusionTargets.lowIncome}% low-income households.` },
                       ],
                     },
                     {
@@ -32065,6 +32143,8 @@ interface SidebarItemType {
   label: string;
   badge?: string;
   actionBadge?: boolean;
+  /** Section heading the item sits under; consecutive items with the same group share one heading. */
+  group?: string;
 }
 
 // --- Main App ---
@@ -32099,9 +32179,6 @@ export default function App() {
   const [fieldVerifierInspectionBadge, setFieldVerifierInspectionBadge] = useState<string | undefined>(undefined);
   const [sidebarBadges, setSidebarBadges] = useState<Record<string, string | undefined>>({});
   const [viewingVendorProfile, setViewingVendorProfile] = useState<string | null>(null);
-  const [showDoeConcernModal, setShowDoeConcernModal] = useState(false);
-  const [selectedProjectForConcern, setSelectedProjectForConcern] = useState<Project | null>(null);
-  const [doeConcernType, setDoeConcernType] = useState("");
 
   const navigateTo = (section: string, action?: string, id?: string) => {
     setActiveTab(section);
@@ -32114,6 +32191,13 @@ export default function App() {
     const parts = [section, action, id].filter(Boolean);
     const url = `/app/${parts.join("/")}`;
     window.history.pushState({ __app: "rbf-spa", activeTab: section, action: action ?? null, id: id ?? null }, "", url);
+  };
+
+  // Auditor screens over source records hand the record to a new audit case (the record itself stays untouched).
+  const [auditPrefill, setAuditPrefill] = useState<AuditCasePrefill | null>(null);
+  const openAuditCase = (prefill: AuditCasePrefill) => {
+    setAuditPrefill(prefill);
+    navigateTo("audit_cases");
   };
 
   React.useEffect(() => {
@@ -32153,10 +32237,6 @@ export default function App() {
     if (projectId) setSelectedProjectId(projectId);
     if (projectTab) setSelectedProjectTab(projectTab);
   }, []);
-  const [doeConcernSeverity, setDoeConcernSeverity] = useState("");
-  const [doeConcernDesc, setDoeConcernDesc] = useState("");
-  const [doeConcernNotifyPsc, setDoeConcernNotifyPsc] = useState(false);
-  const [doeConcernSubmitting, setDoeConcernSubmitting] = useState(false);
   React.useEffect(() => {
     if (typeof window === "undefined") return;
     const stored = window.localStorage.getItem("rbf_push_enabled");
@@ -32588,7 +32668,7 @@ export default function App() {
       return;
     }
     if (role === UserRole.DOE_OFFICER) {
-      setActiveTab("dashboard");
+      setActiveTab("projects");
       return;
     }
     if (role === UserRole.TAC || role === UserRole.AUDITOR || role === UserRole.FIELD_VERIFIER) {
@@ -32612,7 +32692,7 @@ export default function App() {
       return;
     }
     if (role === UserRole.DOE_OFFICER) {
-      setActiveTab("dashboard");
+      setActiveTab("projects");
       return;
     }
     if (role === UserRole.TAC || role === UserRole.AUDITOR || role === UserRole.FIELD_VERIFIER) {
@@ -32649,6 +32729,10 @@ export default function App() {
       return { tab: "dashboard" };
     }
 
+    if (role === UserRole.RBF_OFFICIAL && (event.startsWith("audit_") || event === "project_oversight_flag")) {
+      return { tab: "audit_oversight" };
+    }
+
     if (role === UserRole.ADMIN || role === UserRole.RBF_OFFICIAL) {
       if (isTender && linkedId) return { tab: "tenders", tenderId: linkedId };
       if (isPrequal) return { tab: "prequal" };
@@ -32658,19 +32742,25 @@ export default function App() {
     }
 
     if (role === UserRole.DOE_OFFICER) {
-      if (isProject) return { tab: "regional" };
+      if (event.includes("blacklist")) return { tab: "blacklisting" };
+      if (event.includes("verification")) return { tab: "doe_verification" };
+      if (event.includes("oversight")) return { tab: "oversight_issues" };
+      if (isProject) return { tab: "projects" };
       if (isReport) return { tab: "kpis" };
       return { tab: "dashboard" };
     }
 
     if (role === UserRole.UNDP_DONOR) {
+      if (event.startsWith("audit_")) return { tab: "audit_findings" };
+      if (event.includes("oversight")) return { tab: "psc_my_flags" };
       if (isReport) return { tab: "reports" };
       if (isProject) return { tab: "payments" };
       return { tab: "dashboard" };
     }
 
     if (role === UserRole.AUDITOR) {
-      if (isProject) return { tab: "verification" };
+      if (event.startsWith("audit_")) return { tab: "audit_cases" };
+      if (isProject) return { tab: "verification_audit" };
       if (isReport) return { tab: "audit_trail" };
       return { tab: "dashboard" };
     }
@@ -32694,11 +32784,10 @@ export default function App() {
     payments: "payments",
     claims: "payments",
     blacklisting: "blacklisting",
-    issues_findings: "issues",
-    issues: "issues",
     reports: "reports",
+    results_framework: "system_configuration",
+    report_schedules: "system_configuration",
     audit_logs: "audit_logs",
-    audit_findings: "audit_logs",
     notifications: "notifications",
     system_configuration: "system_configuration",
     prospect_sync: "prospect_sync",
@@ -32711,6 +32800,37 @@ export default function App() {
     anomaly_report: "audit_logs",
     claims_audit: "audit_logs",
     portfolio: "projects",
+    // Shared Monitoring & Verification / oversight / audit screens
+    doe_verification: "projects",
+    vendor_performance: "vendors",
+    oversight_issues: "projects",
+    tenders_active: "tenders",
+    tenders_history: "tenders",
+    bid_evaluations: "evaluations",
+    rejected_bids: "evaluations",
+    contracts_oversight: "tenders",
+    project_monitoring: "projects",
+    regional_performance: "projects",
+    kpi_oversight: "reports",
+    verification_summary: "projects",
+    oversight_flagged: "projects",
+    psc_my_reviews: "projects",
+    psc_my_flags: "projects",
+    psc_review_history: "projects",
+    audit_cases: "audit_logs",
+    procurement_audit: "tenders",
+    vendor_audit: "vendors",
+    contract_audit: "tenders",
+    verification_audit: "projects",
+    kpi_audit: "reports",
+    system_access_audit: "audit_logs",
+    compliance_reviews: "audit_logs",
+    audit_exceptions: "audit_logs",
+    corrective_actions: "audit_logs",
+    audit_reports: "audit_logs",
+    evidence_reports: "audit_logs",
+    audit_oversight: "projects",
+    audit_findings: "projects",
   };
 
   const canViewSidebarItem = (tab: string) => {
@@ -32895,8 +33015,6 @@ export default function App() {
           return <Blacklisting currentUser={currentUser} />;
         case "all_vendors":
           return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={(vendorId) => { setViewingVendorProfile(vendorId); navigateTo("all_vendors", "view", vendorId); }} />;
-        case "reports":
-          return <TacReports />;
         default:
           return <TacDashboard currentUser={currentUser} onNavigate={(action) => navigateTo(action)} />;
       }
@@ -32905,6 +33023,8 @@ export default function App() {
       switch (activeTab) {
         case "evaluations":
           return <EvaluationCommitteeView allowedTabs={["technical", "financial"]} onNavigate={(action, id) => navigateTo("evaluations", action, id)} />;
+        case "reports":
+          return <ReportsHub currentUser={currentUser} />;
         case "notifications":
           return <NotificationLogs logs={notifications} onSelect={handleNotificationSelect} />;
         case "dashboard":
@@ -32956,7 +33076,8 @@ export default function App() {
         case "rbf_projects": return <ProjectsHub mode="rbf" externalProjectId={selectedProjectId} externalProjectTab={selectedProjectTab} />;
         case "blacklisting": return <Blacklisting currentUser={currentUser} />;
         case "payments": return <Disbursements onOpenProjectKpi={openProjectKpiView} onOpenProject={openProjectHubView} />;
-        case "issues_findings": return <RmtIssuesFindings currentUser={currentUser} />;
+        case "results_framework": return <ResultsFramework />;
+        case "report_schedules": return <ReportSchedules />;
         case "dashboard":
          case "users":
          case "permissions":
@@ -33010,25 +33131,38 @@ case "projects":
           case "dashboard":
             return <DoeDashboard currentUser={currentUser} onNavigate={handleTabChange} />;
 case "regional":
-            return <DoeRegionalMap currentUser={currentUser} />;
+            return <DoeRegionalMonitoring currentUser={currentUser} />;
           case "kpis":
+            return <DoeKpiReview currentUser={currentUser} onOpenProject={openProjectHubView} />;
+          case "doe_verification":
+            return <VerificationReviewView currentUser={currentUser} />;
+          case "vendor_performance":
+            return (
+              <TabbedSection tabs={[
+                { id: "performance", label: "Vendor Performance", render: () => <VendorPerformanceView currentUser={currentUser} /> },
+                { id: "directory", label: "Regional Vendors", render: () => <VendorDirectory viewerRole={currentUser.role} onOpenProfile={(vendorId) => { setViewingVendorProfile(vendorId); navigateTo("all_vendors", "view", vendorId); }} /> },
+              ]} />
+            );
+          case "oversight_issues":
+            return (
+              <OversightReviewsView
+                currentUser={currentUser}
+                title="Verification / Monitoring Issues"
+                description={`Issues, comments and re-verification requests on projects in ${currentUser?.region || "your region"}, from DoE, PSC and RMT.`}
+              />
+            );
           case "blacklisting":
           case "all_vendors":
           case "reports":
             if (activeTab === "all_vendors") {
               return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={(vendorId) => { setViewingVendorProfile(vendorId); navigateTo("all_vendors", "view", vendorId); }} />;
             }
-if (activeTab === "reports") {
-              return <DoeReports currentUser={currentUser} />;
-            }
             return activeTab === "blacklisting" ? (
               <Blacklisting currentUser={currentUser} />
             ) : (
               <PortfolioMonitoringView
-                title={activeTab === "kpis" ? "KPI Review" : "Department of Energy"}
-                description={activeTab === "kpis" 
-                  ? `Regional KPI performance for ${currentUser?.region || "the assigned region"}.`
-                  : `Regional GIS and KPI monitoring for ${currentUser?.region || "the assigned region"}.`}
+                title="Department of Energy"
+                description={`Regional GIS and KPI monitoring for ${currentUser?.region || "the assigned region"}.`}
                 emptyProjectsMessage="No projects are currently assigned to this regional scope."
             />
           );
@@ -33056,12 +33190,70 @@ if (activeTab === "reports") {
           return <PscDashboard currentUser={currentUser} onNavigate={(tab) => setActiveTab(tab as any)} />;
         case "all_vendors":
           return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={(vendorId) => { setViewingVendorProfile(vendorId); navigateTo("all_vendors", "view", vendorId); }} />;
-        case "reports":
-          return <PscReports currentUser={currentUser} />;
-        case "issues":
-          return <PscIssuesView currentUser={currentUser} />;
         case "payments":
           return <Disbursements onOpenProjectKpi={openProjectKpiView} onOpenProject={openProjectHubView} />;
+        case "tenders_active":
+          return <ProcurementOversightView views={["active"]} />;
+        case "tenders_history":
+          return <ProcurementOversightView views={["history"]} />;
+        case "bid_evaluations":
+          return <ProcurementOversightView views={["evaluations"]} />;
+        case "rejected_bids":
+          return <ProcurementOversightView views={["rejected_bids"]} />;
+        case "contracts_oversight":
+          return <ProcurementOversightView views={["contracts"]} />;
+        case "project_monitoring":
+          return (
+            <PortfolioMonitoringView
+              title="Project Monitoring"
+              description="Portfolio-wide GIS and KPI monitoring from the shared project, installation and verification records."
+              emptyProjectsMessage="No projects are currently active."
+            />
+          );
+        case "regional_performance":
+          return (
+            <MacroKpiPortal
+              title="Regional Performance"
+              description="National and district progress, inclusion compliance and payment pacing."
+            />
+          );
+        case "kpi_oversight":
+          return <KpiOversightView currentUser={currentUser} />;
+        case "verification_summary":
+          return <VerificationReviewView currentUser={currentUser} />;
+        case "vendor_performance":
+          return (
+            <TabbedSection tabs={[
+              { id: "performance", label: "Vendor Performance", render: () => <VendorPerformanceView currentUser={currentUser} /> },
+              { id: "directory", label: "All Vendors", render: () => <VendorDirectory viewerRole={currentUser.role} onOpenProfile={(vendorId) => { setViewingVendorProfile(vendorId); navigateTo("all_vendors", "view", vendorId); }} /> },
+            ]} />
+          );
+        case "blacklisting":
+          return <Blacklisting currentUser={currentUser} />;
+        case "oversight_flagged":
+          return (
+            <OversightReviewsView
+              currentUser={currentUser}
+              preset="flagged"
+              title="Flagged Issues"
+              description="Every flagged or delayed item raised by PSC, DoE and RMT across the portfolio, with its follow-up status."
+            />
+          );
+        case "audit_findings":
+          return <AuditCasesView currentUser={currentUser} preset="responses" />;
+        case "psc_my_reviews":
+          return <OversightReviewsView currentUser={currentUser} preset="mine" title="My Reviews" description="Oversight reviews you recorded on projects, verifications, KPIs, vendors and disbursements." />;
+        case "psc_my_flags":
+          return <OversightReviewsView currentUser={currentUser} preset="mine_flagged" title="My Flagged Issues" description="Issues you flagged or marked delayed, and how RMT is following them up." />;
+        case "psc_review_history":
+          return (
+            <OversightReviewsView
+              currentUser={currentUser}
+              reviewerRole={UserRole.UNDP_DONOR}
+              title="Review History"
+              description="All PSC oversight reviews, including resolved items."
+            />
+          );
         default:
           return (
             <MacroKpiPortal
@@ -33089,10 +33281,67 @@ if (activeTab === "reports") {
           return <AuditorClaimsAudit />;
         case "prospect_sync":
           return <AuditorProspectSyncLog />;
+        case "audit_cases":
+          return (
+            <AuditCasesView
+              currentUser={currentUser}
+              prefill={auditPrefill}
+              onPrefillConsumed={() => setAuditPrefill(null)}
+            />
+          );
+        case "compliance_reviews":
+          return <AuditCasesView currentUser={currentUser} preset="compliance" />;
+        case "audit_exceptions":
+          return <AuditCasesView currentUser={currentUser} preset="exceptions" />;
+        case "corrective_actions":
+          return <AuditCasesView currentUser={currentUser} preset="corrective" />;
+        case "audit_reports":
+          return <AuditCasesView currentUser={currentUser} preset="reports" />;
+        case "evidence_reports":
+          return <AuditCasesView currentUser={currentUser} preset="evidence" />;
+        case "system_access_audit":
+          return <SystemAccessAuditView />;
+        case "procurement_audit":
+          return (
+            <ProcurementOversightView
+              views={["active", "history", "evaluations", "rejected_bids"]}
+              title="Procurement Audit"
+              description="Tenders, bids, evaluator scores and rejections as recorded. Read-only; open an audit case on any record."
+              onOpenAuditCase={openAuditCase}
+            />
+          );
+        case "contract_audit":
+          return (
+            <ProcurementOversightView
+              views={["contracts"]}
+              title="Contract Audit"
+              description="Awarded contracts with signature and approval status. Read-only; open an audit case on any contract."
+              onOpenAuditCase={openAuditCase}
+            />
+          );
+        case "vendor_audit":
+          return (
+            <TabbedSection tabs={[
+              { id: "performance", label: "Vendor Performance", render: () => <VendorPerformanceView currentUser={currentUser} title="Vendor Audit" onOpenAuditCase={openAuditCase} /> },
+              { id: "records", label: "Vendor Records", render: () => <VendorDirectory viewerRole={currentUser.role} onOpenProfile={(vendorId) => { setViewingVendorProfile(vendorId); navigateTo("all_vendors", "view", vendorId); }} /> },
+            ]} />
+          );
+        case "verification_audit":
+          return (
+            <TabbedSection tabs={[
+              { id: "records", label: "Verification Records", render: () => <VerificationReviewView currentUser={currentUser} onOpenAuditCase={openAuditCase} /> },
+              { id: "gps", label: "GPS Evidence Map", render: () => <AuditorGisMap /> },
+            ]} />
+          );
+        case "kpi_audit":
+          return (
+            <TabbedSection tabs={[
+              { id: "kpi", label: "KPI Results", render: () => <AuditorKpiDashboard /> },
+              { id: "reviews", label: "DoE KPI Reviews", render: () => <KpiOversightView currentUser={currentUser} title="KPI Audit" onOpenAuditCase={openAuditCase} /> },
+            ]} />
+          );
         case "reports":
           return <Reports currentUser={currentUser} onNavigate={(action, id) => navigateTo("reports", action, id)} />;
-        case "audit_findings":
-          return <AuditorAuditFindings currentUser={currentUser} />;
         case "notifications":
           return <NotificationLogs logs={notifications} onSelect={handleNotificationSelect} />;
         case "all_vendors":
@@ -33159,9 +33408,26 @@ if (activeTab === "reports") {
       case "evaluations": return <EvaluationCommitteeView allowedTabs={["eoi", "scores"]} onNavigate={(action, id) => navigateTo("evaluations", action, id)} />;
       case "rbf_projects": return <ProjectsHub mode="rbf" externalProjectId={selectedProjectId} externalProjectTab={selectedProjectTab} />;
       case "blacklisting": return <Blacklisting currentUser={currentUser} />;
+      case "audit_oversight":
+        return (
+          <TabbedSection tabs={[
+            { id: "audit", label: "Audit Findings", render: () => <AuditCasesView currentUser={currentUser} preset="responses" /> },
+            {
+              id: "oversight",
+              label: "Oversight Follow-ups",
+              render: () => (
+                <OversightReviewsView
+                  currentUser={currentUser}
+                  preset="open"
+                  title="Oversight Follow-ups"
+                  description="Open issues flagged by DoE, PSC and RMT. Update progress and record how each was resolved."
+                />
+              ),
+            },
+          ]} />
+        );
       case "payments": return <Disbursements onOpenProjectKpi={openProjectKpiView} onOpenProject={openProjectHubView} />;
       case "all_vendors": return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={(vendorId) => { setViewingVendorProfile(vendorId); navigateTo("all_vendors", "view", vendorId); }} />;
-      case "issues_findings": return <RmtIssuesFindings currentUser={currentUser} />;
       case "notifications": return <NotificationLogs logs={notifications} onSelect={handleNotificationSelect} />;
       default:
         return (
@@ -33197,6 +33463,7 @@ if (activeTab === "reports") {
         { id: "projects_hub", icon: BarChart3, label: "Projects Hub" },
         { id: "claims", icon: CreditCard, label: "Payment Claims", ...ab("claims") },
         { id: "blacklisting", icon: FileWarning, label: "Blacklisting" },
+        { id: "reports", icon: BarChart3, label: "My Reports" },
       ];
     }
 
@@ -33207,6 +33474,7 @@ if (activeTab === "reports") {
         { id: "projects", icon: FolderKanban, label: "Projects" },
         { id: "payments", icon: CreditCard, label: "Claim Reviews", ...ab("payments") },
         { id: "blacklisting", icon: FileWarning, label: "Blacklisting" },
+        { id: "reports", icon: BarChart3, label: "Reports" },
       ];
     }
 
@@ -33214,6 +33482,7 @@ if (activeTab === "reports") {
       return [
         ...common,
         { id: "evaluations", icon: ClipboardCheck, label: "Evaluations", ...ab("evaluations") },
+        { id: "reports", icon: FileText, label: "My Reports" },
         { id: "notifications", icon: Bell, label: "Notifications" },
       ];
     }
@@ -33249,35 +33518,55 @@ if (activeTab === "reports") {
          { id: "rbf_projects", icon: FolderKanban, label: "Projects" },
          { id: "payments", icon: CreditCard, label: "Payments", ...ab("payments") },
          { id: "blacklisting", icon: FileWarning, label: "Blacklisting" },
-         { id: "issues_findings", icon: AlertTriangle, label: "Issues & Findings" },
          { id: "users", icon: Users, label: "User Management", ...ab("users") },
          { id: "master_data", icon: Database, label: "Master Data" },
         { id: "prospect_sync", icon: History, label: "Prospect Sync" },
         { id: "audit_logs", icon: FileText, label: "Audit Logs" },
+        { id: "reports", icon: BarChart3, label: "Reports" },
+        { id: "results_framework", icon: Target, label: "Results Framework" },
+        { id: "report_schedules", icon: CalendarClock, label: "Report Schedules" },
         { id: "notifications", icon: Bell, label: "Notifications" },
         { id: "system_health", icon: Activity, label: "System Health" },
       ];
     }
 
     if (role === UserRole.DOE_OFFICER) {
+      const mv = "Monitoring & Verification";
       return [
         ...common,
-        { id: "all_vendors", icon: Users, label: "All Vendors" },
-        { id: "projects", icon: FolderKanban, label: "Regional Projects" },
-        { id: "regional", icon: MapIcon, label: "Regional Monitoring" },
-        { id: "kpis", icon: BarChart3, label: "KPI Review" },
-        { id: "blacklisting", icon: FileWarning, label: "Blacklisting" },
+        { id: "regional", icon: MapIcon, label: "Regional Monitoring", group: mv },
+        { id: "projects", icon: FolderKanban, label: "Regional Projects", group: mv },
+        { id: "doe_verification", icon: ClipboardCheck, label: "Field Verification", group: mv },
+        { id: "kpis", icon: BarChart3, label: "KPI Review", group: mv },
+        { id: "vendor_performance", icon: Users, label: "Vendor Performance", group: mv },
+        { id: "reports", icon: FileText, label: "Monitoring Reports", group: mv },
+        { id: "oversight_issues", icon: AlertTriangle, label: "Verification / Monitoring Issues", group: "Issues" },
+        { id: "blacklisting", icon: FileWarning, label: "Blacklisting", group: "Compliance" },
       ];
     }
 
     if (role === UserRole.UNDP_DONOR) {
       return [
         ...common,
-        { id: "all_vendors", icon: Users, label: "All Vendors" },
-        { id: "portfolio", icon: FolderKanban, label: "Portfolio Overview" },
-        { id: "payments", icon: CreditCard, label: "Disbursements" },
-        { id: "issues", icon: AlertTriangle, label: "Issues" },
-        { id: "reports", icon: BarChart3, label: "Briefings & Reports" },
+        { id: "tenders_active", icon: FileText, label: "Active Tenders", group: "Tenders" },
+        { id: "tenders_history", icon: History, label: "Tender History", group: "Tenders" },
+        { id: "bid_evaluations", icon: ClipboardCheck, label: "Bid Evaluations", group: "Tenders" },
+        { id: "portfolio", icon: FolderKanban, label: "Regional Projects", group: "Projects" },
+        { id: "project_monitoring", icon: MapIcon, label: "Project Monitoring", group: "Monitoring & Oversight" },
+        { id: "regional_performance", icon: BarChart3, label: "Regional Performance", group: "Monitoring & Oversight" },
+        { id: "kpi_oversight", icon: BarChart3, label: "KPI Review", group: "Monitoring & Oversight" },
+        { id: "verification_summary", icon: ClipboardCheck, label: "Verification Summary", group: "Monitoring & Oversight" },
+        { id: "reports", icon: FileText, label: "Monitoring Reports", group: "Monitoring & Oversight" },
+        { id: "vendor_performance", icon: Users, label: "Vendor Performance", group: "Vendors" },
+        { id: "contracts_oversight", icon: Gavel, label: "Awards & Contracts", group: "Contracts" },
+        { id: "payments", icon: CreditCard, label: "Disbursements", group: "Financial" },
+        { id: "rejected_bids", icon: XCircle, label: "Rejected Bids", group: "Compliance" },
+        { id: "blacklisting", icon: FileWarning, label: "Vendor Compliance", group: "Compliance" },
+        { id: "oversight_flagged", icon: AlertTriangle, label: "Flagged Issues", group: "Compliance" },
+        { id: "audit_findings", icon: ShieldCheck, label: "Audit Findings", group: "Compliance" },
+        { id: "psc_my_reviews", icon: MessageSquare, label: "My Reviews", group: "PSC Oversight" },
+        { id: "psc_my_flags", icon: Flag, label: "My Flagged Issues", group: "PSC Oversight" },
+        { id: "psc_review_history", icon: History, label: "Review History", group: "PSC Oversight" },
         { id: "notifications", icon: Bell, label: "Briefings" },
       ];
     }
@@ -33285,15 +33574,24 @@ if (activeTab === "reports") {
     if (role === UserRole.AUDITOR) {
       return [
         ...common,
-        { id: "projects", icon: FolderKanban, label: "All Projects" },
-        { id: "gis", icon: MapIcon, label: "GIS Map" },
-        { id: "kpi_dashboard", icon: BarChart3, label: "KPI Dashboard" },
-        { id: "audit_logs", icon: FileText, label: "Audit Logs" },
-        { id: "audit_findings", icon: FileText, label: "Audit Findings" },
-        { id: "anomaly_report", icon: AlertTriangle, label: "Anomaly Report" },
-        { id: "claims_audit", icon: ClipboardCheck, label: "Claims Audit" },
-        { id: "prospect_sync", icon: History, label: "Prospect Sync Log" },
-        { id: "reports", icon: BarChart3, label: "Reports" },
+        { id: "audit_cases", icon: ShieldCheck, label: "Audit Cases", group: "Audit" },
+        { id: "audit_logs", icon: FileText, label: "Audit Logs", group: "Audit" },
+        { id: "procurement_audit", icon: Gavel, label: "Procurement Audit", group: "Audit" },
+        { id: "vendor_audit", icon: Users, label: "Vendor Audit", group: "Audit" },
+        { id: "contract_audit", icon: FileSignature, label: "Contract Audit", group: "Audit" },
+        { id: "verification_audit", icon: MapIcon, label: "Verification Audit", group: "Audit" },
+        { id: "kpi_audit", icon: BarChart3, label: "KPI Audit", group: "Audit" },
+        { id: "claims_audit", icon: CreditCard, label: "Disbursement Audit", group: "Audit" },
+        { id: "system_access_audit", icon: Lock, label: "System Access Audit", group: "Audit" },
+        { id: "projects", icon: FolderKanban, label: "All Projects", group: "Audit" },
+        { id: "compliance_reviews", icon: ClipboardCheck, label: "Compliance Reviews", group: "Compliance" },
+        { id: "audit_exceptions", icon: AlertTriangle, label: "Exceptions", group: "Compliance" },
+        { id: "anomaly_report", icon: AlertTriangle, label: "Anomalies", group: "Compliance" },
+        { id: "corrective_actions", icon: CheckCircle2, label: "Corrective Actions", group: "Compliance" },
+        { id: "audit_reports", icon: FileText, label: "Audit Reports", group: "Reports" },
+        { id: "reports", icon: BarChart3, label: "Compliance Reports", group: "Reports" },
+        { id: "evidence_reports", icon: Paperclip, label: "Evidence Reports", group: "Reports" },
+        { id: "prospect_sync", icon: History, label: "Prospect Sync Log", group: "Reports" },
         { id: "notifications", icon: Bell, label: "Notifications" },
       ];
     }
@@ -33310,10 +33608,10 @@ if (activeTab === "reports") {
       { id: "evaluations", icon: ClipboardCheck, label: "Evaluations", ...ab("evaluations") },
       { id: "rbf_projects", icon: FolderKanban, label: "Projects Hub", ...ab("rbf_projects") },
       { id: "blacklisting", icon: FileWarning, label: "Blacklisting" },
+      { id: "audit_oversight", icon: ShieldCheck, label: "Audit & Oversight" },
       { id: "gis", icon: MapIcon, label: "GIS Mapping" },
       { id: "payments", icon: CreditCard, label: "Disbursements", ...ab("payments") },
       { id: "reports", icon: BarChart3, label: "Reports" },
-      { id: "issues_findings", icon: AlertTriangle, label: "Issues & Findings" },
       { id: "notifications", icon: Bell, label: "Notifications" },
     ];
   };
@@ -33339,7 +33637,11 @@ if (activeTab === "reports") {
         <nav className="flex-1 px-4 space-y-1 overflow-y-auto">
           <div className="py-4">
             <p className="px-4 text-[10px] font-bold text-blue-200/80 uppercase tracking-widest mb-2">Menu</p>
-            {getSidebarItems().filter(item => canViewSidebarItem(item.id)).map(item => (
+            {getSidebarItems().filter(item => canViewSidebarItem(item.id)).map((item, index, items) => (
+              <React.Fragment key={item.id}>
+              {item.group && item.group !== items[index - 1]?.group && (
+                <p className="px-4 pt-4 pb-1 text-[10px] font-bold uppercase tracking-widest text-blue-200/60">{item.group}</p>
+              )}
               <SidebarItem 
                 key={item.id}
                 icon={item.icon} 
@@ -33352,6 +33654,7 @@ if (activeTab === "reports") {
                   if (item.id === "tenders") setTenderView("list");
                 }} 
               />
+              </React.Fragment>
             ))}
           </div>
         </nav>

@@ -1,3 +1,4 @@
+import { setInclusionTargets } from "../inclusionTargets";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
@@ -645,6 +646,7 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
     setConfigurationSubmitting(true);
     try {
       const updated = await updatePlatformConfiguration(configuration);
+      setInclusionTargets({ female: updated.femaleTargetMinimum, vulnerable: updated.vulnerableTargetMinimum, lowIncome: updated.lowIncomeTargetMinimum });
       setConfiguration(updated);
       setBanner("System configuration updated.");
     } catch (err: any) {
@@ -1823,15 +1825,15 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
               </h3>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Female Target (%)</label>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Minimum female-headed target (%)</label>
                   <input className="input-field" type="number" min="0" max="100" value={configuration.femaleTargetMinimum} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, femaleTargetMinimum: Number(e.target.value || 0) } : prev)} />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Vulnerable Target (%)</label>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Minimum vulnerable-group target (%)</label>
                   <input className="input-field" type="number" min="0" max="100" value={configuration.vulnerableTargetMinimum} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, vulnerableTargetMinimum: Number(e.target.value || 0) } : prev)} />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Low Income Target (%)</label>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Minimum low-income target (%)</label>
                   <input className="input-field" type="number" min="0" max="100" value={configuration.lowIncomeTargetMinimum} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, lowIncomeTargetMinimum: Number(e.target.value || 0) } : prev)} />
                 </div>
                 <div>

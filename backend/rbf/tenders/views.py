@@ -84,6 +84,7 @@ from .serializers import (
     IntentToAwardRequestSerializer,
 )
 from .pba_pdf import generate_contract_pdf
+from .lot_status import sync_lot_wise_tender
 from rbf.users.models import UserRole, VendorPrequalification, PrequalificationStatus
 from rbf.users.models import User, PlatformConfiguration, FinancialScoringFormula
 from rbf.users.blacklisting import is_vendor_restricted
@@ -402,9 +403,7 @@ def _assignment_defaults(contract: TenderContract):
         'district_zone': ', '.join(assignment_districts),
         'district_zones': assignment_districts,
         'verification_method': VerificationMethod.MANUAL,
-        'female_target_pct': 50,
-        'vulnerable_target_pct': 30,
-        'low_income_target_pct': 60,
+        **_default_inclusion_targets(contract),
         'start_date': start_date.isoformat(),
         'm1_disbursement_pct': DEFAULT_MILESTONE_DISBURSEMENT_PCTS[0],
         'm2_disbursement_pct': DEFAULT_MILESTONE_DISBURSEMENT_PCTS[1],
@@ -467,6 +466,12 @@ def _milestone_amounts(contract_value: Decimal, disbursement_pcts) -> list[Decim
     return amounts
 
 
+def _default_inclusion_targets(contract) -> dict:
+    from .serializers import default_inclusion_targets
+
+    return default_inclusion_targets(contract)
+
+
 def _milestone_requirement_descriptions(project: Project, m2_installation_pct: int, m3_installation_pct: int) -> dict[int, str]:
     female = project.female_target_pct or project.target_female_pct
     vulnerable = project.vulnerable_target_pct or project.target_vulnerable_pct
@@ -520,6 +525,9 @@ def _create_project_assignment(request, contract: TenderContract, assignment_dat
         milestone_plan_id = f'{milestone_plan_id}-LOT{contract.lot_id}'
 
     project_budget = _contract_value(contract)
+    inclusion = {**_default_inclusion_targets(contract), **{
+        k: assignment_data[k] for k in ('female_target_pct', 'vulnerable_target_pct', 'low_income_target_pct') if assignment_data.get(k) is not None
+    }}
 
     project = Project.objects.create(
         tender=tender,
@@ -543,12 +551,12 @@ def _create_project_assignment(request, contract: TenderContract, assignment_dat
         budget=project_budget,
         target_installations=assignment_data['installation_target'],
         installation_target=assignment_data['installation_target'],
-        target_female_pct=assignment_data.get('female_target_pct', 50),
-        female_target_pct=assignment_data.get('female_target_pct', 50),
-        target_vulnerable_pct=assignment_data.get('vulnerable_target_pct', 30),
-        vulnerable_target_pct=assignment_data.get('vulnerable_target_pct', 30),
-        target_low_income_pct=assignment_data.get('low_income_target_pct', 60),
-        low_income_target_pct=assignment_data.get('low_income_target_pct', 60),
+        target_female_pct=inclusion['female_target_pct'],
+        female_target_pct=inclusion['female_target_pct'],
+        target_vulnerable_pct=inclusion['vulnerable_target_pct'],
+        vulnerable_target_pct=inclusion['vulnerable_target_pct'],
+        target_low_income_pct=inclusion['low_income_target_pct'],
+        low_income_target_pct=inclusion['low_income_target_pct'],
         installation_target_summary=f"{assignment_data['installation_target']} installations",
         project_duration_months=duration_months,
         verification_method=assignment_data['verification_method'],
@@ -1905,6 +1913,7 @@ def _build_lot_award_ranking(tender: Tender, lot, *, include_pending_request=Fal
     return {
         'lot_id': str(lot.id),
         'lot_name': lot.name,
+        'status': lot.status,
         'rows': rows,
         'recommended': recommended_row,
         'awarded_vendor_id': lot.awarded_vendor_id or None,
@@ -2175,6 +2184,7 @@ def _apply_intent_to_award(tender, prepared, *, actor, send_email=True, from_cha
             tender.intent_to_award_at = now
             tender.cooling_off_until = lot_cooling_off_until
             tender.save(update_fields=['status', 'intent_to_award_at', 'cooling_off_until', 'updated_at'])
+        sync_lot_wise_tender(tender)
     else:
         lot_cooling_off_until = None
         tender.status = TenderStatus.STANDSTILL
@@ -2635,14 +2645,21 @@ class TenderViewSet(viewsets.ModelViewSet):
         )
         return response
 
+    def _assert_not_archived(self):
+        if self.get_object().archived_at:
+            raise PermissionDenied('This tender is archived: every project delivered under it is completed. Its records are read-only.')
+
     def update(self, request, *args, **kwargs):
+        self._assert_not_archived()
         return self._update_with_audit(request, False, *args, **kwargs)
 
     def partial_update(self, request, *args, **kwargs):
+        self._assert_not_archived()
         return self._update_with_audit(request, True, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
         self._assert_write_permission()
+        self._assert_not_archived()
         return super().destroy(request, *args, **kwargs)
 
     @action(detail=True, methods=['post'])
@@ -4086,15 +4103,9 @@ class TenderViewSet(viewsets.ModelViewSet):
                             'contract_id': str(contract.id) if contract else None,
                         },
                     )
-                # Only close out the whole tender once every lot that received intent
-                # has actually been confirmed — other lots may still be mid-standstill.
-                still_pending = any(l.intent_to_award_bid_id and not l.awarded_at for l in lots)
-                if not still_pending:
-                    tender.status = TenderStatus.AWARDED
-                    tender.awarded_at = now
-                    tender.cooling_off_until = None
-                    tender.dispute_started_at = None
-                    tender.save(update_fields=['status', 'awarded_at', 'cooling_off_until', 'dispute_started_at', 'updated_at'])
+                # The tender is Awarded only once EVERY lot is awarded; while other lots
+                # are still in standstill or evaluation the tender status reflects them.
+                sync_lot_wise_tender(tender)
             else:
                 bid = tender.intent_to_award_bid
                 tender.status = TenderStatus.AWARDED
@@ -4183,6 +4194,11 @@ class TenderViewSet(viewsets.ModelViewSet):
         if tender.status == TenderStatus.AWARDED:
             return Response(
                 {'detail': 'Tender has already been awarded. Cannot pause.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if tender.lots.exists() and not tender.lots.filter(intent_to_award_bid__isnull=False, awarded_at__isnull=True).exists():
+            return Response(
+                {'detail': 'No lot has a pending intent to award. Nothing to pause.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -4279,8 +4295,10 @@ class TenderViewSet(viewsets.ModelViewSet):
                 'updated_at',
             ])
         # else: at least one lot is already confirmed-awarded with a real contract —
-        # leave the tender's own status/award fields untouched; only the still-pending
-        # lots above were revoked.
+        # leave the tender's own award fields untouched; only the still-pending lots
+        # above were revoked. The tender status then rolls up from its lots.
+        if is_lot_wise:
+            sync_lot_wise_tender(tender)
 
         log_audit(
             request.user,
@@ -4326,6 +4344,11 @@ class TenderViewSet(viewsets.ModelViewSet):
         if tender.status == TenderStatus.AWARDED:
             return Response(
                 {'detail': 'Tender has already been awarded. Cannot file a challenge.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if tender.lots.exists() and not tender.lots.filter(intent_to_award_bid__isnull=False, awarded_at__isnull=True).exists():
+            return Response(
+                {'detail': 'No lot has a pending intent to award. Awarded lots cannot be challenged here.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -4462,6 +4485,7 @@ class TenderViewSet(viewsets.ModelViewSet):
             tender.dispute_started_at = None
             tender.status = TenderStatus.STANDSTILL
             tender.save(update_fields=['cooling_off_until', 'dispute_started_at', 'status', 'updated_at'])
+            sync_lot_wise_tender(tender)
 
             log_audit(
                 request.user,
@@ -6229,7 +6253,7 @@ class TenderContractViewSet(viewsets.ModelViewSet):
             })
         if not contract.signed_file:
             raise ValidationError({'detail': 'Signed contract file is required before assigning a project.'})
-        serializer = ProjectAssignmentSerializer(data=request.data, context={'contract': contract})
+        serializer = ProjectAssignmentSerializer(data=request.data, context={'contract': contract, 'user': request.user})
         serializer.is_valid(raise_exception=True)
         with transaction.atomic():
             project = _create_project_assignment(request, contract, serializer.validated_data)

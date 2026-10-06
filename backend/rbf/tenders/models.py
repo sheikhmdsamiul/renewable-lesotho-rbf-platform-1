@@ -225,6 +225,10 @@ class Tender(models.Model):
     published_at = models.DateTimeField(null=True, blank=True)
     awarded_at = models.DateTimeField(null=True, blank=True)
     closed_at = models.DateTimeField(null=True, blank=True)
+    # Set once every project delivered under this tender is completed and archived. The
+    # tender's procurement records (lots, bids, evaluations, award, challenges) are then
+    # read-only; see rbf.projects.archive.
+    archived_at = models.DateTimeField(null=True, blank=True)
 
     # Security verification fields
     security_deposit_verified = models.BooleanField(default=False)
@@ -305,6 +309,11 @@ class TenderLot(models.Model):
     estimated_installation_target = models.PositiveIntegerField(null=True, blank=True)
     budget = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
     position = models.PositiveIntegerField(default=0)
+    # This lot's own procurement status (same values as Tender.status). It follows the
+    # tender until the lot enters award, then moves on its own: Standstill once its
+    # intent is issued, Disputed while a tender-level dispute is open, Awarded once
+    # confirmed. Maintained by rbf.tenders.lot_status; never set directly.
+    status = models.CharField(max_length=32, choices=TenderStatus.choices, default=TenderStatus.DRAFT)
 
     # Award state — independent per lot, unlike the shared dispute/challenge timing.
     # awarded_vendor_id/name are set only once this lot's award is CONFIRMED (alongside
@@ -1018,6 +1027,8 @@ class ContractStatus(models.TextChoices):
     SIGNED = 'Signed'
     APPROVED = 'Approved'
     REJECTED = 'Rejected'
+    # Set when the contract's project completes and is archived; the contract is then read-only.
+    CLOSED = 'Closed'
 
 
 class ContractSignatureStatus(models.TextChoices):
@@ -1056,6 +1067,7 @@ class TenderContract(models.Model):
     approved_at = models.DateTimeField(null=True, blank=True)
     approved_by = models.CharField(max_length=255, blank=True)
     rejection_reason = models.TextField(blank=True)
+    closed_at = models.DateTimeField(null=True, blank=True)
     milestone_plan_id = models.CharField(max_length=64, blank=True)
     project_id = models.CharField(max_length=64, blank=True)
 

@@ -1,3 +1,4 @@
+import { getInclusionTargets } from "./inclusionTargets";
 import {
   Tender,
   TenderViewersResponse,
@@ -13,6 +14,7 @@ import {
   ProjectDocument,
   InstallationReport,
   SmartMeterReading,
+  MeterDataBatch,
   VerificationTask,
   FieldVerificationRecord,
   VendorPrequalification,
@@ -53,6 +55,7 @@ import {
   VendorBlacklistCase,
   BlacklistAppeal,
   ProjectKpiSummary,
+  MeterCsvInvalidRow,
   PortfolioKpiSummary,
   ProspectSyncLog,
   Organization,
@@ -67,18 +70,29 @@ import {
   ReportTemplate,
   ReportHistoryItem,
   ReportFormat,
-  Concern,
-  ConcernResponse,
-  AuditFinding,
-  ConcernType,
-  ConcernSeverity,
-  ConcernStatus,
-  FindingCategory,
-  RiskLevel,
   Notice,
+  SiteMonitoringVisit,
+  SiteVisitFollowUpStatus,
+  KpiReview,
+  KpiReviewRating,
+  BlacklistRecommendation,
   NoticeAttachment,
   NoticeCategory,
   NoticeStatus,
+  OversightReview,
+  OversightReviewStatus,
+  OversightSubject,
+  OversightFollowUpStatus,
+  VendorPerformance,
+  AuditCase,
+  AuditEvidence,
+  ProjectArchiveRecord,
+  ReportFilterOptions,
+  ReportHistoryPage,
+  ReportJobStatus,
+  ResultsIndicator,
+  ReportSchedule,
+  ReportScheduleOptions,
 } from "./types";
 
 const env = (import.meta as any)?.env ?? {};
@@ -483,6 +497,7 @@ function mapTenderFromApi(api: any): Tender {
           estimatedInstallationTarget: l.estimated_installation_target ?? undefined,
           budget: l.budget != null ? Number(l.budget) : undefined,
           position: l.position ?? undefined,
+          status: l.status || undefined,
           boqItems: Array.isArray(l.boq_items)
             ? l.boq_items.map((b: any) => ({
                 id: b.id != null ? String(b.id) : undefined,
@@ -501,6 +516,11 @@ function mapTenderFromApi(api: any): Tender {
         }))
       : undefined,
     lotCount: api.lot_count != null ? Number(api.lot_count) : (Array.isArray(api.lots) ? api.lots.length : undefined),
+    lotStatuses: Array.isArray(api.lot_statuses)
+      ? api.lot_statuses.map((l: any) => ({ id: String(l.id), name: l.name || "", status: l.status }))
+      : Array.isArray(api.lots)
+      ? api.lots.filter((l: any) => l.status).map((l: any) => ({ id: String(l.id), name: l.name || "", status: l.status }))
+      : undefined,
     awardedLotCount: api.awarded_lot_count != null ? Number(api.awarded_lot_count) : (Array.isArray(api.lots) ? api.lots.filter((l: any) => l.awarded_vendor_id).length : undefined),
     maxLotsPerBidder: api.max_lots_per_bidder != null ? Number(api.max_lots_per_bidder) : undefined,
     boqItems: Array.isArray(api.boq_items)
@@ -1077,6 +1097,8 @@ function buildTenderForm(payload: Partial<Tender> & { scheduleFile?: File | null
 function mapProjectFromApi(api: any): Project {
   return {
     id: String(api.id ?? ""),
+    archivedAt: api.archived_at ?? null,
+    archivedByName: api.archived_by_name ?? null,
     tenderId: api.tender != null ? String(api.tender) : undefined,
     projectTitle: api.project_title ?? undefined,
     projectReference: api.project_reference ?? undefined,
@@ -1319,6 +1341,29 @@ function mapVerificationTaskFromApi(api: any): VerificationTask {
     updatedAt: api.updated_at ?? "",
     concernMessage: api.concern_message ?? undefined,
     fieldVerification: api.field_verification ? mapFieldVerificationFromApi(api.field_verification) : undefined,
+    verificationRound: Number(api.verification_round ?? 1),
+    reverificationReason: api.reverification_reason || undefined,
+    reverificationRequestedByUsername: api.reverification_requested_by_username || undefined,
+    reverificationRequestedAt: api.reverification_requested_at ?? null,
+    fieldVerifications: Array.isArray(api.field_verifications) ? api.field_verifications.map(mapFieldVerificationFromApi) : undefined,
+    installation: api.installation
+      ? {
+          id: String(api.installation.id),
+          projectId: String(api.installation.project_id),
+          projectReference: api.installation.project_reference || undefined,
+          projectTitle: api.installation.project_title || undefined,
+          vendorName: api.installation.vendor_name || undefined,
+          serialNumber: api.installation.serial_number || undefined,
+          district: api.installation.district || undefined,
+          householdType: api.installation.household_type || undefined,
+          gpsLat: Number(api.installation.gps_lat ?? 0),
+          gpsLng: Number(api.installation.gps_lng ?? 0),
+          status: api.installation.status || undefined,
+          gisStatus: api.installation.gis_status || undefined,
+          submittedAt: api.installation.submitted_at || undefined,
+          photoUrls: Array.isArray(api.installation.photo_urls) ? api.installation.photo_urls.map((u: string) => normalizeFileUrl(u)).filter(Boolean) : [],
+        }
+      : undefined,
   };
 }
 
@@ -1339,6 +1384,8 @@ function mapFieldVerificationFromApi(api: any): FieldVerificationRecord {
     verificationStatus: api.verification_status ?? "",
     flagReason: api.flag_reason ?? undefined,
     verifiedAt: api.verified_at ?? "",
+    verificationRound: api.verification_round != null ? Number(api.verification_round) : undefined,
+    fieldOfficerName: api.field_officer_name || undefined,
   };
 }
 
@@ -1400,6 +1447,16 @@ function mapTenderContractFromApi(api: any): TenderContract {
     projectId: api.project_id ?? undefined,
     generatedAt: api.generated_at ?? undefined,
     updatedAt: api.updated_at ?? undefined,
+    tenderReference: api.tender_reference ?? undefined,
+    tenderName: api.tender_name ?? undefined,
+    fundingSource: api.funding_source || undefined,
+    currency: api.currency || "LSL",
+    awardValue: api.award_value != null ? Number(api.award_value) : undefined,
+    awardedAt: api.awarded_at ?? undefined,
+    technologies: Array.isArray(api.technologies) ? api.technologies : [],
+    districts: Array.isArray(api.districts) ? api.districts : [],
+    installationTarget: api.installation_target != null ? Number(api.installation_target) : undefined,
+    projectReference: api.project_reference ?? undefined,
   };
 }
 
@@ -1659,8 +1716,8 @@ function mapVendorPrequalificationFromApi(api: any): VendorPrequalification {
     priorProjects: Number(api.prior_projects ?? 0),
     annualRevenue: api.annual_revenue != null ? Number(api.annual_revenue) : undefined,
     districtsCovered: Number(api.districts_covered ?? 0),
-    femaleBeneficiaryTarget: Number(api.female_beneficiary_target ?? 50),
-    vulnerableGroupTarget: Number(api.vulnerable_group_target ?? 30),
+    femaleBeneficiaryTarget: Number(api.female_beneficiary_target ?? getInclusionTargets().female),
+    vulnerableGroupTarget: Number(api.vulnerable_group_target ?? getInclusionTargets().vulnerable),
     bankName: api.bank_name ?? undefined,
     bankBranch: api.bank_branch ?? undefined,
     bankSwiftCode: api.bank_swift_code ?? undefined,
@@ -1762,6 +1819,50 @@ function mapSmartMeterReadingFromApi(api: any): SmartMeterReading {
     uptimePct: api.uptime_pct != null ? Number(api.uptime_pct) : undefined,
     recordedAt: api.recorded_at ?? "",
     createdAt: api.created_at ?? "",
+    batchId: api.batch != null ? String(api.batch) : undefined,
+    source: api.source || undefined,
+    submittedByUsername: api.submitted_by_username || undefined,
+    outputPowerW: api.output_power_w != null ? Number(api.output_power_w) : undefined,
+    latitude: api.latitude != null ? Number(api.latitude) : undefined,
+    longitude: api.longitude != null ? Number(api.longitude) : undefined,
+    integrityFlags: Array.isArray(api.integrity_flags) ? api.integrity_flags.map(String) : [],
+    reviewStatus: api.review_status === "rejected" ? "rejected" : "accepted",
+    rejectionReason: api.rejection_reason || undefined,
+  };
+}
+
+function mapMeterDataBatchFromApi(api: any): MeterDataBatch {
+  return {
+    id: String(api.id ?? ""),
+    projectId: String(api.project ?? ""),
+    projectReference: api.project_reference || undefined,
+    vendorId: api.vendor_id != null ? String(api.vendor_id) : undefined,
+    vendorName: api.vendor_name || undefined,
+    uploadedByUsername: api.uploaded_by_username || undefined,
+    uploadedByName: api.uploaded_by_name || undefined,
+    fileName: api.file_name || undefined,
+    sourceFileUrl: normalizeFileUrl(api.source_file_url ?? undefined),
+    rowsIngested: Number(api.rows_ingested ?? 0),
+    rowsRejectedOnUpload: Number(api.rows_rejected_on_upload ?? 0),
+    readingsRejected: Number(api.readings_rejected ?? 0),
+    totalKwh: Number(api.total_kwh ?? 0),
+    integrityFindings: Array.isArray(api.integrity_findings)
+      ? api.integrity_findings.map((finding: any) => ({
+          code: String(finding.code ?? ""),
+          label: String(finding.label ?? finding.code ?? ""),
+          severity: finding.severity === "high" || finding.severity === "low" ? finding.severity : "medium",
+          meterId: String(finding.meter_id ?? ""),
+          message: String(finding.message ?? ""),
+          readingIds: Array.isArray(finding.reading_ids) ? finding.reading_ids.map(String) : [],
+        }))
+      : [],
+    status: api.status ?? "pending_review",
+    reviewNotes: api.review_notes || undefined,
+    reviewedByUsername: api.reviewed_by_username || undefined,
+    reviewedAt: api.reviewed_at || undefined,
+    correctionDueDate: api.correction_due_date || undefined,
+    createdAt: api.created_at ?? "",
+    readings: Array.isArray(api.readings) ? api.readings.map(mapSmartMeterReadingFromApi) : undefined,
   };
 }
 
@@ -3449,8 +3550,10 @@ export async function testProjectSetupConnection(
 
 export async function fetchMilestones(projectId?: string): Promise<Milestone[]> {
   const query = projectId ? `?project=${encodeURIComponent(projectId)}` : "";
-  const data = await http<any>(`/api/projects/milestones/${query}`);
-  return unwrapListResponse<any>(data).map(mapMilestoneFromApi);
+  // Every page: the hub lists each project's milestones, and page one alone left the
+  // projects past the first 50 milestones showing "No milestones added yet".
+  const rows = await fetchAllPages<any>(`/api/projects/milestones/${query}`);
+  return rows.map(mapMilestoneFromApi);
 }
 
 export async function createMilestone(payload: {
@@ -3555,6 +3658,22 @@ export async function uploadProjectDocument(payload: {
     body: form,
   });
   return mapProjectDocumentFromApi(data);
+}
+
+export async function updateProjectUpdate(id: string, payload: { title?: string; body: string }): Promise<ProjectUpdate> {
+  const data = await http<any>(`/api/projects/updates/${id}/`, {
+    method: "PATCH",
+    body: JSON.stringify({ title: payload.title ?? "", body: payload.body }),
+  });
+  return mapProjectUpdateFromApi(data);
+}
+
+export async function deleteProjectUpdate(id: string): Promise<void> {
+  await http<any>(`/api/projects/updates/${id}/`, { method: "DELETE" });
+}
+
+export async function deleteProjectDocument(id: string): Promise<void> {
+  await http<any>(`/api/projects/documents/${id}/`, { method: "DELETE" });
 }
 
 export async function fetchInstallationReports(projectId?: string): Promise<InstallationReport[]> {
@@ -3851,8 +3970,8 @@ export async function submitVendorPrequalification(
   // Blank means "not provided" (stored as null), not zero revenue.
   form.append('annual_revenue', payload.annualRevenue == null ? '' : String(payload.annualRevenue));
   form.append('districts_covered', String(payload.districtsCovered ?? 0));
-  form.append('female_beneficiary_target', String(payload.femaleBeneficiaryTarget ?? 50));
-  form.append('vulnerable_group_target', String(payload.vulnerableGroupTarget ?? 30));
+  form.append('female_beneficiary_target', String(payload.femaleBeneficiaryTarget ?? getInclusionTargets().female));
+  form.append('vulnerable_group_target', String(payload.vulnerableGroupTarget ?? getInclusionTargets().vulnerable));
   form.append('bank_name', payload.bankName ?? "");
   form.append('bank_branch', payload.bankBranch ?? "");
   form.append('bank_swift_code', payload.bankSwiftCode ?? "");
@@ -4083,6 +4202,11 @@ export async function fetchReportTemplates(): Promise<ReportTemplate[]> {
     description: String(item.description || ""),
     category: item.category != null ? String(item.category) : undefined,
     quick: item.quick != null ? Boolean(item.quick) : undefined,
+    requiresProject: Boolean(item.requires_project),
+    requiresTender: Boolean(item.requires_tender),
+    requiresReason: Boolean(item.requires_reason),
+    filters: Array.isArray(item.filters) ? item.filters.map(String) : [],
+    method: item.method ? String(item.method) : undefined,
     formats: Array.isArray(item.formats)
       ? item.formats
           .map((format: any) => String(format).toLowerCase())
@@ -4091,30 +4215,72 @@ export async function fetchReportTemplates(): Promise<ReportTemplate[]> {
   }));
 }
 
-export async function fetchReportHistory(): Promise<ReportHistoryItem[]> {
-  const data = await http<any>(`/api/projects/reports/history/`);
-  return unwrapListResponse<any>(data).map((item) => ({
+function mapReportJob(item: any): ReportHistoryItem {
+  return {
     id: String(item.id || ""),
-    reportType: String(item.report_type || item.reportType || ""),
+    reportType: String(item.reportType || item.report_type || ""),
+    title: item.title != null ? String(item.title) : undefined,
+    period: item.period != null ? String(item.period) : undefined,
+    status: (item.status || "ready") as ReportJobStatus,
+    error: item.error || undefined,
+    rowCount: item.rowCount != null ? Number(item.rowCount) : undefined,
+    filters: item.filters || undefined,
     format: String(item.format || "").toLowerCase() as ReportFormat,
-    generatedAt: String(item.generated_at || item.generatedAt || ""),
-    notes: String(item.notes || ""),
-    project: item.project != null ? String(item.project) : undefined,
+    generatedAt: String(item.generatedAt || item.generated_at || ""),
+    completedAt: item.completedAt ?? null,
+    project: item.project ? String(item.project) : undefined,
     generatedBy: item.generatedBy != null ? String(item.generatedBy) : undefined,
     downloadUrl: item.downloadUrl != null ? String(item.downloadUrl) : undefined,
-  }));
+    approvalStatus: item.approvalStatus || "not_required",
+    version: item.version != null ? Number(item.version) : 1,
+    supersedesId: item.supersedesId ?? null,
+    reviewedBy: item.reviewedBy ?? null,
+    approvedBy: item.approvedBy ?? null,
+    approvedAt: item.approvedAt ?? null,
+    reviewNotes: item.reviewNotes || "",
+    generatedById: item.generatedById ?? null,
+    reviewedById: item.reviewedById ?? null,
+    scheduleName: item.scheduleName ?? null,
+    distributedAt: item.distributedAt ?? null,
+  };
 }
 
-export async function generateReport(
-  reportType: string,
-  format: ReportFormat,
-  filters?: Record<string, any>,
-): Promise<Blob> {
-  return await httpBlob(`/api/projects/reports/generate/`, {
+export async function fetchReportHistory(params: { page?: number; search?: string; active?: boolean } = {}): Promise<ReportHistoryPage> {
+  const query = new URLSearchParams();
+  if (params.page) query.set("page", String(params.page));
+  if (params.search) query.set("search", params.search);
+  if (params.active) query.set("active", "1");
+  const data = await http<any>(`/api/projects/reports/history/${query.toString() ? `?${query}` : ""}`);
+  return {
+    count: Number(data?.count || 0),
+    page: Number(data?.page || 1),
+    pageSize: Number(data?.page_size || 25),
+    results: Array.isArray(data?.results) ? data.results.map(mapReportJob) : [],
+  };
+}
+
+export async function fetchReportFilterOptions(): Promise<ReportFilterOptions> {
+  const data = await http<any>(`/api/projects/reports/filter-options/`);
+  return {
+    districts: data?.districts || [],
+    technologies: data?.technologies || [],
+    vendors: (data?.vendors || []).map((v: any) => ({ id: String(v.id), name: String(v.name || v.id) })),
+    tenders: (data?.tenders || []).map((t: any) => ({ id: String(t.id), reference: String(t.reference || ""), name: String(t.name || "") })),
+    projects: (data?.projects || []).map((p: any) => ({ id: String(p.id), reference: String(p.reference || ""), vendor: String(p.vendor || "") })),
+  };
+}
+
+/** Queue a report; it is generated in the background. Poll fetchReportJob until ready. */
+export async function queueReport(reportType: string, format: ReportFormat, filters?: Record<string, any>): Promise<ReportHistoryItem> {
+  const data = await http<any>(`/api/projects/reports/generate/`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ report_type: reportType, format, filters: filters || {} }),
   });
+  return mapReportJob(data);
+}
+
+export async function fetchReportJob(id: string): Promise<ReportHistoryItem> {
+  return mapReportJob(await http<any>(`/api/projects/reports/${id}/`));
 }
 
 export async function downloadGeneratedReport(downloadUrl: string): Promise<Blob> {
@@ -4362,10 +4528,51 @@ export async function rejectProjectSetup(projectId: string, notes: string): Prom
   };
 }
 
-export async function uploadProjectMeterCsv(projectId: string, file: File): Promise<{ status: string; rows_ingested: number; uploaded_at: string }> {
+export async function fetchMeterDataBatches(projectId: string): Promise<MeterDataBatch[]> {
+  const rows = await fetchAllPages<any>(`/api/projects/meter-data-batches/?project=${encodeURIComponent(projectId)}`);
+  return rows.map(mapMeterDataBatchFromApi);
+}
+
+export async function fetchMeterDataBatch(batchId: string): Promise<MeterDataBatch> {
+  const data = await http<any>(`/api/projects/meter-data-batches/${batchId}/`);
+  return mapMeterDataBatchFromApi(data);
+}
+
+export type MeterDataBatchReviewAction =
+  | { action: "verify"; notes?: string }
+  | { action: "reject"; reason: string }
+  | { action: "request-correction"; reason: string; dueDate?: string }
+  | { action: "reject-readings"; readingIds: string[]; reason: string }
+  | { action: "restore-readings"; readingIds: string[]; notes: string };
+
+export async function reviewMeterDataBatch(batchId: string, review: MeterDataBatchReviewAction): Promise<MeterDataBatch> {
+  const body: Record<string, any> = {};
+  if ("notes" in review && review.notes) body.notes = review.notes;
+  if ("reason" in review) body.reason = review.reason;
+  if ("dueDate" in review && review.dueDate) body.due_date = review.dueDate;
+  if ("readingIds" in review) body.reading_ids = review.readingIds.map(Number);
+  const data = await http<any>(`/api/projects/meter-data-batches/${batchId}/${review.action}/`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  return mapMeterDataBatchFromApi(data);
+}
+
+export type MeterCsvUploadResult = {
+  status: string;
+  rows_ingested: number;
+  rows_rejected?: number;
+  invalid_rows?: MeterCsvInvalidRow[];
+  uploaded_at: string;
+  batch_id?: number;
+  batch_status?: MeterDataBatch["status"];
+  integrity_findings?: Array<{ code: string; label: string; severity: string; message: string }>;
+};
+
+export async function uploadProjectMeterCsv(projectId: string, file: File): Promise<MeterCsvUploadResult> {
   const form = new FormData();
   form.append("file", file);
-  return await http<{ status: string; rows_ingested: number; uploaded_at: string }>(`/api/projects/${projectId}/meter-csv-upload/`, {
+  return await http<MeterCsvUploadResult>(`/api/projects/${projectId}/meter-csv-upload/`, {
     method: "POST",
     body: form,
   });
@@ -4373,13 +4580,14 @@ export async function uploadProjectMeterCsv(projectId: string, file: File): Prom
 
 export async function flagProjectIssue(
   projectId: string,
-  payload: { category?: string; details: string }
+  payload: { category?: string; details: string; paymentClaimId?: string }
 ): Promise<{ status: string; title: string; details: string }> {
   return await http(`/api/projects/${projectId}/flag_issue/`, {
     method: "POST",
     body: JSON.stringify({
       category: payload.category ?? "general",
       details: payload.details,
+      ...(payload.paymentClaimId ? { payment_claim: payload.paymentClaimId } : {}),
     }),
   });
 }
@@ -4898,180 +5106,6 @@ export async function verifyRegistrationOtp(email: string, otp: string): Promise
   });
 }
 
-function mapConcernFromApi(api: any): Concern {
-  return {
-    id: String(api.id ?? ""),
-    raisedBy: String(api.raised_by ?? ""),
-    raisedByUsername: api.raised_by_username ?? undefined,
-    raisedByRole: api.raised_by_role ?? "doe",
-    raisedByRegion: api.raised_by_region ?? undefined,
-    concernType: api.concern_type ?? ConcernType.OTHER,
-    severity: api.severity ?? ConcernSeverity.LOW,
-    linkedProject: api.linked_project ?? undefined,
-    linkedProjectName: api.linked_project_ref ?? api.linked_project_name ?? undefined,
-    linkedProjectVendor: api.linked_project_vendor ?? undefined,
-    linkedProjectDistrict: api.linked_project_district ?? undefined,
-    linkedInstallation: api.linked_installation ?? undefined,
-    linkedClaim: api.linked_claim ?? undefined,
-    description: api.description ?? "",
-    evidenceFiles: Array.isArray(api.evidence_files) ? api.evidence_files : undefined,
-    status: api.status ?? ConcernStatus.OPEN,
-    createdAt: api.created_at ?? "",
-    updatedAt: api.updated_at ?? undefined,
-    notifyRmt: api.notify_rmt,
-    notifyPsc: api.notify_psc,
-    responses: Array.isArray(api.responses) ? api.responses.map(mapConcernResponseFromApi) : undefined,
-  };
-}
-
-function mapConcernResponseFromApi(api: any): ConcernResponse {
-  return {
-    id: String(api.id ?? ""),
-    concernId: String(api.concern ?? ""),
-    respondedBy: String(api.responded_by ?? ""),
-    respondedByUsername: api.responded_by_username ?? undefined,
-    respondedByRole: api.responded_by_role ?? undefined,
-    responseText: api.response_text ?? "",
-    actionTaken: api.action_taken ?? "under_investigation",
-    evidenceFiles: Array.isArray(api.evidence_files) ? api.evidence_files : undefined,
-    createdAt: api.created_at ?? "",
-  };
-}
-
-function mapAuditFindingFromApi(api: any): AuditFinding {
-  return {
-    id: String(api.id ?? ""),
-    findingReference: api.finding_reference ?? undefined,
-    raisedBy: String(api.raised_by ?? ""),
-    raisedByUsername: api.raised_by_username ?? undefined,
-    raisedByRole: api.raised_by_role ?? undefined,
-    raisedByRegion: api.raised_by_region ?? undefined,
-    findingCategory: api.finding_category ?? FindingCategory.OTHER_COMPLIANCE,
-    riskLevel: api.risk_level ?? RiskLevel.OBSERVATION,
-    linkedProject: api.linked_project ?? undefined,
-    linkedProjectName: api.linked_project_ref ?? api.linked_project_name ?? undefined,
-    linkedProjectVendor: api.linked_project_vendor ?? undefined,
-    linkedProjectDistrict: api.linked_project_district ?? undefined,
-    linkedClaim: api.linked_claim ?? undefined,
-    linkedInstallation: api.linked_installation ?? undefined,
-    linkedAuditLog: api.linked_audit_log ?? undefined,
-    description: api.description ?? "",
-    recommendedAction: api.recommended_action ?? undefined,
-    evidenceFiles: Array.isArray(api.evidence_files) ? api.evidence_files : undefined,
-    status: api.status ?? ConcernStatus.OPEN,
-    rmtResponse: api.rmt_response ?? undefined,
-    rmtActionTaken: api.rmt_action_taken ?? undefined,
-    rmtRespondedAt: api.rmt_responded_at ?? undefined,
-    pscComment: api.psc_comment ?? undefined,
-    pscCommentedAt: api.psc_commented_at ?? undefined,
-    pscNotified: Boolean(api.psc_notified || api.notify_psc),
-    superAdminNotified: Boolean(api.super_admin_notified),
-    createdAt: api.created_at ?? "",
-    updatedAt: api.updated_at ?? undefined,
-  };
-}
-
-export async function fetchConcerns(): Promise<Concern[]> {
-  const data = await http<any>(`/api/projects/concerns/`);
-  const items = unwrapListResponse<any>(data);
-  return items.map(mapConcernFromApi);
-}
-
-export async function createConcern(concern: {
-  concern_type: ConcernType;
-  severity: ConcernSeverity;
-  linked_project?: string;
-  linked_installation?: string;
-  description: string;
-  evidence_files?: string[];
-  notify_rmt?: boolean;
-  notify_psc?: boolean;
-}): Promise<Concern> {
-  const data = await http<any>(`/api/projects/concerns/`, {
-    method: "POST",
-    body: JSON.stringify(concern),
-  });
-  return mapConcernFromApi(data);
-}
-
-export async function updateConcern(concernId: string, data: {
-  status?: string;
-  notify_psc?: boolean;
-  notify_rmt?: boolean;
-}): Promise<Concern> {
-  const result = await http<any>(`/api/projects/concerns/${concernId}/`, {
-    method: "PATCH",
-    body: JSON.stringify(data),
-  });
-  return mapConcernFromApi(result);
-}
-
-export async function fetchConcernResponses(concernId: string): Promise<ConcernResponse[]> {
-  const data = await http<any>(`/api/projects/concern-responses/?concern=${concernId}`);
-  const items = unwrapListResponse<any>(data);
-  return items.map(mapConcernResponseFromApi);
-}
-
-export async function createConcernResponse(concernId: string, response: {
-  response_text: string;
-  action_taken?: string;
-  evidence_files?: string[];
-  responded_by?: string | number;
-}): Promise<ConcernResponse> {
-  const data = await http<any>(`/api/projects/concern-responses/`, {
-    method: "POST",
-    body: JSON.stringify({ concern: concernId, responded_by: response.responded_by, response_text: response.response_text, action_taken: response.action_taken, evidence_files: response.evidence_files }),
-  });
-  return mapConcernResponseFromApi(data);
-}
-
-export async function fetchAuditFindings(): Promise<AuditFinding[]> {
-  const data = await http<any>(`/api/projects/audit-findings/`);
-  const items = unwrapListResponse<any>(data);
-  return items.map(mapAuditFindingFromApi);
-}
-
-export async function createAuditFinding(finding: {
-  finding_category: FindingCategory;
-  risk_level: RiskLevel;
-  linked_project?: string;
-  linked_claim?: string;
-  linked_installation?: string;
-  description: string;
-  recommended_action?: string;
-  evidence_files?: string[];
-  rised_to_rmt?: boolean;
-  rised_to_psc?: boolean;
-  rised_to_super_admin?: boolean;
-}): Promise<AuditFinding> {
-  const data = await http<any>(`/api/projects/audit-findings/`, {
-    method: "POST",
-    body: JSON.stringify(finding),
-  });
-  return mapAuditFindingFromApi(data);
-}
-
-export async function updateAuditFinding(findingId: string, data: {
-  status?: string;
-}): Promise<AuditFinding> {
-  const result = await http<any>(`/api/projects/audit-findings/${findingId}/`, {
-    method: "PATCH",
-    body: JSON.stringify(data),
-  });
-  return mapAuditFindingFromApi(result);
-}
-
-export async function respondAuditFinding(findingId: string, response: {
-  response: string;
-  action_taken: string;
-}): Promise<any> {
-  const data = await http<any>(`/api/projects/audit-findings/${findingId}/respond/`, {
-    method: "POST",
-    body: JSON.stringify(response),
-  });
-  return data;
-}
-
 // ======================== NOTICE API FUNCTIONS ========================
 
 function mapNoticeFromApi(data: any): Notice {
@@ -5228,4 +5262,727 @@ export async function unpublishNotice(noticeId: string): Promise<Notice> {
     method: "POST",
   });
   return mapNoticeFromApi(data);
+}
+
+// ======================== DoE REGIONAL RECORDS ========================
+
+const optionalId = (value: any) => (value === null || value === undefined || value === "" ? null : String(value));
+
+function mapSiteMonitoringVisitFromApi(api: any): SiteMonitoringVisit {
+  return {
+    id: String(api.id),
+    projectId: String(api.project),
+    projectReference: api.project_reference || undefined,
+    projectTitle: api.project_title || undefined,
+    projectDistrict: api.project_district || undefined,
+    installationId: optionalId(api.installation),
+    installationSerial: api.installation_serial ?? null,
+    visitedBy: optionalId(api.visited_by),
+    visitedByUsername: api.visited_by_username || undefined,
+    visitedByName: api.visited_by_name || undefined,
+    visitDate: api.visit_date,
+    systemWorking: api.system_working ?? null,
+    beneficiaryPresent: api.beneficiary_present ?? null,
+    observations: api.observations || "",
+    followUpAction: api.follow_up_action || "",
+    followUpStatus: (api.follow_up_status || "none") as SiteVisitFollowUpStatus,
+    latitude: api.latitude ?? null,
+    longitude: api.longitude ?? null,
+    photos: (api.photos || []).map((photo: any) => ({ id: String(photo.id), file: normalizeFileUrl(photo.file) ?? "", uploadedAt: photo.uploaded_at })),
+    createdAt: api.created_at,
+    updatedAt: api.updated_at,
+  };
+}
+
+export interface SiteMonitoringVisitInput {
+  projectId: string;
+  installationId?: string | null;
+  visitDate: string;
+  systemWorking: boolean | null;
+  beneficiaryPresent: boolean | null;
+  observations: string;
+  followUpAction: string;
+  followUpStatus: SiteVisitFollowUpStatus;
+  latitude?: number | null;
+  longitude?: number | null;
+  photos?: File[];
+}
+
+function buildSiteMonitoringVisitForm(payload: SiteMonitoringVisitInput, includeProject: boolean): FormData {
+  const form = new FormData();
+  if (includeProject) form.append("project", payload.projectId);
+  form.append("installation", payload.installationId || "");
+  form.append("visit_date", payload.visitDate);
+  form.append("system_working", payload.systemWorking === null ? "" : String(payload.systemWorking));
+  form.append("beneficiary_present", payload.beneficiaryPresent === null ? "" : String(payload.beneficiaryPresent));
+  form.append("observations", payload.observations);
+  form.append("follow_up_action", payload.followUpAction);
+  form.append("follow_up_status", payload.followUpStatus);
+  form.append("latitude", payload.latitude === null || payload.latitude === undefined ? "" : String(payload.latitude));
+  form.append("longitude", payload.longitude === null || payload.longitude === undefined ? "" : String(payload.longitude));
+  (payload.photos || []).forEach((photo) => form.append("photos", photo));
+  return form;
+}
+
+export async function fetchSiteMonitoringVisits(projectId?: string): Promise<SiteMonitoringVisit[]> {
+  const query = projectId ? `?project=${encodeURIComponent(projectId)}` : "";
+  const rows = await fetchAllPages<any>(`/api/projects/monitoring-visits/${query}`);
+  return rows.map(mapSiteMonitoringVisitFromApi);
+}
+
+export async function createSiteMonitoringVisit(payload: SiteMonitoringVisitInput): Promise<SiteMonitoringVisit> {
+  const data = await http<any>(`/api/projects/monitoring-visits/`, {
+    method: "POST",
+    body: buildSiteMonitoringVisitForm(payload, true),
+  });
+  return mapSiteMonitoringVisitFromApi(data);
+}
+
+export async function updateSiteMonitoringVisit(id: string, payload: SiteMonitoringVisitInput): Promise<SiteMonitoringVisit> {
+  const data = await http<any>(`/api/projects/monitoring-visits/${id}/`, {
+    method: "PATCH",
+    body: buildSiteMonitoringVisitForm(payload, false),
+  });
+  return mapSiteMonitoringVisitFromApi(data);
+}
+
+export async function removeSiteMonitoringPhoto(visitId: string, photoId: string): Promise<SiteMonitoringVisit> {
+  const data = await http<any>(`/api/projects/monitoring-visits/${visitId}/photos/${photoId}/remove/`, { method: "POST" });
+  return mapSiteMonitoringVisitFromApi(data);
+}
+
+function mapKpiReviewFromApi(api: any): KpiReview {
+  return {
+    id: String(api.id),
+    projectId: String(api.project),
+    projectReference: api.project_reference || undefined,
+    projectTitle: api.project_title || undefined,
+    reviewer: optionalId(api.reviewer),
+    reviewerUsername: api.reviewer_username || undefined,
+    reviewerName: api.reviewer_name || undefined,
+    reviewPeriod: api.review_period,
+    rating: api.rating as KpiReviewRating,
+    uptimeComment: api.uptime_comment || "",
+    beneficiaryComment: api.beneficiary_comment || "",
+    genderInclusionComment: api.gender_inclusion_comment || "",
+    summary: api.summary || "",
+    recommendations: api.recommendations || "",
+    kpiSnapshot: api.kpi_snapshot || {},
+    createdAt: api.created_at,
+    updatedAt: api.updated_at,
+  };
+}
+
+export interface KpiReviewInput {
+  projectId: string;
+  reviewPeriod: string;
+  rating: KpiReviewRating;
+  uptimeComment: string;
+  beneficiaryComment: string;
+  genderInclusionComment: string;
+  summary: string;
+  recommendations: string;
+  kpiSnapshot?: Record<string, any>;
+}
+
+function kpiReviewBody(payload: KpiReviewInput, includeProject: boolean) {
+  return JSON.stringify({
+    ...(includeProject ? { project: payload.projectId } : {}),
+    review_period: payload.reviewPeriod,
+    rating: payload.rating,
+    uptime_comment: payload.uptimeComment,
+    beneficiary_comment: payload.beneficiaryComment,
+    gender_inclusion_comment: payload.genderInclusionComment,
+    summary: payload.summary,
+    recommendations: payload.recommendations,
+    ...(payload.kpiSnapshot ? { kpi_snapshot: payload.kpiSnapshot } : {}),
+  });
+}
+
+export async function fetchKpiReviews(projectId?: string): Promise<KpiReview[]> {
+  const query = projectId ? `?project=${encodeURIComponent(projectId)}` : "";
+  const rows = await fetchAllPages<any>(`/api/projects/kpi-reviews/${query}`);
+  return rows.map(mapKpiReviewFromApi);
+}
+
+export async function createKpiReview(payload: KpiReviewInput): Promise<KpiReview> {
+  const data = await http<any>(`/api/projects/kpi-reviews/`, { method: "POST", body: kpiReviewBody(payload, true) });
+  return mapKpiReviewFromApi(data);
+}
+
+export async function updateKpiReview(id: string, payload: KpiReviewInput): Promise<KpiReview> {
+  const data = await http<any>(`/api/projects/kpi-reviews/${id}/`, { method: "PATCH", body: kpiReviewBody(payload, false) });
+  return mapKpiReviewFromApi(data);
+}
+
+function mapBlacklistRecommendationFromApi(api: any): BlacklistRecommendation {
+  return {
+    id: String(api.id),
+    vendorId: String(api.vendor),
+    vendorUsername: api.vendor_username || undefined,
+    vendorName: api.vendor_name || undefined,
+    recommendedBy: optionalId(api.recommended_by),
+    recommendedByUsername: api.recommended_by_username || undefined,
+    recommendedByRegion: api.recommended_by_region || undefined,
+    projectId: optionalId(api.project),
+    projectReference: api.project_reference ?? null,
+    reason: api.reason,
+    justification: api.justification || "",
+    evidenceDocument: normalizeFileUrl(api.evidence_document) ?? null,
+    status: api.status,
+    respondedByUsername: api.responded_by_username || undefined,
+    respondedAt: api.responded_at ?? null,
+    responseNotes: api.response_notes || "",
+    linkedCaseId: optionalId(api.linked_case),
+    createdAt: api.created_at,
+  };
+}
+
+export async function fetchBlacklistRecommendations(): Promise<BlacklistRecommendation[]> {
+  const rows = await fetchAllPages<any>(`/api/users/blacklisting-recommendations/`);
+  return rows.map(mapBlacklistRecommendationFromApi);
+}
+
+export async function createBlacklistRecommendation(payload: {
+  vendorId: string;
+  projectId?: string;
+  reason: string;
+  justification: string;
+  evidenceDocument?: File | null;
+}): Promise<BlacklistRecommendation> {
+  const form = new FormData();
+  form.append("vendor", payload.vendorId);
+  if (payload.projectId) form.append("project", payload.projectId);
+  form.append("reason", payload.reason);
+  form.append("justification", payload.justification);
+  if (payload.evidenceDocument instanceof File) form.append("evidence_document", payload.evidenceDocument);
+  const data = await http<any>(`/api/users/blacklisting-recommendations/`, { method: "POST", body: form });
+  return mapBlacklistRecommendationFromApi(data);
+}
+
+export async function respondToBlacklistRecommendation(
+  id: string,
+  decision: "accept" | "decline",
+  responseNotes: string,
+): Promise<BlacklistRecommendation> {
+  const data = await http<any>(`/api/users/blacklisting-recommendations/${id}/${decision}/`, {
+    method: "POST",
+    body: JSON.stringify({ response_notes: responseNotes }),
+  });
+  return mapBlacklistRecommendationFromApi(data);
+}
+
+
+// ============ Shared oversight (DoE / PSC / RMT), vendor performance, audit cases ============
+
+export async function acknowledgeVerification(taskId: string, comment = ""): Promise<VerificationTask> {
+  const data = await http<any>(`/api/projects/verification-tasks/${taskId}/acknowledge/`, {
+    method: "POST",
+    body: JSON.stringify({ comment }),
+  });
+  return mapVerificationTaskFromApi(data);
+}
+
+export async function requestReverification(taskId: string, reason: string): Promise<VerificationTask> {
+  const data = await http<any>(`/api/projects/verification-tasks/${taskId}/request_reverification/`, {
+    method: "POST",
+    body: JSON.stringify({ reason }),
+  });
+  return mapVerificationTaskFromApi(data);
+}
+
+function mapOversightReviewFromApi(api: any): OversightReview {
+  return {
+    id: String(api.id),
+    reviewer: optionalId(api.reviewer),
+    reviewerName: api.reviewer_name || undefined,
+    reviewerUsername: api.reviewer_username || undefined,
+    reviewerRole: api.reviewer_role || "",
+    subjectType: api.subject_type as OversightSubject,
+    reviewStatus: api.review_status as OversightReviewStatus,
+    projectId: optionalId(api.project),
+    projectReference: api.project_reference ?? null,
+    projectTitle: api.project_title ?? null,
+    projectDistrict: api.project_district ?? null,
+    milestoneId: optionalId(api.milestone),
+    verificationTaskId: optionalId(api.verification_task),
+    verificationRound: api.verification_round ?? null,
+    installationSerial: api.installation_serial ?? null,
+    paymentClaimId: optionalId(api.payment_claim),
+    claimStatus: api.claim_status ?? null,
+    vendorId: optionalId(api.vendor),
+    vendorDisplay: api.vendor_display ?? null,
+    kpiReviewId: optionalId(api.kpi_review),
+    monitoringVisitId: optionalId(api.monitoring_visit),
+    comment: api.comment || "",
+    issueCategory: api.issue_category || "",
+    actionRequired: api.action_required || "",
+    followUpStatus: (api.follow_up_status || "none") as OversightFollowUpStatus,
+    followUpDate: api.follow_up_date ?? null,
+    resolvedByUsername: api.resolved_by_username ?? null,
+    resolvedAt: api.resolved_at ?? null,
+    resolutionNote: api.resolution_note || "",
+    createdAt: api.created_at,
+    updatedAt: api.updated_at,
+  };
+}
+
+export async function fetchOversightReviews(filters: Record<string, string | undefined> = {}): Promise<OversightReview[]> {
+  const search = new URLSearchParams();
+  Object.entries(filters).forEach(([key, value]) => {
+    if (value) search.set(key, value);
+  });
+  const query = search.toString();
+  const rows = await fetchAllPages<any>(`/api/projects/oversight-reviews/${query ? `?${query}` : ""}`);
+  return rows.map(mapOversightReviewFromApi);
+}
+
+export interface OversightReviewInput {
+  subjectType: OversightSubject;
+  reviewStatus: OversightReviewStatus;
+  comment: string;
+  projectId?: string;
+  milestoneId?: string;
+  verificationTaskId?: string;
+  paymentClaimId?: string;
+  vendorId?: string;
+  kpiReviewId?: string;
+  monitoringVisitId?: string;
+  issueCategory?: string;
+  actionRequired?: string;
+  followUpDate?: string;
+}
+
+export async function createOversightReview(payload: OversightReviewInput): Promise<OversightReview> {
+  const body: Record<string, any> = {
+    subject_type: payload.subjectType,
+    review_status: payload.reviewStatus,
+    comment: payload.comment,
+    issue_category: payload.issueCategory || "",
+    action_required: payload.actionRequired || "",
+    follow_up_date: payload.followUpDate || null,
+  };
+  const links: [keyof OversightReviewInput, string][] = [
+    ["projectId", "project"], ["milestoneId", "milestone"], ["verificationTaskId", "verification_task"],
+    ["paymentClaimId", "payment_claim"], ["vendorId", "vendor"], ["kpiReviewId", "kpi_review"],
+    ["monitoringVisitId", "monitoring_visit"],
+  ];
+  links.forEach(([key, field]) => {
+    if (payload[key]) body[field] = payload[key];
+  });
+  const data = await http<any>(`/api/projects/oversight-reviews/`, { method: "POST", body: JSON.stringify(body) });
+  return mapOversightReviewFromApi(data);
+}
+
+export async function amendOversightReview(
+  id: string,
+  payload: Partial<Pick<OversightReviewInput, "reviewStatus" | "comment" | "issueCategory" | "actionRequired" | "followUpDate">>,
+): Promise<OversightReview> {
+  const body: Record<string, any> = {};
+  if (payload.reviewStatus) body.review_status = payload.reviewStatus;
+  if (payload.comment !== undefined) body.comment = payload.comment;
+  if (payload.issueCategory !== undefined) body.issue_category = payload.issueCategory;
+  if (payload.actionRequired !== undefined) body.action_required = payload.actionRequired;
+  if (payload.followUpDate !== undefined) body.follow_up_date = payload.followUpDate || null;
+  const data = await http<any>(`/api/projects/oversight-reviews/${id}/`, { method: "PATCH", body: JSON.stringify(body) });
+  return mapOversightReviewFromApi(data);
+}
+
+export async function updateOversightFollowUp(id: string, followUpStatus: OversightFollowUpStatus, resolutionNote = ""): Promise<OversightReview> {
+  const data = await http<any>(`/api/projects/oversight-reviews/${id}/follow_up/`, {
+    method: "POST",
+    body: JSON.stringify({ follow_up_status: followUpStatus, resolution_note: resolutionNote }),
+  });
+  return mapOversightReviewFromApi(data);
+}
+
+export async function fetchVendorPerformance(): Promise<VendorPerformance[]> {
+  const rows = await http<any[]>(`/api/projects/vendor-performance/`);
+  return (rows || []).map((api) => ({
+    vendorId: String(api.vendor_id),
+    vendorName: api.vendor_name || String(api.vendor_id),
+    vendorStatus: api.vendor_status || "",
+    districts: api.districts || [],
+    projectRefs: (api.project_refs || []).map((ref: any) => ({ id: String(ref.id), reference: ref.reference })),
+    projects: Number(api.projects || 0),
+    activeProjects: Number(api.active_projects || 0),
+    completedProjects: Number(api.completed_projects || 0),
+    installations: Number(api.installations || 0),
+    verified: Number(api.verified || 0),
+    flagged: Number(api.flagged || 0),
+    pendingVerification: Number(api.pending_verification || 0),
+    reverifications: Number(api.reverifications || 0),
+    verificationRate: api.verification_rate ?? null,
+    claims: Number(api.claims || 0),
+    claimedAmount: Number(api.claimed_amount || 0),
+    paidAmount: Number(api.paid_amount || 0),
+    rejectedClaims: Number(api.rejected_claims || 0),
+    heldClaims: Number(api.held_claims || 0),
+    openIssues: Number(api.open_issues || 0),
+    kpiOnTrack: Number(api.kpi_on_track || 0),
+    kpiNeedsAttention: Number(api.kpi_needs_attention || 0),
+    kpiAtRisk: Number(api.kpi_at_risk || 0),
+  }));
+}
+
+function mapAuditEvidenceFromApi(api: any): AuditEvidence {
+  return {
+    id: String(api.id),
+    kind: api.kind,
+    description: api.description || "",
+    fileUrl: api.file_url ? normalizeFileUrl(api.file_url) ?? null : null,
+    sourceType: api.source_type || "",
+    sourceId: api.source_id || "",
+    addedByName: api.added_by_name ?? null,
+    addedAt: api.added_at,
+  };
+}
+
+function mapAuditCaseFromApi(api: any): AuditCase {
+  return {
+    id: String(api.id),
+    reference: api.reference,
+    caseType: api.case_type,
+    auditArea: api.audit_area,
+    auditAreaDisplay: api.audit_area_display || api.audit_area,
+    title: api.title || "",
+    scope: api.scope || "",
+    status: api.status,
+    statusDisplay: api.status_display || api.status,
+    auditorName: api.auditor_name ?? null,
+    projectId: optionalId(api.project),
+    projectReference: api.project_reference ?? null,
+    projectTitle: api.project_title ?? null,
+    vendorId: optionalId(api.vendor),
+    vendorDisplay: api.vendor_display ?? null,
+    tenderId: optionalId(api.tender),
+    tenderReference: api.tender_reference ?? null,
+    contractId: optionalId(api.contract),
+    contractReference: api.contract_reference ?? null,
+    paymentClaimId: optionalId(api.payment_claim),
+    claimStatus: api.claim_status ?? null,
+    verificationTaskId: optionalId(api.verification_task),
+    installationSerial: api.installation_serial ?? null,
+    criteria: api.criteria || "",
+    findingType: api.finding_type || "",
+    riskLevel: api.risk_level || "",
+    finding: api.finding || "",
+    recommendation: api.recommendation || "",
+    findingRecordedAt: api.finding_recorded_at ?? null,
+    responseRequestedAt: api.response_requested_at ?? null,
+    managementResponse: api.management_response || "",
+    respondedByName: api.responded_by_name ?? null,
+    respondedAt: api.responded_at ?? null,
+    correctiveAction: api.corrective_action || "",
+    correctiveActionOwner: api.corrective_action_owner || "",
+    correctiveActionDue: api.corrective_action_due ?? null,
+    correctiveActionStatus: api.corrective_action_status || "not_required",
+    conclusion: api.conclusion || "",
+    finalizedAt: api.finalized_at ?? null,
+    closedAt: api.closed_at ?? null,
+    createdAt: api.created_at,
+    updatedAt: api.updated_at,
+    evidence: Array.isArray(api.evidence) ? api.evidence.map(mapAuditEvidenceFromApi) : [],
+  };
+}
+
+export async function fetchAuditCases(filters: Record<string, string | undefined> = {}): Promise<AuditCase[]> {
+  const search = new URLSearchParams();
+  Object.entries(filters).forEach(([key, value]) => {
+    if (value) search.set(key, value);
+  });
+  const query = search.toString();
+  const rows = await fetchAllPages<any>(`/api/projects/audit-cases/${query ? `?${query}` : ""}`);
+  return rows.map(mapAuditCaseFromApi);
+}
+
+export interface AuditCaseInput {
+  caseType: AuditCase["caseType"];
+  auditArea: AuditCase["auditArea"];
+  title: string;
+  scope: string;
+  criteria?: string;
+  projectId?: string;
+  vendorId?: string;
+  tenderId?: string;
+  contractId?: string;
+  paymentClaimId?: string;
+  verificationTaskId?: string;
+}
+
+export async function createAuditCase(payload: AuditCaseInput): Promise<AuditCase> {
+  const body: Record<string, any> = {
+    case_type: payload.caseType,
+    audit_area: payload.auditArea,
+    title: payload.title,
+    scope: payload.scope,
+    criteria: payload.criteria || "",
+  };
+  const links: [keyof AuditCaseInput, string][] = [
+    ["projectId", "project"], ["vendorId", "vendor"], ["tenderId", "tender"], ["contractId", "contract"],
+    ["paymentClaimId", "payment_claim"], ["verificationTaskId", "verification_task"],
+  ];
+  links.forEach(([key, field]) => {
+    if (payload[key]) body[field] = payload[key];
+  });
+  const data = await http<any>(`/api/projects/audit-cases/`, { method: "POST", body: JSON.stringify(body) });
+  return mapAuditCaseFromApi(data);
+}
+
+export async function updateAuditCase(id: string, payload: { title?: string; scope?: string; criteria?: string }): Promise<AuditCase> {
+  const data = await http<any>(`/api/projects/audit-cases/${id}/`, { method: "PATCH", body: JSON.stringify(payload) });
+  return mapAuditCaseFromApi(data);
+}
+
+export type AuditCaseStep =
+  | "start_review"
+  | "evidence_collected"
+  | "record_finding"
+  | "request_response"
+  | "respond"
+  | "corrective_action_progress"
+  | "finalize"
+  | "close";
+
+export async function runAuditCaseStep(id: string, step: AuditCaseStep, payload: Record<string, any> = {}): Promise<AuditCase> {
+  const data = await http<any>(`/api/projects/audit-cases/${id}/${step}/`, { method: "POST", body: JSON.stringify(payload) });
+  return mapAuditCaseFromApi(data);
+}
+
+export async function addAuditEvidence(
+  id: string,
+  payload: { kind: AuditEvidence["kind"]; description: string; sourceType?: string; sourceId?: string; file?: File | null },
+): Promise<AuditCase> {
+  const form = new FormData();
+  form.append("kind", payload.kind);
+  form.append("description", payload.description);
+  if (payload.sourceType) form.append("source_type", payload.sourceType);
+  if (payload.sourceId) form.append("source_id", payload.sourceId);
+  if (payload.file instanceof File) form.append("file", payload.file);
+  const data = await http<any>(`/api/projects/audit-cases/${id}/evidence/`, { method: "POST", body: form });
+  return mapAuditCaseFromApi(data);
+}
+
+export async function fetchAuditCaseHistory(id: string): Promise<AuditLog[]> {
+  const rows = await http<any[]>(`/api/projects/audit-cases/${id}/history/`);
+  return (rows || []).map(mapAuditLogFromApi);
+}
+
+export async function downloadAuditCaseReport(id: string): Promise<Blob> {
+  return httpBlob(`/api/projects/audit-cases/${id}/report/`);
+}
+
+/** Complete procurement record sets for read-only oversight and audit (not just the first page). */
+export async function fetchAllTendersForOversight(): Promise<Tender[]> {
+  const rows = await fetchAllPages<any>(`/api/tenders/?page_size=100`);
+  return rows.map(mapTenderFromApi);
+}
+
+export async function fetchAllTenderBidsForOversight(): Promise<TenderBid[]> {
+  const rows = await fetchAllPages<any>(`/api/tender-bids/`);
+  return rows.map(mapTenderBidFromApi);
+}
+
+export async function fetchAllBidEvaluationsForOversight(): Promise<TenderBidEvaluation[]> {
+  const rows = await fetchAllPages<any>(`/api/tender-bid-evaluations/`);
+  return rows.map(mapBidEvaluationFromApi);
+}
+
+export async function fetchAllTenderContractsForOversight(): Promise<TenderContract[]> {
+  const rows = await fetchAllPages<any>(`/api/tender-contracts/`);
+  return rows.map(mapTenderContractFromApi);
+}
+
+/** Every audit-log row in a module and date range (used by System Access Audit). */
+export async function fetchAuditLogsForModule(module: string, dateFrom?: string): Promise<AuditLog[]> {
+  const query = new URLSearchParams({ module });
+  if (dateFrom) query.set("date_from", dateFrom);
+  const rows = await fetchAllPages<any>(`/api/projects/audit-logs/?${query.toString()}`);
+  return rows.map(mapAuditLogFromApi);
+}
+
+// ============ Project archive (completed projects, full lifecycle) ============
+
+/** Everything the Projects hub needs for its Archived view: archived projects and their records. */
+export async function fetchArchivedProjectsHubData() {
+  const [projects, milestones, claims, updates, installations] = await Promise.all([
+    fetchAllPages<any>(`/api/projects/?archived=1`),
+    fetchAllPages<any>(`/api/projects/milestones/?archived=1`),
+    fetchAllPages<any>(`/api/projects/claims/?archived=1`),
+    fetchAllPages<any>(`/api/projects/updates/?archived=1`),
+    fetchAllPages<any>(`/api/projects/installations/?archived=1`),
+  ]);
+  return {
+    projects: projects.map(mapProjectFromApi),
+    milestones: milestones.map(mapMilestoneFromApi),
+    claims: claims.map(mapPaymentClaimFromApi),
+    updates: updates.map(mapProjectUpdateFromApi),
+    installations: installations.map(mapInstallationReportFromApi),
+  };
+}
+
+export async function fetchProjectArchive(projectId: string): Promise<ProjectArchiveRecord[]> {
+  const rows = await http<any[]>(`/api/projects/${projectId}/archive/`);
+  return (rows || []).map((api) => ({
+    id: String(api.id),
+    archivedAt: api.archived_at,
+    archivedBy: api.archived_by ?? null,
+    reason: api.reason || "",
+    lifecycleStartedAt: api.lifecycle_started_at ?? null,
+    lifecycleEndedAt: api.lifecycle_ended_at ?? null,
+    supersededAt: api.superseded_at ?? null,
+    tenderReference: api.tender_reference ?? null,
+    contractReference: api.contract_reference ?? null,
+    hasDossier: Boolean(api.has_dossier),
+    timeline: Array.isArray(api.timeline) ? api.timeline : [],
+    snapshot: api.snapshot || {},
+  }));
+}
+
+export async function downloadProjectArchiveDossier(projectId: string, archiveId: string): Promise<Blob> {
+  return httpBlob(`/api/projects/${projectId}/archive/${archiveId}/dossier/`);
+}
+
+export async function restoreArchivedProject(projectId: string, reason: string): Promise<Project> {
+  const data = await http<any>(`/api/projects/${projectId}/restore_archive/`, { method: "POST", body: JSON.stringify({ reason }) });
+  return mapProjectFromApi(data);
+}
+
+/** Every bid on one tender (all pages), for exports. */
+export async function fetchAllBidsForTender(tenderId: string): Promise<TenderBid[]> {
+  const rows = await fetchAllPages<any>(`/api/tender-bids/?tender=${encodeURIComponent(tenderId)}`);
+  return rows.map(mapTenderBidFromApi);
+}
+
+// ============ Results framework ============
+
+const num = (v: any) => (v === null || v === undefined || v === "" ? null : Number(v));
+
+function mapResultsIndicator(api: any): ResultsIndicator {
+  return {
+    id: String(api.id),
+    code: api.code || "",
+    name: api.name || "",
+    unit: api.unit || "",
+    measure: api.measure || "manual",
+    measureDisplay: api.measure_display || api.measure || "",
+    technology: api.technology || "",
+    baseline: num(api.baseline),
+    target: num(api.target),
+    targetDate: api.target_date || null,
+    manualActual: num(api.manual_actual),
+    manualActualAsOf: api.manual_actual_as_of || null,
+    sourceNote: api.source_note || "",
+    position: Number(api.position || 0),
+    updatedByName: api.updated_by_name ?? null,
+    updatedAt: api.updated_at,
+  };
+}
+
+export async function fetchResultsIndicators(): Promise<ResultsIndicator[]> {
+  const rows = await fetchAllPages<any>(`/api/projects/results-indicators/`);
+  return rows.map(mapResultsIndicator);
+}
+
+export async function fetchResultsMeasures(): Promise<{ value: string; label: string }[]> {
+  return await http<any[]>(`/api/projects/results-indicators/measures/`);
+}
+
+export async function saveResultsIndicator(indicator: Partial<ResultsIndicator> & { id?: string }): Promise<ResultsIndicator> {
+  const body = {
+    code: indicator.code,
+    name: indicator.name,
+    unit: indicator.unit || "",
+    measure: indicator.measure,
+    technology: indicator.technology || "",
+    baseline: indicator.baseline,
+    target: indicator.target,
+    target_date: indicator.targetDate || null,
+    manual_actual: indicator.measure === "manual" ? indicator.manualActual : null,
+    manual_actual_as_of: indicator.measure === "manual" ? indicator.manualActualAsOf || null : null,
+    source_note: indicator.sourceNote || "",
+    position: indicator.position ?? 0,
+  };
+  const data = indicator.id
+    ? await http<any>(`/api/projects/results-indicators/${indicator.id}/`, { method: "PATCH", body: JSON.stringify(body) })
+    : await http<any>(`/api/projects/results-indicators/`, { method: "POST", body: JSON.stringify(body) });
+  return mapResultsIndicator(data);
+}
+
+// ============ Report sign-off, sharing and schedules ============
+
+export type ReportStep = "submit" | "review" | "approve" | "new-version" | "distribute";
+
+export async function runReportStep(id: string, step: ReportStep, payload: Record<string, any> = {}): Promise<ReportHistoryItem> {
+  return mapReportJob(await http<any>(`/api/projects/reports/${id}/${step}/`, { method: "POST", body: JSON.stringify(payload) }));
+}
+
+export async function fetchReportInbox(): Promise<{ shared: ReportHistoryItem[]; awaiting: ReportHistoryItem[] }> {
+  const data = await http<any>(`/api/projects/reports/inbox/`);
+  return { shared: (data?.shared || []).map(mapReportJob), awaiting: (data?.awaiting || []).map(mapReportJob) };
+}
+
+function mapReportSchedule(api: any): ReportSchedule {
+  return {
+    id: String(api.id),
+    name: api.name || "",
+    reportType: api.report_type,
+    reportTitle: api.report_title || api.report_type,
+    format: api.format,
+    frequency: api.frequency,
+    runDay: Number(api.run_day || 1),
+    filters: api.filters || {},
+    preparedBy: String(api.prepared_by),
+    preparedByName: api.prepared_by_name ?? null,
+    recipientRoles: api.recipient_roles || [],
+    recipientUsers: (api.recipient_users || []).map(String),
+    active: Boolean(api.active),
+    nextRunAt: api.next_run_at ?? null,
+    lastRunAt: api.last_run_at ?? null,
+  };
+}
+
+export async function fetchReportSchedules(): Promise<ReportSchedule[]> {
+  return (await fetchAllPages<any>(`/api/projects/report-schedules/`)).map(mapReportSchedule);
+}
+
+export async function fetchReportScheduleOptions(): Promise<ReportScheduleOptions> {
+  const data = await http<any>(`/api/projects/report-schedules/form-options/`);
+  return {
+    reports: data?.reports || [],
+    roles: data?.roles || [],
+    preparers: (data?.preparers || []).map((p: any) => ({ id: String(p.id), name: p.name, role: p.role })),
+  };
+}
+
+export async function saveReportSchedule(schedule: Partial<ReportSchedule> & { id?: string }): Promise<ReportSchedule> {
+  const body: Record<string, any> = {
+    name: schedule.name,
+    report_type: schedule.reportType,
+    format: schedule.format,
+    frequency: schedule.frequency,
+    run_day: schedule.runDay,
+    filters: schedule.filters || {},
+    prepared_by: schedule.preparedBy,
+    recipient_roles: schedule.recipientRoles || [],
+    recipient_users: schedule.recipientUsers || [],
+    active: schedule.active ?? true,
+  };
+  const data = schedule.id
+    ? await http<any>(`/api/projects/report-schedules/${schedule.id}/`, { method: "PATCH", body: JSON.stringify(body) })
+    : await http<any>(`/api/projects/report-schedules/`, { method: "POST", body: JSON.stringify(body) });
+  return mapReportSchedule(data);
+}
+
+export async function runReportScheduleNow(id: string): Promise<ReportHistoryItem> {
+  return mapReportJob(await http<any>(`/api/projects/report-schedules/${id}/run_now/`, { method: "POST" }));
+}
+
+export async function fetchInclusionTargets(): Promise<{ female: number; vulnerable: number; lowIncome: number }> {
+  const data = await http<any>(`/api/users/platform-configuration/inclusion-targets/`);
+  return {
+    female: Number(data?.female_target_minimum),
+    vulnerable: Number(data?.vulnerable_target_minimum),
+    lowIncome: Number(data?.low_income_target_minimum),
+  };
 }

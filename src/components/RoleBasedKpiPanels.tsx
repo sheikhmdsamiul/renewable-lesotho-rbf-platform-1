@@ -1,3 +1,4 @@
+import { useInclusionTargets } from "../inclusionTargets";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Activity,
@@ -296,6 +297,7 @@ export function MacroKpiPortal({
   description: string;
   portalType?: "rbf" | "psc";
 }) {
+  const inclusionTargets = useInclusionTargets();
   const [portfolio, setPortfolio] = useState<PortfolioKpiSummary | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [installations, setInstallations] = useState<MapInstallationRecord[]>([]);
@@ -394,9 +396,9 @@ export function MacroKpiPortal({
       femalePct,
       vulnerablePct,
       lowIncomePct,
-      metCount: Number(femalePct >= 50) + Number(vulnerablePct >= 30) + Number(lowIncomePct >= 60),
+      metCount: Number(femalePct >= inclusionTargets.female) + Number(vulnerablePct >= inclusionTargets.vulnerable) + Number(lowIncomePct >= inclusionTargets.lowIncome),
     };
-  }, [projectSummaries]);
+  }, [projectSummaries, inclusionTargets]);
 
   const budgetSummary = useMemo(() => {
     const totalBudget = projects.reduce((sum, project) => sum + Number(project.budget || project.contractValue || project.milestoneTotalAmount || 0), 0);
@@ -606,26 +608,26 @@ export function MacroKpiPortal({
                 <ProgressMetric
                   label="Gender"
                   value={formatPercent(inclusion.femalePct, 1)}
-                  targetLabel="Target: at least 50% female-headed households"
+                  targetLabel={`Target: at least ${inclusionTargets.female}% female-headed households`}
                   percent={inclusion.femalePct}
                   color="bg-emerald-500"
-                  ok={inclusion.femalePct >= 50}
+                  ok={inclusion.femalePct >= inclusionTargets.female}
                 />
                 <ProgressMetric
                   label="Vulnerable Groups"
                   value={formatPercent(inclusion.vulnerablePct, 1)}
-                  targetLabel="Target: at least 30% vulnerable households"
+                  targetLabel={`Target: at least ${inclusionTargets.vulnerable}% vulnerable households`}
                   percent={inclusion.vulnerablePct}
                   color="bg-amber-500"
-                  ok={inclusion.vulnerablePct >= 30}
+                  ok={inclusion.vulnerablePct >= inclusionTargets.vulnerable}
                 />
                 <ProgressMetric
                   label="Low-Income"
                   value={formatPercent(inclusion.lowIncomePct, 1)}
-                  targetLabel="Target: at least 60% low-income households"
+                  targetLabel={`Target: at least ${inclusionTargets.lowIncome}% low-income households`}
                   percent={inclusion.lowIncomePct}
                   color="bg-blue-600"
-                  ok={inclusion.lowIncomePct >= 60}
+                  ok={inclusion.lowIncomePct >= inclusionTargets.lowIncome}
                 />
               </div>
             </SectionCard>
@@ -934,6 +936,7 @@ export function VendorKpiPanel({
   projects: Project[];
   installationReports: InstallationReport[];
 }) {
+  const inclusionTargets = useInclusionTargets();
   const [projectSummaries, setProjectSummaries] = useState<ProjectKpiSummary[]>([]);
   const [meterReadings, setMeterReadings] = useState<SmartMeterReading[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1047,9 +1050,9 @@ export function VendorKpiPanel({
       femalePct,
       vulnerablePct,
       lowIncomePct,
-      metCount: Number(femalePct >= 50) + Number(vulnerablePct >= 30) + Number(lowIncomePct >= 60),
+      metCount: Number(femalePct >= inclusionTargets.female) + Number(vulnerablePct >= inclusionTargets.vulnerable) + Number(lowIncomePct >= inclusionTargets.lowIncome),
     };
-  }, [projectSummaries]);
+  }, [projectSummaries, inclusionTargets]);
 
   const quality = useMemo(() => {
     const verified = installationReports.filter((report) => report.status === "Verified").length;
@@ -1308,26 +1311,26 @@ export function VendorKpiPanel({
               <ProgressMetric
                 label="Gender"
                 value={formatPercent(inclusion.femalePct, 1)}
-                targetLabel="Target: at least 50% female-headed households"
+                targetLabel={`Target: at least ${inclusionTargets.female}% female-headed households`}
                 percent={inclusion.femalePct}
                 color="bg-emerald-500"
-                ok={inclusion.femalePct >= 50}
+                ok={inclusion.femalePct >= inclusionTargets.female}
               />
               <ProgressMetric
                 label="Vulnerable Groups"
                 value={formatPercent(inclusion.vulnerablePct, 1)}
-                targetLabel="Target: at least 30% vulnerable households"
+                targetLabel={`Target: at least ${inclusionTargets.vulnerable}% vulnerable households`}
                 percent={inclusion.vulnerablePct}
                 color="bg-amber-500"
-                ok={inclusion.vulnerablePct >= 30}
+                ok={inclusion.vulnerablePct >= inclusionTargets.vulnerable}
               />
               <ProgressMetric
                 label="Low-Income"
                 value={formatPercent(inclusion.lowIncomePct, 1)}
-                targetLabel="Target: at least 60% low-income households"
+                targetLabel={`Target: at least ${inclusionTargets.lowIncome}% low-income households`}
                 percent={inclusion.lowIncomePct}
                 color="bg-blue-600"
-                ok={inclusion.lowIncomePct >= 60}
+                ok={inclusion.lowIncomePct >= inclusionTargets.lowIncome}
               />
             </div>
           </SectionCard>

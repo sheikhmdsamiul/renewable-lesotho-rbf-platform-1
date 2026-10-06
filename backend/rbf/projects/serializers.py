@@ -1,6 +1,13 @@
 from rest_framework import serializers
 from django.db.models import Q, Sum
 from .models import (
+    ResultsIndicator,
+    AuditCase,
+    AuditEvidence,
+    OversightReview,
+    KpiReview,
+    SiteMonitoringPhoto,
+    SiteMonitoringVisit,
     Project,
     ProjectSetup,
     ProjectSetupReviewStatus,
@@ -11,7 +18,9 @@ from .models import (
     InstallationReport,
     FieldVerification,
     VerificationTask,
+    MeterDataBatch,
     SmartMeterReading,
+    SmartMeterReadingReviewStatus,
     PaymentClaim,
     PaymentClaimStatus,
     Disbursement,
@@ -20,13 +29,12 @@ from .models import (
     AnomalyFlag,
     AnomalyReviewEvent,
     AnomalyEvidenceFile,
-    Concern,
-    ConcernResponse,
-    AuditFinding,
 )
 from rbf.tenders.models import TenderContract
 from django.conf import settings
 from rbf.users.models import UserRole
+from rbf.common.uploads import validate_document_upload
+from django.core.files.storage import default_storage
 from .bank_details import get_vendor_bank_snapshot
 
 
@@ -118,6 +126,7 @@ class ProjectSerializer(serializers.ModelSerializer):
     contract_status = serializers.SerializerMethodField()
     contract_signed_file = serializers.SerializerMethodField()
     milestone_total_amount = serializers.SerializerMethodField()
+    archived_by_name = serializers.SerializerMethodField()
     milestone_count = serializers.SerializerMethodField()
     assigned_district = serializers.SerializerMethodField()
     setup_status = serializers.SerializerMethodField()
@@ -146,6 +155,9 @@ class ProjectSerializer(serializers.ModelSerializer):
         ).first()
         self._contract_cache[obj.id] = contract
         return contract
+
+    def get_archived_by_name(self, obj: Project):
+        return (obj.archived_by.full_name or obj.archived_by.username) if obj.archived_by_id else None
 
     def get_contract_reference(self, obj: Project):
         contract = self._get_contract(obj)
@@ -310,10 +322,37 @@ class ProjectSerializer(serializers.ModelSerializer):
 
         return data
 
+    INCLUSION_TARGET_FIELDS = {
+        'female': ('female_target_pct', 'target_female_pct'),
+        'vulnerable': ('vulnerable_target_pct', 'target_vulnerable_pct'),
+        'low_income': ('low_income_target_pct', 'target_low_income_pct'),
+    }
+
+    def validate(self, attrs):
+        """Inclusion targets are configured by the Super Admin only. Anyone else creating a project
+        gets the programme minimums from Platform Configuration and cannot change them later."""
+        from rbf.users.models import inclusion_targets
+
+        attrs = super().validate(attrs)
+        request = self.context.get('request')
+        if getattr(getattr(request, 'user', None), 'role', None) == UserRole.ADMIN:
+            return attrs
+        fields = [f for pair in self.INCLUSION_TARGET_FIELDS.values() for f in pair]
+        if self.instance is None:
+            minimums = inclusion_targets()
+            for key, pair in self.INCLUSION_TARGET_FIELDS.items():
+                for field in pair:
+                    attrs[field] = minimums[key]
+            return attrs
+        changed = [f for f in fields if f in attrs and attrs[f] != getattr(self.instance, f)]
+        if changed:
+            raise serializers.ValidationError({f: 'Only the Super Admin can change inclusion targets.' for f in changed})
+        return attrs
+
     class Meta:
         model = Project
         fields = '__all__'
-        read_only_fields = ['id']
+        read_only_fields = ['id', 'archived_at', 'archived_by']
 
 
 class ProjectSetupSerializer(serializers.ModelSerializer):
@@ -710,44 +749,135 @@ class InstallationReportSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'vendor', 'vendor_username', 'submitted_at', 'status', 'gis_status', 'receipt_file_url', 'district']
 
 
-class VerificationTaskSerializer(serializers.ModelSerializer):
-    assigned_verifier_username = serializers.CharField(source='assigned_verifier.username', read_only=True)
-    field_verification = serializers.SerializerMethodField()
-
-    class Meta:
-        model = VerificationTask
-        fields = '__all__'
-        read_only_fields = [
-            'id',
-            'assigned_verifier',
-            'assigned_verifier_username',
-            'distance_meters',
-            'anomaly_flag',
-            'created_at',
-            'updated_at',
-        ]
-
-    def get_field_verification(self, obj):
-        field_verification = obj.report.field_verifications.first()
-        if field_verification is None:
-            return None
-        return FieldVerificationSerializer(field_verification, context=self.context).data
+def _storage_urls(paths):
+    urls = []
+    for path in paths or []:
+        try:
+            urls.append(default_storage.url(path))
+        except Exception:
+            continue
+    return urls
 
 
 class FieldVerificationSerializer(serializers.ModelSerializer):
     field_officer_username = serializers.CharField(source='field_officer.username', read_only=True)
+    field_officer_name = serializers.CharField(source='field_officer.full_name', read_only=True)
+    site_photo_urls = serializers.SerializerMethodField()
 
     class Meta:
         model = FieldVerification
         fields = '__all__'
-        read_only_fields = ['id', 'field_officer_username', 'verified_at']
+        read_only_fields = [field.name for field in FieldVerification._meta.fields] + [
+            'field_officer_username', 'field_officer_name', 'site_photo_urls',
+        ]
+
+    def get_site_photo_urls(self, obj):
+        return _storage_urls(obj.site_photos)
+
+
+class VerificationTaskSerializer(serializers.ModelSerializer):
+    """Verification tasks are workflow records: every field is read-only and changes go through actions."""
+
+    assigned_verifier_username = serializers.CharField(source='assigned_verifier.username', read_only=True)
+    reverification_requested_by_username = serializers.CharField(source='reverification_requested_by.username', read_only=True, default=None)
+    field_verification = serializers.SerializerMethodField()
+    field_verifications = serializers.SerializerMethodField()
+    installation = serializers.SerializerMethodField()
+
+    class Meta:
+        model = VerificationTask
+        fields = '__all__'
+        read_only_fields = [field.name for field in VerificationTask._meta.fields] + [
+            'assigned_verifier_username', 'reverification_requested_by_username',
+        ]
+
+    def _history(self, obj):
+        cached = getattr(obj, '_field_verification_history', None)
+        if cached is None:
+            cached = list(obj.report.field_verifications.select_related('field_officer').all())
+            obj._field_verification_history = cached
+        return cached
+
+    def get_field_verification(self, obj):
+        history = self._history(obj)
+        if not history:
+            return None
+        return FieldVerificationSerializer(history[0], context=self.context).data
+
+    def get_field_verifications(self, obj):
+        return FieldVerificationSerializer(self._history(obj), many=True, context=self.context).data
+
+    def get_installation(self, obj):
+        report = obj.report
+        project = report.project
+        return {
+            'id': report.id,
+            'project_id': project.id,
+            'project_reference': project.project_reference,
+            'project_title': project.project_title,
+            'vendor_name': project.vendor_name,
+            'serial_number': report.serial_number,
+            'district': report.district or project.district or project.region,
+            'household_type': report.household_type,
+            'gps_lat': report.gps_lat,
+            'gps_lng': report.gps_lng,
+            'status': report.status,
+            'gis_status': report.gis_status,
+            'submitted_at': report.submitted_at,
+            'photo_urls': _storage_urls(report.photo_files),
+        }
 
 
 class SmartMeterReadingSerializer(serializers.ModelSerializer):
+    submitted_by_username = serializers.CharField(source='submitted_by.username', read_only=True, default=None)
+    batch_status = serializers.CharField(source='batch.status', read_only=True, default=None)
+
     class Meta:
         model = SmartMeterReading
         fields = '__all__'
-        read_only_fields = ['id', 'created_at']
+        read_only_fields = [
+            'id', 'created_at', 'batch', 'source', 'submitted_by', 'integrity_flags',
+            'review_status', 'rejection_reason',
+        ]
+
+
+class MeterDataBatchSerializer(serializers.ModelSerializer):
+    uploaded_by_username = serializers.CharField(source='uploaded_by.username', read_only=True, default=None)
+    uploaded_by_name = serializers.SerializerMethodField()
+    reviewed_by_username = serializers.CharField(source='reviewed_by.username', read_only=True, default=None)
+    source_file_url = serializers.SerializerMethodField()
+    project_reference = serializers.CharField(source='project.project_reference', read_only=True)
+    vendor_id = serializers.CharField(source='project.vendor_id', read_only=True)
+    vendor_name = serializers.CharField(source='project.vendor_name', read_only=True)
+    readings_rejected = serializers.SerializerMethodField()
+    total_kwh = serializers.SerializerMethodField()
+
+    def get_uploaded_by_name(self, obj: MeterDataBatch):
+        user = obj.uploaded_by
+        if not user:
+            return None
+        return user.organization_name or user.full_name or user.username
+
+    def get_source_file_url(self, obj: MeterDataBatch):
+        document = obj.source_document
+        if document and document.file:
+            return document.file.url
+        return None
+
+    def get_readings_rejected(self, obj: MeterDataBatch):
+        return sum(1 for reading in obj.readings.all() if reading.review_status == SmartMeterReadingReviewStatus.REJECTED)
+
+    def get_total_kwh(self, obj: MeterDataBatch):
+        return round(sum(float(reading.kwh or 0) for reading in obj.readings.all()), 3)
+
+    class Meta:
+        model = MeterDataBatch
+        fields = '__all__'
+        read_only_fields = [field.name for field in MeterDataBatch._meta.fields]
+
+
+class MeterDataBatchDetailSerializer(MeterDataBatchSerializer):
+    readings = SmartMeterReadingSerializer(many=True, read_only=True)
 
 
 class AuditLogSerializer(serializers.ModelSerializer):
@@ -808,39 +938,204 @@ class AnomalyFlagSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at', 'resolved_at', 'is_resolved', 'assigned_to_username']
 
 
-class ConcernResponseSerializer(serializers.ModelSerializer):
-    responded_by_username = serializers.CharField(source='responded_by.username', read_only=True)
+class SiteMonitoringPhotoSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SiteMonitoringPhoto
+        fields = ['id', 'file', 'uploaded_at']
+        read_only_fields = fields
+
+
+class SiteMonitoringVisitSerializer(serializers.ModelSerializer):
+    visited_by_username = serializers.CharField(source='visited_by.username', read_only=True)
+    visited_by_name = serializers.CharField(source='visited_by.full_name', read_only=True)
+    project_reference = serializers.CharField(source='project.project_reference', read_only=True)
+    project_title = serializers.CharField(source='project.project_title', read_only=True)
+    project_district = serializers.CharField(source='project.district', read_only=True)
+    installation_serial = serializers.CharField(source='installation.serial_number', read_only=True, allow_null=True)
+    photos = SiteMonitoringPhotoSerializer(many=True, read_only=True)
 
     class Meta:
-        model = ConcernResponse
-        fields = '__all__'
-        read_only_fields = ['id', 'created_at', 'responded_by_username']
+        model = SiteMonitoringVisit
+        fields = [
+            'id', 'project', 'project_reference', 'project_title', 'project_district',
+            'installation', 'installation_serial', 'visited_by', 'visited_by_username', 'visited_by_name',
+            'visit_date', 'system_working', 'beneficiary_present', 'observations',
+            'follow_up_action', 'follow_up_status', 'latitude', 'longitude', 'photos',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'visited_by', 'created_at', 'updated_at']
+
+    def validate_observations(self, value):
+        if len((value or '').strip()) < 10:
+            raise serializers.ValidationError('Describe what you observed (at least 10 characters).')
+        return value.strip()
+
+    def validate(self, attrs):
+        project = attrs.get('project') or getattr(self.instance, 'project', None)
+        installation = attrs.get('installation')
+        if installation and project and installation.project_id != project.id:
+            raise serializers.ValidationError({'installation': 'The installation does not belong to this project.'})
+        if self.instance and 'project' in attrs and attrs['project'].id != self.instance.project_id:
+            raise serializers.ValidationError({'project': 'The project of a visit cannot be changed.'})
+        return attrs
+
+    @staticmethod
+    def validate_photo(upload):
+        return validate_document_upload(upload, label='Site photo', allowed=('jpg', 'jpeg', 'png'))
 
 
-class ConcernSerializer(serializers.ModelSerializer):
-    raised_by_username = serializers.CharField(source='raised_by.username', read_only=True)
-    raised_by_role = serializers.CharField(source='raised_by.get_role_display', read_only=True)
-    raised_by_region = serializers.CharField(source='raised_by.region', read_only=True)
-    linked_project_ref = serializers.CharField(source='linked_project.project_reference', read_only=True, allow_null=True)
-    linked_project_vendor = serializers.CharField(source='linked_project.vendor.name', read_only=True, allow_null=True)
-    linked_project_district = serializers.CharField(source='linked_project.district', read_only=True, allow_null=True)
-    responses = ConcernResponseSerializer(many=True, read_only=True)
+class KpiReviewSerializer(serializers.ModelSerializer):
+    reviewer_username = serializers.CharField(source='reviewer.username', read_only=True)
+    reviewer_name = serializers.CharField(source='reviewer.full_name', read_only=True)
+    project_reference = serializers.CharField(source='project.project_reference', read_only=True)
+    project_title = serializers.CharField(source='project.project_title', read_only=True)
 
     class Meta:
-        model = Concern
-        fields = '__all__'
-        read_only_fields = ['id', 'created_at', 'updated_at', 'raised_by', 'raised_by_username', 'raised_by_role', 'raised_by_region', 'linked_project_ref', 'linked_project_vendor', 'linked_project_district']
+        model = KpiReview
+        fields = [
+            'id', 'project', 'project_reference', 'project_title', 'reviewer', 'reviewer_username', 'reviewer_name',
+            'review_period', 'rating', 'uptime_comment', 'beneficiary_comment', 'gender_inclusion_comment',
+            'summary', 'recommendations', 'kpi_snapshot', 'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'reviewer', 'created_at', 'updated_at']
+        # Uniqueness per reviewer/period is enforced in the view, where the reviewer is known.
+        validators = []
+
+    def validate_review_period(self, value):
+        import re
+        if not re.fullmatch(r'\d{4}-(0[1-9]|1[0-2])', value or ''):
+            raise serializers.ValidationError('Use the YYYY-MM format.')
+        return value
+
+    def validate_summary(self, value):
+        if len((value or '').strip()) < 10:
+            raise serializers.ValidationError('Write a short summary of the review (at least 10 characters).')
+        return value.strip()
+
+    def validate(self, attrs):
+        if self.instance and 'project' in attrs and attrs['project'].id != self.instance.project_id:
+            raise serializers.ValidationError({'project': 'The project of a review cannot be changed.'})
+        return attrs
 
 
-class AuditFindingSerializer(serializers.ModelSerializer):
-    raised_by_username = serializers.CharField(source='raised_by.username', read_only=True)
-    raised_by_role = serializers.CharField(source='raised_by.get_role_display', read_only=True)
-    raised_by_region = serializers.CharField(source='raised_by.region', read_only=True)
-    linked_project_ref = serializers.CharField(source='linked_project.project_reference', read_only=True, allow_null=True)
-    linked_project_vendor = serializers.CharField(source='linked_project.vendor.name', read_only=True, allow_null=True)
-    linked_project_district = serializers.CharField(source='linked_project.district', read_only=True, allow_null=True)
+class OversightReviewSerializer(serializers.ModelSerializer):
+    reviewer_username = serializers.CharField(source='reviewer.username', read_only=True, default=None)
+    reviewer_name = serializers.CharField(source='reviewer.full_name', read_only=True, default=None)
+    resolved_by_username = serializers.CharField(source='resolved_by.username', read_only=True, default=None)
+    project_reference = serializers.CharField(source='project.project_reference', read_only=True, default=None)
+    project_title = serializers.CharField(source='project.project_title', read_only=True, default=None)
+    project_district = serializers.CharField(source='project.district', read_only=True, default=None)
+    vendor_display = serializers.SerializerMethodField()
+    installation_serial = serializers.CharField(source='verification_task.report.serial_number', read_only=True, default=None)
+    claim_status = serializers.CharField(source='payment_claim.status', read_only=True, default=None)
 
     class Meta:
-        model = AuditFinding
+        model = OversightReview
         fields = '__all__'
-        read_only_fields = ['id', 'created_at', 'updated_at', 'raised_by', 'raised_by_username', 'raised_by_role', 'raised_by_region', 'linked_project_ref', 'linked_project_vendor', 'linked_project_district']
+        read_only_fields = [
+            'id', 'reviewer', 'reviewer_role', 'verification_round', 'resolved_by', 'resolved_at',
+            'resolution_note', 'created_at', 'updated_at',
+        ]
+
+    def get_vendor_display(self, obj):
+        if obj.vendor_id:
+            vendor = obj.vendor
+            return vendor.organization_name or vendor.full_name or vendor.username
+        if obj.project_id:
+            return obj.project.vendor_name or None
+        return None
+
+    def validate_comment(self, value):
+        if len((value or '').strip()) < 5:
+            raise serializers.ValidationError('Write a comment (at least 5 characters).')
+        return value.strip()
+
+
+
+class AuditEvidenceSerializer(serializers.ModelSerializer):
+    added_by_name = serializers.SerializerMethodField()
+    file_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = AuditEvidence
+        fields = '__all__'
+        read_only_fields = ['id', 'case', 'added_by', 'added_at']
+
+    def get_added_by_name(self, obj):
+        return (obj.added_by.full_name or obj.added_by.username) if obj.added_by_id else None
+
+    def get_file_url(self, obj):
+        return obj.file.url if obj.file else None
+
+
+class AuditCaseSerializer(serializers.ModelSerializer):
+    """Descriptive fields are writable by the Auditor; workflow fields change only through actions."""
+
+    auditor_name = serializers.SerializerMethodField()
+    responded_by_name = serializers.SerializerMethodField()
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    audit_area_display = serializers.CharField(source='get_audit_area_display', read_only=True)
+    project_reference = serializers.CharField(source='project.project_reference', read_only=True, default=None)
+    project_title = serializers.CharField(source='project.project_title', read_only=True, default=None)
+    vendor_display = serializers.SerializerMethodField()
+    tender_reference = serializers.CharField(source='tender.reference_number', read_only=True, default=None)
+    contract_reference = serializers.CharField(source='contract.reference_number', read_only=True, default=None)
+    claim_status = serializers.CharField(source='payment_claim.status', read_only=True, default=None)
+    installation_serial = serializers.CharField(source='verification_task.report.serial_number', read_only=True, default=None)
+    evidence = AuditEvidenceSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = AuditCase
+        fields = '__all__'
+        read_only_fields = [
+            'reference', 'status', 'auditor', 'finding_recorded_at', 'response_requested_at', 'management_response',
+            'responded_by', 'responded_at', 'finalized_at', 'closed_at', 'created_at', 'updated_at',
+        ]
+
+    def get_auditor_name(self, obj):
+        return (obj.auditor.full_name or obj.auditor.username) if obj.auditor_id else None
+
+    def get_responded_by_name(self, obj):
+        return (obj.responded_by.full_name or obj.responded_by.username) if obj.responded_by_id else None
+
+    def get_vendor_display(self, obj):
+        if obj.vendor_id:
+            return obj.vendor.organization_name or obj.vendor.full_name or obj.vendor.username
+        if obj.project_id:
+            return obj.project.vendor_name or None
+        return None
+
+    def validate_title(self, value):
+        if len((value or '').strip()) < 5:
+            raise serializers.ValidationError('Give the case a title (at least 5 characters).')
+        return value.strip()
+
+    def validate_scope(self, value):
+        if len((value or '').strip()) < 10:
+            raise serializers.ValidationError('Describe the audit scope (at least 10 characters).')
+        return value.strip()
+
+
+class ResultsIndicatorSerializer(serializers.ModelSerializer):
+    measure_display = serializers.CharField(source='get_measure_display', read_only=True)
+    updated_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ResultsIndicator
+        fields = '__all__'
+        read_only_fields = ['id', 'updated_by', 'updated_at']
+
+    def get_updated_by_name(self, obj):
+        return (obj.updated_by.full_name or obj.updated_by.username) if obj.updated_by_id else None
+
+    def validate_code(self, value):
+        value = (value or '').strip().upper()
+        if not value:
+            raise serializers.ValidationError('Give the indicator a short code, such as "OUT1.1".')
+        return value
+
+    def validate(self, attrs):
+        measure = attrs.get('measure', getattr(self.instance, 'measure', None))
+        if measure != 'manual' and (attrs.get('manual_actual') is not None):
+            raise serializers.ValidationError({'manual_actual': 'Only manual indicators take an entered actual value.'})
+        return attrs

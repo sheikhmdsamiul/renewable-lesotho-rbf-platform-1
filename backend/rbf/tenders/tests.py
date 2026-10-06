@@ -3749,6 +3749,10 @@ class TenderContractAssignmentTests(APITestCase):
 
     @patch("rbf.tenders.views.queue_project_targets_sync")
     def test_assign_post_applies_configured_milestone_plan(self, queue_targets):
+        # Inclusion targets come from the Super Admin's Platform Configuration, not the RMT form.
+        config = PlatformConfiguration.objects.order_by("id").first() or PlatformConfiguration()
+        config.female_target_minimum, config.vulnerable_target_minimum, config.low_income_target_minimum = 55, 35, 65
+        config.save()
         self.client.force_authenticate(self.rmt_user)
 
         response = self.client.post(
@@ -3760,9 +3764,6 @@ class TenderContractAssignmentTests(APITestCase):
                 "energy_output_target_kwh": "20000.00",
                 "district_zones": ["Maseru"],
                 "verification_method": "manual",
-                "female_target_pct": 55,
-                "vulnerable_target_pct": 35,
-                "low_income_target_pct": 65,
                 "m1_disbursement_pct": 10,
                 "m2_disbursement_pct": 60,
                 "m3_disbursement_pct": 30,
@@ -5580,6 +5581,15 @@ class LotWiseTenderTests(APITestCase):
         )
         self.lot1 = TenderLot.objects.create(tender=self.tender, name="Lot 1: Maseru", position=0)
         self.lot2 = TenderLot.objects.create(tender=self.tender, name="Lot 2: Leribe", position=1)
+        # Assigning a project from a contract is an RMT action, distinct from the Super Admin
+        # who approves the intent to award and the contract.
+        self.rmt_user = User.objects.create_user(
+            username="lot_rmt",
+            password="securePass123",
+            role=UserRole.RBF_OFFICIAL,
+            status="Active",
+            full_name="Lot RMT",
+        )
 
     def _submitted_financial_bid(self, vendor, offers):
         """Create a Financial-stage bid with lot offers, bypassing the wizard's earlier
@@ -5873,6 +5883,109 @@ class LotWiseTenderTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("award_lot", response.data["detail"])
 
+    def _request_and_approve_lot_award(self, lot, bid, as_user=None):
+        """Queue the RBF's intent-to-award for one lot and have a Super Admin approve it,
+        which starts that lot's own cooling-off clock."""
+        user = as_user or self.admin_user
+        self.client.force_authenticate(user)
+        award = self.client.post(
+            f"/api/tenders/{self.tender.id}/award_lot/",
+            {"lot_id": str(lot.id), "bid_id": str(bid.id)},
+            format="json",
+        )
+        self.assertEqual(award.status_code, status.HTTP_200_OK, award.data)
+        _approve_pending_intent_to_award(self.client, self.tender, as_user=user, lot=lot)
+
+    def _confirm_all_lot_awards(self):
+        """Expire every lot's cooling-off and confirm the award, generating one contract
+        per confirmed lot."""
+        for lot in (self.lot1, self.lot2):
+            lot.refresh_from_db()
+            lot.cooling_off_until = timezone.now() - timedelta(minutes=1)
+            lot.save(update_fields=["cooling_off_until"])
+        confirm = self.client.post(f"/api/tenders/{self.tender.id}/confirm_award/", {}, format="json")
+        self.assertEqual(confirm.status_code, status.HTTP_200_OK, confirm.data)
+        return confirm
+
+    def test_contract_list_identifies_each_lots_own_contract_and_project(self):
+        """The Contract and Project Assignment tabs key everything off the contract list,
+        so every lot-wise contract must come back naming its own lot. Two lots won by the
+        SAME vendor under one bid are the case that matters: without lot_id/lot_name the
+        reviewer sees two identical rows and cannot tell which lot or project they are on."""
+        bid_a = self._submitted_financial_bid(self.vendor_a, {self.lot1: 100000, self.lot2: 200000})
+        self._score_technical(bid_a, score=80)
+        self._score_financial_for_lot(bid_a, self.lot1, 100)
+        self._score_financial_for_lot(bid_a, self.lot2, 100)
+
+        # One bid wins both lots — the vendor is the same, so only the lot distinguishes them.
+        self._request_and_approve_lot_award(self.lot1, bid_a)
+        self._request_and_approve_lot_award(self.lot2, bid_a)
+        self._confirm_all_lot_awards()
+
+        contract_lot1 = TenderContract.objects.get(tender=self.tender, lot=self.lot1)
+        contract_lot2 = TenderContract.objects.get(tender=self.tender, lot=self.lot2)
+        self.assertEqual(contract_lot1.vendor_id, contract_lot2.vendor_id)
+
+        self.client.force_authenticate(self.admin_user)
+        response = self.client.get(f"/api/tender-contracts/?tender={self.tender.id}")
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+
+        rows = response.data["results"] if isinstance(response.data, dict) else response.data
+        self.assertEqual(len(rows), 2)
+        by_lot_id = {str(row["lot"]): row for row in rows}
+        self.assertEqual(set(by_lot_id), {str(self.lot1.id), str(self.lot2.id)})
+
+        for lot, contract in ((self.lot1, contract_lot1), (self.lot2, contract_lot2)):
+            row = by_lot_id[str(lot.id)]
+            self.assertEqual(row["lot_name"], lot.name)
+            self.assertEqual(row["vendor_id"], str(self.vendor_a.id))
+            # Distinct references keep the two lots' contracts (and later their projects)
+            # from being mistaken for one another.
+            self.assertNotEqual(row["reference_number"], contract_lot1.reference_number if lot is self.lot2 else contract_lot2.reference_number)
+            self.assertIn(f"-LOT{lot.id}", row["reference_number"])
+            self.assertNotIn("project_id", [k for k, v in row.items() if v])
+            self.assertIsNone(row["project_id"])
+            self.assertIsNone(row["project_reference"])
+
+    def test_contract_list_carries_the_project_created_for_each_lot(self):
+        """Once a lot's contract is approved and assigned, its project must be visible from
+        the contract itself (project_id + project_reference) — that is what lets the Project
+        Assignment tab say which project belongs to which lot."""
+        bid_a = self._submitted_financial_bid(self.vendor_a, {self.lot1: 100000})
+        self._score_technical(bid_a, score=80)
+        self._score_financial_for_lot(bid_a, self.lot1, 100)
+
+        self._request_and_approve_lot_award(self.lot1, bid_a)
+        self._confirm_all_lot_awards()
+        contract = TenderContract.objects.get(tender=self.tender, lot=self.lot1)
+        contract.status = ContractStatus.APPROVED
+        contract.signed_at = timezone.now()
+        contract.save(update_fields=["status", "signed_at", "updated_at"])
+
+        self.client.force_authenticate(self.rmt_user)
+        assigned = self.client.post(
+            f"/api/tender-contracts/{contract.id}/assign/",
+            {
+                "project_duration_months": 12,
+                "installation_target": 100,
+                "technology_type": "GMG",
+                "energy_output_target_kwh": "20000.00",
+                "district_zones": ["Maseru"],
+                "verification_method": "manual",
+            },
+            format="json",
+        )
+        self.assertEqual(assigned.status_code, status.HTTP_201_CREATED, assigned.data)
+        project = Project.objects.get(contract=contract)
+
+        response = self.client.get(f"/api/tender-contracts/?tender={self.tender.id}")
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        rows = response.data["results"] if isinstance(response.data, dict) else response.data
+        row = next(r for r in rows if str(r["lot"]) == str(self.lot1.id))
+        self.assertEqual(str(row["project_id"]), str(project.id))
+        self.assertEqual(row["project_reference"], project.project_reference)
+        self.assertIn(f"-LOT{self.lot1.id}", row["project_reference"])
+
     def test_contract_award_value_uses_the_awarded_lots_own_bid_amount(self):
         """A lot-wise contract's award value must be that specific lot's winning bid
         amount, not the tender's overall budget — the bug this test guards against
@@ -6145,9 +6258,100 @@ class LotWiseTenderTests(APITestCase):
         # Lot 2's still-pending intent was revoked.
         self.assertIsNone(self.lot2.intent_to_award_bid)
         self.assertIsNone(self.lot2.awarded_at)
-        # Tender must not be forced back to EVALUATION out from under a lot that's
-        # already confirmed-awarded.
+        # Each lot keeps its own status: Lot 1 stays Awarded, Lot 2 is back in
+        # evaluation, so the tender as a whole is in Evaluation (not Awarded).
+        self.assertEqual(self.lot1.status, TenderStatus.AWARDED)
+        self.assertEqual(self.lot2.status, TenderStatus.EVALUATION)
+        self.assertEqual(self.tender.status, TenderStatus.EVALUATION)
+        self.assertIsNotNone(self.tender.intent_to_award_at)
+
+    def _issue_lot_intent(self, lot, bid):
+        response = self.client.post(
+            f"/api/tenders/{self.tender.id}/award_lot/",
+            {"lot_id": str(lot.id), "bid_id": str(bid.id)},
+            format="json",
+        )
+        self.assertIn(response.status_code, {status.HTTP_200_OK, status.HTTP_201_CREATED, status.HTTP_202_ACCEPTED}, response.data)
+        _approve_pending_intent_to_award(self.client, self.tender, as_user=self.admin_user, lot=lot)
+        lot.refresh_from_db()
+        lot.cooling_off_until = timezone.now() - timedelta(minutes=1)
+        lot.save(update_fields=["cooling_off_until"])
+
+    def _scored_bids(self):
+        bid_a = self._submitted_financial_bid(self.vendor_a, {self.lot1: 100000})
+        bid_b = self._submitted_financial_bid(self.vendor_b, {self.lot2: 120000})
+        self._score_technical(bid_a, score=80)
+        self._score_technical(bid_b, score=75)
+        self._score_financial_for_lot(bid_a, self.lot1, 100)
+        self._score_financial_for_lot(bid_b, self.lot2, 100)
+        return bid_a, bid_b
+
+    def test_lot_status_follows_tender_before_award(self):
+        self.lot1.refresh_from_db()
+        self.assertEqual(self.lot1.status, TenderStatus.PUBLISHED)
+        self.client.force_authenticate(self.admin_user)
+        self.assertEqual(self.client.post(f"/api/tenders/{self.tender.id}/close/", {}, format="json").status_code, status.HTTP_200_OK)
+        self.lot1.refresh_from_db()
+        self.lot2.refresh_from_db()
+        self.assertEqual((self.lot1.status, self.lot2.status), (TenderStatus.CLOSED, TenderStatus.CLOSED))
+        detail = self.client.get(f"/api/tenders/{self.tender.id}/")
+        self.assertEqual({lot["status"] for lot in detail.data["lots"]}, {TenderStatus.CLOSED})
+
+    def test_tender_is_awarded_only_when_every_lot_is_awarded(self):
+        bid_a, bid_b = self._scored_bids()
+        self.client.force_authenticate(self.admin_user)
+
+        self._issue_lot_intent(self.lot1, bid_a)
+        self.lot2.refresh_from_db()
+        self.tender.refresh_from_db()
+        self.assertEqual(self.lot1.status, TenderStatus.STANDSTILL)
+        self.assertEqual(self.lot2.status, TenderStatus.EVALUATION)
         self.assertEqual(self.tender.status, TenderStatus.STANDSTILL)
+
+        confirm = self.client.post(f"/api/tenders/{self.tender.id}/confirm_award/", {"lot_id": str(self.lot1.id)}, format="json")
+        self.assertEqual(confirm.status_code, status.HTTP_200_OK, confirm.data)
+        self.tender.refresh_from_db()
+        self.lot1.refresh_from_db()
+        self.lot2.refresh_from_db()
+        # Lot 2 never received an intent, so the tender must not be Awarded yet.
+        self.assertEqual(self.lot1.status, TenderStatus.AWARDED)
+        self.assertEqual(self.lot2.status, TenderStatus.EVALUATION)
+        self.assertEqual(self.tender.status, TenderStatus.EVALUATION)
+
+        self._issue_lot_intent(self.lot2, bid_b)
+        self.tender.refresh_from_db()
+        self.assertEqual(self.tender.status, TenderStatus.STANDSTILL)
+        confirm = self.client.post(f"/api/tenders/{self.tender.id}/confirm_award/", {"lot_id": str(self.lot2.id)}, format="json")
+        self.assertEqual(confirm.status_code, status.HTTP_200_OK, confirm.data)
+        self.tender.refresh_from_db()
+        self.lot2.refresh_from_db()
+        self.assertEqual(self.lot2.status, TenderStatus.AWARDED)
+        self.assertEqual(self.tender.status, TenderStatus.AWARDED)
+        self.assertIsNotNone(self.tender.awarded_at)
+
+    def test_pause_moves_only_pending_lots_into_dispute(self):
+        bid_a, bid_b = self._scored_bids()
+        self.client.force_authenticate(self.admin_user)
+        self._issue_lot_intent(self.lot1, bid_a)
+        self.client.post(f"/api/tenders/{self.tender.id}/confirm_award/", {"lot_id": str(self.lot1.id)}, format="json")
+        self._issue_lot_intent(self.lot2, bid_b)
+
+        pause = self.client.post(f"/api/tenders/{self.tender.id}/pause_award/", {}, format="json")
+        self.assertEqual(pause.status_code, status.HTTP_200_OK, pause.data)
+        self.tender.refresh_from_db()
+        self.lot1.refresh_from_db()
+        self.lot2.refresh_from_db()
+        self.assertEqual(self.tender.status, TenderStatus.DISPUTED)
+        self.assertEqual(self.lot1.status, TenderStatus.AWARDED)
+        self.assertEqual(self.lot2.status, TenderStatus.DISPUTED)
+
+    def test_pause_rejected_when_no_lot_has_a_pending_intent(self):
+        bid_a, _ = self._scored_bids()
+        self.client.force_authenticate(self.admin_user)
+        self._issue_lot_intent(self.lot1, bid_a)
+        self.client.post(f"/api/tenders/{self.tender.id}/confirm_award/", {"lot_id": str(self.lot1.id)}, format="json")
+        pause = self.client.post(f"/api/tenders/{self.tender.id}/pause_award/", {}, format="json")
+        self.assertEqual(pause.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_eoi_submission_requires_declared_lots_for_lot_wise_tender(self):
         self.client.force_authenticate(self.vendor_a)

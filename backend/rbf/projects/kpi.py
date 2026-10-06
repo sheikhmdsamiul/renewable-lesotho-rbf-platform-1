@@ -13,7 +13,7 @@ from django.utils import timezone
 
 from rbf.notifications.models import Notification, NotificationChannel, NotificationStatus
 from rbf.tenders.models import ContractStatus, TenderContract
-from rbf.users.models import PlatformConfiguration, User, UserRole
+from rbf.users.models import PlatformConfiguration, User, UserRole, inclusion_targets
 
 from .audit import log_audit
 from .milestone_reviews import TERMINAL_PROJECT_STATUSES, is_zero_value_milestone, milestone_cleared_to_proceed
@@ -27,7 +27,10 @@ from .models import (
     Project,
     ProjectUpdate,
     ProjectStatus,
+    MILESTONE_BLOCKING_BATCH_STATUSES,
+    MeterDataBatch,
     SmartMeterReading,
+    SmartMeterReadingReviewStatus,
 )
 
 
@@ -84,12 +87,6 @@ class MilestoneEligibilityResult:
 
 
 class KpiService:
-    GENDER_TARGETS = {
-        "female_headed": 50,
-        "vulnerable": 30,
-        "low_income": 60,
-    }
-
     def __init__(self, project_id: str):
         self.project = Project.objects.get(id=project_id)
 
@@ -110,10 +107,11 @@ class KpiService:
     def _readings_queryset(self):
         verified_installations = self._verified_installations()
         meter_ids = [meter_id for meter_id in verified_installations.values_list("meter_id", flat=True) if meter_id]
+        # Readings RBF rejected as not genuine never count toward KPIs or milestones.
         return SmartMeterReading.objects.filter(
             Q(installation__in=verified_installations)
             | Q(installation__isnull=True, project=self.project, meter_id__in=meter_ids)
-        ).distinct()
+        ).exclude(review_status=SmartMeterReadingReviewStatus.REJECTED).distinct()
 
     def getInstallationProgress(self) -> dict[str, Any]:
         aggregates = InstallationReport.objects.filter(project=self.project).aggregate(
@@ -139,12 +137,13 @@ class KpiService:
 
     def _gender_targets(self) -> dict[str, int]:
         """Per-project thresholds set on the Milestone Assignment form, falling
-        back to the programme defaults for projects without them."""
+        back to the programme minimums in Platform Configuration."""
         project = self.project
+        fallback = inclusion_targets()
         return {
-            "female_headed": int(project.female_target_pct or project.target_female_pct or self.GENDER_TARGETS["female_headed"]),
-            "vulnerable": int(project.vulnerable_target_pct or project.target_vulnerable_pct or self.GENDER_TARGETS["vulnerable"]),
-            "low_income": int(project.low_income_target_pct or project.target_low_income_pct or self.GENDER_TARGETS["low_income"]),
+            "female_headed": int(project.female_target_pct or project.target_female_pct or fallback["female"]),
+            "vulnerable": int(project.vulnerable_target_pct or project.target_vulnerable_pct or fallback["vulnerable"]),
+            "low_income": int(project.low_income_target_pct or project.target_low_income_pct or fallback["low_income"]),
         }
 
     def getGenderKpi(self) -> dict[str, Any]:
@@ -341,6 +340,9 @@ class KpiService:
     ) -> bool:
         if milestone is None or not eligible or not self._is_unlockable_status(milestone.status):
             return False
+        if self.project.archived_at:
+            # Archived projects are read-only; their KPIs are reported, never acted on.
+            return False
 
         with transaction.atomic():
             milestone.status = "claimable"
@@ -395,6 +397,12 @@ class KpiService:
         ).count()
         all_flags = AnomalyFlag.objects.filter(project=self.project, is_resolved=False).count()
         meter_present = self._readings_queryset().filter(recorded_at__gte=readings_cutoff).exists()
+        # A meter upload that failed integrity checks and is not yet reviewed, or was sent
+        # back for correction, holds the project's claims until RBF clears it.
+        meter_data_cleared = not MeterDataBatch.objects.filter(
+            project=self.project,
+            status__in=MILESTONE_BLOCKING_BATCH_STATUSES,
+        ).exists()
 
         contract_approved = TenderContract.objects.filter(
             project_id=str(self.project.id),
@@ -480,6 +488,7 @@ class KpiService:
             and female_pct_met
             and blocking_flags == 0
             and meter_present
+            and meter_data_cleared
         )
         m3_eligible = (
             project_open
@@ -490,6 +499,7 @@ class KpiService:
             and low_income_pct_met
             and all_flags == 0
             and milestone_two_paid
+            and meter_data_cleared
         )
         summary = {
             "milestone_1": {
@@ -511,6 +521,7 @@ class KpiService:
                     "female_pct_50": female_pct_met,
                     "no_blocking_anomaly_flags": blocking_flags == 0,
                     "meter_data_present": meter_present,
+                    "meter_data_integrity_cleared": meter_data_cleared,
                 },
                 # Condition keys are kept stable for existing clients; the actual
                 # configured percentages behind them are reported here.
@@ -531,6 +542,7 @@ class KpiService:
                     "all_anomaly_flags_resolved": all_flags == 0,
                     "milestone_2_paid": milestone_two_paid,
                     "milestone_2_verified": milestone_two_verified,
+                    "meter_data_integrity_cleared": meter_data_cleared,
                 },
                 "thresholds": {
                     "installations_pct": m3_installation_pct,
@@ -641,7 +653,7 @@ class KpiService:
             self.project.target_installations = verified_target
             update_fields.append("target_installations")
 
-        if update_fields:
+        if update_fields and not self.project.archived_at:
             self.project.save(update_fields=update_fields + ["updated_at"])
 
     @classmethod
@@ -739,7 +751,7 @@ class KpiService:
             "total_verified": total_verified,
             "overall_progress_pct": _round(overall_progress_pct, 1),
             "overall_female_pct": _round(overall_female_pct, 1),
-            "overall_female_met": overall_female_pct >= 50.0 if female_denominator else False,
+            "overall_female_met": overall_female_pct >= inclusion_targets()["female"] if female_denominator else False,
             "overall_uptime_pct": _round((uptime_weighted / uptime_devices) if uptime_devices else 0.0, 1),
             "projects_at_risk": projects_at_risk,
             "projects_on_track": projects_on_track,

@@ -91,7 +91,6 @@ export function GisInstallationsMap({
   showFilters = true,
   height = "500px",
   emptyStateMessage,
-  onFlagInstallation,
   refreshKey,
   defaultDistrict,
   focusInstallationId,
@@ -101,7 +100,6 @@ export function GisInstallationsMap({
   showFilters?: boolean;
   height?: string;
   emptyStateMessage?: string;
-  onFlagInstallation?: (installation: any) => void;
   refreshKey?: string | number;
   defaultDistrict?: string;
   focusInstallationId?: string;
@@ -280,23 +278,6 @@ export function GisInstallationsMap({
           <a href="/api/projects/installations/${encodeURIComponent(installation.id)}/" target="_blank" rel="noreferrer">View Details</a>
         </div>
       `;
-
-      if (onFlagInstallation) {
-        console.log("Adding flag button for installation:", installation.id, "onFlagInstallation exists:", typeof onFlagInstallation);
-        const flagButton = document.createElement("button");
-        flagButton.textContent = "Flag This Installation";
-        flagButton.style.marginTop = "10px";
-        flagButton.style.padding = "6px 12px";
-        flagButton.style.backgroundColor = "#F59E0B";
-        flagButton.style.color = "white";
-        flagButton.style.border = "none";
-        flagButton.style.borderRadius = "6px";
-        flagButton.style.cursor = "pointer";
-        flagButton.style.fontSize = "12px";
-        flagButton.style.fontWeight = "600";
-        flagButton.onclick = () => onFlagInstallation(installation);
-        popupContent.appendChild(flagButton);
-      }
 
       marker.bindPopup(popupContent);
       marker.addTo(targetLayer);

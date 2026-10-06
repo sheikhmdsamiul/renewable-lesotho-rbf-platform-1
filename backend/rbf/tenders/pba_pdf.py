@@ -186,8 +186,11 @@ def _resolve_social_commitments(vendor) -> dict:
         .order_by("-submitted_at")
         .first()
     )
-    female_target = approved_prequal.female_beneficiary_target if approved_prequal else 50
-    vulnerable_target = approved_prequal.vulnerable_group_target if approved_prequal else 30
+    from rbf.users.models import inclusion_targets
+
+    minimums = inclusion_targets()
+    female_target = (approved_prequal.female_beneficiary_target if approved_prequal else 0) or minimums['female']
+    vulnerable_target = (approved_prequal.vulnerable_group_target if approved_prequal else 0) or minimums['vulnerable']
     return {
         "female_target": female_target,
         "vulnerable_target": vulnerable_target,
@@ -758,7 +761,7 @@ def _is_mergeable_pdf(path: Path | None) -> bool:
         return False
 
 
-def _render_pdf(html_string: str, output_path: Path, contract_reference: str):
+def _render_pdf(html_string: str, output_path: Path, contract_reference: str, *, header_template: str | None = None, footer_template: str | None = None):
     script_path = Path(getattr(settings, "PBA_RENDER_SCRIPT", "")) if getattr(settings, "PBA_RENDER_SCRIPT", "") else (Path(settings.BASE_DIR) / "scripts" / "render_pdf.mjs")
     if not script_path.exists():
         raise RuntimeError(f"PDF renderer script not found: {script_path}")
@@ -776,8 +779,8 @@ def _render_pdf(html_string: str, output_path: Path, contract_reference: str):
         "html": html_string,
         "outputPath": str(output_path),
         "chromePath": chrome_path,
-        "headerTemplate": _header_template(contract_reference),
-        "footerTemplate": _footer_template(contract_reference),
+        "headerTemplate": header_template if header_template is not None else _header_template(contract_reference),
+        "footerTemplate": footer_template if footer_template is not None else _footer_template(contract_reference),
         "margin": {"top": "92px", "right": "36px", "bottom": "72px", "left": "36px"},
     }
     input_json = output_path.with_suffix(".json")

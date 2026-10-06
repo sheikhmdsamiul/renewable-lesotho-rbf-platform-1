@@ -3,6 +3,7 @@ from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenRefreshView
 from .views import (
     BlacklistAppealViewSet,
+    BlacklistRecommendationViewSet,
     UserViewSet,
     LoginView,
     CurrentUserView,
@@ -20,6 +21,7 @@ from .views import (
     EvaluationScoringConfigView,
     ProcurementMethodsConfigView,
     CurrenciesConfigView,
+    InclusionTargetsConfigView,
     SystemHealthView,
     SuperAdminDashboardView,
     RolePermissionsView,
@@ -30,6 +32,7 @@ router.register(r'organizations', OrganizationViewSet, basename='organization')
 router.register(r'prequalifications', VendorPrequalificationViewSet, basename='vendor-prequalification')
 router.register(r'blacklisting-cases', VendorBlacklistCaseViewSet, basename='vendor-blacklisting-case')
 router.register(r'blacklisting-appeals', BlacklistAppealViewSet, basename='vendor-blacklisting-appeal')
+router.register(r'blacklisting-recommendations', BlacklistRecommendationViewSet, basename='vendor-blacklisting-recommendation')
 router.register(r'', UserViewSet, basename='user')
 
 urlpatterns = [
@@ -49,6 +52,7 @@ urlpatterns = [
     path('platform-configuration/evaluation-scoring/', EvaluationScoringConfigView.as_view(), name='evaluation_scoring_config'),
     path('platform-configuration/procurement-methods/', ProcurementMethodsConfigView.as_view(), name='procurement_methods_config'),
     path('platform-configuration/currencies/', CurrenciesConfigView.as_view(), name='currencies_config'),
+    path('platform-configuration/inclusion-targets/', InclusionTargetsConfigView.as_view(), name='inclusion_targets_config'),
     path('system-health/', SystemHealthView.as_view(), name='system_health'),
 ]
 urlpatterns += router.urls

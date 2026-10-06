@@ -15,7 +15,7 @@ export enum UserRole {
   EVALUATION_COMMITTEE = "Evaluation Committee",
 }
 
-export type ReportFormat = "csv" | "pdf" | "excel";
+export type ReportFormat = "csv" | "pdf" | "excel" | "geojson" | "xml" | "zip";
 
 export interface ReportTemplate {
   id: string;
@@ -24,11 +24,54 @@ export interface ReportTemplate {
   formats: ReportFormat[];
   category?: string;
   quick?: boolean;
+  /** The report covers one project, which must be chosen. */
+  requiresProject?: boolean;
+  requiresTender?: boolean;
+  requiresReason?: boolean;
+  /** Filters the report understands: period, district, technology, vendor, tender. */
+  filters: string[];
+  /** How the figures are calculated (also printed in the report). */
+  method?: string;
+}
+
+export type ReportJobStatus = "queued" | "running" | "ready" | "failed";
+
+export interface ReportFilterOptions {
+  districts: string[];
+  technologies: string[];
+  vendors: { id: string; name: string }[];
+  tenders: { id: string; reference: string; name: string }[];
+  projects: { id: string; reference: string; vendor: string }[];
+}
+
+export interface ReportHistoryPage {
+  count: number;
+  page: number;
+  pageSize: number;
+  results: ReportHistoryItem[];
 }
 
 export interface ReportHistoryItem {
   id: string;
   reportType: string;
+  title?: string;
+  period?: string;
+  status: ReportJobStatus;
+  error?: string;
+  rowCount?: number;
+  filters?: string;
+  completedAt?: string | null;
+  approvalStatus?: ReportApprovalStatus;
+  version?: number;
+  supersedesId?: string | null;
+  reviewedBy?: string | null;
+  approvedBy?: string | null;
+  approvedAt?: string | null;
+  reviewNotes?: string;
+  generatedById?: string | null;
+  reviewedById?: string | null;
+  scheduleName?: string | null;
+  distributedAt?: string | null;
   format: ReportFormat;
   generatedAt: string;
   notes?: string;
@@ -268,6 +311,8 @@ export interface Tender {
    * tender. `lotCount` is 0 (not undefined) for a non-lot-wise tender. */
   lotCount?: number;
   awardedLotCount?: number;
+  /** Per-lot statuses (list payload) for lot-wise tenders. */
+  lotStatuses?: { id: string; name: string; status: TenderStatus }[];
   maxLotsPerBidder?: number;
   /** This tender's own designed BOQ — only meaningful when `lots` is empty (a
    * lot-wise tender designs its BOQ per lot instead, on each TenderLot.boqItems). An
@@ -315,6 +360,9 @@ export interface TenderLot {
   /** This lot's own standstill/cooling-off deadline, independent of other lots. */
   coolingOffUntil?: string;
   awardedAt?: string;
+  /** This lot's own status. Follows the tender until the lot enters award, then moves on
+   * its own (Standstill, Disputed, Awarded). */
+  status?: TenderStatus;
 }
 
 export type GoverningDocumentFieldKey = "schedule_file" | "rfp_documents_file" | "milestone_payment_schedule_file";
@@ -579,6 +627,9 @@ export interface TenderBid {
 
 export interface Project {
   id: string;
+  /** Set when the project completed; the project and all its records are then read-only. */
+  archivedAt?: string | null;
+  archivedByName?: string | null;
   tenderId?: string;
   projectTitle?: string;
   projectReference?: string;
@@ -1225,6 +1276,8 @@ export interface TenderAwardRankingRow {
 export interface TenderLotAwardRanking {
   lot_id: string;
   lot_name: string;
+  /** The lot's own status (Evaluation, Standstill, Disputed, Awarded...). */
+  status?: TenderStatus | string;
   rows: TenderAwardRankingRow[];
   recommended: TenderAwardRankingRow | null;
   awarded_vendor_id: string | null;
@@ -1359,6 +1412,16 @@ export interface TenderContract {
   projectId?: string;
   generatedAt?: string;
   updatedAt?: string;
+  tenderReference?: string;
+  tenderName?: string;
+  fundingSource?: string;
+  currency?: string;
+  awardValue?: number;
+  awardedAt?: string;
+  technologies?: string[];
+  districts?: string[];
+  installationTarget?: number;
+  projectReference?: string;
 }
 
 export interface MilestoneConditionThresholds {
@@ -1427,7 +1490,7 @@ export interface ProjectDocument {
 }
 
 export type InstallationStatus = "Submitted" | "Verified" | "Flagged";
-export type VerificationStatus = "Pending" | "Paused" | "Partial" | "Verified" | "Flagged" | "Terminated";
+export type VerificationStatus = "Pending" | "Paused" | "Partial" | "Verified" | "Flagged" | "Terminated" | "Reverification Required";
 
 export interface InstallationReport {
   id: string;
@@ -1467,6 +1530,59 @@ export interface SmartMeterReading {
   uptimePct?: number;
   recordedAt: string;
   createdAt: string;
+  batchId?: string;
+  source?: "csv_upload" | "installation_report" | "api" | "legacy";
+  submittedByUsername?: string;
+  outputPowerW?: number;
+  latitude?: number;
+  longitude?: number;
+  /** Integrity check codes this reading tripped at upload. */
+  integrityFlags: string[];
+  /** Rejected readings no longer count toward KPIs or milestones. */
+  reviewStatus: "accepted" | "rejected";
+  rejectionReason?: string;
+}
+
+export type MeterDataBatchStatus =
+  | "pending_review"
+  | "flagged"
+  | "verified"
+  | "rejected"
+  | "correction_requested"
+  | "superseded";
+
+export interface MeterIntegrityFinding {
+  code: string;
+  label: string;
+  severity: "high" | "medium" | "low";
+  meterId: string;
+  message: string;
+  readingIds: string[];
+}
+
+/** One vendor meter-data upload, reviewed by RBF / Super Admin for authenticity. */
+export interface MeterDataBatch {
+  id: string;
+  projectId: string;
+  projectReference?: string;
+  vendorId?: string;
+  vendorName?: string;
+  uploadedByUsername?: string;
+  uploadedByName?: string;
+  fileName?: string;
+  sourceFileUrl?: string;
+  rowsIngested: number;
+  rowsRejectedOnUpload: number;
+  readingsRejected: number;
+  totalKwh: number;
+  integrityFindings: MeterIntegrityFinding[];
+  status: MeterDataBatchStatus;
+  reviewNotes?: string;
+  reviewedByUsername?: string;
+  reviewedAt?: string;
+  correctionDueDate?: string;
+  createdAt: string;
+  readings?: SmartMeterReading[];
 }
 
 export interface VerificationTask {
@@ -1485,6 +1601,30 @@ export interface VerificationTask {
   updatedAt: string;
   concernMessage?: string;
   fieldVerification?: FieldVerificationRecord;
+  /** Each re-verification starts a new round; earlier field evidence is kept unchanged. */
+  verificationRound: number;
+  reverificationReason?: string;
+  reverificationRequestedByUsername?: string;
+  reverificationRequestedAt?: string | null;
+  fieldVerifications?: FieldVerificationRecord[];
+  installation?: VerificationInstallationSummary;
+}
+
+export interface VerificationInstallationSummary {
+  id: string;
+  projectId: string;
+  projectReference?: string;
+  projectTitle?: string;
+  vendorName?: string;
+  serialNumber?: string;
+  district?: string;
+  householdType?: string;
+  gpsLat: number;
+  gpsLng: number;
+  status?: string;
+  gisStatus?: string;
+  submittedAt?: string;
+  photoUrls: string[];
 }
 
 export interface FieldVerificationRecord {
@@ -1503,6 +1643,8 @@ export interface FieldVerificationRecord {
   verificationStatus: string;
   flagReason?: string;
   verifiedAt: string;
+  verificationRound?: number;
+  fieldOfficerName?: string;
 }
 
 export interface MapInstallationRecord {
@@ -1982,6 +2124,12 @@ export interface PaymentClaimSubmission {
   declarationAccepted: boolean;
 }
 
+export interface MeterCsvInvalidRow {
+  row: number;
+  meter_id?: string;
+  errors: string[];
+}
+
 export interface AuditLog {
   id: string;
   action: string;
@@ -2048,113 +2196,301 @@ export interface AnomalyFlag {
   evidenceFiles?: AnomalyEvidenceFile[];
 }
 
-export enum ConcernType {
-  KPI_ISSUE = "kpi_issue",
-  GPS_ISSUE = "gps_issue",
-  VERIFICATION_ISSUE = "verification_issue",
-  VENDOR_BEHAVIOUR = "vendor_behaviour",
-  INSTALLATION_QUALITY = "installation_quality",
-  DATA_DISCREPANCY = "data_discrepancy",
-  OTHER = "other",
-}
+export type SiteVisitFollowUpStatus = "none" | "open" | "in_progress" | "closed";
 
-export enum ConcernSeverity {
-  LOW = "low",
-  MEDIUM = "medium",
-  HIGH = "high",
-  CRITICAL = "critical",
-}
-
-export enum ConcernStatus {
-  OPEN = "open",
-  UNDER_INVESTIGATION = "under_investigation",
-  RESOLVED = "resolved",
-  DISMISSED = "dismissed",
-  ESCALATED_TO_PSC = "escalated_to_psc",
-}
-
-export interface Concern {
+export interface SiteMonitoringPhoto {
   id: string;
-  raisedBy: string;
-  raisedByUsername?: string;
-  raisedByRole: "doe" | "auditor";
-  raisedByRegion?: string;
-  concernType: ConcernType;
-  severity: ConcernSeverity;
-  linkedProject?: string;
-  linkedProjectName?: string;
-  linkedProjectVendor?: string;
-  linkedProjectDistrict?: string;
-  linkedInstallation?: string;
-  linkedClaim?: string;
-  description: string;
-  evidenceFiles?: Array<{ url: string; name: string }>;
-  status: ConcernStatus;
+  file: string;
+  uploadedAt: string;
+}
+
+export interface SiteMonitoringVisit {
+  id: string;
+  projectId: string;
+  projectReference?: string;
+  projectTitle?: string;
+  projectDistrict?: string;
+  installationId?: string | null;
+  installationSerial?: string | null;
+  visitedBy?: string | null;
+  visitedByUsername?: string;
+  visitedByName?: string;
+  visitDate: string;
+  systemWorking: boolean | null;
+  beneficiaryPresent: boolean | null;
+  observations: string;
+  followUpAction: string;
+  followUpStatus: SiteVisitFollowUpStatus;
+  latitude: number | null;
+  longitude: number | null;
+  photos: SiteMonitoringPhoto[];
   createdAt: string;
-  updatedAt?: string;
-  notifyRmt?: boolean;
-  notifyPsc?: boolean;
-  responses?: ConcernResponse[];
+  updatedAt: string;
 }
 
-export interface ConcernResponse {
+export type KpiReviewRating = "on_track" | "needs_attention" | "at_risk";
+
+export interface KpiReview {
   id: string;
-  concernId: string;
-  respondedBy: string;
+  projectId: string;
+  projectReference?: string;
+  projectTitle?: string;
+  reviewer?: string | null;
+  reviewerUsername?: string;
+  reviewerName?: string;
+  reviewPeriod: string;
+  rating: KpiReviewRating;
+  uptimeComment: string;
+  beneficiaryComment: string;
+  genderInclusionComment: string;
+  summary: string;
+  recommendations: string;
+  kpiSnapshot: Record<string, any>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type BlacklistRecommendationStatus = "Submitted" | "Accepted" | "Declined";
+
+export interface BlacklistRecommendation {
+  id: string;
+  vendorId: string;
+  vendorUsername?: string;
+  vendorName?: string;
+  recommendedBy?: string | null;
+  recommendedByUsername?: string;
+  recommendedByRegion?: string;
+  projectId?: string | null;
+  projectReference?: string | null;
+  reason: string;
+  justification: string;
+  evidenceDocument?: string | null;
+  status: BlacklistRecommendationStatus;
   respondedByUsername?: string;
-  respondedByRole?: string;
-  responseText: string;
-  actionTaken: "under_investigation" | "action_initiated" | "resolved" | "escalated_to_psc" | "dismissed" | "issue_confirmed" | "payment_suspended" | "blacklist_initiated";
-  evidenceFiles?: Array<{ url: string; name: string }>;
+  respondedAt?: string | null;
+  responseNotes: string;
+  linkedCaseId?: string | null;
   createdAt: string;
 }
 
-export enum FindingCategory {
-  PAYMENT_COMPLIANCE = "payment_compliance",
-  APPROVAL_CHAIN_VIOLATION = "approval_chain_violation",
-  DATA_INTEGRITY = "data_integrity",
-  GPS_LOCATION_FRAUD = "gps_location_fraud",
-  KPI_MANIPULATION = "kpi_manipulation",
-  DOCUMENT_IRREGULARITY = "document_irregularity",
-  PROCESS_VIOLATION = "process_violation",
-  CONFLICT_OF_INTEREST = "conflict_of_interest",
-  OTHER_COMPLIANCE = "other_compliance",
-}
+export type OversightSubject = "project" | "verification" | "kpi" | "vendor" | "disbursement" | "monitoring";
+export type OversightReviewStatus =
+  | "compliant"
+  | "delayed"
+  | "flagged"
+  | "comment"
+  | "acknowledged"
+  | "reverification_requested";
+export type OversightFollowUpStatus = "none" | "open" | "in_progress" | "resolved";
 
-export enum RiskLevel {
-  OBSERVATION = "observation",
-  MINOR_FINDING = "minor_finding",
-  MAJOR_FINDING = "major_finding",
-  CRITICAL = "critical",
-}
-
-export interface AuditFinding {
+/** One shared oversight record (DoE, PSC, RMT) about an existing project, verification,
+ *  KPI, vendor or disbursement record. The underlying record is never copied or changed. */
+export interface OversightReview {
   id: string;
-  findingReference?: string;
-  raisedBy: string;
-  raisedByUsername?: string;
-  raisedByRole?: string;
-  raisedByRegion?: string;
-  findingCategory: FindingCategory;
-  riskLevel: RiskLevel;
-  linkedProject?: string;
-  linkedProjectName?: string;
-  linkedProjectVendor?: string;
-  linkedProjectDistrict?: string;
-  linkedClaim?: string;
-  linkedInstallation?: string;
-  linkedAuditLog?: string;
-  description: string;
-  recommendedAction?: string;
-  evidenceFiles?: Array<{ url: string; name: string }>;
-  status: ConcernStatus;
-  rmtResponse?: string;
-  rmtActionTaken?: string;
-  rmtRespondedAt?: string;
-  pscComment?: string;
-  pscCommentedAt?: string;
-  pscNotified?: boolean;
-  superAdminNotified?: boolean;
+  reviewer?: string | null;
+  reviewerName?: string;
+  reviewerUsername?: string;
+  reviewerRole: string;
+  subjectType: OversightSubject;
+  reviewStatus: OversightReviewStatus;
+  projectId?: string | null;
+  projectReference?: string | null;
+  projectTitle?: string | null;
+  projectDistrict?: string | null;
+  milestoneId?: string | null;
+  verificationTaskId?: string | null;
+  verificationRound?: number | null;
+  installationSerial?: string | null;
+  paymentClaimId?: string | null;
+  claimStatus?: string | null;
+  vendorId?: string | null;
+  vendorDisplay?: string | null;
+  kpiReviewId?: string | null;
+  monitoringVisitId?: string | null;
+  comment: string;
+  issueCategory: string;
+  actionRequired: string;
+  followUpStatus: OversightFollowUpStatus;
+  followUpDate?: string | null;
+  resolvedByUsername?: string | null;
+  resolvedAt?: string | null;
+  resolutionNote: string;
   createdAt: string;
+  updatedAt: string;
+}
+
+export interface VendorPerformance {
+  vendorId: string;
+  vendorName: string;
+  vendorStatus: string;
+  districts: string[];
+  projectRefs: { id: string; reference: string }[];
+  projects: number;
+  activeProjects: number;
+  completedProjects: number;
+  installations: number;
+  verified: number;
+  flagged: number;
+  pendingVerification: number;
+  reverifications: number;
+  verificationRate: number | null;
+  claims: number;
+  claimedAmount: number;
+  paidAmount: number;
+  rejectedClaims: number;
+  heldClaims: number;
+  openIssues: number;
+  kpiOnTrack: number;
+  kpiNeedsAttention: number;
+  kpiAtRisk: number;
+}
+
+export type AuditArea =
+  | "procurement"
+  | "vendor"
+  | "contract"
+  | "verification"
+  | "kpi"
+  | "disbursement"
+  | "system_access"
+  | "other";
+export type AuditCaseType = "audit" | "compliance_review";
+export type AuditCaseStatus =
+  | "draft"
+  | "under_review"
+  | "evidence_collected"
+  | "finding_recorded"
+  | "management_response"
+  | "finalized"
+  | "closed";
+export type AuditFindingType = "compliant" | "observation" | "exception" | "non_compliance";
+export type AuditRiskLevel = "observation" | "minor" | "major" | "critical";
+export type CorrectiveActionStatus = "not_required" | "open" | "in_progress" | "implemented" | "verified";
+
+export interface AuditEvidence {
+  id: string;
+  kind: "file" | "record" | "note";
+  description: string;
+  fileUrl?: string | null;
+  sourceType: string;
+  sourceId: string;
+  addedByName?: string | null;
+  addedAt: string;
+}
+
+/** An independent audit or compliance review. Links to the audited records; never edits them. */
+export interface AuditCase {
+  id: string;
+  reference: string;
+  caseType: AuditCaseType;
+  auditArea: AuditArea;
+  auditAreaDisplay: string;
+  title: string;
+  scope: string;
+  status: AuditCaseStatus;
+  statusDisplay: string;
+  auditorName?: string | null;
+  projectId?: string | null;
+  projectReference?: string | null;
+  projectTitle?: string | null;
+  vendorId?: string | null;
+  vendorDisplay?: string | null;
+  tenderId?: string | null;
+  tenderReference?: string | null;
+  contractId?: string | null;
+  contractReference?: string | null;
+  paymentClaimId?: string | null;
+  claimStatus?: string | null;
+  verificationTaskId?: string | null;
+  installationSerial?: string | null;
+  criteria: string;
+  findingType: AuditFindingType | "";
+  riskLevel: AuditRiskLevel | "";
+  finding: string;
+  recommendation: string;
+  findingRecordedAt?: string | null;
+  responseRequestedAt?: string | null;
+  managementResponse: string;
+  respondedByName?: string | null;
+  respondedAt?: string | null;
+  correctiveAction: string;
+  correctiveActionOwner: string;
+  correctiveActionDue?: string | null;
+  correctiveActionStatus: CorrectiveActionStatus;
+  conclusion: string;
+  finalizedAt?: string | null;
+  closedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  evidence: AuditEvidence[];
+}
+
+export interface ProjectLifecycleEvent {
+  at: string;
+  phase: "Procurement" | "Award" | "Contract" | "Delivery" | "Payment" | "Completion" | string;
+  title: string;
+  detail: string;
+  actor: string;
+}
+
+/** The permanent archive of a project's lifecycle, from tender creation to contract closure. */
+export interface ProjectArchiveRecord {
+  id: string;
+  archivedAt: string;
+  archivedBy?: string | null;
+  reason: string;
+  lifecycleStartedAt?: string | null;
+  lifecycleEndedAt?: string | null;
+  supersededAt?: string | null;
+  tenderReference?: string | null;
+  contractReference?: string | null;
+  hasDossier: boolean;
+  timeline: ProjectLifecycleEvent[];
+  snapshot: Record<string, any>;
+}
+
+/** One results-framework (logframe) indicator, maintained by the Super Admin. */
+export interface ResultsIndicator {
+  id: string;
+  code: string;
+  name: string;
+  unit: string;
+  measure: string;
+  measureDisplay: string;
+  technology: string;
+  baseline: number | null;
+  target: number | null;
+  targetDate: string | null;
+  manualActual: number | null;
+  manualActualAsOf: string | null;
+  sourceNote: string;
+  position: number;
+  updatedByName?: string | null;
   updatedAt?: string;
+}
+
+export type ReportApprovalStatus = "not_required" | "draft" | "in_review" | "reviewed" | "approved" | "returned";
+
+export interface ReportSchedule {
+  id: string;
+  name: string;
+  reportType: string;
+  reportTitle: string;
+  format: ReportFormat;
+  frequency: "monthly" | "quarterly";
+  runDay: number;
+  filters: Record<string, string>;
+  preparedBy: string;
+  preparedByName?: string | null;
+  recipientRoles: string[];
+  recipientUsers: string[];
+  active: boolean;
+  nextRunAt?: string | null;
+  lastRunAt?: string | null;
+}
+
+export interface ReportScheduleOptions {
+  reports: { id: string; title: string; formats: ReportFormat[]; roles: string[]; formal: boolean }[];
+  roles: { value: string; label: string }[];
+  preparers: { id: string; name: string; role: string }[];
 }
