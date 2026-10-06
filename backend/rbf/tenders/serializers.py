@@ -48,6 +48,37 @@ from rbf.projects.models import TechnologyType, VerificationMethod
 from rbf.users.models import User, PlatformConfiguration
 
 
+INCLUSION_FIELDS = (
+    ('female_target_pct', 'female', 'Female-headed household'),
+    ('vulnerable_target_pct', 'vulnerable', 'Vulnerable group'),
+    ('low_income_target_pct', 'low_income', 'Low-income household'),
+)
+
+
+def inclusion_target_errors(values: dict) -> dict:
+    """Errors for inclusion targets below the programme minimums in Platform Configuration."""
+    from rbf.users.models import inclusion_targets
+
+    minimums = inclusion_targets()
+    errors = {}
+    for field, key, label in INCLUSION_FIELDS:
+        value = int(values.get(field) or 0)
+        if value < minimums[key]:
+            errors[field] = f'{label} target must be at least {minimums[key]}%.'
+        elif value > 100:
+            errors[field] = f'{label} target cannot be more than 100%.'
+    return errors
+
+
+def default_inclusion_targets(contract=None) -> dict:
+    """A new project's inclusion targets: the programme minimums the Super Admin set in
+    Platform Configuration."""
+    from rbf.users.models import inclusion_targets
+
+    minimums = inclusion_targets()
+    return {field: minimums[key] for field, key, _ in INCLUSION_FIELDS}
+
+
 PRE_QUALIFICATION_STAGE_KEYS = {
     'pre_qualification',
     'prequalification',
@@ -747,15 +778,9 @@ class TenderBidSerializer(serializers.ModelSerializer):
 
             # Inclusion commitment is declared once, here, and carried forward to later stages.
             if bid_status == BidStatus.SUBMITTED:
-                female_target_pct = attrs.get('female_target_pct', instance.female_target_pct if instance else 0)
-                vulnerable_target_pct = attrs.get('vulnerable_target_pct', instance.vulnerable_target_pct if instance else 0)
-                low_income_target_pct = attrs.get('low_income_target_pct', instance.low_income_target_pct if instance else 0)
-                if int(female_target_pct or 0) < 50:
-                    errors['female_target_pct'] = 'Female-headed household target must be at least 50%.'
-                if int(vulnerable_target_pct or 0) < 30:
-                    errors['vulnerable_target_pct'] = 'Vulnerable group target must be at least 30%.'
-                if int(low_income_target_pct or 0) < 60:
-                    errors['low_income_target_pct'] = 'Low-income household target must be at least 60%.'
+                errors.update(inclusion_target_errors({
+                    field: attrs.get(field, getattr(instance, field) if instance else 0) for field, _, _ in INCLUSION_FIELDS
+                }))
                 if not attrs.get('inclusion_commitment_confirmed', instance.inclusion_commitment_confirmed if instance else False):
                     errors['inclusion_commitment_confirmed'] = 'You must confirm the inclusion commitment before submitting.'
 
@@ -1542,6 +1567,51 @@ class TenderContractSerializer(serializers.ModelSerializer):
         'annex_e_file': ('technical_proposal_file',),
     }
     lot_name = serializers.CharField(source='lot.name', read_only=True, default=None)
+    # Plain-language context for the vendor's contract card: what was won, where, for how much.
+    tender_reference = serializers.CharField(source='tender.reference_number', read_only=True, default=None)
+    tender_name = serializers.CharField(source='tender.name', read_only=True, default=None)
+    funding_source = serializers.CharField(source='tender.funding_source', read_only=True, default=None)
+    currency = serializers.SerializerMethodField()
+    award_value = serializers.SerializerMethodField()
+    awarded_at = serializers.SerializerMethodField()
+    technologies = serializers.SerializerMethodField()
+    districts = serializers.SerializerMethodField()
+    installation_target = serializers.SerializerMethodField()
+    project_reference = serializers.SerializerMethodField()
+
+    def get_currency(self, obj):
+        # Tenders may store labels such as "LSL (Maloti)"; the card needs the ISO code.
+        raw = (obj.tender.bidding_currency or '') if obj.tender_id else ''
+        match = re.match(r'\s*([A-Za-z]{3})\b', raw)
+        return match.group(1).upper() if match else 'LSL'
+
+    def get_award_value(self, obj):
+        try:
+            return str(obj.resolved_award_value())
+        except Exception:  # noqa: BLE001 - context only; never break the contract list
+            return None
+
+    def get_awarded_at(self, obj):
+        when = (obj.lot.awarded_at if obj.lot_id else None) or (obj.tender.awarded_at if obj.tender_id else None)
+        return when.isoformat() if when else None
+
+    def get_technologies(self, obj):
+        return list((obj.lot.technology_types if obj.lot_id else None) or (obj.tender.technology_types if obj.tender_id else None) or [])
+
+    def get_districts(self, obj):
+        return list((obj.lot.target_districts if obj.lot_id else None) or (obj.tender.target_districts if obj.tender_id else None) or [])
+
+    def get_installation_target(self, obj):
+        if obj.lot_id and obj.lot.estimated_installation_target:
+            return obj.lot.estimated_installation_target
+        return obj.tender.approximate_installation_target if obj.tender_id else None
+
+    def get_project_reference(self, obj):
+        from rbf.projects.models import Project
+
+        if not obj.project_id:
+            return None
+        return Project.objects.filter(id=obj.project_id).values_list('project_reference', flat=True).first() if str(obj.project_id).isdigit() else None
 
     class Meta:
         model = TenderContract
@@ -1608,9 +1678,11 @@ class ProjectAssignmentSerializer(serializers.Serializer):
         allow_empty=False,
     )
     verification_method = serializers.ChoiceField(choices=VerificationMethod.choices)
-    female_target_pct = serializers.IntegerField(min_value=50, max_value=100, required=False, default=50)
-    vulnerable_target_pct = serializers.IntegerField(min_value=30, max_value=100, required=False, default=30)
-    low_income_target_pct = serializers.IntegerField(min_value=60, max_value=100, required=False, default=60)
+    # Inclusion targets: default to the winning bid's commitments (or the programme minimums),
+    # and never below the minimums set in Platform Configuration. See validate().
+    female_target_pct = serializers.IntegerField(min_value=0, max_value=100, required=False)
+    vulnerable_target_pct = serializers.IntegerField(min_value=0, max_value=100, required=False)
+    low_income_target_pct = serializers.IntegerField(min_value=0, max_value=100, required=False)
     start_date = serializers.DateField(required=False, allow_null=True, input_formats=['%Y-%m-%d'])
     # Milestone plan — disbursement share of the contract value per milestone
     # (must total 100) and the verified-installation checklist thresholds.
@@ -1661,6 +1733,19 @@ class ProjectAssignmentSerializer(serializers.Serializer):
                 normalized_districts.append(cleaned)
         if not normalized_districts:
             raise serializers.ValidationError({'district_zones': 'Select at least one district.'})
+        defaults = default_inclusion_targets(self.context.get('contract'))
+        is_super_admin = getattr(self.context.get('user'), 'role', None) == UserRole.ADMIN
+        not_allowed = {}
+        for field, _, label in INCLUSION_FIELDS:
+            if attrs.get(field) is None:
+                attrs[field] = defaults[field]
+            elif not is_super_admin and int(attrs[field]) != defaults[field]:
+                not_allowed[field] = f'{label} target is set by the Super Admin in Platform Configuration ({defaults[field]}%).'
+        if not_allowed:
+            raise serializers.ValidationError(not_allowed)
+        inclusion_errors = inclusion_target_errors(attrs)
+        if inclusion_errors:
+            raise serializers.ValidationError(inclusion_errors)
         attrs['district_zones'] = normalized_districts
         attrs['district_zone'] = normalized_districts[0]
 
@@ -1699,6 +1784,7 @@ class TenderListSerializer(serializers.ModelSerializer):
     linked_tender_count = serializers.SerializerMethodField()
     lot_count = serializers.SerializerMethodField()
     awarded_lot_count = serializers.SerializerMethodField()
+    lot_statuses = serializers.SerializerMethodField()
 
     def get_bid_count(self, obj):
         return obj.bids.count()
@@ -1717,6 +1803,9 @@ class TenderListSerializer(serializers.ModelSerializer):
 
     def get_awarded_lot_count(self, obj):
         return obj.lots.exclude(awarded_vendor_id='').count()
+
+    def get_lot_statuses(self, obj):
+        return [{'id': str(lot.id), 'name': lot.name, 'status': lot.status} for lot in obj.lots.all()]
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
@@ -1739,7 +1828,7 @@ class TenderListSerializer(serializers.ModelSerializer):
             'publish_approval_reviewed_at', 'publish_approval_reviewed_by', 'publish_approval_notes',
             'evaluation_comment', 'evaluation_comment_author', 'evaluation_comment_updated_at',
             'is_eoi_invite_only', 'linked_eoi_tender', 'skips_eoi_stage', 'invited_vendor_count',
-            'linked_tender_count', 'lot_count', 'awarded_lot_count',
+            'linked_tender_count', 'lot_count', 'awarded_lot_count', 'lot_statuses',
         ]
 
 
@@ -1812,13 +1901,13 @@ class TenderLotSerializer(serializers.ModelSerializer):
         model = TenderLot
         fields = [
             'id', 'name', 'description', 'technology_types', 'target_districts',
-            'estimated_installation_target', 'budget', 'position', 'boq_items',
+            'estimated_installation_target', 'budget', 'position', 'boq_items', 'status',
             'awarded_vendor_id', 'awarded_vendor_name',
             'intent_to_award_bid_id', 'intent_to_award_at', 'cooling_off_until', 'awarded_at',
             'pending_intent_award_request',
         ]
         read_only_fields = [
-            'id', 'awarded_vendor_id', 'awarded_vendor_name',
+            'id', 'status', 'awarded_vendor_id', 'awarded_vendor_name',
             'intent_to_award_bid_id', 'intent_to_award_at', 'cooling_off_until', 'awarded_at',
             'pending_intent_award_request',
         ]

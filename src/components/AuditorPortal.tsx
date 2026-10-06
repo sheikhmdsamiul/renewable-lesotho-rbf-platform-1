@@ -1,3 +1,4 @@
+import { getInclusionTargets } from "../inclusionTargets";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Activity,
@@ -25,7 +26,6 @@ import {
   Building2,
   X,
   TrendingUp,
-  Shield,
   Paperclip,
   Users,
   Calendar,
@@ -43,12 +43,10 @@ import {
   fetchProspectSyncSummary,
   exportSystemAuditLogs,
   API_BASE,
-  fetchAuditFindings,
-  createAuditFinding,
   fetchPortfolioKpiSummary,
   fetchProjectKpiSummary,
-  fetchConcerns,
 } from "../api";
+import { toCsv } from "../csv";
 import {
   AuditLog,
   AnomalyFlag,
@@ -57,47 +55,11 @@ import {
   PaymentClaim,
   ProspectSyncLog,
   UserRole,
-  FindingCategory,
-  RiskLevel,
   PortfolioKpiSummary,
-  AuditFinding,
-  Concern,
 } from "../types";
 import KpiDashboard from "./KpiDashboard";
 
-const FINDING_CATEGORIES = [
-  { value: "payment_compliance", label: "Payment Compliance", desc: "Payment made without required KPI conditions" },
-  { value: "approval_chain_violation", label: "Approval Chain Violation", desc: "Payment approved without full chain" },
-  { value: "data_integrity", label: "Data Integrity", desc: "Data mismatch between system and Prospect" },
-  { value: "gps_fraud", label: "GPS / Location Fraud", desc: "Suspicious GPS patterns or location fraud" },
-  { value: "kpi_manipulation", label: "KPI Manipulation", desc: "KPI data appears manipulated or fabricated" },
-  { value: "document_irregularity", label: "Document Irregularity", desc: "Missing, forged, or inconsistent documents" },
-  { value: "process_violation", label: "Process Violation", desc: "System process was bypassed or overridden" },
-  { value: "conflict_of_interest", label: "Conflict of Interest", desc: "Potential conflict between actors" },
-  { value: "other", label: "Other Compliance Issue", desc: "Other compliance issue" },
-];
-
-const RISK_LEVELS = [
-  { value: "observation", label: "Observation", desc: "Minor issue, note for record", color: "yellow" },
-  { value: "minor", label: "Minor Finding", desc: "Issue found, corrective action needed", color: "orange" },
-  { value: "major", label: "Major Finding", desc: "Serious breach, immediate action required", color: "red" },
-  { value: "critical", label: "Critical", desc: "Fraud suspected, escalate immediately", color: "rose" },
-];
-
 const formatDateTime = (value?: string | null) => (value ? new Date(value).toLocaleString() : "N/A");
-
-const formatRelativeTime = (value?: string | null) => {
-  if (!value) return "Never";
-  const delta = Date.now() - new Date(value).getTime();
-  if (!Number.isFinite(delta)) return "Unknown";
-  const minutes = Math.round(delta / 60000);
-  if (minutes < 1) return "Just now";
-  if (minutes < 60) return `${minutes} min ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours} hr ago`;
-  const days = Math.round(hours / 24);
-  return `${days} day${days === 1 ? "" : "s"} ago`;
-};
 
 const saveBlob = (blob: Blob, filename: string) => {
   const objectUrl = URL.createObjectURL(blob);
@@ -108,12 +70,14 @@ const saveBlob = (blob: Blob, filename: string) => {
   URL.revokeObjectURL(objectUrl);
 };
 
+/** Paid claims: the current "Completed" status and the legacy "Paid". */
+const isPaidClaim = (status?: string) => status === "Completed" || status === "Paid";
+
 export function AuditorDashboard({ onNavigate }: { onNavigate?: (tab: string) => void }) {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
-  const [findings, setFindings] = useState<any[]>([]);
   const [anomalyFlags, setAnomalyFlags] = useState<AnomalyFlag[]>([]);
   const [syncLogs, setSyncLogs] = useState<ProspectSyncLog[]>([]);
   const [kpiSummary, setKpiSummary] = useState<PortfolioKpiSummary | null>(null);
@@ -122,15 +86,13 @@ export function AuditorDashboard({ onNavigate }: { onNavigate?: (tab: string) =>
     setLoading(true);
     setError(null);
     try {
-      const [projList, findingsData, anomalyData, syncData, kpi] = await Promise.all([
+      const [projList, anomalyData, syncData, kpi] = await Promise.all([
         fetchProjects(),
-        fetchAuditFindings(),
         fetchAnomalyFlags({}),
         fetchProspectSyncLogs({ pageSize: 100 }),
         fetchPortfolioKpiSummary(),
       ]);
       setProjects(projList);
-      setFindings(findingsData);
       setAnomalyFlags(anomalyData);
       setSyncLogs(syncData);
       setKpiSummary(kpi);
@@ -159,9 +121,6 @@ export function AuditorDashboard({ onNavigate }: { onNavigate?: (tab: string) =>
     const unresolvedAnomalies = anomalyFlags.filter(a => !a.isResolved).length;
     const resolvedAnomalies = anomalyFlags.filter(a => a.isResolved).length;
 
-    const openFindings = findings.filter((f: any) => f.status === "open").length;
-    const criticalFindings = findings.filter((f: any) => f.riskLevel === "critical").length;
-
     const syncSuccess = syncLogs.filter(l => l.status === "Success").length;
     const syncFailed = syncLogs.filter(l => l.status === "Failed").length;
     const syncTotal = syncLogs.length;
@@ -172,14 +131,12 @@ export function AuditorDashboard({ onNavigate }: { onNavigate?: (tab: string) =>
       projectsWithFlags,
       unresolvedAnomalies,
       resolvedAnomalies,
-      openFindings,
-      criticalFindings,
       syncSuccess,
       syncFailed,
       syncTotal,
       syncSuccessRate,
     };
-  }, [projects, anomalyFlags, findings, syncLogs]);
+  }, [projects, anomalyFlags, syncLogs]);
 
   const flaggedProjects = useMemo(() => {
     return projects
@@ -187,32 +144,6 @@ export function AuditorDashboard({ onNavigate }: { onNavigate?: (tab: string) =>
       .sort((a, b) => (b.unresolvedFlagCount || 0) - (a.unresolvedFlagCount || 0))
       .slice(0, 8);
   }, [projects]);
-
-  const recentFindings = useMemo(() => {
-    return [...findings]
-      .sort((a: any, b: any) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime())
-      .slice(0, 6);
-  }, [findings]);
-
-  const getSeverityIcon = (severity: string | undefined) => {
-    if (severity === "critical") return <AlertCircle size={14} className="text-rose-600" />;
-    if (severity === "major") return <AlertTriangle size={14} className="text-rose-500" />;
-    if (severity === "minor") return <AlertTriangle size={14} className="text-orange-500" />;
-    return <AlertCircle size={14} className="text-amber-500" />;
-  };
-
-  const getSeverityBadge = (severity: string | undefined) => {
-    if (severity === "critical") return "bg-rose-600 text-white";
-    if (severity === "major") return "bg-rose-500 text-white";
-    if (severity === "minor") return "bg-orange-500 text-white";
-    return "bg-amber-400 text-amber-900";
-  };
-
-  const getStatusBadge = (status: string | undefined) => {
-    if (status === "resolved") return "bg-emerald-100 text-emerald-700";
-    if (status === "open") return "bg-amber-100 text-amber-700";
-    return "bg-slate-100 text-slate-600";
-  };
 
   if (loading) {
     return (
@@ -223,8 +154,8 @@ export function AuditorDashboard({ onNavigate }: { onNavigate?: (tab: string) =>
             <p className="text-sm text-slate-500">Audit Oversight Dashboard</p>
           </div>
         </div>
-        <div className="grid grid-cols-2 gap-4 md:grid-cols-5">
-          {[1, 2, 3, 4, 5].map(i => (
+        <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+          {[1, 2, 3, 4].map(i => (
             <div key={i} className="rounded-xl bg-slate-50 p-4 animate-pulse">
               <div className="h-3 bg-slate-200 rounded w-24 mb-3" />
               <div className="h-8 bg-slate-200 rounded w-16" />
@@ -258,14 +189,14 @@ export function AuditorDashboard({ onNavigate }: { onNavigate?: (tab: string) =>
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-slate-900">Auditor Portal</h1>
-          <p className="text-sm text-slate-500">Audit Oversight Dashboard — compliance monitoring, anomaly tracking, and finding management</p>
+          <p className="text-sm text-slate-500">Audit Oversight Dashboard — compliance monitoring and anomaly tracking</p>
         </div>
         <button onClick={() => void handleRefresh()} className="btn-secondary flex items-center gap-2" disabled={refreshing}>
           <RefreshCw size={16} className={refreshing ? "animate-spin" : ""} /> Refresh
         </button>
       </div>
 
-      <div className="grid grid-cols-2 gap-4 md:grid-cols-5">
+      <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
         <button
           onClick={() => onNavigate?.("projects")}
           className="rounded-xl bg-slate-50 p-4 border border-slate-200 hover:border-slate-300 hover:bg-slate-100 transition-all text-left"
@@ -281,14 +212,6 @@ export function AuditorDashboard({ onNavigate }: { onNavigate?: (tab: string) =>
           <p className="text-xs font-bold uppercase tracking-widest text-rose-600">Unresolved Anomalies</p>
           <p className="mt-2 text-3xl font-bold text-rose-700">{summary.unresolvedAnomalies}</p>
           <p className="text-xs text-slate-400 mt-1">{summary.resolvedAnomalies} resolved</p>
-        </button>
-        <button
-          onClick={() => onNavigate?.("audit_findings")}
-          className="rounded-xl bg-amber-50 p-4 border border-amber-200 hover:border-amber-300 hover:bg-amber-100 transition-all text-left"
-        >
-          <p className="text-xs font-bold uppercase tracking-widest text-amber-600">Open Audit Findings</p>
-          <p className="mt-2 text-3xl font-bold text-amber-700">{summary.openFindings}</p>
-          <p className="text-xs text-rose-500 mt-1">{summary.criticalFindings} critical</p>
         </button>
         <button
           onClick={() => onNavigate?.("projects")}
@@ -308,7 +231,7 @@ export function AuditorDashboard({ onNavigate }: { onNavigate?: (tab: string) =>
         </button>
       </div>
 
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+      <div className="grid grid-cols-1 gap-6">
         <div className="card p-6">
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
@@ -354,47 +277,6 @@ export function AuditorDashboard({ onNavigate }: { onNavigate?: (tab: string) =>
                   </div>
                 );
               })}
-            </div>
-          )}
-        </div>
-
-        <div className="card p-6">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-              <FileText size={18} className="text-amber-600" /> Recent Audit Findings
-            </h3>
-            <button onClick={() => onNavigate?.("audit_findings")} className="text-sm text-amber-600 hover:text-amber-700 flex items-center gap-1 font-medium">
-              View all <ChevronRight size={14} />
-            </button>
-          </div>
-          {recentFindings.length === 0 ? (
-            <div className="bg-slate-50 rounded-xl p-6 text-center border border-slate-200">
-              <FileText size={32} className="mx-auto text-slate-300 mb-2" />
-              <p className="font-medium text-slate-500">No audit findings raised yet</p>
-            </div>
-          ) : (
-            <div className="space-y-3">
-              {recentFindings.map((finding: any) => (
-                <div key={finding.id} className="rounded-xl border border-slate-200 p-3 hover:bg-slate-50 transition-colors">
-                  <div className="flex items-center justify-between mb-1">
-                    <div className="flex items-center gap-2">
-                      {getSeverityIcon(finding.riskLevel)}
-                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${getSeverityBadge(finding.riskLevel)}`}>
-                        {finding.riskLevel?.toUpperCase()}
-                      </span>
-                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${getStatusBadge(finding.status)}`}>
-                        {finding.status?.replace(/_/g, " ")}
-                      </span>
-                    </div>
-                    <span className="text-xs text-slate-400">{formatRelativeTime(finding.createdAt)}</span>
-                  </div>
-                  <p className="text-sm text-slate-700 line-clamp-2 mt-1">{finding.description}</p>
-                  <div className="flex items-center gap-3 mt-1 text-xs text-slate-400">
-                    <span>{finding.findingCategory?.replace(/_/g, " ")}</span>
-                    {finding.linkedProject && <span>PRJ-{finding.linkedProject}</span>}
-                  </div>
-                </div>
-              ))}
             </div>
           )}
         </div>
@@ -501,16 +383,6 @@ export function AuditorDashboard({ onNavigate }: { onNavigate?: (tab: string) =>
               <div>
                 <p className="font-medium text-slate-900 text-sm">Anomaly Report</p>
                 <p className="text-xs text-slate-500">All anomaly flags across projects</p>
-              </div>
-              <ChevronRight size={14} className="text-slate-400 ml-auto" />
-            </button>
-            <button onClick={() => onNavigate?.("audit_findings")} className="w-full flex items-center gap-3 p-3 rounded-xl border border-slate-200 hover:bg-slate-50 hover:border-slate-300 transition-all text-left">
-              <div className="w-10 h-10 rounded-lg bg-amber-50 flex items-center justify-center">
-                <Shield size={18} className="text-amber-600" />
-              </div>
-              <div>
-                <p className="font-medium text-slate-900 text-sm">Audit Findings</p>
-                <p className="text-xs text-slate-500">Raise and manage findings</p>
               </div>
               <ChevronRight size={14} className="text-slate-400 ml-auto" />
             </button>
@@ -1029,7 +901,7 @@ export function AuditorKpiDashboard() {
         </h4>
         <ul className="text-xs text-blue-700 space-y-0.5">
           <li>Click any project row to view detailed KPI data (energy trends, uptime distribution, milestone conditions, gender breakdown).</li>
-          <li><strong>Gender targets:</strong> Female-headed households ≥ 50%, Vulnerable groups ≥ 30%, Low-income ≥ 60% (per SRS contractual requirements).</li>
+          <li><strong>Inclusion targets:</strong> each project's contracted targets, with programme minimums of female-headed households ≥ {getInclusionTargets().female}%, vulnerable groups ≥ {getInclusionTargets().vulnerable}% and low-income ≥ {getInclusionTargets().lowIncome}% (set by the Super Admin in Platform Configuration).</li>
           <li><strong>Milestone eligibility:</strong> A project becomes eligible when installation progress, gender KPIs, uptime, and anomaly flags all meet thresholds.</li>
           <li><strong>Payment workflow:</strong> KPI verification is required before RMT → TAC → PSC approval chain can proceed to disbursement.</li>
         </ul>
@@ -1302,8 +1174,8 @@ export function AuditorAnomalyReport() {
   }, [flags]);
 
   const handleExport = () => {
-    const csv = [
-      ["ID", "Installation", "Project", "Flag Type", "Severity", "Description", "Risk Context", "Status", "Age (Days)", "Created At", "Resolved At"].join(","),
+    const csv = toCsv([
+      ["ID", "Installation", "Project", "Flag Type", "Severity", "Description", "Risk Context", "Status", "Age (Days)", "Created At", "Resolved At"],
       ...filteredFlags.map(f => {
         const meta = FLAG_TYPE_META[f.flagType];
         const age = f.createdAt ? Math.floor((Date.now() - new Date(f.createdAt).getTime()) / 86400000) : "";
@@ -1313,15 +1185,15 @@ export function AuditorAnomalyReport() {
           f.project,
           f.flagType,
           meta?.severity ?? "low",
-          `"${(f.description || meta?.description || "").replace(/"/g, '""')}"`,
-          `"${(meta?.riskContext || "").replace(/"/g, '""')}"`,
+          f.description || meta?.description || "",
+          meta?.riskContext || "",
           f.isResolved ? "Resolved" : "Unresolved",
           age,
           f.createdAt || "",
           f.resolvedAt || "",
-        ].join(",");
-      })
-    ].join("\n");
+        ];
+      }),
+    ]);
 
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
     saveBlob(blob, `anomaly_report_${new Date().toISOString().slice(0, 10)}.csv`);
@@ -1680,7 +1552,6 @@ export function AuditorClaimsAudit() {
   const [claims, setClaims] = useState<PaymentClaim[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [anomalies, setAnomalies] = useState<AnomalyFlag[]>([]);
-  const [auditFindings, setAuditFindings] = useState<AuditFinding[]>([]);
   const [selectedClaim, setSelectedClaim] = useState<PaymentClaim | null>(null);
   const [filterProject, setFilterProject] = useState("");
   const [filterStatus, setFilterStatus] = useState("all");
@@ -1691,16 +1562,14 @@ export function AuditorClaimsAudit() {
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [claimsData, projectsData, anomalyData, findingsData] = await Promise.allSettled([
+      const [claimsData, projectsData, anomalyData] = await Promise.allSettled([
         fetchPaymentClaims({ pageSize: 500 }),
         fetchProjects(),
         fetchAnomalyFlags(),
-        fetchAuditFindings(),
       ]);
       if (claimsData.status === "fulfilled") setClaims(claimsData.value);
       if (projectsData.status === "fulfilled") setProjects(projectsData.value);
       if (anomalyData.status === "fulfilled") setAnomalies(anomalyData.value);
-      if (findingsData.status === "fulfilled") setAuditFindings(findingsData.value);
     } catch (err) {
       console.error("Failed to load claims audit data:", err);
     } finally {
@@ -1722,21 +1591,10 @@ export function AuditorClaimsAudit() {
     return counts;
   }, [anomalies]);
 
-  const findingsByClaim = useMemo(() => {
-    const map: Record<string, AuditFinding[]> = {};
-    auditFindings.forEach(f => {
-      if (f.linkedClaim) {
-        if (!map[f.linkedClaim]) map[f.linkedClaim] = [];
-        map[f.linkedClaim].push(f);
-      }
-    });
-    return map;
-  }, [auditFindings]);
-
   const filteredClaims = useMemo(() => {
     let result = claims;
     if (filterProject) result = result.filter(c => c.projectId === filterProject);
-    if (filterStatus !== "all") result = result.filter(c => c.status === filterStatus);
+    if (filterStatus !== "all") result = result.filter(c => (filterStatus === "Paid" ? isPaidClaim(c.status) : c.status === filterStatus));
     if (searchTerm) {
       const term = searchTerm.toLowerCase();
       result = result.filter(c =>
@@ -1758,17 +1616,18 @@ export function AuditorClaimsAudit() {
     const totalClaims = claims.length;
     const pendingReview = claims.filter(c => c.status === "Submitted").length;
     const inPipeline = claims.filter(c => ["RMT Approved", "TAC Endorsed", "PSC Approved"].includes(c.status)).length;
-    const paid = claims.filter(c => c.status === "Paid").length;
+    const paid = claims.filter(c => isPaidClaim(c.status)).length;
     const totalClaimed = claims.reduce((acc, c) => acc + (c.claimAmount || 0), 0);
-    const totalPaid = claims.filter(c => c.status === "Paid").reduce((acc, c) => acc + (c.claimAmount || 0), 0);
+    const totalPaid = claims.filter(c => isPaidClaim(c.status)).reduce((acc, c) => acc + (c.claimAmount || 0), 0);
     const flaggedCount = claims.filter(c => (anomalyCountByProject[c.projectId] || 0) > 0).length;
-    const withFindings = Object.keys(findingsByClaim).length;
-    return { totalClaims, pendingReview, inPipeline, paid, totalClaimed, totalPaid, flaggedCount, withFindings };
-  }, [claims, anomalyCountByProject, findingsByClaim]);
+    return { totalClaims, pendingReview, inPipeline, paid, totalClaimed, totalPaid, flaggedCount };
+  }, [claims, anomalyCountByProject]);
 
   const handleExportCsv = () => {
-    const rows = [
-      ["Claim ID", "Project", "Vendor", "Milestone", "Slab %", "Amount (LSL)", "Status", "Submitted", "RMT Verified", "TAC Endorsed", "PSC Approved", "Paid", "Beneficiaries", "Female Beneficiaries", "Evidence Files", "Anomalies", "Findings"].join(","),
+    // Claims record three stage dates: RMT approval, TAC endorsement and payment. The PSC approval
+    // step is in the audit log; the Payment Chain Audit report shows every step with who did it.
+    const rows = toCsv([
+      ["Claim ID", "Project", "Vendor", "Milestone", "Slab %", "Amount (LSL)", "Status", "Submitted", "RMT Approved", "TAC Endorsed", "Paid", "Payment Reference", "Beneficiaries", "Female Beneficiaries", "Evidence Files", "Anomalies"],
       ...filteredClaims.map(c => [
         c.id,
         c.projectId,
@@ -1781,14 +1640,13 @@ export function AuditorClaimsAudit() {
         c.verifiedAt || "",
         c.approvedAt || "",
         c.paidAt || "",
-        c.paidAt || "",
+        c.paymentReference || "",
         c.actualBeneficiaries || 0,
         c.actualFemaleBeneficiaries || 0,
         (c.evidenceFiles || []).length,
         anomalyCountByProject[c.projectId] || 0,
-        (findingsByClaim[c.id] || []).length,
-      ].join(","))
-    ].join("\n");
+      ]),
+    ]);
     const blob = new Blob([rows], { type: "text/csv;charset=utf-8" });
     saveBlob(blob, "claims_audit.csv");
   };
@@ -1840,7 +1698,6 @@ export function AuditorClaimsAudit() {
           claim={selectedClaim}
           project={projectMap[selectedClaim.projectId]}
           anomalies={anomalies.filter(a => a.project === selectedClaim.projectId)}
-          findings={findingsByClaim[selectedClaim.id] || []}
           approvalSteps={approvalSteps}
           getSlabLabel={getSlabLabel}
           onClose={() => setSelectedClaim(null)}
@@ -1871,7 +1728,7 @@ export function AuditorClaimsAudit() {
         <button onClick={() => setFilterStatus("all")} className="card p-4 text-left hover:border-blue-300 transition-all border-red-200 bg-red-50/30">
           <p className="text-xs font-bold uppercase tracking-widest text-red-400">With Anomalies</p>
           <p className="mt-2 text-3xl font-bold text-red-700">{summary.flaggedCount}</p>
-          <p className="mt-1 text-xs text-red-500">{summary.withFindings} with audit findings</p>
+          <p className="mt-1 text-xs text-red-500">Claims on projects with anomaly flags</p>
         </button>
         <button onClick={() => setFilterStatus("Paid")} className="card p-4 text-left hover:border-blue-300 transition-all">
           <p className="text-xs font-bold uppercase tracking-widest text-slate-400">Paid</p>
@@ -1952,9 +1809,8 @@ export function AuditorClaimsAudit() {
             {paginatedClaims.map((claim) => {
               const proj = projectMap[claim.projectId];
               const anomalyCount = anomalyCountByProject[claim.projectId] || 0;
-              const claimFindings = findingsByClaim[claim.id] || [];
               const stepIdx = getApprovalStepIndex(claim.status);
-              const hasFlags = anomalyCount > 0 || claimFindings.length > 0;
+              const hasFlags = anomalyCount > 0;
               const slabPct = claim.milestone_details?.disbursementPct;
 
               return (
@@ -2021,11 +1877,6 @@ export function AuditorClaimsAudit() {
                           {anomalyCount} <AlertCircle size={8} className="inline" />
                         </span>
                       )}
-                      {claimFindings.length > 0 && (
-                        <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-700">
-                          {claimFindings.length} <FileText size={8} className="inline" />
-                        </span>
-                      )}
                       {!hasFlags && <span className="text-[10px] text-slate-300">\u2014</span>}
                     </div>
                   </td>
@@ -2080,7 +1931,7 @@ export function AuditorClaimsAudit() {
               <li>\u2713 Check GPS &amp; installation photos</li>
               <li>\u2713 Validate beneficiary counts &amp; gender targets</li>
               <li>\u2713 Flag data deviations &gt;5%</li>
-              <li>\u2713 Review anomaly flags &amp; audit findings</li>
+              <li>\u2713 Review anomaly flags</li>
             </ul>
           </div>
           <div className="bg-slate-50 rounded-lg p-3">
@@ -2103,13 +1954,12 @@ interface ClaimDetailPanelProps {
   claim: PaymentClaim;
   project?: Project;
   anomalies: AnomalyFlag[];
-  findings: AuditFinding[];
   approvalSteps: string[];
   getSlabLabel: (pct?: number) => string;
   onClose: () => void;
 }
 
-function ClaimDetailPanel({ claim, project, anomalies, findings, approvalSteps, getSlabLabel, onClose }: ClaimDetailPanelProps) {
+function ClaimDetailPanel({ claim, project, anomalies, approvalSteps, getSlabLabel, onClose }: ClaimDetailPanelProps) {
   const [activeTab, setActiveTab] = useState<"overview" | "evidence" | "flags" | "timeline">("overview");
   const stepIdx = approvalSteps.indexOf(claim.status);
 
@@ -2118,8 +1968,9 @@ function ClaimDetailPanel({ claim, project, anomalies, findings, approvalSteps, 
       { label: "Claim Submitted", date: claim.submittedAt, done: true },
       { label: "RMT Verified", date: claim.verifiedAt, done: !!claim.verifiedAt },
       { label: "TAC Endorsed", date: claim.approvedAt, done: !!claim.approvedAt && stepIdx >= 2 },
-      { label: "PSC Approved", date: claim.paidAt, done: !!claim.paidAt && stepIdx >= 3 },
-      { label: "Disbursed", date: claim.paidAt, done: claim.status === "Paid" },
+      // The claim stores no PSC approval date (it is in the audit log; see the Payment Chain Audit report).
+      { label: "PSC Approved", date: undefined, done: stepIdx >= 3 },
+      { label: "Disbursed", date: claim.paidAt, done: isPaidClaim(claim.status) },
     ];
     return events;
   }, [claim, stepIdx]);
@@ -2138,7 +1989,7 @@ function ClaimDetailPanel({ claim, project, anomalies, findings, approvalSteps, 
         </div>
         <div className="flex items-center gap-2">
           <span className={`px-3 py-1 rounded-full text-xs font-bold border ${
-            claim.status === "Paid" ? "bg-emerald-100 text-emerald-700 border-emerald-200" :
+            isPaidClaim(claim.status) ? "bg-emerald-100 text-emerald-700 border-emerald-200" :
             claim.status === "Submitted" ? "bg-blue-100 text-blue-700 border-blue-200" :
             "bg-amber-100 text-amber-700 border-amber-200"
           }`}>
@@ -2164,9 +2015,9 @@ function ClaimDetailPanel({ claim, project, anomalies, findings, approvalSteps, 
             {tab === "flags" && <AlertCircle size={12} className="inline mr-1" />}
             {tab === "timeline" && <History size={12} className="inline mr-1" />}
             {tab.charAt(0).toUpperCase() + tab.slice(1)}
-            {tab === "flags" && (anomalies.length + findings.length) > 0 && (
+            {tab === "flags" && anomalies.length > 0 && (
               <span className="ml-1 px-1.5 py-0.5 rounded-full bg-red-100 text-red-600 text-[9px]">
-                {anomalies.length + findings.length}
+                {anomalies.length}
               </span>
             )}
           </button>
@@ -2299,11 +2150,11 @@ function ClaimDetailPanel({ claim, project, anomalies, findings, approvalSteps, 
 
         {activeTab === "flags" && (
           <div className="space-y-5">
-            {anomalies.length === 0 && findings.length === 0 ? (
+            {anomalies.length === 0 ? (
               <div className="text-center py-8 text-slate-400">
                 <CheckCircle2 size={32} className="mx-auto mb-2 text-emerald-400" />
-                <p className="font-medium text-emerald-600">No flags or findings</p>
-                <p className="text-xs mt-1">This claim has no linked anomaly flags or audit findings</p>
+                <p className="font-medium text-emerald-600">No flags</p>
+                <p className="text-xs mt-1">This claim has no linked anomaly flags</p>
               </div>
             ) : (
               <>
@@ -2323,39 +2174,6 @@ function ClaimDetailPanel({ claim, project, anomalies, findings, approvalSteps, 
                           </div>
                           {flag.description && <p className="text-xs text-red-600 mt-1">{flag.description}</p>}
                           <p className="text-[10px] text-red-400 mt-1">Created: {formatDateTime(flag.createdAt)}</p>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {findings.length > 0 && (
-                  <div>
-                    <h4 className="text-xs font-bold uppercase tracking-widest text-amber-500 mb-3 flex items-center gap-1">
-                      <FileText size={12} /> Audit Findings ({findings.length})
-                    </h4>
-                    <div className="space-y-2">
-                      {findings.map(finding => (
-                        <div key={finding.id} className="p-3 bg-amber-50 rounded-lg border border-amber-200">
-                          <div className="flex items-center justify-between">
-                            <span className="text-xs font-bold text-amber-700">{finding.findingCategory.replace(/_/g, " ").toUpperCase()}</span>
-                            <div className="flex items-center gap-2">
-                              <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
-                                finding.riskLevel === RiskLevel.CRITICAL || finding.riskLevel === RiskLevel.MAJOR_FINDING
-                                  ? "bg-red-100 text-red-700"
-                                  : "bg-amber-100 text-amber-700"
-                              }`}>
-                                {finding.riskLevel}
-                              </span>
-                              <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${finding.status === "resolved" ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-700"}`}>
-                                {finding.status}
-                              </span>
-                            </div>
-                          </div>
-                          <p className="text-xs text-amber-800 mt-1">{finding.description}</p>
-                          {finding.recommendedAction && (
-                            <p className="text-[10px] text-amber-600 mt-1 font-medium">Action: {finding.recommendedAction}</p>
-                          )}
                         </div>
                       ))}
                     </div>
@@ -2434,8 +2252,8 @@ export function AuditorProspectSyncLog() {
   }, [logs]);
 
   const handleExport = () => {
-    const csv = [
-      ["ID", "Method", "Status", "Attempts", "Record ID", "Created At", "Error"].join(","),
+    const csv = toCsv([
+      ["ID", "Method", "Status", "Attempts", "Record ID", "Created At", "Error"],
       ...filteredLogs.map(l => [
         l.id,
         l.methodName,
@@ -2444,8 +2262,8 @@ export function AuditorProspectSyncLog() {
         l.recordId || "",
         l.createdAt || "",
         l.errorMessage || "",
-      ].join(","))
-    ].join("\n");
+      ]),
+    ]);
     
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
     saveBlob(blob, "prospect_sync_log.csv");
@@ -2559,354 +2377,6 @@ export function AuditorProspectSyncLog() {
             ))}
           </tbody>
         </table>
-      </div>
-    </div>
-  );
-}
-
-export function AuditorAuditFindings({ currentUser }: { currentUser: any }) {
-  const [loading, setLoading] = useState(true);
-  const [findings, setFindings] = useState<any[]>([]);
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [claims, setClaims] = useState<PaymentClaim[]>([]);
-  const [showFindingModal, setShowFindingModal] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
-
-  const [findingCategory, setFindingCategory] = useState("");
-  const [riskLevel, setRiskLevel] = useState("");
-  const [linkedProject, setLinkedProject] = useState("");
-  const [linkedClaim, setLinkedClaim] = useState("");
-  const [description, setDescription] = useState("");
-  const [recommendedAction, setRecommendedAction] = useState("");
-  const [notifyRmt, setNotifyRmt] = useState(true);
-  const [notifyPsc, setNotifyPsc] = useState(true);
-  const [notifySuperAdmin, setNotifySuperAdmin] = useState(false);
-
-  const loadData = async () => {
-    setLoading(true);
-    try {
-      const [findingsData, projList, claimsData] = await Promise.all([
-        fetchAuditFindings(),
-        fetchProjects(),
-        fetchPaymentClaims(),
-      ]);
-      setFindings(findingsData);
-      setProjects(projList);
-      setClaims(claimsData);
-    } catch (err) {
-      console.error("Failed to load audit findings:", err);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    void loadData();
-  }, []);
-
-  const openFindings = findings.filter((f: any) => f.status === "open");
-  const resolvedFindings = findings.filter((f: any) => f.status === "resolved");
-
-  const handleSubmitFinding = async () => {
-    if (!findingCategory || !riskLevel || !description.trim()) {
-      alert("Please fill in all required fields.");
-      return;
-    }
-    setSubmitting(true);
-    try {
-      await createAuditFinding({
-        finding_category: findingCategory as FindingCategory,
-        risk_level: riskLevel as RiskLevel,
-        linked_project: linkedProject || undefined,
-        linked_claim: linkedClaim || undefined,
-        description: description,
-        recommended_action: recommendedAction,
-        rised_to_rmt: notifyRmt,
-        rised_to_psc: notifyPsc,
-        rised_to_super_admin: notifySuperAdmin,
-      });
-      alert("Audit finding submitted successfully!");
-      setShowFindingModal(false);
-      resetForm();
-      void loadData();
-    } catch (err) {
-      console.error("Failed to submit finding:", err);
-      alert("Failed to submit finding. Please try again.");
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const resetForm = () => {
-    setFindingCategory("");
-    setRiskLevel("");
-    setLinkedProject("");
-    setLinkedClaim("");
-    setDescription("");
-    setRecommendedAction("");
-    setNotifyRmt(true);
-    setNotifyPsc(true);
-    setNotifySuperAdmin(false);
-  };
-
-  if (loading) {
-    return (
-      <div className="card p-10 text-center text-slate-500">
-        <Loader2 size={24} className="animate-spin mx-auto mb-2" />
-        Loading audit findings...
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-6">
-      {showFindingModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 overflow-y-auto">
-          <div className="bg-white rounded-2xl p-6 max-w-3xl w-full mx-4 my-8 shadow-xl max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                <FileText size={20} className="text-amber-600" />
-                Raise Audit Finding
-              </h3>
-              <button onClick={() => setShowFindingModal(false)} className="text-slate-400 hover:text-slate-600">
-                <X size={20} />
-              </button>
-            </div>
-
-            <div className="mb-4">
-              <label className="text-sm font-bold text-slate-900 mb-2 block">Finding Category *</label>
-              <div className="grid grid-cols-2 gap-2">
-                {FINDING_CATEGORIES.map((cat) => (
-                  <button
-                    key={cat.value}
-                    onClick={() => setFindingCategory(cat.value)}
-                    className={`p-3 rounded-xl text-left border transition-all ${
-                      findingCategory === cat.value
-                        ? "border-amber-500 bg-amber-50"
-                        : "border-slate-200 hover:border-slate-300"
-                    }`}
-                  >
-                    <p className="font-medium text-slate-900 text-sm">{cat.label}</p>
-                    <p className="text-xs text-slate-500">{cat.desc}</p>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="mb-4">
-              <label className="text-sm font-bold text-slate-900 mb-2 block">Risk Level *</label>
-              <div className="flex gap-2">
-                {RISK_LEVELS.map((level) => (
-                  <button
-                    key={level.value}
-                    onClick={() => setRiskLevel(level.value)}
-                    className={`flex-1 p-3 rounded-xl text-center border transition-all ${
-                      riskLevel === level.value
-                        ? level.color === "rose" ? "border-rose-500 bg-rose-50"
-                          : level.color === "red" ? "border-red-500 bg-red-50"
-                          : level.color === "orange" ? "border-orange-500 bg-orange-50"
-                          : "border-yellow-500 bg-yellow-50"
-                        : "border-slate-200 hover:border-slate-300"
-                    }`}
-                  >
-                    <p className="font-medium text-slate-900 text-sm">{level.label}</p>
-                    <p className="text-xs text-slate-500">{level.desc}</p>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 gap-4 mb-4">
-              <div>
-                <label className="text-sm font-bold text-slate-900 mb-2 block">Linked Project</label>
-                <select
-                  className="input-field"
-                  value={linkedProject}
-                  onChange={(e) => { setLinkedProject(e.target.value); setLinkedClaim(""); }}
-                >
-                  <option value="">Select project...</option>
-                  {projects.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.projectReference || `PRJ-${p.id}`} | {p.vendorName || p.vendorId || "Vendor"} | {p.techType || "Tech"} | {p.district || p.region || "Region"} | {p.status}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="text-sm font-bold text-slate-900 mb-2 block">
-                  Linked Payment Claim
-                  {!linkedProject && <span className="text-slate-400 text-xs ml-2">(select project first)</span>}
-                </label>
-                <select
-                  className="input-field"
-                  value={linkedClaim}
-                  onChange={(e) => setLinkedClaim(e.target.value)}
-                  disabled={!linkedProject}
-                >
-                  <option value="">{linkedProject ? "Select claim..." : "Select a project first"}</option>
-                  {claims.filter(c => !linkedProject || String(c.projectId) === linkedProject).map((c) => (
-                    <option key={c.id} value={c.id}>
-                      CLM-{c.id} | {c.milestoneId ? `M${c.milestoneId}` : "Milestone"} | ${c.claimAmount?.toLocaleString() || "0"} | {c.status}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            <div className="mb-4">
-              <label className="text-sm font-bold text-slate-900 mb-2 block">Finding Description *</label>
-              <textarea
-                className="input-field min-h-[150px]"
-                placeholder="Describe the audit finding in detail..."
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-              />
-            </div>
-
-            <div className="mb-4">
-              <label className="text-sm font-bold text-slate-900 mb-2 block">Recommended Action</label>
-              <textarea
-                className="input-field min-h-[100px]"
-                placeholder="What action do you recommend be taken?"
-                value={recommendedAction}
-                onChange={(e) => setRecommendedAction(e.target.value)}
-              />
-            </div>
-
-            <div className="mb-4">
-              <label className="text-sm font-bold text-slate-900 mb-2 block">Notify *</label>
-              <div className="space-y-2">
-                <label className="flex items-center gap-2 p-3 bg-slate-50 rounded-xl">
-                  <input
-                    type="checkbox"
-                    checked={notifyRmt}
-                    onChange={(e) => setNotifyRmt(e.target.checked)}
-                    className="rounded border-slate-300 text-amber-600"
-                  />
-                  <span className="text-sm font-medium text-slate-700">RMT (always notified)</span>
-                </label>
-                <label className="flex items-center gap-2 p-3 bg-slate-50 rounded-xl">
-                  <input
-                    type="checkbox"
-                    checked={notifyPsc}
-                    onChange={(e) => setNotifyPsc(e.target.checked)}
-                    className="rounded border-slate-300 text-amber-600"
-                  />
-                  <span className="text-sm font-medium text-slate-700">PSC (always notified for audit findings)</span>
-                </label>
-                <label className="flex items-center gap-2 p-3 bg-slate-50 rounded-xl">
-                  <input
-                    type="checkbox"
-                    checked={notifySuperAdmin}
-                    onChange={(e) => setNotifySuperAdmin(e.target.checked)}
-                    className="rounded border-slate-300 text-amber-600"
-                  />
-                  <span className="text-sm font-medium text-slate-700">Super Admin (notify for system-level issues)</span>
-                </label>
-              </div>
-            </div>
-
-            <div className="flex justify-end gap-3 mt-6">
-              <button
-                onClick={() => { setShowFindingModal(false); resetForm(); }}
-                className="btn-secondary"
-                disabled={submitting}
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleSubmitFinding}
-                className="btn-primary flex items-center gap-2"
-                disabled={submitting || !findingCategory || !riskLevel || !description.trim()}
-              >
-                {submitting ? <Loader2 size={16} className="animate-spin" /> : <FileText size={16} />}
-                Submit Finding
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900">Audit Findings</h1>
-          <p className="text-sm text-slate-500">Raise and manage formal audit findings</p>
-        </div>
-        <button onClick={() => setShowFindingModal(true)} className="btn-primary flex items-center gap-2">
-          <FileText size={16} /> Raise Audit Finding
-        </button>
-      </div>
-
-      <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-        <div className="rounded-xl bg-slate-50 p-4">
-          <p className="text-xs font-bold uppercase tracking-widest text-slate-500">Total Findings</p>
-          <p className="mt-2 text-3xl font-bold text-slate-900">{findings.length}</p>
-        </div>
-        <div className="rounded-xl bg-amber-50 p-4">
-          <p className="text-xs font-bold uppercase tracking-widest text-amber-600">Open</p>
-          <p className="mt-2 text-3xl font-bold text-amber-700">{openFindings.length}</p>
-        </div>
-        <div className="rounded-xl bg-emerald-50 p-4">
-          <p className="text-xs font-bold uppercase tracking-widest text-emerald-600">Resolved</p>
-          <p className="mt-2 text-3xl font-bold text-emerald-700">{resolvedFindings.length}</p>
-        </div>
-        <div className="rounded-xl bg-rose-50 p-4">
-          <p className="text-xs font-bold uppercase tracking-widest text-rose-600">Critical</p>
-          <p className="mt-2 text-3xl font-bold text-rose-700">
-            {findings.filter((f: any) => f.riskLevel === "critical").length}
-          </p>
-        </div>
-      </div>
-
-      <div className="card p-6">
-        <h3 className="text-lg font-bold text-slate-900 mb-4">My Audit Findings</h3>
-        {findings.length === 0 ? (
-          <p className="text-slate-500">No audit findings raised yet.</p>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left">
-              <thead>
-                <tr className="bg-slate-50">
-                  <th className="px-4 py-3 text-xs font-bold uppercase text-slate-500">ID</th>
-                  <th className="px-4 py-3 text-xs font-bold uppercase text-slate-500">Category</th>
-                  <th className="px-4 py-3 text-xs font-bold uppercase text-slate-500">Risk Level</th>
-                  <th className="px-4 py-3 text-xs font-bold uppercase text-slate-500">Project</th>
-                  <th className="px-4 py-3 text-xs font-bold uppercase text-slate-500">Status</th>
-                  <th className="px-4 py-3 text-xs font-bold uppercase text-slate-500">Date</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {findings.map((finding: any) => (
-                  <tr key={finding.id} className="hover:bg-slate-50">
-                    <td className="px-4 py-3 text-sm font-medium text-slate-900">{finding.id}</td>
-                    <td className="px-4 py-3 text-sm text-slate-600">{finding.findingCategory}</td>
-                    <td className="px-4 py-3">
-                      <span className={`px-2 py-1 rounded-full text-[10px] font-bold ${
-                        finding.riskLevel === "critical" ? "bg-rose-600 text-white" :
-                        finding.riskLevel === "major" ? "bg-red-500 text-white" :
-                        finding.riskLevel === "minor" ? "bg-orange-500 text-white" :
-                        "bg-yellow-500 text-white"
-                      }`}>
-                        {finding.riskLevel?.toUpperCase()}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-sm text-slate-600">{finding.linkedProject || "—"}</td>
-                    <td className="px-4 py-3">
-                      <span className={`px-2 py-1 rounded-full text-[10px] font-bold ${
-                        finding.status === "resolved" ? "bg-emerald-100 text-emerald-700" :
-                        finding.status === "under_investigation" ? "bg-amber-100 text-amber-700" :
-                        "bg-amber-100 text-amber-700"
-                      }`}>
-                        {finding.status?.replace(/_/g, " ")}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-sm text-slate-500">{formatDateTime(finding.createdAt)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
       </div>
     </div>
   );

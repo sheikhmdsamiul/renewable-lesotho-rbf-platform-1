@@ -1,5 +1,6 @@
 from decimal import Decimal
 from datetime import timedelta
+from datetime import timezone as dt_timezone
 from pathlib import Path
 import shutil
 import uuid
@@ -2221,7 +2222,7 @@ class ProjectApiTests(APITestCase):
         self.assertIn("Action", export_csv.content.decode("utf-8"))
 
         with patch("rbf.tenders.pba_pdf._render_pdf") as mock_render:
-            def _fake_render(_html, output_path, _ref):
+            def _fake_render(_html, output_path, _ref, **_kwargs):
                 output_path.write_bytes(b"%PDF-1.4\n%fake\n")
 
             mock_render.side_effect = _fake_render
@@ -3629,3 +3630,70 @@ class MilestoneCompletionReviewTests(APITestCase):
 
         self.assertEqual(self._submit_m2_claim(self.vendor).status_code, status.HTTP_403_FORBIDDEN)
         self.assertEqual(self._submit_m2_claim(self.new_vendor).status_code, status.HTTP_201_CREATED)
+
+
+class MeterTimestampParsingTests(SimpleTestCase):
+    """recorded_at must carry the real reading time, not a rounded or dropped one."""
+
+    def _parse(self, raw):
+        from rbf.projects.meter_integrity import parse_meter_timestamp
+
+        return parse_meter_timestamp(raw)
+
+    def test_iso_timestamps_are_preserved(self):
+        result = self._parse('2026-09-28T14:30:00Z')
+        self.assertIsNotNone(result)
+        self.assertEqual(result.astimezone(dt_timezone.utc).strftime('%Y-%m-%d %H:%M'), '2026-09-28 14:30')
+
+    def test_naive_timestamp_is_read_as_lesotho_local_time(self):
+        result = self._parse('2026-09-28T14:30:00')
+        self.assertIsNotNone(result)
+        self.assertEqual(result.utcoffset(), timedelta(hours=2))
+        self.assertEqual(result.strftime('%H:%M'), '14:30')
+
+    def test_day_first_slash_format_is_accepted(self):
+        result = self._parse('28/09/2026 14:30')
+        self.assertIsNotNone(result)
+        self.assertEqual((result.year, result.month, result.day, result.hour, result.minute), (2026, 9, 28, 14, 30))
+
+    def test_day_first_dash_format_is_accepted(self):
+        result = self._parse('28-09-2026 14:30')
+        self.assertIsNotNone(result)
+        self.assertEqual((result.month, result.day, result.hour), (9, 28, 14))
+
+    def test_month_first_is_used_when_day_first_is_impossible(self):
+        result = self._parse('09/28/2026 14:30')
+        self.assertIsNotNone(result)
+        self.assertEqual((result.month, result.day), (9, 28))
+
+    def test_seconds_precision_is_preserved(self):
+        result = self._parse('28/09/2026 14:30:45')
+        self.assertIsNotNone(result)
+        self.assertEqual(result.second, 45)
+
+    def test_explicit_midnight_is_accepted(self):
+        result = self._parse('2026-09-28T00:00:00')
+        self.assertIsNotNone(result)
+        self.assertEqual((result.hour, result.minute), (0, 0))
+
+    def test_iso_basic_format_is_accepted(self):
+        result = self._parse('20260928T143000')
+        self.assertIsNotNone(result)
+        self.assertEqual((result.month, result.day, result.hour), (9, 28, 14))
+
+    def test_date_only_values_are_rejected(self):
+        for raw in ('2026-09-28', '28/09/2026', '09/28/2026', '28-09-2026', '20260928'):
+            with self.subTest(raw=raw):
+                self.assertIsNone(self._parse(raw))
+
+    def test_blank_and_invalid_values_are_rejected(self):
+        for raw in ('', '   ', None, 'not-a-date', '13/13/2026 10:00', '2026-13-01T10:00'):
+            with self.subTest(raw=raw):
+                self.assertIsNone(self._parse(raw))
+
+    def test_error_message_distinguishes_date_only_from_unparseable(self):
+        from rbf.projects.meter_integrity import parse_meter_timestamp_error
+
+        self.assertIn('required', parse_meter_timestamp_error(''))
+        self.assertIn('must include a time', parse_meter_timestamp_error('2026-09-28'))
+        self.assertIn('not a recognised datetime', parse_meter_timestamp_error('not-a-date'))

@@ -36,7 +36,8 @@ def get_report_base_styles():
     return """
     @page {
       size: A4;
-      margin: 0;
+      /* Room for the repeating programme header and confidential footer on every page. */
+      margin: 92px 36px 64px 36px;
     }
     body {
       margin: 0;
@@ -46,7 +47,7 @@ def get_report_base_styles():
       line-height: 1.5;
     }
     .page {
-      padding: 100px 50px 80px 50px;
+      padding: 4px 14px 0 14px;
       box-sizing: border-box;
     }
     .header-info {
@@ -221,7 +222,7 @@ def render_report_html(title, content_html, meta_items=None):
     
     meta_html = ""
     if meta_items:
-        meta_html = " · ".join([f"<strong>{k}:</strong> {v}" for k, v in meta_items.items()])
+        meta_html = " · ".join([f"<strong>{html.escape(str(k))}:</strong> {html.escape(str(v))}" for k, v in meta_items.items()])
     
     generated_at = timezone.localtime(timezone.now()).strftime('%B %d, %Y at %H:%M:%S %Z')
     

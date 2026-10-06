@@ -38,6 +38,8 @@ from .blacklisting import (
 )
 from .models import (
     BlacklistAppeal,
+    BlacklistRecommendation,
+    BlacklistRecommendationStatus,
     BlacklistAppealStatus,
     BlacklistCaseStatus,
     Organization,
@@ -62,6 +64,7 @@ from .serializers import (
     OrganizationSerializer,
     PlatformConfigurationSerializer,
     BlacklistAppealSerializer,
+    BlacklistRecommendationSerializer,
     ChangePasswordSerializer,
     CustomTokenObtainPairSerializer,
     UserSerializer,
@@ -74,6 +77,7 @@ from .serializers import (
 )
 from rbf.projects.audit import log_audit, AuditLogger
 from rbf.notifications.services import NotificationService
+from rbf.notifications.models import Notification, NotificationChannel, NotificationStatus
 from rbf.projects.integrations import SyncToProspectJob, normalize_prospect_gender
 from rbf.projects.models import AuditLog, Project, ProjectStatus, ProspectSyncLog, ProspectSyncStatus
 
@@ -112,17 +116,17 @@ ROLE_DEFAULT_MODULES = {
     UserRole.TAC: {'dashboard', 'vendors', 'projects', 'payments', 'evaluations', 'blacklisting', 'reports', 'notifications'},
     UserRole.DOE_OFFICER: {'dashboard', 'vendors', 'projects', 'blacklisting', 'reports', 'notifications'},
     UserRole.FIELD_VERIFIER: {'dashboard', 'projects', 'notifications', 'reports'},
-    UserRole.UNDP_DONOR: {'dashboard', 'vendors', 'projects', 'payments', 'issues', 'reports', 'notifications'},
-    UserRole.AUDITOR: {'dashboard', 'vendors', 'projects', 'payments', 'reports', 'audit_logs', 'prospect_sync', 'notifications'},
-    UserRole.VENDOR: {'dashboard', 'vendors', 'tenders', 'prequalification', 'bids', 'projects', 'payments', 'notifications'},
-    UserRole.EVALUATION_COMMITTEE: {'dashboard', 'evaluations', 'notifications'},
+    UserRole.UNDP_DONOR: {'dashboard', 'vendors', 'tenders', 'evaluations', 'projects', 'payments', 'blacklisting', 'reports', 'notifications'},
+    UserRole.AUDITOR: {'dashboard', 'vendors', 'tenders', 'evaluations', 'projects', 'payments', 'blacklisting', 'reports', 'audit_logs', 'prospect_sync', 'notifications'},
+    UserRole.VENDOR: {'dashboard', 'vendors', 'tenders', 'prequalification', 'bids', 'projects', 'payments', 'reports', 'notifications'},
+    UserRole.EVALUATION_COMMITTEE: {'dashboard', 'evaluations', 'reports', 'notifications'},
 }
 
 ROLE_DEFAULT_ACTIONS = {
     UserRole.ADMIN: set(PERMISSION_ACTIONS),
     UserRole.RBF_OFFICIAL: {'view', 'create', 'edit', 'submit', 'upload', 'download', 'review', 'verify', 'publish', 'approve', 'reject', 'confirm', 'endorse', 'pay', 'mark_paid', 'assign', 'resolve', 'reinstate', 'export', 'view_sensitive', 'view_bank_details', 'run_sync', 'retry_sync', 'generate_report', 'respond', 'flag_issue'},
     UserRole.TAC: {'view', 'review', 'approve', 'reject', 'endorse', 'export', 'respond'},
-    UserRole.DOE_OFFICER: {'view', 'review', 'verify', 'approve', 'reject', 'confirm', 'export', 'respond'},
+    UserRole.DOE_OFFICER: {'view', 'create', 'edit', 'upload', 'review', 'export', 'respond', 'flag_issue'},
     UserRole.FIELD_VERIFIER: {'view', 'create', 'edit', 'submit', 'upload'},
     UserRole.UNDP_DONOR: {'view', 'review', 'approve', 'reject', 'export', 'respond', 'flag_issue'},
     UserRole.AUDITOR: {'view', 'create', 'edit', 'review', 'download', 'export', 'generate_report', 'respond', 'flag_issue'},
@@ -290,7 +294,7 @@ class IsBlacklistReviewerRole:
         return bool(
             user
             and user.is_authenticated
-            and user.role in {UserRole.TAC, UserRole.DOE_OFFICER, UserRole.AUDITOR}
+            and user.role in {UserRole.TAC, UserRole.AUDITOR}
         )
 
 
@@ -300,8 +304,49 @@ class IsBlacklistConfirmerRole:
         return bool(
             user
             and user.is_authenticated
-            and user.role in {UserRole.ADMIN, UserRole.DOE_OFFICER}
+            and user.role == UserRole.ADMIN
         )
+
+
+def doe_regional_vendor_q(region: str) -> Q:
+    """Vendors a DoE officer covers: registered in the region, or running a project there."""
+    region = (region or '').strip()
+    if not region:
+        return Q(pk__in=[])
+    refs = Project.objects.filter(Q(region__iexact=region) | Q(district__iexact=region)).values_list('vendor_id', 'vendor_name')
+    ids = {ref for ref, _ in refs if ref and str(ref).isdigit()}
+    names = {ref for ref, _ in refs if ref and not str(ref).isdigit()} | {name for _, name in refs if name}
+    return (
+        Q(region__iexact=region)
+        | Q(id__in=ids)
+        | Q(username__in=names)
+        | Q(organization_name__in=names)
+    )
+
+
+def open_blacklist_case(
+    vendor,
+    initiator,
+    *,
+    reason,
+    description='',
+    justification_document=None,
+    cooling_off_days=14,
+    is_permanent=False,
+    expiry_date=None,
+):
+    case = VendorBlacklistCase.objects.create(
+        vendor=vendor,
+        reason=reason,
+        description=description,
+        justification_document=justification_document,
+        initiated_by=initiator,
+        cooling_off_until=timezone.now() + timedelta(days=max(1, cooling_off_days)),
+        is_permanent=is_permanent,
+        expiry_date=expiry_date,
+    )
+    apply_blacklist_initiation(case, initiator)
+    return case
 
 
 class UserViewSet(viewsets.ModelViewSet):
@@ -462,9 +507,7 @@ class UserViewSet(viewsets.ModelViewSet):
         if viewer.role in {UserRole.RBF_OFFICIAL, UserRole.TAC, UserRole.UNDP_DONOR, UserRole.AUDITOR, UserRole.ADMIN}:
             return True
         if viewer.role == UserRole.DOE_OFFICER:
-            viewer_region = (viewer.region or '').strip().lower()
-            vendor_region = (vendor.region or '').strip().lower()
-            return bool(viewer_region and vendor_region and viewer_region == vendor_region)
+            return User.objects.filter(pk=vendor.pk).filter(doe_regional_vendor_q(viewer.region)).exists()
         return False
 
     def _vendor_directory_queryset(self, viewer):
@@ -474,8 +517,7 @@ class UserViewSet(viewsets.ModelViewSet):
             .order_by('organization_name', 'full_name', 'username')
         )
         if viewer.role == UserRole.DOE_OFFICER:
-            region = (viewer.region or '').strip()
-            queryset = queryset.filter(region__iexact=region) if region else queryset.none()
+            queryset = queryset.filter(doe_regional_vendor_q(viewer.region)).distinct()
         return queryset
 
     def update(self, request, *args, **kwargs):
@@ -519,6 +561,7 @@ class UserViewSet(viewsets.ModelViewSet):
         target_user = self.get_object()
         if target_user.id == request.user.id:
             raise PermissionDenied('You cannot delete your own account.')
+        AuditLogger.log('user_deleted', 'users', target_user.id, 'user', old_status=target_user.status, notes=f'Deleted {target_user.role} user {target_user.username}.')
         return super().destroy(request, *args, **kwargs)
 
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated], url_path='deactivate')
@@ -901,6 +944,24 @@ class ProcurementMethodsConfigView(APIView):
         }, status=status.HTTP_200_OK)
 
 
+class InclusionTargetsConfigView(APIView):
+    """Read-only view of the programme's minimum inclusion targets, for bid forms, project
+    setup and reports. Any authenticated user can read them; only the Super Admin changes
+    them (Platform Configuration). Public, because the targets are published programme policy
+    (the landing page and tender notices state them)."""
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        from .models import inclusion_targets
+
+        targets = inclusion_targets()
+        return Response({
+            'female_target_minimum': targets['female'],
+            'vulnerable_target_minimum': targets['vulnerable'],
+            'low_income_target_minimum': targets['low_income'],
+        }, status=status.HTTP_200_OK)
+
+
 class CurrenciesConfigView(APIView):
     """Read-only view of the Super-Admin-managed currency list (Base Currency /
     Additional Currencies Accepted options for tender creation) — any authenticated
@@ -1041,18 +1102,16 @@ class SuperAdminDashboardView(APIView):
         if not reason:
             return Response({'detail': 'A blacklist reason is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        cooling_off_days = max(1, int(request.data.get('cooling_off_days') or 14))
-        case = VendorBlacklistCase.objects.create(
-            vendor=vendor,
+        case = open_blacklist_case(
+            vendor,
+            request.user,
             reason=reason,
             description=request.data.get('description', ''),
             justification_document=request.data.get('justification_document'),
-            initiated_by=request.user,
-            cooling_off_until=timezone.now() + timedelta(days=cooling_off_days),
+            cooling_off_days=int(request.data.get('cooling_off_days') or 14),
             is_permanent=str(request.data.get('is_permanent', '')).lower() in {'1', 'true', 'yes'},
             expiry_date=request.data.get('expiry_date') or None,
         )
-        apply_blacklist_initiation(case, request.user)
         return Response(VendorBlacklistCaseSerializer(case).data, status=status.HTTP_201_CREATED)
 
 
@@ -1296,13 +1355,15 @@ class VendorBlacklistCaseViewSet(viewsets.ModelViewSet):
     serializer_class = VendorBlacklistCaseSerializer
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser, *viewsets.ModelViewSet.parser_classes]
+    # Cases move only through the workflow actions below; nobody edits or deletes them directly.
+    http_method_names = ['get', 'post', 'head', 'options']
 
     def get_queryset(self):
         qs = self.queryset.order_by('-initiated_at', '-id')
         user = self.request.user
         if user.role == UserRole.VENDOR:
             return qs.filter(vendor=user)
-        if user.role in {UserRole.ADMIN, UserRole.RBF_OFFICIAL, UserRole.AUDITOR, UserRole.TAC, UserRole.DOE_OFFICER}:
+        if user.role in {UserRole.ADMIN, UserRole.RBF_OFFICIAL, UserRole.AUDITOR, UserRole.TAC, UserRole.DOE_OFFICER, UserRole.UNDP_DONOR}:
             return qs
         return qs.none()
 
@@ -1312,7 +1373,7 @@ class VendorBlacklistCaseViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def review(self, request, pk=None):
         if not IsBlacklistReviewerRole.check(request.user):
-            raise PermissionDenied('Only TAC, Auditor, or DoE Officer can review blacklisting cases.')
+            raise PermissionDenied('Only TAC or Auditor can review blacklisting cases.')
         case = self.get_object()
         if case.initiated_by_id == request.user.id:
             raise PermissionDenied('Four-eyes control: the initiator cannot review the same blacklisting case.')
@@ -1327,7 +1388,7 @@ class VendorBlacklistCaseViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def confirm(self, request, pk=None):
         if not IsBlacklistConfirmerRole.check(request.user):
-            raise PermissionDenied('Only Platform Administrator (Super Admin) or DoE Officer can confirm blacklisting.')
+            raise PermissionDenied('Only Platform Administrator (Super Admin) can confirm blacklisting.')
         case = self.get_object()
         if case.status not in {BlacklistCaseStatus.INITIATED, BlacklistCaseStatus.UNDER_REVIEW}:
             return Response({'detail': 'Only initiated or under-review cases can be confirmed.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -1361,7 +1422,7 @@ class VendorBlacklistCaseViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def reinstate(self, request, pk=None):
         if not IsBlacklistConfirmerRole.check(request.user):
-            raise PermissionDenied('Only Platform Administrator (Super Admin) or DoE Officer can reinstate a vendor.')
+            raise PermissionDenied('Only Platform Administrator (Super Admin) can reinstate a vendor.')
         case = self.get_object()
         if case.status != BlacklistCaseStatus.BLACKLISTED:
             return Response({'detail': 'Only blacklisted cases can be reinstated.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -1382,6 +1443,116 @@ class VendorBlacklistCaseViewSet(viewsets.ModelViewSet):
         )
         log_audit(request.user, 'vendor_blacklisting_appealed', appeal, {'case_id': str(case.id)})
         return Response(BlacklistAppealSerializer(appeal).data, status=status.HTTP_201_CREATED)
+
+
+class BlacklistRecommendationViewSet(viewsets.ModelViewSet):
+    """DoE officers recommend vendors for blacklisting; RMT accepts (opening a case) or declines."""
+
+    queryset = BlacklistRecommendation.objects.select_related(
+        'vendor', 'recommended_by', 'responded_by', 'project', 'linked_case'
+    ).all()
+    serializer_class = BlacklistRecommendationSerializer
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser, *viewsets.ModelViewSet.parser_classes]
+    http_method_names = ['get', 'post', 'head', 'options']
+    REVIEW_ROLES = {UserRole.RBF_OFFICIAL, UserRole.ADMIN}
+
+    def get_queryset(self):
+        qs = self.queryset.order_by('-created_at', '-id')
+        user = self.request.user
+        if user.role == UserRole.DOE_OFFICER:
+            return qs.filter(recommended_by=user)
+        if user.role in {UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.AUDITOR}:
+            return qs
+        return qs.none()
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        if user.role != UserRole.DOE_OFFICER:
+            raise PermissionDenied('Only DoE Officers can submit blacklisting recommendations.')
+        vendor = serializer.validated_data['vendor']
+        region = (user.region or '').strip()
+        if not User.objects.filter(pk=vendor.pk).filter(doe_regional_vendor_q(region)).exists():
+            raise PermissionDenied('You can only recommend vendors operating in your region.')
+        project = serializer.validated_data.get('project')
+        if project and region.lower() not in {(project.region or '').lower(), (project.district or '').lower()}:
+            raise PermissionDenied('The linked project is outside your region.')
+        if BlacklistRecommendation.objects.filter(
+            vendor=vendor, recommended_by=user, status=BlacklistRecommendationStatus.SUBMITTED
+        ).exists():
+            raise PermissionDenied('You already have a pending recommendation for this vendor.')
+        recommendation = serializer.save(recommended_by=user)
+        log_audit(user, 'vendor_blacklisting_recommended', recommendation, {'vendor_id': str(vendor.id)})
+        vendor_name = vendor.organization_name or vendor.full_name or vendor.username
+        Notification.objects.bulk_create([
+            Notification(
+                recipient_id=str(reviewer.id),
+                recipient_name=reviewer.full_name or reviewer.username,
+                type=NotificationChannel.IN_APP,
+                event='blacklist_recommendation',
+                title='Blacklisting recommended by DoE',
+                body=f"{user.full_name or user.username} ({region}) recommends blacklisting {vendor_name}: {recommendation.get_reason_display()}.",
+                status=NotificationStatus.SENT,
+                linked_entity_id=str(recommendation.id),
+            )
+            for reviewer in User.objects.filter(role__in=self.REVIEW_ROLES).only('id', 'full_name', 'username')
+        ])
+
+    def _get_pending_for_review(self, request):
+        if request.user.role not in self.REVIEW_ROLES:
+            raise PermissionDenied('Only the RBF Management Team can act on blacklisting recommendations.')
+        recommendation = self.get_object()
+        if recommendation.status != BlacklistRecommendationStatus.SUBMITTED:
+            raise PermissionDenied('This recommendation has already been actioned.')
+        return recommendation
+
+    def _respond(self, recommendation, request, new_status, case=None):
+        recommendation.status = new_status
+        recommendation.responded_by = request.user
+        recommendation.responded_at = timezone.now()
+        recommendation.response_notes = (request.data.get('response_notes') or '').strip()
+        recommendation.linked_case = case
+        recommendation.save(update_fields=['status', 'responded_by', 'responded_at', 'response_notes', 'linked_case'])
+        if recommendation.recommended_by_id:
+            recommender = recommendation.recommended_by
+            Notification.objects.create(
+                recipient_id=str(recommender.id),
+                recipient_name=recommender.full_name or recommender.username,
+                type=NotificationChannel.IN_APP,
+                event='blacklist_recommendation_response',
+                title=f'Blacklisting recommendation {new_status.lower()}',
+                body=recommendation.response_notes or f'RMT has {new_status.lower()} your recommendation.',
+                status=NotificationStatus.SENT,
+                linked_entity_id=str(recommendation.id),
+            )
+
+    @action(detail=True, methods=['post'])
+    def accept(self, request, pk=None):
+        recommendation = self._get_pending_for_review(request)
+        if get_active_blacklist_case(recommendation.vendor):
+            return Response({'detail': 'This vendor already has an active blacklisting case.'}, status=status.HTTP_400_BAD_REQUEST)
+        recommender = recommendation.recommended_by
+        recommender_label = (recommender.full_name or recommender.username) if recommender else 'DoE Officer'
+        case = open_blacklist_case(
+            recommendation.vendor,
+            request.user,
+            reason=recommendation.reason,
+            description=f"Recommended by {recommender_label} (DoE). {recommendation.justification}",
+            justification_document=recommendation.evidence_document or None,
+            cooling_off_days=int(request.data.get('cooling_off_days') or 14),
+        )
+        self._respond(recommendation, request, BlacklistRecommendationStatus.ACCEPTED, case)
+        log_audit(request.user, 'vendor_blacklisting_recommendation_accepted', recommendation, {'case_id': str(case.id)})
+        return Response(self.get_serializer(recommendation).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def decline(self, request, pk=None):
+        recommendation = self._get_pending_for_review(request)
+        if not (request.data.get('response_notes') or '').strip():
+            return Response({'detail': 'Please give a reason for declining.'}, status=status.HTTP_400_BAD_REQUEST)
+        self._respond(recommendation, request, BlacklistRecommendationStatus.DECLINED)
+        log_audit(request.user, 'vendor_blacklisting_recommendation_declined', recommendation, {})
+        return Response(self.get_serializer(recommendation).data, status=status.HTTP_200_OK)
 
 
 class BlacklistAppealViewSet(viewsets.ReadOnlyModelViewSet):
@@ -1418,7 +1589,18 @@ class LoginView(TokenObtainPairView):
 
     def post(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
+        try:
+            serializer.is_valid(raise_exception=True)
+        except Exception:
+            # Failed sign-ins are part of the system-access audit trail (never the password).
+            identifier = str(request.data.get('username') or '').strip()[:150]
+            AuditLog.objects.create(
+                action='login_failed', module='system_access', entity_type='User',
+                notes=f'Failed sign-in for "{identifier}".', ip_address=_client_ip(request),
+                details={'module': 'system_access', 'identifier': identifier},
+            )
+            raise
+        log_audit(serializer.user, 'login_succeeded', serializer.user, {'module': 'system_access', 'username': serializer.user.username})
         return Response(serializer.validated_data, status=status.HTTP_200_OK)
 
 

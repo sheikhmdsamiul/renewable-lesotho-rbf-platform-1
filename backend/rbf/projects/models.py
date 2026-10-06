@@ -95,6 +95,13 @@ class Project(models.Model):
     prospect_sync_status = models.CharField(max_length=16, choices=ProspectSyncStatus.choices, default=ProspectSyncStatus.PENDING)
     prospect_sync_error = models.TextField(blank=True)
     prospect_synced_at = models.DateTimeField(null=True, blank=True)
+    # Set when the project completes. An archived project and every record under it
+    # (milestones, installations, verifications, claims, meter data...) is read-only and
+    # leaves the operational lists; see rbf.projects.archive.
+    archived_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    archived_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, related_name='archived_projects', on_delete=models.SET_NULL, null=True, blank=True,
+    )
     energy_output = models.FloatField(default=0)  # kWh
     energy_output_target_kwh = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     uptime = models.FloatField(default=0)  # %
@@ -524,6 +531,7 @@ class VerificationStatus(models.TextChoices):
     VERIFIED = 'Verified'
     FLAGGED = 'Flagged'
     TERMINATED = 'Terminated'
+    REVERIFICATION_REQUIRED = 'Reverification Required'
 
 
 class VerificationTask(models.Model):
@@ -541,7 +549,18 @@ class VerificationTask(models.Model):
     verifier_lng = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
     distance_meters = models.FloatField(null=True, blank=True)
     anomaly_flag = models.BooleanField(default=False)
-    status = models.CharField(max_length=16, choices=VerificationStatus.choices, default=VerificationStatus.PENDING)
+    status = models.CharField(max_length=32, choices=VerificationStatus.choices, default=VerificationStatus.PENDING)
+    # Each re-verification starts a new round; earlier FieldVerification records are kept untouched.
+    verification_round = models.PositiveIntegerField(default=1)
+    reverification_reason = models.TextField(blank=True)
+    reverification_requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        related_name='requested_reverifications',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    reverification_requested_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -592,6 +611,7 @@ class FieldVerification(models.Model):
         default=FieldVerificationStatus.VERIFIED,
     )
     flag_reason = models.TextField(blank=True, null=True)
+    verification_round = models.PositiveIntegerField(default=1)
     verified_at = models.DateTimeField(default=timezone.now)
 
     class Meta:
@@ -645,6 +665,9 @@ class MeterDataBatch(models.Model):
     file_name = models.CharField(max_length=255, blank=True)
     rows_ingested = models.PositiveIntegerField(default=0)
     rows_rejected_on_upload = models.PositiveIntegerField(default=0)
+    # [{row, meter_id, errors}] kept so the vendor and reviewer can see why a row was
+    # dropped after the upload response is gone. Capped at REJECTED_ROWS_STORED.
+    rejected_rows = models.JSONField(default=list, blank=True)
     # [{code, severity, message, meter_id, reading_ids}] from integrity checks at upload.
     integrity_findings = models.JSONField(default=list, blank=True)
     status = models.CharField(max_length=32, choices=MeterDataBatchStatus.choices, default=MeterDataBatchStatus.PENDING_REVIEW)
@@ -852,6 +875,9 @@ class GeneratedReport(models.Model):
         CSV = "csv", "CSV"
         PDF = "pdf", "PDF"
         EXCEL = "excel", "Excel"
+        GEOJSON = "geojson", "GeoJSON"
+        XML = "xml", "IATI XML"
+        ZIP = "zip", "ZIP package"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     report_type = models.CharField(max_length=128)
@@ -874,13 +900,50 @@ class GeneratedReport(models.Model):
         blank=True,
     )
     generated_at = models.DateTimeField(auto_now_add=True)
-    file = models.FileField(upload_to="generated-reports/%Y/%m/%d/")
+    file = models.FileField(upload_to="generated-reports/%Y/%m/%d/", null=True, blank=True)
+
+    class Status(models.TextChoices):
+        QUEUED = "queued", "Queued"
+        RUNNING = "running", "Generating"
+        READY = "ready", "Ready"
+        FAILED = "failed", "Failed"
+
+    # Reports are generated in the background (see report_queue); the row is the job.
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.READY)
+    title = models.CharField(max_length=255, blank=True)
+    error = models.TextField(blank=True)
+    row_count = models.PositiveIntegerField(default=0)
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Approval(models.TextChoices):
+        NOT_REQUIRED = "not_required", "Not required"
+        DRAFT = "draft", "Draft"
+        IN_REVIEW = "in_review", "In review"
+        REVIEWED = "reviewed", "Reviewed"
+        APPROVED = "approved", "Approved"
+        RETURNED = "returned", "Returned for correction"
+
+    # Formal reports (results, PSC packs, verification) are reviewed and approved before they are
+    # distributed; the file never changes, so a correction is a new version that supersedes this one.
+    approval_status = models.CharField(max_length=16, choices=Approval.choices, default=Approval.NOT_REQUIRED)
+    version = models.PositiveIntegerField(default=1)
+    supersedes = models.ForeignKey("self", related_name="superseded_by", on_delete=models.SET_NULL, null=True, blank=True)
+    reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="+", on_delete=models.SET_NULL, null=True, blank=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    approved_by = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="+", on_delete=models.SET_NULL, null=True, blank=True)
+    approved_at = models.DateTimeField(null=True, blank=True)
+    review_notes = models.TextField(blank=True)
+    schedule = models.ForeignKey("ReportSchedule", related_name="runs", on_delete=models.SET_NULL, null=True, blank=True)
+    distributed_at = models.DateTimeField(null=True, blank=True)
+    distributed_to = models.ManyToManyField(settings.AUTH_USER_MODEL, related_name="received_reports", blank=True)
 
     class Meta:
         ordering = ["-generated_at"]
         indexes = [
             models.Index(fields=["report_type", "generated_at"]),
             models.Index(fields=["generated_by", "generated_at"]),
+            models.Index(fields=["status", "generated_at"]),
         ]
 
     def __str__(self):
@@ -909,179 +972,427 @@ class ProspectSyncLog(models.Model):
         return f"{self.method_name} ({self.status})"
 
 
-class ConcernType(models.TextChoices):
-    KPI_ISSUE = 'kpi_issue', 'KPI Issue'
-    GPS_ISSUE = 'gps_issue', 'GPS / Location Issue'
-    VERIFICATION_ISSUE = 'verification_issue', 'Field Verification Issue'
-    VENDOR_BEHAVIOUR = 'vendor_behaviour', 'Vendor Behaviour'
-    INSTALLATION_QUALITY = 'installation_quality', 'Installation Quality'
-    DATA_DISCREPANCY = 'data_discrepancy', 'Data Discrepancy'
+class SiteVisitFollowUpStatus(models.TextChoices):
+    NONE = 'none', 'No Follow-up Needed'
+    OPEN = 'open', 'Open'
+    IN_PROGRESS = 'in_progress', 'In Progress'
+    CLOSED = 'closed', 'Closed'
+
+
+class SiteMonitoringVisit(models.Model):
+    """A DoE officer's record of a regional site monitoring visit."""
+
+    project = models.ForeignKey(Project, related_name='monitoring_visits', on_delete=models.CASCADE)
+    installation = models.ForeignKey(
+        InstallationReport,
+        related_name='monitoring_visits',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    visited_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        related_name='monitoring_visits',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    visit_date = models.DateField()
+    system_working = models.BooleanField(null=True, blank=True)
+    beneficiary_present = models.BooleanField(null=True, blank=True)
+    observations = models.TextField()
+    follow_up_action = models.TextField(blank=True)
+    follow_up_status = models.CharField(
+        max_length=16,
+        choices=SiteVisitFollowUpStatus.choices,
+        default=SiteVisitFollowUpStatus.NONE,
+    )
+    latitude = models.FloatField(null=True, blank=True)
+    longitude = models.FloatField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-visit_date', '-created_at']
+        indexes = [models.Index(fields=['project', 'visit_date'])]
+
+    def __str__(self):
+        return f"Visit {self.id} to {self.project_id} on {self.visit_date}"
+
+
+class SiteMonitoringPhoto(models.Model):
+    visit = models.ForeignKey(SiteMonitoringVisit, related_name='photos', on_delete=models.CASCADE)
+    file = models.FileField(upload_to='monitoring_visits/')
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['uploaded_at']
+
+
+class KpiReviewRating(models.TextChoices):
+    ON_TRACK = 'on_track', 'On Track'
+    NEEDS_ATTENTION = 'needs_attention', 'Needs Attention'
+    AT_RISK = 'at_risk', 'At Risk'
+
+
+class KpiReview(models.Model):
+    """A DoE officer's periodic review of a project's KPI performance."""
+
+    project = models.ForeignKey(Project, related_name='kpi_reviews', on_delete=models.CASCADE)
+    reviewer = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        related_name='kpi_reviews',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    review_period = models.CharField(max_length=7, help_text='Reporting month, YYYY-MM.')
+    rating = models.CharField(max_length=24, choices=KpiReviewRating.choices)
+    uptime_comment = models.TextField(blank=True)
+    beneficiary_comment = models.TextField(blank=True)
+    gender_inclusion_comment = models.TextField(blank=True)
+    summary = models.TextField()
+    recommendations = models.TextField(blank=True)
+    kpi_snapshot = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-review_period', '-updated_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['project', 'reviewer', 'review_period'],
+                name='unique_kpi_review_per_reviewer_period',
+            ),
+        ]
+
+    def __str__(self):
+        return f"KPI review {self.project_id} {self.review_period} ({self.rating})"
+
+
+class OversightSubject(models.TextChoices):
+    PROJECT = 'project', 'Project'
+    VERIFICATION = 'verification', 'Verification'
+    KPI = 'kpi', 'KPI'
+    VENDOR = 'vendor', 'Vendor Performance'
+    DISBURSEMENT = 'disbursement', 'Disbursement'
+    MONITORING = 'monitoring', 'Monitoring'
+
+
+class OversightReviewStatus(models.TextChoices):
+    COMPLIANT = 'compliant', 'Compliant'
+    DELAYED = 'delayed', 'Delayed'
+    FLAGGED = 'flagged', 'Flagged'
+    COMMENT = 'comment', 'Comment'
+    ACKNOWLEDGED = 'acknowledged', 'Acknowledged'
+    REVERIFICATION_REQUESTED = 'reverification_requested', 'Re-verification Requested'
+
+
+class OversightFollowUpStatus(models.TextChoices):
+    NONE = 'none', 'No Follow-up'
+    OPEN = 'open', 'Open'
+    IN_PROGRESS = 'in_progress', 'In Progress'
+    RESOLVED = 'resolved', 'Resolved'
+
+
+class OversightReview(models.Model):
+    """One shared record for oversight reviews, flags and comments on existing project data.
+
+    DoE, PSC and RMT all write here, about the same underlying project, verification, KPI,
+    vendor and disbursement records; the role of the reviewer is stored, the data is not copied.
+    """
+
+    reviewer = models.ForeignKey(
+        settings.AUTH_USER_MODEL, related_name='oversight_reviews', on_delete=models.SET_NULL, null=True, blank=True,
+    )
+    reviewer_role = models.CharField(max_length=64, blank=True)
+    subject_type = models.CharField(max_length=16, choices=OversightSubject.choices)
+    review_status = models.CharField(max_length=32, choices=OversightReviewStatus.choices)
+    project = models.ForeignKey(Project, related_name='oversight_reviews', on_delete=models.CASCADE, null=True, blank=True)
+    milestone = models.ForeignKey(Milestone, related_name='oversight_reviews', on_delete=models.SET_NULL, null=True, blank=True)
+    verification_task = models.ForeignKey(
+        VerificationTask, related_name='oversight_reviews', on_delete=models.SET_NULL, null=True, blank=True,
+    )
+    verification_round = models.PositiveIntegerField(null=True, blank=True)
+    payment_claim = models.ForeignKey(PaymentClaim, related_name='oversight_reviews', on_delete=models.SET_NULL, null=True, blank=True)
+    vendor = models.ForeignKey(
+        settings.AUTH_USER_MODEL, related_name='vendor_oversight_reviews', on_delete=models.SET_NULL, null=True, blank=True,
+    )
+    kpi_review = models.ForeignKey('KpiReview', related_name='oversight_reviews', on_delete=models.SET_NULL, null=True, blank=True)
+    monitoring_visit = models.ForeignKey(
+        'SiteMonitoringVisit', related_name='oversight_reviews', on_delete=models.SET_NULL, null=True, blank=True,
+    )
+    comment = models.TextField()
+    issue_category = models.CharField(max_length=64, blank=True)
+    action_required = models.TextField(blank=True)
+    follow_up_status = models.CharField(
+        max_length=16, choices=OversightFollowUpStatus.choices, default=OversightFollowUpStatus.NONE,
+    )
+    follow_up_date = models.DateField(null=True, blank=True)
+    resolved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, related_name='resolved_oversight_reviews', on_delete=models.SET_NULL, null=True, blank=True,
+    )
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    resolution_note = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['subject_type', 'review_status']),
+            models.Index(fields=['follow_up_status']),
+            models.Index(fields=['reviewer_role']),
+        ]
+
+    def __str__(self):
+        return f"{self.get_review_status_display()} {self.subject_type} review {self.id}"
+
+
+
+class AuditArea(models.TextChoices):
+    PROCUREMENT = 'procurement', 'Procurement'
+    VENDOR = 'vendor', 'Vendor'
+    CONTRACT = 'contract', 'Contract'
+    VERIFICATION = 'verification', 'Verification / GPS Evidence'
+    KPI = 'kpi', 'KPI'
+    DISBURSEMENT = 'disbursement', 'Disbursement'
+    SYSTEM_ACCESS = 'system_access', 'System Access'
     OTHER = 'other', 'Other'
 
 
-class ConcernSeverity(models.TextChoices):
-    LOW = 'low', 'Low'
-    MEDIUM = 'medium', 'Medium'
-    HIGH = 'high', 'High'
-    CRITICAL = 'critical', 'Critical'
+class AuditCaseType(models.TextChoices):
+    AUDIT = 'audit', 'Audit Case'
+    COMPLIANCE_REVIEW = 'compliance_review', 'Compliance Review'
 
 
-class ConcernStatus(models.TextChoices):
-    OPEN = 'open', 'Open'
-    UNDER_INVESTIGATION = 'under_investigation', 'Under Investigation'
-    RESOLVED = 'resolved', 'Resolved'
-    DISMISSED = 'dismissed', 'Dismissed'
-    ESCALATED_TO_PSC = 'escalated_to_psc', 'Escalated to PSC'
+class AuditCaseStatus(models.TextChoices):
+    DRAFT = 'draft', 'Draft'
+    UNDER_REVIEW = 'under_review', 'Under Review'
+    EVIDENCE_COLLECTED = 'evidence_collected', 'Evidence Collected'
+    FINDING_RECORDED = 'finding_recorded', 'Finding Recorded'
+    MANAGEMENT_RESPONSE = 'management_response', 'Management Response'
+    FINALIZED = 'finalized', 'Audit Finalized'
+    CLOSED = 'closed', 'Closed'
 
 
-class Concern(models.Model):
-    id = models.CharField(max_length=20, primary_key=True)
-    raised_by = models.ForeignKey('users.User', on_delete=models.CASCADE, related_name='raised_concerns')
-    concern_type = models.CharField(max_length=32, choices=ConcernType.choices)
-    severity = models.CharField(max_length=16, choices=ConcernSeverity.choices)
-    linked_project = models.ForeignKey(
-        'projects.Project', on_delete=models.CASCADE,
-        related_name='concerns', null=True, blank=True
-    )
-    linked_installation = models.ForeignKey(
-        'InstallationReport', on_delete=models.CASCADE,
-        related_name='concerns', null=True, blank=True
-    )
-    description = models.TextField()
-    evidence_files = models.JSONField(default=list, blank=True)
-    status = models.CharField(
-        max_length=24, choices=ConcernStatus.choices,
-        default=ConcernStatus.OPEN
-    )
-    notify_rmt = models.BooleanField(default=True)
-    notify_psc = models.BooleanField(default=False)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        ordering = ['-created_at']
-        indexes = [
-            models.Index(fields=['raised_by']),
-            models.Index(fields=['status']),
-            models.Index(fields=['severity']),
-        ]
-
-    def __str__(self):
-        return f"{self.id} - {self.concern_type} ({self.severity})"
-
-    def save(self, *args, **kwargs):
-        if not self.id:
-            last_concern = Concern.objects.order_by('-created_at').first()
-            next_num = 1 if not last_concern else int(last_concern.id.split('-')[1]) + 1
-            self.id = f"CNC-{next_num:03d}"
-        super().save(*args, **kwargs)
-
-
-class ConcernResponse(models.Model):
-    concern = models.ForeignKey(
-        Concern, on_delete=models.CASCADE,
-        related_name='responses'
-    )
-    responded_by = models.ForeignKey('users.User', on_delete=models.CASCADE)
-    response_text = models.TextField()
-    action_taken = models.CharField(max_length=32, blank=True)
-    evidence_files = models.JSONField(default=list, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        ordering = ['created_at']
-
-    def __str__(self):
-        return f"Response to {self.concern_id}"
-
-
-class FindingCategory(models.TextChoices):
-    PAYMENT_COMPLIANCE = 'payment_compliance', 'Payment Compliance'
-    APPROVAL_CHAIN_VIOLATION = 'approval_chain_violation', 'Approval Chain Violation'
-    DATA_INTEGRITY = 'data_integrity', 'Data Integrity'
-    GPS_FRAUD = 'gps_fraud', 'GPS / Location Fraud'
-    KPI_MANIPULATION = 'kpi_manipulation', 'KPI Manipulation'
-    DOCUMENT_IRREGULARITY = 'document_irregularity', 'Document Irregularity'
-    PROCESS_VIOLATION = 'process_violation', 'Process Violation'
-    CONFLICT_OF_INTEREST = 'conflict_of_interest', 'Conflict of Interest'
-    OTHER = 'other', 'Other Compliance Issue'
-
-
-class FindingRiskLevel(models.TextChoices):
+class AuditFindingType(models.TextChoices):
+    COMPLIANT = 'compliant', 'No Exception (Compliant)'
     OBSERVATION = 'observation', 'Observation'
-    MINOR = 'minor', 'Minor Finding'
-    MAJOR = 'major', 'Major Finding'
+    EXCEPTION = 'exception', 'Exception'
+    NON_COMPLIANCE = 'non_compliance', 'Non-compliance'
+
+
+class AuditRiskLevel(models.TextChoices):
+    OBSERVATION = 'observation', 'Observation'
+    MINOR = 'minor', 'Minor'
+    MAJOR = 'major', 'Major'
     CRITICAL = 'critical', 'Critical'
 
 
-class AuditFinding(models.Model):
-    id = models.CharField(max_length=24, primary_key=True)
-    raised_by = models.ForeignKey(
-        'users.User', on_delete=models.CASCADE,
-        related_name='raised_findings'
+class CorrectiveActionStatus(models.TextChoices):
+    NOT_REQUIRED = 'not_required', 'Not Required'
+    OPEN = 'open', 'Open'
+    IN_PROGRESS = 'in_progress', 'In Progress'
+    IMPLEMENTED = 'implemented', 'Implemented'
+    VERIFIED = 'verified', 'Verified by Auditor'
+
+
+class AuditCase(models.Model):
+    """An independent audit (or compliance review) over existing source records.
+
+    The case links to the records it examines; it never copies or changes them. Only the
+    Auditor moves a case through its workflow; the RBF Management Team supplies the
+    management response and corrective-action progress.
+    """
+
+    reference = models.CharField(max_length=32, unique=True)
+    case_type = models.CharField(max_length=24, choices=AuditCaseType.choices, default=AuditCaseType.AUDIT)
+    audit_area = models.CharField(max_length=24, choices=AuditArea.choices)
+    title = models.CharField(max_length=255)
+    scope = models.TextField()
+    status = models.CharField(max_length=24, choices=AuditCaseStatus.choices, default=AuditCaseStatus.DRAFT)
+    auditor = models.ForeignKey(
+        settings.AUTH_USER_MODEL, related_name='audit_cases', on_delete=models.SET_NULL, null=True, blank=True,
     )
-    finding_category = models.CharField(
-        max_length=32, choices=FindingCategory.choices
+
+    project = models.ForeignKey(Project, related_name='audit_cases', on_delete=models.SET_NULL, null=True, blank=True)
+    vendor = models.ForeignKey(
+        settings.AUTH_USER_MODEL, related_name='vendor_audit_cases', on_delete=models.SET_NULL, null=True, blank=True,
     )
-    risk_level = models.CharField(
-        max_length=16, choices=FindingRiskLevel.choices
+    tender = models.ForeignKey('tenders.Tender', related_name='audit_cases', on_delete=models.SET_NULL, null=True, blank=True)
+    contract = models.ForeignKey(
+        'tenders.TenderContract', related_name='audit_cases', on_delete=models.SET_NULL, null=True, blank=True,
     )
-    linked_project = models.ForeignKey(
-        'projects.Project', on_delete=models.CASCADE,
-        related_name='audit_findings', null=True, blank=True
+    payment_claim = models.ForeignKey(PaymentClaim, related_name='audit_cases', on_delete=models.SET_NULL, null=True, blank=True)
+    verification_task = models.ForeignKey(
+        VerificationTask, related_name='audit_cases', on_delete=models.SET_NULL, null=True, blank=True,
     )
-    linked_claim = models.ForeignKey(
-        'PaymentClaim', on_delete=models.CASCADE,
-        related_name='audit_findings', null=True, blank=True
+
+    criteria = models.TextField(blank=True, help_text='Rule, policy or SRS requirement the records were tested against.')
+    finding_type = models.CharField(max_length=24, choices=AuditFindingType.choices, blank=True)
+    risk_level = models.CharField(max_length=16, choices=AuditRiskLevel.choices, blank=True)
+    finding = models.TextField(blank=True)
+    recommendation = models.TextField(blank=True)
+    finding_recorded_at = models.DateTimeField(null=True, blank=True)
+
+    response_requested_at = models.DateTimeField(null=True, blank=True)
+    management_response = models.TextField(blank=True)
+    responded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, related_name='audit_case_responses', on_delete=models.SET_NULL, null=True, blank=True,
     )
-    linked_installation = models.ForeignKey(
-        'InstallationReport', on_delete=models.CASCADE,
-        related_name='audit_findings', null=True, blank=True
+    responded_at = models.DateTimeField(null=True, blank=True)
+    corrective_action = models.TextField(blank=True)
+    corrective_action_owner = models.CharField(max_length=255, blank=True)
+    corrective_action_due = models.DateField(null=True, blank=True)
+    corrective_action_status = models.CharField(
+        max_length=16, choices=CorrectiveActionStatus.choices, default=CorrectiveActionStatus.NOT_REQUIRED,
     )
-    description = models.TextField()
-    recommended_action = models.TextField(blank=True)
-    evidence_files = models.JSONField(default=list, blank=True)
-    status = models.CharField(
-        max_length=24, choices=ConcernStatus.choices,
-        default=ConcernStatus.OPEN
-    )
-    rised_to_rmt = models.BooleanField(default=True)
-    rised_to_psc = models.BooleanField(default=True)
-    rised_to_super_admin = models.BooleanField(default=False)
-    resolved = models.BooleanField(default=False)
-    rmt_response = models.TextField(blank=True, default="")
-    rmt_response_action = models.CharField(max_length=32, blank=True, default="")
-    rmt_responded_by = models.ForeignKey(
-        'users.User', on_delete=models.SET_NULL,
-        related_name='audit_finding_responses', null=True, blank=True
-    )
-    rmt_responded_at = models.DateTimeField(null=True, blank=True)
-    psc_comment = models.TextField(blank=True, default="")
-    psc_commented_at = models.DateTimeField(null=True, blank=True)
-    psc_commented_by = models.ForeignKey(
-        'users.User', on_delete=models.SET_NULL,
-        related_name='audit_finding_psc_comments', null=True, blank=True
-    )
+
+    conclusion = models.TextField(blank=True)
+    finalized_at = models.DateTimeField(null=True, blank=True)
+    closed_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ['-created_at']
         indexes = [
-            models.Index(fields=['raised_by']),
             models.Index(fields=['status']),
-            models.Index(fields=['risk_level']),
+            models.Index(fields=['audit_area', 'status']),
+            models.Index(fields=['case_type']),
         ]
 
     def __str__(self):
-        return f"{self.id} - {self.finding_category} ({self.risk_level})"
+        return f"{self.reference} ({self.get_status_display()})"
 
-    def save(self, *args, **kwargs):
-        if not self.id:
-            year = timezone.now().year
-            last_finding = AuditFinding.objects.filter(
-                id__startswith=f'AUD-FND-{year}'
-            ).order_by('-created_at').first()
-            next_num = 1 if not last_finding else int(last_finding.id.split('-')[-1]) + 1
-            self.id = f"AUD-FND-{year}-{next_num:03d}"
-        super().save(*args, **kwargs)
+
+class AuditEvidenceKind(models.TextChoices):
+    FILE = 'file', 'File'
+    RECORD = 'record', 'Source Record Reference'
+    NOTE = 'note', 'Working Note'
+
+
+class AuditEvidence(models.Model):
+    """Append-only evidence on an audit case: a file, a pointer to a source record, or a note."""
+
+    case = models.ForeignKey(AuditCase, related_name='evidence', on_delete=models.CASCADE)
+    kind = models.CharField(max_length=16, choices=AuditEvidenceKind.choices)
+    description = models.TextField()
+    file = models.FileField(upload_to='audit_evidence/', null=True, blank=True)
+    source_type = models.CharField(max_length=64, blank=True)
+    source_id = models.CharField(max_length=64, blank=True)
+    added_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, related_name='audit_evidence', on_delete=models.SET_NULL, null=True, blank=True,
+    )
+    added_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['added_at', 'id']
+
+
+class ProjectArchive(models.Model):
+    """The archived record of a project's whole lifecycle, from tender creation to completion
+    and contract closure.
+
+    Written once when the project is archived and never changed. If the Super Admin restores
+    the project, this record is kept (marked superseded) and a new one is written when the
+    project is archived again.
+    """
+
+    project = models.ForeignKey(Project, related_name='archives', on_delete=models.PROTECT)
+    tender = models.ForeignKey('tenders.Tender', related_name='project_archives', on_delete=models.SET_NULL, null=True, blank=True)
+    contract = models.ForeignKey(
+        'tenders.TenderContract', related_name='project_archives', on_delete=models.SET_NULL, null=True, blank=True,
+    )
+    archived_at = models.DateTimeField(auto_now_add=True)
+    archived_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, related_name='project_archive_records', on_delete=models.SET_NULL, null=True, blank=True,
+    )
+    reason = models.CharField(max_length=255, blank=True)
+    lifecycle_started_at = models.DateTimeField(null=True, blank=True, help_text='Tender creation.')
+    lifecycle_ended_at = models.DateTimeField(null=True, blank=True, help_text='Project completion and contract closure.')
+    timeline = models.JSONField(default=list, blank=True)
+    snapshot = models.JSONField(default=dict, blank=True)
+    dossier = models.FileField(upload_to='project_archives/', null=True, blank=True)
+    superseded_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-archived_at']
+
+    def __str__(self):
+        return f"Archive of project {self.project_id} ({self.archived_at:%Y-%m-%d})"
+
+
+class ResultsMeasure(models.TextChoices):
+    VERIFIED_INSTALLATIONS = 'verified_installations', 'Verified installations (connections)'
+    FEMALE_HEADED_SHARE = 'female_headed_share', 'Female-headed households (% of verified)'
+    VULNERABLE_SHARE = 'vulnerable_share', 'Vulnerable households (% of verified)'
+    LOW_INCOME_SHARE = 'low_income_share', 'Low-income households (% of verified)'
+    BENEFICIARIES = 'beneficiaries', 'Beneficiaries reported in paid claims'
+    FEMALE_BENEFICIARIES = 'female_beneficiaries', 'Female beneficiaries reported in paid claims'
+    ENERGY_KWH = 'energy_kwh', 'Energy delivered (kWh, meter readings)'
+    AVERAGE_UPTIME = 'average_uptime', 'Average system uptime (%)'
+    AMOUNT_DISBURSED = 'amount_disbursed', 'Amount disbursed (LSL, paid claims)'
+    PROJECTS_COMPLETED = 'projects_completed', 'Projects completed'
+    MANUAL = 'manual', 'Entered manually (not measured by the platform)'
+
+
+class ResultsIndicator(models.Model):
+    """One line of the programme results framework (logframe): baseline, target and how the
+    actual value is obtained. Maintained by the Super Admin; read by the Results report."""
+
+    code = models.CharField(max_length=32, unique=True)
+    name = models.CharField(max_length=255)
+    unit = models.CharField(max_length=32, blank=True)
+    measure = models.CharField(max_length=32, choices=ResultsMeasure.choices)
+    technology = models.CharField(max_length=64, blank=True, help_text='Limit the measure to one technology (optional).')
+    baseline = models.DecimalField(max_digits=16, decimal_places=2, null=True, blank=True)
+    target = models.DecimalField(max_digits=16, decimal_places=2, null=True, blank=True)
+    target_date = models.DateField(null=True, blank=True)
+    manual_actual = models.DecimalField(max_digits=16, decimal_places=2, null=True, blank=True)
+    manual_actual_as_of = models.DateField(null=True, blank=True)
+    source_note = models.TextField(blank=True, help_text='Where the target comes from (e.g. EU Action Document).')
+    position = models.PositiveIntegerField(default=0)
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='+', on_delete=models.SET_NULL, null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['position', 'code']
+
+    def __str__(self):
+        return f'{self.code} {self.name}'
+
+
+class ReportSchedule(models.Model):
+    """A report generated automatically every month or quarter and sent to a distribution list.
+
+    The report is prepared with the role and data scope of `prepared_by`. Formal reports go to
+    review and are distributed once approved; others are distributed as soon as they are ready.
+    """
+
+    class Frequency(models.TextChoices):
+        MONTHLY = "monthly", "Monthly (previous month)"
+        QUARTERLY = "quarterly", "Quarterly (previous quarter)"
+
+    name = models.CharField(max_length=255)
+    report_type = models.CharField(max_length=64)
+    format = models.CharField(max_length=16, choices=GeneratedReport.Format.choices, default=GeneratedReport.Format.PDF)
+    frequency = models.CharField(max_length=16, choices=Frequency.choices)
+    run_day = models.PositiveSmallIntegerField(default=5, help_text="Day of the month the report runs (1-28).")
+    filters = models.JSONField(default=dict, blank=True)
+    prepared_by = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="prepared_report_schedules", on_delete=models.PROTECT)
+    recipient_roles = models.JSONField(default=list, blank=True)
+    recipient_users = models.ManyToManyField(settings.AUTH_USER_MODEL, related_name="report_subscriptions", blank=True)
+    active = models.BooleanField(default=True)
+    next_run_at = models.DateTimeField(null=True, blank=True)
+    last_run_at = models.DateTimeField(null=True, blank=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="+", on_delete=models.SET_NULL, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return f"{self.name} ({self.frequency})"

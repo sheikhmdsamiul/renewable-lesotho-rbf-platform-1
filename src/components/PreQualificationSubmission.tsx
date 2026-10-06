@@ -1,3 +1,4 @@
+import { getInclusionTargets, useInclusionTargets } from "../inclusionTargets";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, CheckCircle2, ChevronRight, Clock, Download, HelpCircle, Loader2, XCircle } from "lucide-react";
 import { fetchMyProfile, fetchVendorPrequalifications, submitVendorPrequalification } from "../api";
@@ -75,7 +76,7 @@ type Form = {
   declaration_accepted: boolean;
 };
 
-const EMPTY_FORM: Form = {
+const emptyForm = (): Form => ({
   company_name: "",
   organization_type: "Private",
   tax_id: "",
@@ -89,8 +90,8 @@ const EMPTY_FORM: Form = {
   prior_projects: "",
   annual_revenue: "",
   districts_covered: "",
-  female_beneficiary_target: 50,
-  vulnerable_group_target: 30,
+  female_beneficiary_target: getInclusionTargets().female,
+  vulnerable_group_target: getInclusionTargets().vulnerable,
   bank_name: "",
   bank_branch: "",
   bank_account_name: "",
@@ -98,7 +99,7 @@ const EMPTY_FORM: Form = {
   bank_swift_code: "",
   bank_sort_code: "",
   declaration_accepted: false,
-};
+});
 
 const STEP_FIELDS: Record<number, string[]> = {
   1: ["company_name", "organization_type", "tax_id", "hq_address", "email", "contact_number", "gender_of_focal_person", ...DOCUMENTS.map((doc) => doc.api)],
@@ -161,6 +162,11 @@ function validateStep(step: number, form: Form, docs: Record<DocKey, File | null
     if (swift && !SWIFT_PATTERN.test(swift)) errors.bank_swift_code = "SWIFT/BIC is 8 or 11 letters/digits, e.g. FIRNLSMX.";
     if (form.bank_sort_code.trim() && !/^[0-9-]{4,12}$/.test(form.bank_sort_code.trim())) errors.bank_sort_code = "Use digits and dashes only.";
   }
+  if (step === 4) {
+    const minimums = getInclusionTargets();
+    if (Number(form.female_beneficiary_target) < minimums.female) errors.female_beneficiary_target = `Commit to at least ${minimums.female}%.`;
+    if (Number(form.vulnerable_group_target) < minimums.vulnerable) errors.vulnerable_group_target = `Commit to at least ${minimums.vulnerable}%.`;
+  }
   if (step === 4 && !form.declaration_accepted) errors.declaration_accepted = "You must accept the declaration to submit.";
   return errors;
 }
@@ -199,8 +205,8 @@ function formFromPrequal(prequal: VendorPrequalification): Form {
     prior_projects: prequal.priorProjects != null ? String(prequal.priorProjects) : "",
     annual_revenue: prequal.annualRevenue != null ? String(prequal.annualRevenue) : "",
     districts_covered: prequal.districtsCovered ? String(prequal.districtsCovered) : "",
-    female_beneficiary_target: prequal.femaleBeneficiaryTarget ?? 50,
-    vulnerable_group_target: prequal.vulnerableGroupTarget ?? 30,
+    female_beneficiary_target: prequal.femaleBeneficiaryTarget ?? getInclusionTargets().female,
+    vulnerable_group_target: prequal.vulnerableGroupTarget ?? getInclusionTargets().vulnerable,
     bank_name: prequal.bankName ?? "",
     bank_branch: prequal.bankBranch ?? "",
     bank_account_name: prequal.bankAccountName ?? "",
@@ -220,13 +226,14 @@ const EMPTY_DOCS: Record<DocKey, File | null> = {
 };
 
 export default function PreQualificationSubmission() {
+  const inclusionTargets = useInclusionTargets();
   const [prequals, setPrequals] = useState<VendorPrequalification[]>([]);
   const [loadState, setLoadState] = useState<"loading" | "ready" | "error">("loading");
   const [vendorId, setVendorId] = useState("");
   const [editing, setEditing] = useState<VendorPrequalification | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [step, setStep] = useState(1);
-  const [form, setForm] = useState<Form>(EMPTY_FORM);
+  const [form, setForm] = useState<Form>(emptyForm);
   const [docs, setDocs] = useState<Record<DocKey, File | null>>(EMPTY_DOCS);
   const [errors, setErrors] = useState<FieldErrors>({});
   const [formError, setFormError] = useState("");
@@ -663,8 +670,8 @@ export default function PreQualificationSubmission() {
             <div className="space-y-6">
               <div className="space-y-6 rounded-2xl border border-emerald-100 bg-emerald-50 p-6">
                 {([
-                  ["female_beneficiary_target", "Female-headed household commitment (%)", 50, "Minimum 50% of beneficiaries must be female-headed households."],
-                  ["vulnerable_group_target", "Vulnerable group inclusion (%)", 30, "Minimum 30% of beneficiaries from vulnerable groups (elderly, people with disabilities, etc.)."],
+                  ["female_beneficiary_target", "Female-headed household commitment (%)", inclusionTargets.female, `Minimum ${inclusionTargets.female}% of beneficiaries must be female-headed households.`],
+                  ["vulnerable_group_target", "Vulnerable group inclusion (%)", inclusionTargets.vulnerable, `Minimum ${inclusionTargets.vulnerable}% of beneficiaries from vulnerable groups (elderly, people with disabilities, etc.).`],
                 ] as Array<["female_beneficiary_target" | "vulnerable_group_target", string, number, string]>).map(([key, label, min, help]) => (
                   <div key={key} className="space-y-2">
                     <div className="flex items-center justify-between">

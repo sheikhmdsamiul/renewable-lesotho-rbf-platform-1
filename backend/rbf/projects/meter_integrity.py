@@ -6,7 +6,7 @@ Admin verifies or rejects it. MEDIUM / LOW findings are shown to the reviewer on
 """
 import math
 from collections import defaultdict
-from datetime import timedelta
+from datetime import datetime, timedelta
 from statistics import median
 
 from django.utils import timezone
@@ -33,6 +33,80 @@ CLONED_MIN_METERS = 3
 # Energy over an interval cannot exceed the reported output power sustained for the
 # whole interval; the margin absorbs power that varied during the interval.
 ENERGY_POWER_MARGIN = 1.5
+
+# Meter exports reach us from field devices, spreadsheets and vendor tooling, so the
+# reading timestamp arrives in whatever format that producer emits. ISO 8601 is the
+# documented contract; the slash- and dash-separated forms are what Excel and the local
+# field kit actually produce. Day-first is tried before month-first because 05/03/2026
+# cannot be disambiguated by inspection, and Lesotho field data is conventionally
+# day-first -- a value whose first field exceeds 12 is unambiguously month-first, so
+# trying day-first and only then falling back never misreads a valid date.
+ISO_TIMESTAMP_HINT = 'ISO 8601 (2026-09-28T14:30:00 or 2026-09-28 14:30)'
+TIMESTAMP_FORMAT_HINT = f'dd/mm/yyyy hh:mm, e.g. 28/09/2026 14:30, or {ISO_TIMESTAMP_HINT}'
+
+# Time is required. A bare date would be stored at midnight and then score a whole day
+# stale against the 48-hour reporting rule, raising false "no data" flags on healthy
+# meters.
+_DAY_FIRST_FORMATS = ('%d/%m/%Y %H:%M:%S', '%d/%m/%Y %H:%M', '%d-%m-%Y %H:%M:%S', '%d-%m-%Y %H:%M')
+_MONTH_FIRST_FORMATS = ('%m/%d/%Y %H:%M:%S', '%m/%d/%Y %H:%M', '%m-%d-%Y %H:%M:%S', '%m-%d-%Y %H:%M')
+# ISO 8601 basic form, emitted by embedded device firmware.
+_ISO_BASIC_FORMATS = ('%Y%m%dT%H%M%S', '%Y%m%dT%H%M', '%Y%m%d%H%M%S', '%Y%m%d%H%M')
+_DATE_ONLY_FORMATS = (
+    '%Y-%m-%d', '%d/%m/%Y', '%m/%d/%Y', '%d-%m-%Y', '%m-%d-%Y', '%Y%m%d',
+)
+
+
+def _parse_date_only(text: str) -> bool:
+    """True when the value carries a date but no time, e.g. 2026-09-28 or 28/09/2026."""
+    for fmt in _DATE_ONLY_FORMATS:
+        try:
+            datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+        return True
+    return False
+
+
+def parse_meter_timestamp(raw) -> datetime | None:
+    """Parse an uploaded meter reading timestamp into an aware datetime.
+
+    Returns None when the value is missing, unparseable, or carries no time component.
+    Naive values are interpreted in the active Django timezone (Africa/Maseru), so a meter
+    reporting local SAST time is not shifted by the UTC offset.
+    """
+    text = str(raw or '').strip()
+    if not text:
+        return None
+
+    parsed = None
+    try:
+        parsed = datetime.fromisoformat(text.replace('Z', '+00:00'))
+    except ValueError:
+        for fmt in _ISO_BASIC_FORMATS + _DAY_FIRST_FORMATS + _MONTH_FIRST_FORMATS:
+            try:
+                parsed = datetime.strptime(text, fmt)
+                break
+            except ValueError:
+                continue
+
+    if parsed is None:
+        return None
+    if _parse_date_only(text):
+        return None
+    if timezone.is_naive(parsed):
+        parsed = timezone.make_aware(parsed, timezone.get_current_timezone())
+    return parsed
+
+
+def parse_meter_timestamp_error(raw) -> str:
+    """A row-level message explaining why parse_meter_timestamp rejected the value."""
+    text = str(raw or '').strip()
+    if not text:
+        return 'reading_datetime/recorded_at is required.'
+    if _parse_date_only(text):
+        return 'reading_datetime/recorded_at must include a time, e.g. 28/09/2026 14:30.'
+    return f'reading_datetime/recorded_at is not a recognised datetime. Use {TIMESTAMP_FORMAT_HINT}.'
+
 
 CHECK_LABELS = {
     'duplicate_reading': 'Duplicate reading',

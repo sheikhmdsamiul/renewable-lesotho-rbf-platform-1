@@ -13,7 +13,7 @@ from django.utils import timezone
 
 from rbf.notifications.models import Notification, NotificationChannel, NotificationStatus
 from rbf.tenders.models import ContractStatus, TenderContract
-from rbf.users.models import PlatformConfiguration, User, UserRole
+from rbf.users.models import PlatformConfiguration, User, UserRole, inclusion_targets
 
 from .audit import log_audit
 from .milestone_reviews import TERMINAL_PROJECT_STATUSES, is_zero_value_milestone, milestone_cleared_to_proceed
@@ -87,12 +87,6 @@ class MilestoneEligibilityResult:
 
 
 class KpiService:
-    GENDER_TARGETS = {
-        "female_headed": 50,
-        "vulnerable": 30,
-        "low_income": 60,
-    }
-
     def __init__(self, project_id: str):
         self.project = Project.objects.get(id=project_id)
 
@@ -143,12 +137,13 @@ class KpiService:
 
     def _gender_targets(self) -> dict[str, int]:
         """Per-project thresholds set on the Milestone Assignment form, falling
-        back to the programme defaults for projects without them."""
+        back to the programme minimums in Platform Configuration."""
         project = self.project
+        fallback = inclusion_targets()
         return {
-            "female_headed": int(project.female_target_pct or project.target_female_pct or self.GENDER_TARGETS["female_headed"]),
-            "vulnerable": int(project.vulnerable_target_pct or project.target_vulnerable_pct or self.GENDER_TARGETS["vulnerable"]),
-            "low_income": int(project.low_income_target_pct or project.target_low_income_pct or self.GENDER_TARGETS["low_income"]),
+            "female_headed": int(project.female_target_pct or project.target_female_pct or fallback["female"]),
+            "vulnerable": int(project.vulnerable_target_pct or project.target_vulnerable_pct or fallback["vulnerable"]),
+            "low_income": int(project.low_income_target_pct or project.target_low_income_pct or fallback["low_income"]),
         }
 
     def getGenderKpi(self) -> dict[str, Any]:
@@ -344,6 +339,9 @@ class KpiService:
         reason_notes: str,
     ) -> bool:
         if milestone is None or not eligible or not self._is_unlockable_status(milestone.status):
+            return False
+        if self.project.archived_at:
+            # Archived projects are read-only; their KPIs are reported, never acted on.
             return False
 
         with transaction.atomic():
@@ -655,7 +653,7 @@ class KpiService:
             self.project.target_installations = verified_target
             update_fields.append("target_installations")
 
-        if update_fields:
+        if update_fields and not self.project.archived_at:
             self.project.save(update_fields=update_fields + ["updated_at"])
 
     @classmethod
@@ -753,7 +751,7 @@ class KpiService:
             "total_verified": total_verified,
             "overall_progress_pct": _round(overall_progress_pct, 1),
             "overall_female_pct": _round(overall_female_pct, 1),
-            "overall_female_met": overall_female_pct >= 50.0 if female_denominator else False,
+            "overall_female_met": overall_female_pct >= inclusion_targets()["female"] if female_denominator else False,
             "overall_uptime_pct": _round((uptime_weighted / uptime_devices) if uptime_devices else 0.0, 1),
             "projects_at_risk": projects_at_risk,
             "projects_on_track": projects_on_track,

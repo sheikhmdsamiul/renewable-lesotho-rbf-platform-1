@@ -22,6 +22,7 @@ from .models import (
     BlacklistAppealStatus,
     BlacklistCaseStatus,
     BlacklistReason,
+    BlacklistRecommendation,
     User,
     RolePermission,
     UserRole,
@@ -121,15 +122,15 @@ class UserSerializer(serializers.ModelSerializer):
             UserRole.TAC: {'dashboard', 'vendors', 'projects', 'payments', 'evaluations', 'blacklisting', 'reports', 'notifications'},
             UserRole.DOE_OFFICER: {'dashboard', 'vendors', 'projects', 'blacklisting', 'reports', 'notifications'},
             UserRole.FIELD_VERIFIER: {'dashboard', 'projects', 'notifications', 'reports'},
-            UserRole.UNDP_DONOR: {'dashboard', 'vendors', 'projects', 'payments', 'issues', 'reports', 'notifications'},
-            UserRole.AUDITOR: {'dashboard', 'vendors', 'projects', 'payments', 'reports', 'audit_logs', 'prospect_sync', 'notifications'},
-            UserRole.VENDOR: {'dashboard', 'vendors', 'tenders', 'prequalification', 'bids', 'projects', 'payments', 'notifications', 'my_profile', 'my_bids', 'contracting', 'applications', 'blacklisting'},
-            UserRole.EVALUATION_COMMITTEE: {'dashboard', 'evaluations', 'notifications'},
+            UserRole.UNDP_DONOR: {'dashboard', 'vendors', 'tenders', 'evaluations', 'projects', 'payments', 'blacklisting', 'reports', 'notifications'},
+            UserRole.AUDITOR: {'dashboard', 'vendors', 'tenders', 'evaluations', 'projects', 'payments', 'blacklisting', 'reports', 'audit_logs', 'prospect_sync', 'notifications'},
+            UserRole.VENDOR: {'dashboard', 'vendors', 'tenders', 'prequalification', 'bids', 'projects', 'payments', 'notifications', 'my_profile', 'my_bids', 'contracting', 'applications', 'blacklisting', 'reports'},
+            UserRole.EVALUATION_COMMITTEE: {'dashboard', 'evaluations', 'reports', 'notifications'},
         }.get(obj.role, {'dashboard'})
         default_actions = {
             UserRole.RBF_OFFICIAL: ['view', 'create', 'edit', 'submit', 'upload', 'download', 'review', 'verify', 'publish', 'approve', 'reject', 'confirm', 'endorse', 'pay', 'mark_paid', 'assign', 'resolve', 'reinstate', 'export', 'view_sensitive', 'view_bank_details', 'run_sync', 'retry_sync', 'generate_report', 'respond', 'flag_issue'],
             UserRole.TAC: ['view', 'review', 'approve', 'reject', 'endorse', 'export', 'respond'],
-            UserRole.DOE_OFFICER: ['view', 'review', 'verify', 'approve', 'reject', 'confirm', 'export', 'respond'],
+            UserRole.DOE_OFFICER: ['view', 'create', 'edit', 'upload', 'review', 'export', 'respond', 'flag_issue'],
             UserRole.FIELD_VERIFIER: ['view', 'create', 'edit', 'submit', 'upload'],
             UserRole.UNDP_DONOR: ['view', 'review', 'approve', 'reject', 'export', 'respond', 'flag_issue'],
             UserRole.AUDITOR: ['view', 'create', 'edit', 'review', 'download', 'export', 'generate_report', 'respond', 'flag_issue'],
@@ -670,6 +671,20 @@ class PlatformConfigurationSerializer(serializers.ModelSerializer):
             cleaned[0]['isDefault'] = True
         return cleaned
 
+    def _validate_pct(self, value):
+        if value is None or not 0 <= int(value) <= 100:
+            raise serializers.ValidationError('Enter a percentage between 0 and 100.')
+        return value
+
+    def validate_female_target_minimum(self, value):
+        return self._validate_pct(value)
+
+    def validate_vulnerable_target_minimum(self, value):
+        return self._validate_pct(value)
+
+    def validate_low_income_target_minimum(self, value):
+        return self._validate_pct(value)
+
     def validate_national_main_program_budget(self, value):
         if value is None:
             return value
@@ -797,8 +812,11 @@ class VendorPrequalificationSerializer(serializers.ModelSerializer):
             if value < minimum or value > maximum:
                 errors[field_name] = f'{label} must be between {minimum} and {maximum}.'
 
-        check_range('female_beneficiary_target', 'Female beneficiary target (%)', 50, 100)
-        check_range('vulnerable_group_target', 'Vulnerable group target (%)', 30, 100)
+        from .models import inclusion_targets
+
+        minimums = inclusion_targets()
+        check_range('female_beneficiary_target', 'Female beneficiary target (%)', minimums['female'], 100)
+        check_range('vulnerable_group_target', 'Vulnerable group target (%)', minimums['vulnerable'], 100)
         check_range('years_experience', 'Years of experience', 0, 100)
         check_range('prior_projects', 'Number of prior projects', 0, 100000)
         check_range('districts_covered', 'Districts covered', 1, 10)
@@ -947,6 +965,68 @@ class VendorBlacklistCaseSerializer(serializers.ModelSerializer):
             'reinstated_by',
             'reinstated_by_username',
         ]
+
+
+class BlacklistRecommendationSerializer(serializers.ModelSerializer):
+    vendor_username = serializers.CharField(source='vendor.username', read_only=True)
+    vendor_name = serializers.SerializerMethodField()
+    recommended_by_username = serializers.CharField(source='recommended_by.username', read_only=True)
+    recommended_by_region = serializers.CharField(source='recommended_by.region', read_only=True)
+    responded_by_username = serializers.CharField(source='responded_by.username', read_only=True)
+    project_reference = serializers.CharField(source='project.project_reference', read_only=True, allow_null=True)
+
+    class Meta:
+        model = BlacklistRecommendation
+        fields = [
+            'id',
+            'vendor',
+            'vendor_username',
+            'vendor_name',
+            'recommended_by',
+            'recommended_by_username',
+            'recommended_by_region',
+            'project',
+            'project_reference',
+            'reason',
+            'justification',
+            'evidence_document',
+            'status',
+            'responded_by',
+            'responded_by_username',
+            'responded_at',
+            'response_notes',
+            'linked_case',
+            'created_at',
+        ]
+        read_only_fields = [
+            'id',
+            'recommended_by',
+            'status',
+            'responded_by',
+            'responded_at',
+            'response_notes',
+            'linked_case',
+            'created_at',
+        ]
+
+    def get_vendor_name(self, obj):
+        vendor = obj.vendor
+        return vendor.organization_name or vendor.full_name or vendor.username
+
+    def validate_vendor(self, value):
+        if value.role != UserRole.VENDOR:
+            raise serializers.ValidationError('Only vendor accounts can be recommended for blacklisting.')
+        return value
+
+    def validate_justification(self, value):
+        if len((value or '').strip()) < 30:
+            raise serializers.ValidationError('Provide a justification of at least 30 characters.')
+        return value.strip()
+
+    def validate_evidence_document(self, value):
+        if value:
+            return validate_document_upload(value, label='Evidence document')
+        return value
 
 
 class BlacklistAppealSerializer(serializers.ModelSerializer):
@@ -1389,6 +1469,13 @@ class VendorProfileSerializer(serializers.ModelSerializer):
             return round((int(value or 0) / total_claimable_target) * 100, 1) if total_claimable_target else 0.0
 
         prequal = self._latest_prequalification(obj)
+        # Targets: the vendor's own prequalification commitments where given, else the programme minimums.
+        from .models import inclusion_targets
+
+        minimums = inclusion_targets()
+        female_target = float((prequal.female_beneficiary_target if prequal else 0) or minimums['female'])
+        vulnerable_target = float((prequal.vulnerable_group_target if prequal else 0) or minimums['vulnerable'])
+        low_income_target = float(minimums['low_income'])
         notes = list(
             ProjectUpdate.objects.filter(project_id__in=project_ids, author__role__in={UserRole.RBF_OFFICIAL, UserRole.ADMIN})
             .select_related('author')
@@ -1397,9 +1484,9 @@ class VendorProfileSerializer(serializers.ModelSerializer):
 
         return {
             'kpi_rows': [
-                {'label': 'Female-headed HH', 'target': f">={prequal.female_beneficiary_target if prequal else 50}%", 'achieved': f"{pct(installation_summary['female_count'])}%", 'status': 'Met' if pct(installation_summary['female_count']) >= float(prequal.female_beneficiary_target if prequal else 50) else 'Below'},
-                {'label': 'Vulnerable groups', 'target': f">={prequal.vulnerable_group_target if prequal else 30}%", 'achieved': f"{pct(installation_summary['vulnerable_count'])}%", 'status': 'Met' if pct(installation_summary['vulnerable_count']) >= float(prequal.vulnerable_group_target if prequal else 30) else 'Below'},
-                {'label': 'Low-income HH', 'target': '>=60%', 'achieved': f"{pct(installation_summary['low_income_count'])}%", 'status': 'Met' if pct(installation_summary['low_income_count']) >= 60.0 else 'Below'},
+                {'label': 'Female-headed HH', 'target': f">={female_target:g}%", 'achieved': f"{pct(installation_summary['female_count'])}%", 'status': 'Met' if pct(installation_summary['female_count']) >= female_target else 'Below'},
+                {'label': 'Vulnerable groups', 'target': f">={vulnerable_target:g}%", 'achieved': f"{pct(installation_summary['vulnerable_count'])}%", 'status': 'Met' if pct(installation_summary['vulnerable_count']) >= vulnerable_target else 'Below'},
+                {'label': 'Low-income HH', 'target': f">={low_income_target:g}%", 'achieved': f"{pct(installation_summary['low_income_count'])}%", 'status': 'Met' if pct(installation_summary['low_income_count']) >= low_income_target else 'Below'},
                 {'label': 'System uptime', 'target': '>=99%', 'achieved': f"{round(average_uptime, 1)}%", 'status': 'Met' if average_uptime >= 99.0 else 'Below'},
                 {'label': 'Energy output', 'target': f"{round(target_energy, 1)} kWh", 'achieved': f"{round(total_energy, 1)} kWh", 'status': 'Met' if target_energy <= 0 or total_energy >= target_energy else 'Below'},
                 {'label': 'Verification rate', 'target': '100%', 'achieved': f"{verification_rate}%", 'status': 'Met' if verification_rate >= 100.0 else 'Below'},

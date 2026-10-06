@@ -31,6 +31,12 @@ logger = logging.getLogger(__name__)
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix='prospect-sync')
 
 
+def _inclusion_minimum(key: str) -> int:
+    from rbf.users.models import inclusion_targets
+
+    return inclusion_targets()[key]
+
+
 class ProspectServiceError(Exception):
     pass
 
@@ -111,7 +117,7 @@ def build_project_target_payload(project: Project) -> dict[str, Any]:
             {
                 **base_fields,
                 'metric': 'female_beneficiary_target',
-                'target_value': int(project.female_target_pct or 50),
+                'target_value': int(project.female_target_pct or project.target_female_pct or _inclusion_minimum('female')),
                 'unit_of_measurement': 'percentage',
             },
             {

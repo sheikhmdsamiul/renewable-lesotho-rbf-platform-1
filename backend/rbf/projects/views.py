@@ -1,11 +1,12 @@
 from datetime import date, timedelta, timezone as dt_timezone
 from pathlib import Path
+import re
 import tempfile
 import html
 import logging
 import os
 
-from rest_framework import viewsets, filters
+from rest_framework import viewsets, filters, serializers
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.decorators import action
@@ -26,6 +27,26 @@ import io
 import uuid
 from django_filters.rest_framework import DjangoFilterBackend
 from .models import (
+    ReportSchedule,
+    ResultsIndicator,
+    ResultsMeasure,
+    AuditCase,
+    AuditCaseStatus,
+    AuditCaseType,
+    AuditEvidence,
+    AuditEvidenceKind,
+    AuditFindingType,
+    AuditRiskLevel,
+    CorrectiveActionStatus,
+    OversightFollowUpStatus,
+    OversightReview,
+    OversightReviewStatus,
+    OversightSubject,
+    KpiReview,
+    KpiReviewRating,
+    SiteMonitoringPhoto,
+    SiteMonitoringVisit,
+    SiteVisitFollowUpStatus,
     Project,
     ProjectSetup,
     ProjectSetupReviewStatus,
@@ -60,11 +81,14 @@ from .models import (
     AnomalyEvidenceFile,
     GisStatus,
     GeneratedReport,
-    Concern,
-    ConcernResponse,
-    AuditFinding,
 )
 from .serializers import (
+    ResultsIndicatorSerializer,
+    AuditCaseSerializer,
+    AuditEvidenceSerializer,
+    OversightReviewSerializer,
+    KpiReviewSerializer,
+    SiteMonitoringVisitSerializer,
     ProjectSerializer,
     ProjectSetupSerializer,
     MilestoneSerializer,
@@ -82,13 +106,13 @@ from .serializers import (
     AuditLogSerializer,
     ProspectSyncLogSerializer,
     AnomalyFlagSerializer,
-    ConcernSerializer,
-    ConcernResponseSerializer,
-    AuditFindingSerializer,
 )
 from rbf.users.models import User, UserRole, PlatformConfiguration
 from rbf.users.blacklisting import is_vendor_restricted
+from rbf.common.uploads import validate_document_upload
 from .audit import log_audit, AuditLogger
+from .archive import archive_project, archived_scope, restore_project
+from . import claim_status
 from .bank_details import get_vendor_bank_snapshot
 from .integrations import (
     month_start,
@@ -104,6 +128,9 @@ from .integrations import (
 )
 from .gis import GpsValidator
 from .district_scope import (
+    doe_districts,
+    doe_region_filter,
+    vendor_query_filter,
     field_verifier_district_filter,
     field_verifier_districts,
     field_verifier_installation_filter,
@@ -111,13 +138,23 @@ from .district_scope import (
     resolve_installation_district,
 )
 from .kpi import KpiService, invalidate_kpi_cache, render_kpi_pdf
-from .meter_integrity import initial_batch_status, run_integrity_checks
+from .meter_integrity import (
+    initial_batch_status,
+    parse_meter_timestamp,
+    parse_meter_timestamp_error,
+    run_integrity_checks,
+)
 from .milestone_reviews import is_last_milestone, next_milestone_blocker, open_completion_review
 from rbf.notifications.models import Notification, NotificationChannel, NotificationStatus
 from rbf.notifications.services import NotificationService
 from rbf.tenders.models import ContractStatus, TenderContract
 
 logger = logging.getLogger(__name__)
+
+# Per-row rejection reasons are returned to the uploader and persisted on the batch so
+# they survive a reload. Capped so a wholly malformed file cannot bloat the batch row,
+# the audit log, or the response payload.
+REJECTED_ROWS_STORED = 100
 
 
 def _build_disbursement_sheet_payload(claim: PaymentClaim) -> dict:
@@ -156,26 +193,6 @@ def _assert_national_budget_available(claim: PaymentClaim):
             f'Insufficient National/Main Program Budget. Remaining balance is {remaining:.2f}, '
             f'but this claim requires {claim_amount:.2f}.'
         )
-
-
-def vendor_query_filter(user, prefix: str = ''):
-    vendor_ids = {str(user.id)}
-    if user.username:
-        vendor_ids.add(user.username)
-    vendor_names = {user.full_name, user.organization_name, user.username}
-    vendor_names = {name for name in vendor_names if name}
-    return Q(**{f'{prefix}vendor_id__in': vendor_ids}) | Q(**{f'{prefix}vendor_name__in': vendor_names})
-
-
-def doe_region_filter(user, prefix: str = ''):
-    region = (
-        getattr(user, 'region', '')
-        or getattr(user, 'district', '')
-        or ''
-    ).strip()
-    if not region:
-        return Q(pk__in=[])
-    return Q(**{f'{prefix}region__iexact': region}) | Q(**{f'{prefix}district__iexact': region})
 
 
 def create_project_activity_update(project: Project, author, title: str, body: str):
@@ -264,6 +281,8 @@ def create_or_refresh_anomaly(*, installation: InstallationReport, project: Proj
 
 def mark_project_completed(project: Project, actor):
     if project.status == ProjectStatus.COMPLETED:
+        if not project.archived_at:
+            archive_project(project, actor)
         return True
 
     project.status = ProjectStatus.COMPLETED
@@ -290,7 +309,22 @@ def mark_project_completed(project: Project, actor):
             body=f'Project {project.project_reference or project.id} has been marked completed.',
             linked_entity_id=str(project.id),
         )
+    # Completion archives the project with its whole lifecycle (tender to contract closure).
+    archive_project(project, actor)
     return True
+
+
+class ArchiveScopedListMixin:
+    """List endpoints leave out archived projects' records unless asked (see archive.archived_scope)."""
+
+    archive_prefix = 'project__'
+    archive_scope_params: tuple = ('project',)
+
+    def filter_queryset(self, queryset):
+        queryset = super().filter_queryset(queryset)
+        if getattr(self, 'action', None) == 'list':
+            queryset = archived_scope(self.request, queryset, self.archive_prefix, self.archive_scope_params)
+        return queryset
 
 
 def build_installation_map_queryset(user: User):
@@ -361,7 +395,9 @@ def apply_installation_map_filters(queryset, params):
     return queryset
 
 
-class ProjectViewSet(viewsets.ModelViewSet):
+class ProjectViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
+    archive_prefix = ''
+    archive_scope_params = ()
     queryset = Project.objects.select_related('tender', 'project_setup').prefetch_related('milestones').all().order_by('id')
     serializer_class = ProjectSerializer
     permission_classes = [IsAuthenticated]
@@ -371,7 +407,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
     search_fields = ['vendor_name', 'vendor_id']
     ordering_fields = ['progress', 'energy_output', 'uptime', 'gender_impact']
 
-    WRITE_ROLES = {UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.DOE_OFFICER, UserRole.TAC, UserRole.VENDOR}
+    WRITE_ROLES = {UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.TAC, UserRole.VENDOR}
 
     def get_queryset(self):
         qs = Project.objects.select_related('tender', 'project_setup').prefetch_related('milestones').all().order_by('id')
@@ -766,6 +802,8 @@ class ProjectViewSet(viewsets.ModelViewSet):
 
     def destroy(self, request, *args, **kwargs):
         self._assert_write_permission()
+        if self.get_object().archived_at:
+            raise PermissionDenied('Archived projects are kept for audit and cannot be deleted.')
         return super().destroy(request, *args, **kwargs)
 
     @action(detail=True, methods=['get', 'post'], url_path='setup')
@@ -1205,15 +1243,9 @@ class ProjectViewSet(viewsets.ModelViewSet):
                     errors.append('longitude must be a decimal between -180 and 180 when provided.')
                     longitude = None
             recorded_at_raw = str(row.get('reading_datetime') or row.get('recorded_at') or '').strip()
-            try:
-                recorded_at = timezone.datetime.fromisoformat(recorded_at_raw.replace('Z', '+00:00')) if recorded_at_raw else None
-            except ValueError:
-                errors.append('reading_datetime/recorded_at must be a valid ISO 8601 datetime.')
-                recorded_at = None
+            recorded_at = parse_meter_timestamp(recorded_at_raw)
             if recorded_at is None:
-                errors.append('reading_datetime or recorded_at is required.')
-            elif timezone.is_naive(recorded_at):
-                recorded_at = timezone.make_aware(recorded_at, timezone.get_current_timezone())
+                errors.append(parse_meter_timestamp_error(recorded_at_raw))
             if errors:
                 invalid_rows.append({'row': row_number, 'meter_id': meter_id, 'errors': errors})
                 continue
@@ -1355,7 +1387,8 @@ class ProjectViewSet(viewsets.ModelViewSet):
         batch.source_document = source_document
         batch.rows_ingested = len(rows_created)
         batch.rows_rejected_on_upload = len(invalid_rows)
-        batch.save(update_fields=['integrity_findings', 'status', 'source_document', 'rows_ingested', 'rows_rejected_on_upload'])
+        batch.rejected_rows = invalid_rows[:REJECTED_ROWS_STORED]
+        batch.save(update_fields=['integrity_findings', 'status', 'source_document', 'rows_ingested', 'rows_rejected_on_upload', 'rejected_rows'])
         # A fresh upload is the vendor's answer to any outstanding correction request.
         MeterDataBatch.objects.filter(
             project=project,
@@ -1391,6 +1424,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
                 'file_name': str(getattr(csv_file, 'name', '') or ''),
                 'rows_ingested': len(rows_created),
                 'rows_rejected': len(invalid_rows),
+                'rejected_rows': invalid_rows[:REJECTED_ROWS_STORED],
                 'anomaly_counts': anomaly_counts,
                 'meter_data_batch_id': batch.id,
                 'meter_data_batch_status': batch.status,
@@ -1445,7 +1479,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
                 'status': 'ok',
                 'rows_ingested': len(rows_created),
                 'rows_rejected': len(invalid_rows),
-                'invalid_rows': invalid_rows,
+                'invalid_rows': invalid_rows[:REJECTED_ROWS_STORED],
                 'anomaly_counts': anomaly_counts,
                 'uploaded_at': upload_time.isoformat(),
                 'batch_id': batch.id,
@@ -1469,6 +1503,61 @@ class ProjectViewSet(viewsets.ModelViewSet):
             return Response({'detail': 'Enter the API token before testing the connection.'}, status=status.HTTP_400_BAD_REQUEST)
         return Response({'status': 'ok', 'message': 'Connection details look valid for IoT meter ingestion.'}, status=status.HTTP_200_OK)
 
+    @action(detail=True, methods=['get'])
+    def archive(self, request, pk=None):
+        """The project's lifecycle archive record(s): timeline and snapshot from tender creation to closure."""
+        project = self.get_object()
+        records = list(project.archives.select_related('archived_by', 'contract', 'tender'))
+        if not records:
+            return Response({'detail': 'This project has not been archived.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response([
+            {
+                'id': record.id,
+                'archived_at': record.archived_at,
+                'archived_by': (record.archived_by.full_name or record.archived_by.username) if record.archived_by_id else None,
+                'reason': record.reason,
+                'lifecycle_started_at': record.lifecycle_started_at,
+                'lifecycle_ended_at': record.lifecycle_ended_at,
+                'superseded_at': record.superseded_at,
+                'tender_reference': record.tender.reference_number if record.tender_id else None,
+                'contract_reference': record.contract.reference_number if record.contract_id else None,
+                'has_dossier': bool(record.dossier),
+                'timeline': record.timeline,
+                'snapshot': record.snapshot,
+            }
+            for record in records
+        ])
+
+    @action(detail=True, methods=['get'], url_path=r'archive/(?P<archive_id>[0-9]+)/dossier')
+    def archive_dossier(self, request, pk=None, archive_id=None):
+        project = self.get_object()
+        record = project.archives.filter(id=archive_id).first()
+        if record is None:
+            raise Http404('Archive record not found.')
+        if not record.dossier:
+            from .archive import _attach_dossier
+
+            _attach_dossier(record)
+            record.refresh_from_db()
+        if not record.dossier:
+            return Response({'detail': 'The dossier could not be generated. Try again later.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        log_audit(request.user, 'project_archive_dossier_downloaded', project, {'project_id': str(project.id), 'archive_id': record.id, 'module': 'projects'})
+        return FileResponse(record.dossier.open('rb'), as_attachment=True, filename=Path(record.dossier.name).name)
+
+    @action(detail=True, methods=['post'])
+    def restore_archive(self, request, pk=None):
+        if request.user.role != UserRole.ADMIN:
+            raise PermissionDenied('Only the Platform Administrator (Super Admin) can restore an archived project.')
+        project = self.get_object()
+        if not project.archived_at:
+            return Response({'detail': 'This project is not archived.'}, status=status.HTTP_400_BAD_REQUEST)
+        reason = str(request.data.get('reason') or '').strip()
+        if len(reason) < 10:
+            return Response({'reason': ['Explain why the project is being restored (at least 10 characters).']}, status=status.HTTP_400_BAD_REQUEST)
+        restore_project(project, request.user, reason=reason)
+        project.refresh_from_db()
+        return Response(self.get_serializer(project).data)
+
     @action(detail=True, methods=['post'])
     def flag_issue(self, request, pk=None):
         project = self.get_object()
@@ -1487,8 +1576,25 @@ class ProjectViewSet(viewsets.ModelViewSet):
             'general': 'Project Issue Flagged',
         }
         title = title_map.get(category, 'Project Issue Flagged')
-        update = create_project_activity_update(project, request.user, title, details)
-        log_audit(request.user, 'project_issue_flagged', update, {'project_id': str(project.id), 'category': category})
+        claim_id = str(request.data.get('payment_claim') or '').strip()
+        claim = PaymentClaim.objects.filter(id=claim_id, project=project).first() if claim_id.isdigit() else None
+        if claim_id and claim is None:
+            return Response({'detail': 'The payment claim does not belong to this project.'}, status=status.HTTP_400_BAD_REQUEST)
+        # An archived project's activity log is frozen; the flag itself is still recorded below.
+        update = None if project.archived_at else create_project_activity_update(project, request.user, title, details)
+        review = OversightReview.objects.create(
+            reviewer=request.user,
+            reviewer_role=request.user.role,
+            subject_type=OversightSubject.DISBURSEMENT if category == 'payment_delay' else OversightSubject.PROJECT,
+            review_status=OversightReviewStatus.FLAGGED,
+            project=project,
+            payment_claim=claim,
+            comment=details,
+            issue_category=category,
+            action_required=str(request.data.get('action_required') or '').strip(),
+            follow_up_status=OversightFollowUpStatus.OPEN,
+        )
+        log_audit(request.user, 'project_issue_flagged', update or review, {'project_id': str(project.id), 'category': category, 'review_id': review.id})
         notify_project_oversight(
             project,
             title=f'{title}: {project.project_reference or project.id}',
@@ -1498,7 +1604,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
         return Response({'status': 'flagged', 'title': title, 'details': details}, status=status.HTTP_200_OK)
 
 
-class MilestoneViewSet(viewsets.ModelViewSet):
+class MilestoneViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
     queryset = Milestone.objects.all().order_by('id')
     serializer_class = MilestoneSerializer
     permission_classes = [IsAuthenticated]
@@ -1507,7 +1613,7 @@ class MilestoneViewSet(viewsets.ModelViewSet):
     search_fields = ['name']
     ordering_fields = ['percentage', 'amount', 'created_at']
 
-    WRITE_ROLES = {UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.DOE_OFFICER, UserRole.VENDOR}
+    WRITE_ROLES = {UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.VENDOR}
 
     def get_queryset(self):
         qs = Milestone.objects.select_related('project', 'completion_review__reviewed_by').all().order_by('id')
@@ -1699,7 +1805,7 @@ class MilestoneViewSet(viewsets.ModelViewSet):
         return Response(self.get_serializer(milestone).data, status=status.HTTP_200_OK)
 
 
-class ProjectUpdateViewSet(viewsets.ModelViewSet):
+class ProjectUpdateViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
     queryset = ProjectUpdate.objects.select_related('project', 'author').all()
     serializer_class = ProjectUpdateSerializer
     permission_classes = [IsAuthenticated]
@@ -1713,6 +1819,8 @@ class ProjectUpdateViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = ProjectUpdate.objects.select_related('project', 'author').all()
         user = self.request.user
+        if user.role == UserRole.DOE_OFFICER:
+            return qs.filter(doe_region_filter(user, prefix='project__')).distinct()
         if user.role != UserRole.VENDOR:
             return qs
         return qs.filter(vendor_query_filter(user, prefix='project__')).distinct()
@@ -1732,6 +1840,9 @@ class ProjectUpdateViewSet(viewsets.ModelViewSet):
         if self.request.user.role == UserRole.VENDOR:
             if not Project.objects.filter(id=project_id).filter(vendor_query_filter(self.request.user)).exists():
                 raise PermissionDenied('You can only update your own projects.')
+        if self.request.user.role == UserRole.DOE_OFFICER:
+            if not Project.objects.filter(id=project_id).filter(doe_region_filter(self.request.user)).exists():
+                raise PermissionDenied('You can only add notes and documents to projects in your region.')
 
     def perform_create(self, serializer):
         self._assert_write_permission()
@@ -1740,20 +1851,28 @@ class ProjectUpdateViewSet(viewsets.ModelViewSet):
         update = serializer.save(author=self.request.user)
         log_audit(self.request.user, 'project_update_added', update, {'project_id': project_id})
 
+    def _assert_doe_owns(self):
+        # DoE officers may only edit or remove their own regional entries.
+        if self.request.user.role == UserRole.DOE_OFFICER and self.get_object().author_id != self.request.user.id:
+            raise PermissionDenied('You can only change entries you created.')
+
     def update(self, request, *args, **kwargs):
         self._assert_write_permission()
+        self._assert_doe_owns()
         return super().update(request, *args, **kwargs)
 
     def partial_update(self, request, *args, **kwargs):
         self._assert_write_permission()
+        self._assert_doe_owns()
         return super().partial_update(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
         self._assert_write_permission()
+        self._assert_doe_owns()
         return super().destroy(request, *args, **kwargs)
 
 
-class ProjectDocumentViewSet(viewsets.ModelViewSet):
+class ProjectDocumentViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
     queryset = ProjectDocument.objects.select_related('project', 'uploaded_by').all()
     serializer_class = ProjectDocumentSerializer
     permission_classes = [IsAuthenticated]
@@ -1767,6 +1886,8 @@ class ProjectDocumentViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = ProjectDocument.objects.select_related('project', 'uploaded_by').all()
         user = self.request.user
+        if user.role == UserRole.DOE_OFFICER:
+            return qs.filter(doe_region_filter(user, prefix='project__')).distinct()
         if user.role != UserRole.VENDOR:
             return qs
         return qs.filter(vendor_query_filter(user, prefix='project__')).distinct()
@@ -1786,6 +1907,9 @@ class ProjectDocumentViewSet(viewsets.ModelViewSet):
         if self.request.user.role == UserRole.VENDOR:
             if not Project.objects.filter(id=project_id).filter(vendor_query_filter(self.request.user)).exists():
                 raise PermissionDenied('You can only update your own projects.')
+        if self.request.user.role == UserRole.DOE_OFFICER:
+            if not Project.objects.filter(id=project_id).filter(doe_region_filter(self.request.user)).exists():
+                raise PermissionDenied('You can only add notes and documents to projects in your region.')
 
     def perform_create(self, serializer):
         self._assert_write_permission()
@@ -1800,20 +1924,28 @@ class ProjectDocumentViewSet(viewsets.ModelViewSet):
             f"Uploaded project document '{document.title or document.file.name.split('/')[-1]}'.",
         )
 
+    def _assert_doe_owns(self):
+        # DoE officers may only edit or remove their own regional entries.
+        if self.request.user.role == UserRole.DOE_OFFICER and self.get_object().uploaded_by_id != self.request.user.id:
+            raise PermissionDenied('You can only change entries you created.')
+
     def update(self, request, *args, **kwargs):
         self._assert_write_permission()
+        self._assert_doe_owns()
         return super().update(request, *args, **kwargs)
 
     def partial_update(self, request, *args, **kwargs):
         self._assert_write_permission()
+        self._assert_doe_owns()
         return super().partial_update(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
         self._assert_write_permission()
+        self._assert_doe_owns()
         return super().destroy(request, *args, **kwargs)
 
 
-class PaymentClaimViewSet(viewsets.ModelViewSet):
+class PaymentClaimViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
     queryset = PaymentClaim.objects.select_related('project', 'vendor', 'milestone', 'reviewed_by').all()
     serializer_class = PaymentClaimSerializer
     permission_classes = [IsAuthenticated]
@@ -2301,7 +2433,9 @@ class PaymentClaimViewSet(viewsets.ModelViewSet):
         return Response(self.get_serializer(claim).data, status=status.HTTP_200_OK)
 
 
-class DisbursementViewSet(viewsets.ReadOnlyModelViewSet):
+class DisbursementViewSet(ArchiveScopedListMixin, viewsets.ReadOnlyModelViewSet):
+    archive_prefix = 'claim__project__'
+    archive_scope_params = ('claim',)
     queryset = Disbursement.objects.select_related('claim', 'processed_by').all()
     serializer_class = DisbursementSerializer
     permission_classes = [IsAuthenticated]
@@ -2318,7 +2452,7 @@ class DisbursementViewSet(viewsets.ReadOnlyModelViewSet):
         return qs
 
 
-class InstallationReportViewSet(viewsets.ModelViewSet):
+class InstallationReportViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
     queryset = InstallationReport.objects.select_related('project', 'vendor', 'milestone').all()
     serializer_class = InstallationReportSerializer
     permission_classes = [IsAuthenticated]
@@ -2327,13 +2461,15 @@ class InstallationReportViewSet(viewsets.ModelViewSet):
     search_fields = ['serial_number', 'beneficiary_id', 'beneficiary_phone', 'meter_id']
     ordering_fields = ['submitted_at']
 
-    WRITE_ROLES = {UserRole.VENDOR, UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.DOE_OFFICER}
+    WRITE_ROLES = {UserRole.VENDOR, UserRole.RBF_OFFICIAL, UserRole.ADMIN}
 
     def get_queryset(self):
         qs = self.queryset.order_by('-submitted_at')
         user = self.request.user
         if user.role == UserRole.VENDOR:
             return qs.filter(vendor=user)
+        if user.role == UserRole.DOE_OFFICER:
+            return qs.filter(doe_region_filter(user, prefix='project__')).distinct()
         if user.role == UserRole.FIELD_VERIFIER:
             return qs.filter(
                 Q(verification_task__assigned_verifier=user) | field_verifier_installation_filter(user)
@@ -2416,9 +2552,6 @@ class InstallationReportViewSet(viewsets.ModelViewSet):
                 },
                 status=status.HTTP_422_UNPROCESSABLE_ENTITY,
             )
-
-        import logging
-        logger = logging.getLogger(__name__)
 
         project_district_label = (
             getattr(project, 'district_zone', '')
@@ -2542,8 +2675,31 @@ class InstallationReportViewSet(viewsets.ModelViewSet):
         refresh_project_kpis(str(report.project_id))
         return Response(response_payload, status=status.HTTP_201_CREATED)
 
+    def _assert_editable(self, report):
+        # Installation evidence is locked once a field verifier has submitted a verification:
+        # only the reporting vendor may correct it before then, and nobody afterwards.
+        user = self.request.user
+        if user.role != UserRole.VENDOR or report.vendor_id != user.id:
+            raise PermissionDenied('Installation reports can only be corrected by the vendor who submitted them.')
+        if report.status != InstallationStatus.SUBMITTED or report.field_verifications.exists():
+            raise PermissionDenied('This installation has been field-verified; its evidence is locked.')
+        assert_user_not_blacklisted_for_writes(user, 'Your vendor account is suspended or blacklisted. Installation reporting is restricted.')
 
-class VerificationTaskViewSet(viewsets.ModelViewSet):
+    def update(self, request, *args, **kwargs):
+        self._assert_editable(self.get_object())
+        return super().update(request, *args, **kwargs)
+
+    def partial_update(self, request, *args, **kwargs):
+        self._assert_editable(self.get_object())
+        return super().partial_update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        raise PermissionDenied('Installation reports are permanent records and cannot be deleted.')
+
+
+class VerificationTaskViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
+    archive_prefix = 'report__project__'
+    archive_scope_params = ('report__project',)
     queryset = VerificationTask.objects.select_related('report', 'assigned_verifier').all()
     serializer_class = VerificationTaskSerializer
     permission_classes = [IsAuthenticated]
@@ -2553,16 +2709,117 @@ class VerificationTaskViewSet(viewsets.ModelViewSet):
     search_fields = ['report__serial_number', 'report__beneficiary_id']
     ordering_fields = ['created_at']
 
+    # Tasks are created with the installation report and change only through the actions below.
+    http_method_names = ['get', 'post', 'head', 'options']
     VERIFY_ROLES = {UserRole.FIELD_VERIFIER, UserRole.RBF_OFFICIAL, UserRole.ADMIN}
+    REVIEW_ROLES = {UserRole.DOE_OFFICER, UserRole.RBF_OFFICIAL, UserRole.ADMIN}
+    VERIFIABLE_STATUSES = {VerificationStatus.PENDING, VerificationStatus.PARTIAL, VerificationStatus.REVERIFICATION_REQUIRED}
+    COMPLETED_STATUSES = {VerificationStatus.VERIFIED, VerificationStatus.FLAGGED, VerificationStatus.PARTIAL}
 
     def get_queryset(self):
-        qs = self.queryset.order_by('-created_at')
+        qs = self.queryset.select_related('report__project', 'reverification_requested_by').order_by('-created_at')
         user = self.request.user
         if user.role == UserRole.FIELD_VERIFIER:
             return qs.filter(field_verifier_task_scope_filter(user)).distinct().order_by('created_at')
         if user.role == UserRole.VENDOR:
             return qs.filter(report__vendor=user)
+        if user.role == UserRole.DOE_OFFICER:
+            return qs.filter(doe_region_filter(user, prefix='report__project__')).distinct()
         return qs
+
+    def create(self, request, *args, **kwargs):
+        raise PermissionDenied('Verification tasks are created automatically when an installation is reported.')
+
+    def _assert_reviewer(self, task):
+        user = self.request.user
+        if user.role not in self.REVIEW_ROLES:
+            raise PermissionDenied('Only DoE Officers and the RBF Management Team can review verifications.')
+        if user.role == UserRole.DOE_OFFICER and not Project.objects.filter(id=task.report.project_id).filter(doe_region_filter(user)).exists():
+            raise PermissionDenied('You can only review verifications in your region.')
+
+    @action(detail=True, methods=['post'])
+    def acknowledge(self, request, pk=None):
+        task = self.get_object()
+        self._assert_reviewer(task)
+        if task.status not in {VerificationStatus.VERIFIED, VerificationStatus.FLAGGED}:
+            return Response({'detail': 'Only completed verifications can be acknowledged.'}, status=status.HTTP_400_BAD_REQUEST)
+        if OversightReview.objects.filter(
+            verification_task=task, reviewer=request.user, review_status=OversightReviewStatus.ACKNOWLEDGED,
+            verification_round=task.verification_round,
+        ).exists():
+            return Response({'detail': 'You already acknowledged this verification.'}, status=status.HTTP_400_BAD_REQUEST)
+        review = OversightReview.objects.create(
+            reviewer=request.user,
+            reviewer_role=request.user.role,
+            subject_type=OversightSubject.VERIFICATION,
+            review_status=OversightReviewStatus.ACKNOWLEDGED,
+            project=task.report.project,
+            verification_task=task,
+            verification_round=task.verification_round,
+            comment=(str(request.data.get('comment') or '').strip() or 'Verification evidence reviewed and acknowledged.'),
+        )
+        log_audit(request.user, 'verification_acknowledged', task, {'review_id': review.id, 'round': task.verification_round, 'module': 'field_verification'})
+        return Response(self.get_serializer(task).data)
+
+    @action(detail=True, methods=['post'])
+    def request_reverification(self, request, pk=None):
+        task = self.get_object()
+        self._assert_reviewer(task)
+        if task.status not in self.COMPLETED_STATUSES:
+            return Response({'detail': 'Re-verification can only be requested after a verification has been submitted.'}, status=status.HTTP_400_BAD_REQUEST)
+        reason = str(request.data.get('reason') or '').strip()
+        if len(reason) < 10:
+            return Response({'detail': 'Explain why re-verification is needed (at least 10 characters).'}, status=status.HTTP_400_BAD_REQUEST)
+        previous_status = task.status
+        with transaction.atomic():
+            task.status = VerificationStatus.REVERIFICATION_REQUIRED
+            task.verification_round += 1
+            task.reverification_reason = reason
+            task.reverification_requested_by = request.user
+            task.reverification_requested_at = timezone.now()
+            task.save(update_fields=[
+                'status', 'verification_round', 'reverification_reason', 'reverification_requested_by',
+                'reverification_requested_at', 'updated_at',
+            ])
+            report = task.report
+            report.status = InstallationStatus.SUBMITTED
+            report.gis_status = GisStatus.YELLOW
+            report.save(update_fields=['status', 'gis_status'])
+            OversightReview.objects.create(
+                reviewer=request.user,
+                reviewer_role=request.user.role,
+                subject_type=OversightSubject.VERIFICATION,
+                review_status=OversightReviewStatus.REVERIFICATION_REQUESTED,
+                project=report.project,
+                verification_task=task,
+                verification_round=task.verification_round - 1,
+                comment=reason,
+                action_required='Field re-verification of the installation.',
+                follow_up_status=OversightFollowUpStatus.OPEN,
+            )
+        log_audit(request.user, 'reverification_requested', task, {
+            'old_status': previous_status, 'new_status': task.status, 'round': task.verification_round,
+            'reason': reason[:300], 'module': 'field_verification',
+        })
+        requester = request.user.full_name or request.user.username
+        recipients = list(User.objects.filter(role__in={UserRole.RBF_OFFICIAL, UserRole.ADMIN}).only('id', 'full_name', 'username'))
+        if task.assigned_verifier_id:
+            recipients.append(task.assigned_verifier)
+        Notification.objects.bulk_create([
+            Notification(
+                recipient_id=str(user.id),
+                recipient_name=user.full_name or user.username,
+                type=NotificationChannel.IN_APP,
+                event='verification_reverification_requested',
+                title=f'Re-verification required: installation #{report.id}',
+                body=f'{requester} requested re-verification of {report.serial_number or report.id}: {reason[:200]}',
+                status=NotificationStatus.SENT,
+                linked_entity_id=str(report.id),
+            )
+            for user in recipients
+        ], ignore_conflicts=True)
+        refresh_project_kpis(str(report.project_id))
+        return Response(self.get_serializer(task).data)
 
     @action(detail=True, methods=['post'])
     def verify(self, request, pk=None):
@@ -2580,6 +2837,12 @@ class VerificationTaskViewSet(viewsets.ModelViewSet):
             return Response({'detail': 'Field verification is paused while the vendor is under suspension.'}, status=status.HTTP_400_BAD_REQUEST)
         if task.status == VerificationStatus.TERMINATED:
             return Response({'detail': 'Field verification was terminated for this vendor. Only new logs may resume after reinstatement.'}, status=status.HTTP_400_BAD_REQUEST)
+        if task.status not in self.VERIFIABLE_STATUSES:
+            return Response(
+                {'detail': 'This verification has already been submitted and is locked. A reviewer must request re-verification first.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        reverification_round = task.status == VerificationStatus.REVERIFICATION_REQUIRED
         if is_vendor_restricted(task.report.vendor):
             detail = (
                 'Field verification is paused while the vendor is under suspension.'
@@ -2689,8 +2952,20 @@ class VerificationTaskViewSet(viewsets.ModelViewSet):
             observation_notes=observation_notes,
             verification_status=verification_record_status,
             flag_reason=flag_reason or None,
+            verification_round=task.verification_round,
             verified_at=timezone.now(),
         )
+        if reverification_round:
+            OversightReview.objects.filter(
+                verification_task=task,
+                review_status=OversightReviewStatus.REVERIFICATION_REQUESTED,
+                follow_up_status__in=[OversightFollowUpStatus.OPEN, OversightFollowUpStatus.IN_PROGRESS],
+            ).update(
+                follow_up_status=OversightFollowUpStatus.RESOLVED,
+                resolved_by=request.user,
+                resolved_at=timezone.now(),
+                resolution_note=f'Re-verified in round {task.verification_round}: {verification_record_status}.',
+            )
 
         task.verifier_lat = verifier_lat
         task.verifier_lng = verifier_lng
@@ -2763,7 +3038,12 @@ class VerificationTaskViewSet(viewsets.ModelViewSet):
             },
         )
         district_name = report.district or report.project.district or report.project.region or ''
-        oversight_users = User.objects.filter(role__in={UserRole.RBF_OFFICIAL, UserRole.ADMIN}).only('id', 'full_name', 'username')
+        project_areas = {value.lower() for value in (report.project.region, report.project.district) if value}
+        oversight_users = User.objects.filter(
+            Q(role__in={UserRole.RBF_OFFICIAL, UserRole.ADMIN})
+            | (Q(role=UserRole.DOE_OFFICER) & Q(region__iregex=r'^(' + '|'.join(re.escape(area) for area in project_areas) + r')$'))
+            if project_areas else Q(role__in={UserRole.RBF_OFFICIAL, UserRole.ADMIN})
+        ).only('id', 'full_name', 'username')
         Notification.objects.bulk_create(
             [
                 Notification(
@@ -2809,6 +3089,7 @@ class MapInstallationView(APIView):
 
     def get(self, request):
         queryset = apply_installation_map_filters(build_installation_map_queryset(request.user), request.query_params)
+        queryset = archived_scope(request, queryset, 'project__', ('project', 'project_id'))
         summary = queryset.aggregate(
             total=Count('id'),
             verified=Count('id', filter=Q(verification_task__status=VerificationStatus.VERIFIED)),
@@ -2895,7 +3176,7 @@ class MapBoundaryView(APIView):
         return FileResponse(path.open('rb'), content_type='application/geo+json')
 
 
-class SmartMeterReadingViewSet(viewsets.ModelViewSet):
+class SmartMeterReadingViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
     queryset = SmartMeterReading.objects.select_related('project', 'batch', 'submitted_by').all()
     # Readings are evidence for KPI and payment decisions: they are never edited or
     # deleted in place. Wrong data is rejected through the meter data batch review.
@@ -2907,7 +3188,7 @@ class SmartMeterReadingViewSet(viewsets.ModelViewSet):
     search_fields = ['meter_id']
     ordering_fields = ['recorded_at']
 
-    WRITE_ROLES = {UserRole.VENDOR, UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.DOE_OFFICER}
+    WRITE_ROLES = {UserRole.VENDOR, UserRole.RBF_OFFICIAL, UserRole.ADMIN}
 
     def get_queryset(self):
         qs = self.queryset.order_by('-recorded_at')
@@ -2946,7 +3227,7 @@ class SmartMeterReadingViewSet(viewsets.ModelViewSet):
         return Response(self.get_serializer(reading).data, status=status.HTTP_201_CREATED)
 
 
-class MeterDataBatchViewSet(viewsets.ReadOnlyModelViewSet):
+class MeterDataBatchViewSet(ArchiveScopedListMixin, viewsets.ReadOnlyModelViewSet):
     """Vendor meter-data uploads, and the RBF Official / Super Admin review of whether
     they are genuine: verify, reject (whole batch or single readings), or send back for
     correction. Rejected readings stop counting toward KPIs and milestone eligibility."""
@@ -3214,18 +3495,20 @@ class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=False, methods=['get'], url_path='export-pdf')
     def export_pdf(self, request):
         queryset = list(self.filter_queryset(self.get_queryset()).order_by('-created_at')[:500])
+        from html import escape as esc
+
         rows = ''.join(
             (
                 '<tr>'
                 f'<td>{timezone.localtime(log.created_at).strftime("%Y-%m-%d %H:%M")}</td>'
-                f'<td>{((log.actor.full_name or log.actor.username) if log.actor else "System")}</td>'
-                f'<td>{log.actor_role}</td>'
-                f'<td>{log.action}</td>'
-                f'<td>{log.module}</td>'
-                f'<td>{log.entity_id or log.record_id or ""}</td>'
-                f'<td>{log.old_status}</td>'
-                f'<td>{log.new_status}</td>'
-                f'<td>{log.notes}</td>'
+                f'<td>{esc((log.actor.full_name or log.actor.username) if log.actor else "System")}</td>'
+                f'<td>{esc(log.actor_role)}</td>'
+                f'<td>{esc(log.action)}</td>'
+                f'<td>{esc(log.module)}</td>'
+                f'<td>{esc(str(log.entity_id or log.record_id or ""))}</td>'
+                f'<td>{esc(log.old_status)}</td>'
+                f'<td>{esc(log.new_status)}</td>'
+                f'<td>{esc(log.notes)}</td>'
                 '</tr>'
             )
             for log in queryset
@@ -3268,7 +3551,10 @@ class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
 
         tmp_dir = Path(tempfile.mkdtemp(prefix='audit_logs_pdf_'))
         output_path = tmp_dir / f'audit_logs_{timezone.localdate().isoformat()}.pdf'
-        _render_pdf(html, output_path, 'audit-logs')
+        from .report_pdf import report_footer, report_header
+
+        _render_pdf(html, output_path, 'audit-logs', header_template=report_header('Audit Logs'),
+                    footer_template=report_footer(request.user.full_name or request.user.username))
         return FileResponse(output_path.open('rb'), as_attachment=True, filename=output_path.name)
 
 
@@ -3550,7 +3836,7 @@ def _notify_vendor_of_anomaly_review(flag: AnomalyFlag, *, event: str, title: st
     )
 
 
-class AnomalyFlagViewSet(viewsets.ReadOnlyModelViewSet):
+class AnomalyFlagViewSet(ArchiveScopedListMixin, viewsets.ReadOnlyModelViewSet):
     queryset = AnomalyFlag.objects.select_related('project', 'installation').all()
     serializer_class = AnomalyFlagSerializer
     permission_classes = [IsAuthenticated]
@@ -3564,8 +3850,8 @@ class AnomalyFlagViewSet(viewsets.ReadOnlyModelViewSet):
         user = self.request.user
         if user.role == UserRole.VENDOR:
             return qs.filter(project__vendor_id=str(user.id))
-        if user.role == UserRole.DOE_OFFICER and user.region:
-            return qs.filter(project__region__iexact=user.region)
+        if user.role == UserRole.DOE_OFFICER:
+            return qs.filter(doe_region_filter(user, prefix='project__')).distinct()
         if user.role == UserRole.FIELD_VERIFIER:
             return qs.filter(
                 Q(installation__verification_task__assigned_verifier=user)
@@ -3711,8 +3997,9 @@ def _get_kpi_project_for_user(user: User, project_id: str) -> Project:
     if user.role in {UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.TAC, UserRole.UNDP_DONOR, UserRole.AUDITOR}:
         return project
     if user.role == UserRole.DOE_OFFICER:
-        # DoE officers can access regional project KPIs
-        return project
+        if Project.objects.filter(id=project_id).filter(doe_region_filter(user)).exists():
+            return project
+        raise PermissionDenied('You can only access KPI dashboards for projects in your region.')
     if user.role == UserRole.VENDOR:
         if Project.objects.filter(id=project_id).filter(vendor_query_filter(user)).exists():
             return project
@@ -3767,1479 +4054,1171 @@ class PublicPortfolioKpiView(APIView):
         return Response(KpiService.getPublicPortfolioSummary())
 
 
-REPORT_TEMPLATES = [
-    # RMT (RBF Official)
-    {
-        'id': 'rmt_kpi_project',
-        'title': 'KPI Report (Per Project)',
-        'description': 'Project KPI performance summary (installation, inclusion, energy, uptime, milestones, anomalies).',
-        'category': 'KPI Reports',
-        'quick': True,
-        'roles': {UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.AUDITOR, UserRole.TAC},
-    },
-    {
-        'id': 'rmt_verification_project',
-        'title': 'Verification Report (Per Project)',
-        'description': 'Field verification outcomes, GPS quality, and flagged verifications detail.',
-        'category': 'Verification Reports',
-        'quick': True,
-        'roles': {UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.AUDITOR, UserRole.TAC, UserRole.DOE_OFFICER},
-    },
-    {
-        'id': 'rmt_financial_disbursement',
-        'title': 'Financial Disbursement Report (Portfolio)',
-        'description': 'Contracted vs disbursed vs pending, by project and milestone type.',
-        'category': 'Financial Reports',
-        'quick': True,
-        'roles': {UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.AUDITOR, UserRole.UNDP_DONOR},
-    },
-    {
-        'id': 'rmt_portfolio_summary',
-        'title': 'Portfolio Summary Report',
-        'description': 'High-level programme overview, progress, inclusion, performance and risk list.',
-        'category': 'Portfolio Reports',
-        'quick': True,
-        'roles': {UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.AUDITOR, UserRole.UNDP_DONOR},
-    },
-    {
-        'id': 'rmt_anomaly_report',
-        'title': 'Anomaly Flags Report',
-        'description': 'All anomaly flags by type and project, including open flags requiring action.',
-        'category': 'Anomaly Reports',
-        'quick': True,
-        'roles': {UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.AUDITOR},
-    },
-    {
-        'id': 'rmt_gender_impact',
-        'title': 'Gender & Inclusion Impact Report',
-        'description': 'Portfolio gender and inclusion KPIs by technology and district, with trends.',
-        'category': 'Portfolio Reports',
-        'quick': True,
-        'roles': {UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.AUDITOR, UserRole.UNDP_DONOR, UserRole.DOE_OFFICER},
-    },
-
-    # DoE
-    {
-        'id': 'doe_regional_progress',
-        'title': 'Regional Progress Report',
-        'description': 'Project delivery progress within your assigned region.',
-        'category': 'Project Reports',
-        'quick': True,
-        'roles': {UserRole.DOE_OFFICER, UserRole.ADMIN},
-    },
-    {
-        'id': 'doe_verification_summary',
-        'title': 'Verification Summary',
-        'description': 'Verification status by district and technology.',
-        'category': 'Verification Reports',
-        'quick': True,
-        'roles': {UserRole.DOE_OFFICER, UserRole.ADMIN},
-    },
-    {
-        'id': 'doe_regional_kpi',
-        'title': 'Regional KPI Report',
-        'description': 'All KPI indicators for your assigned region.',
-        'category': 'KPI Reports',
-        'quick': True,
-        'roles': {UserRole.DOE_OFFICER, UserRole.ADMIN},
-    },
-    {
-        'id': 'doe_technology_breakdown',
-        'title': 'Technology Breakdown (Regional)',
-        'description': 'Breakdown by technology type within your assigned region.',
-        'category': 'Portfolio Reports',
-        'quick': False,
-        'roles': {UserRole.DOE_OFFICER, UserRole.ADMIN},
-    },
-
-    # PSC
-    {
-        'id': 'psc_quarterly_report',
-        'title': 'Quarterly Progress Report',
-        'description': 'Quarterly oversight report (portfolio level).',
-        'category': 'Portfolio Reports',
-        'quick': False,
-        'roles': {UserRole.UNDP_DONOR, UserRole.ADMIN, UserRole.AUDITOR, UserRole.RBF_OFFICIAL},
-    },
-    {
-        'id': 'psc_financial_summary',
-        'title': 'Financial Summary',
-        'description': 'High-level financial view for PSC briefings.',
-        'category': 'Financial Reports',
-        'quick': True,
-        'roles': {UserRole.UNDP_DONOR, UserRole.ADMIN, UserRole.AUDITOR},
-    },
-    {
-        'id': 'psc_compliance_report',
-        'title': 'Compliance Report',
-        'description': 'Payment chain compliance and KPI compliance summary.',
-        'category': 'Verification Reports',
-        'quick': True,
-        'roles': {UserRole.UNDP_DONOR, UserRole.ADMIN, UserRole.AUDITOR},
-    },
-    {
-        'id': 'psc_gender_impact_portfolio',
-        'title': 'Gender Impact (Portfolio)',
-        'description': 'Portfolio gender and inclusion KPIs for PSC reporting.',
-        'category': 'Portfolio Reports',
-        'quick': True,
-        'roles': {UserRole.UNDP_DONOR, UserRole.ADMIN, UserRole.AUDITOR},
-    },
-    {
-        'id': 'psc_disbursement_summary',
-        'title': 'Disbursement Summary',
-        'description': 'Approved and pending claim disbursements by vendor.',
-        'category': 'Financial Reports',
-        'quick': True,
-        'roles': {UserRole.UNDP_DONOR, UserRole.ADMIN},
-    },
-    {
-        'id': 'psc_vendor_payment_trail',
-        'title': 'Vendor Payment Trail',
-        'description': 'Payment status and approval history for PSC reviews.',
-        'category': 'Financial Reports',
-        'quick': False,
-        'roles': {UserRole.UNDP_DONOR, UserRole.ADMIN},
-    },
-
-    # Field Officer
-    {
-        'id': 'fo_verification_history',
-        'title': 'My Verification History',
-        'description': 'Your complete verification log (privacy-safe).',
-        'category': 'My Reports',
-        'quick': True,
-        'roles': {UserRole.FIELD_VERIFIER, UserRole.ADMIN},
-    },
-    {
-        'id': 'fo_daily_summary',
-        'title': 'Daily Summary',
-        'description': 'What I completed today.',
-        'category': 'My Reports',
-        'quick': True,
-        'roles': {UserRole.FIELD_VERIFIER, UserRole.ADMIN},
-    },
-    {
-        'id': 'fo_performance_summary',
-        'title': 'Performance Summary',
-        'description': 'Weekly, monthly, and all-time verification performance.',
-        'category': 'My Reports',
-        'quick': True,
-        'roles': {UserRole.FIELD_VERIFIER, UserRole.ADMIN},
-    },
-
-    # Auditor
-    {
-        'id': 'auditor_full_audit',
-        'title': 'Full Audit Report',
-        'description': 'Full system audit trail export (read-only).',
-        'category': 'Audit Reports',
-        'quick': True,
-        'roles': {UserRole.AUDITOR, UserRole.ADMIN},
-    },
-    {
-        'id': 'auditor_payment_chain_audit',
-        'title': 'Payment Chain Audit',
-        'description': 'Every payment with full approval chain verification.',
-        'category': 'Audit Reports',
-        'quick': True,
-        'roles': {UserRole.AUDITOR, UserRole.ADMIN},
-    },
-    {
-        'id': 'auditor_kpi_compliance_audit',
-        'title': 'KPI Compliance Audit',
-        'description': 'Verify milestone approvals occurred only when KPI conditions were met.',
-        'category': 'Audit Reports',
-        'quick': True,
-        'roles': {UserRole.AUDITOR, UserRole.ADMIN},
-    },
-    {
-        'id': 'auditor_data_integrity',
-        'title': 'Data Integrity Report',
-        'description': 'Database vs Prospect and validation integrity signals.',
-        'category': 'Audit Reports',
-        'quick': True,
-        'roles': {UserRole.AUDITOR, UserRole.ADMIN, UserRole.RBF_OFFICIAL},
-    },
-    {
-        'id': 'auditor_prospect_sync',
-        'title': 'Prospect Sync Audit',
-        'description': 'Recent Prospect integration sync activity for audit.',
-        'category': 'Audit Reports',
-        'quick': True,
-        'roles': {UserRole.AUDITOR, UserRole.ADMIN, UserRole.RBF_OFFICIAL},
-    },
-]
-
-
-def _report_formats_for_user(user: User, report_type: str) -> list[str]:
-    if user.role == UserRole.TAC and report_type in {'rmt_financial_disbursement', 'psc_financial_summary', 'psc_disbursement_summary', 'psc_vendor_payment_trail'}:
-        return ['pdf', 'csv']
-    return ['pdf', 'excel', 'csv']
-
-
-def _safe_filename_base(report_type: str) -> str:
-    return "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in report_type).strip("_") or "report"
-
-
-def _xlsx_bytes(columns: list[str], rows: list[list[object]]) -> bytes:
-    try:
-        from openpyxl import Workbook
-    except Exception as exc:
-        raise PermissionDenied(f'Excel export not available on this deployment: {exc}')
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Report"
-    ws.append(columns)
-    for row in rows:
-        ws.append([str(cell or "") for cell in row])
-    buf = io.BytesIO()
-    wb.save(buf)
-    return buf.getvalue()
-
-
-def _user_project_queryset(user: User):
-    # Project has vendor_name/vendor_id fields (not a FK), so avoid select_related('vendor').
-    queryset = Project.objects.select_related('tender', 'contract', 'created_by', 'project_setup').all().order_by('-id')
-    if user.role == UserRole.VENDOR:
-        return queryset.filter(vendor_query_filter(user)).distinct()
-    if user.role == UserRole.DOE_OFFICER:
-        return queryset.filter(doe_region_filter(user)).distinct()
-    if user.role == UserRole.FIELD_VERIFIER:
-        return queryset.filter(field_verifier_district_filter(user, project_prefix='')).distinct()
-    return queryset.distinct()
-
-
-def _render_report_pdf(title: str, columns: list[str], rows: list[list[object]]) -> Path:
-    from rbf.tenders.pba_pdf import _render_pdf
-    from .report_templates import render_report_html, render_table
-
-    content_html = render_table(columns, rows)
-    report_html = render_report_html(title, content_html)
-
-    tmp_dir = Path(tempfile.mkdtemp(prefix='report_pdf_'))
-    output_path = tmp_dir / f'report_{uuid.uuid4().hex}.pdf'
-    _render_pdf(report_html, output_path, title[:32])
-    return output_path
-
-
-def _render_report_pdf_text(title: str, report_text: str) -> Path:
-    from rbf.tenders.pba_pdf import _render_pdf
-    from .report_templates import render_report_html
-
-    safe_text = html.escape(report_text or "")
-    content_html = f"""
-    <div class="section-box">
-        <pre style="font-family: monospace; font-size: 10px; line-height: 1.2; background: #f8fafc; padding: 15px; border-radius: 8px; border: 1px solid #e2e8f0; overflow: auto;">
-{safe_text}
-        </pre>
-    </div>
-    """
-    report_html = render_report_html(title, content_html)
-
-    tmp_dir = Path(tempfile.mkdtemp(prefix="report_pdf_"))
-    output_path = tmp_dir / f"report_{uuid.uuid4().hex}.pdf"
-    _render_pdf(report_html, output_path, title[:32])
-    return output_path
-
-
-def _format_date(value):
-    if not value:
-        return "N/A"
-    try:
-        return timezone.localtime(value).strftime("%d %b %Y")
-    except Exception:
-        try:
-            return str(value)
-        except Exception:
-            return "N/A"
-
-
-def _format_datetime(value):
-    if not value:
-        return "N/A"
-    try:
-        return timezone.localtime(value).strftime("%d %b %Y, %H:%M")
-    except Exception:
-        try:
-            return str(value)
-        except Exception:
-            return "N/A"
-
-
-def _format_currency_lsl(amount):
-    try:
-        return f"LSL {float(amount or 0):,.0f}"
-    except Exception:
-        return "LSL 0"
-
-
-def _report_id(prefix: str = "RPT") -> str:
-    # Stable enough for human reference; actual primary key is UUID on GeneratedReport.
-    return f"{prefix}-{timezone.localdate().year}-{uuid.uuid4().hex[:4].upper()}"
-
-
-def _build_report_text(request, report_type: str, params: dict) -> tuple[str, str]:
-    """
-    Returns (title, text). Text is rendered in a monospace PDF to match the
-    exact ASCII/box layout provided in the spec.
-    """
-    user = request.user
-    now = timezone.now()
-    rid = _report_id()
-
-    # Common filters
-    project_id = (params or {}).get("project") or (params or {}).get("project_id")
-    date_from = (params or {}).get("from") or (params or {}).get("date_from")
-    date_to = (params or {}).get("to") or (params or {}).get("date_to")
-
-    projects = _user_project_queryset(user)
-    if project_id:
-        projects = projects.filter(id=project_id)
-    project = projects.first() if project_id else None
-
-    # RMT: KPI Report (Per Project)
-    if report_type == "rmt_kpi_project":
-        title = "RBF PROGRAMME — KPI REPORT"
-        prj_ref = project.project_reference if project else (project_id or "All Projects")
-        vendor = (project.vendor_name or "") if project else "N/A"
-        technology = (project.tech_type or "") if project else "N/A"
-        district = (project.district or project.region or "") if project else "N/A"
-        period_label = f"{date_from or 'N/A'} — {date_to or 'N/A'}"
-        generated_by = (user.full_name or user.username or "User")
-
-        # Use existing KPI service when we have a project.
-        verified = pending = flagged = submitted = target = 0
-        expected_pct = actual_pct = 0.0
-        female_pct = vuln_pct = low_pct = 0.0
-        uptime_pct = 0.0
-        energy_pct = 0.0
-        on_track = True
-        if project:
-            try:
-                summary = KpiService.for_project(str(project.id)).getFullKpiSummary()
-                ip = summary.get("installation_progress") or {}
-                submitted = int(ip.get("submitted") or 0)
-                verified = int(ip.get("verified") or 0)
-                pending = int(ip.get("pending") or 0)
-                flagged = int(ip.get("flagged") or 0)
-                target = int(ip.get("target") or 0)
-                expected_pct = float(ip.get("expected_progress_pct") or 0)
-                actual_pct = float(ip.get("progress_pct") or 0)
-                on_track = bool(ip.get("on_track") or False)
-
-                gender = summary.get("gender_kpi") or {}
-                female_pct = float((gender.get("female_headed") or {}).get("percentage") or 0)
-                vuln_pct = float((gender.get("vulnerable") or {}).get("percentage") or 0)
-                low_pct = float((gender.get("low_income") or {}).get("percentage") or 0)
-
-                uptime = summary.get("uptime_kpi") or {}
-                uptime_pct = float(uptime.get("average_uptime_pct") or 0)
-
-                energy = summary.get("energy_kpi") or {}
-                energy_pct = float(energy.get("current_month_pct") or 0)
-            except Exception:
-                pass
-
-        status_line = "✅ AHEAD OF SCHEDULE" if actual_pct >= expected_pct and target else ("🟡 ON TRACK" if on_track else "⚠ BEHIND SCHEDULE")
-
-        text = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-                 RENEWABLE LESOTHO
-              RBF PROGRAMME — KPI REPORT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-REPORT DETAILS:
-  Report Type:     KPI Performance Report
-  Project:         {prj_ref}
-  Vendor:          {vendor or 'N/A'}
-  Technology:      {technology or 'N/A'}
-  District:        {district or 'N/A'}
-  Report Period:   {period_label}
-  Generated By:    {generated_by}
-  Generated On:    {_format_datetime(now)}
-  Report ID:       {rid}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-SECTION 1 — PROJECT OVERVIEW
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  Contract Reference:   {(getattr(getattr(project, 'contract', None), 'reference_number', None) or 'N/A') if project else 'N/A'}
-  Contract Value:       {_format_currency_lsl(getattr(project, 'budget', None) or 0) if project else 'LSL 0'}
-  Project Duration:     {(getattr(project, 'project_duration_months', None) or 'N/A')} months
-  Start Date:           {_format_date(getattr(project, 'start_date', None) if project else None)}
-  End Date:             {_format_date(getattr(project, 'end_date', None) if project else None)}
-  Verification Method:  {(getattr(project, 'verification_method', None) or 'N/A') if project else 'N/A'}
-  Current Status:       {(project.status or 'N/A') if project else 'N/A'}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-SECTION 2 — INSTALLATION PROGRESS KPI
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  Target:              {target or 'N/A'} installations
-  Submitted:           {submitted}
-  Verified:            {verified}   ← counts toward KPI
-  Pending:             {pending}
-  Flagged:             {flagged}
-
-  Progress vs Timeline:
-    Expected by now:   {expected_pct:.1f}% (based on elapsed days)
-    Actual verified:   {actual_pct:.1f}%
-    Status:            {status_line}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-SECTION 3 — INCLUSION AND GENDER KPIs
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  KPI SUMMARY TABLE:
-  ┌──────────────────────────┬────────┬─────────┬────────┐
-  │ KPI                      │ Target │ Current │ Status │
-  ├──────────────────────────┼────────┼─────────┼────────┤
-  │ Female-headed households │ ≥50%   │ {female_pct:.1f}%   │ {"✅" if female_pct >= 50 else "⚠"}     │
-  │ Vulnerable groups        │ ≥30%   │ {vuln_pct:.1f}%   │ {"✅" if vuln_pct >= 30 else "⚠"}     │
-  │ Low-income households    │ ≥60%   │ {low_pct:.1f}%   │ {"✅" if low_pct >= 60 else "⚠"}     │
-  └──────────────────────────┴────────┴─────────┴────────┘
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-SECTION 4 — ENERGY OUTPUT KPI
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  Current Month Achievement: {energy_pct:.1f}% {"✅" if energy_pct >= 100 else "🟡"}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-SECTION 5 — SYSTEM UPTIME KPI
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  Average Uptime (30 days):  {uptime_pct:.1f}% {"✅ MET" if uptime_pct >= 99 else "🟡"}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-SECTION 6 — MILESTONE STATUS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  (Milestone unlocking rules are computed by the platform KPI engine.)
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-SECTION 7 — ANOMALY SUMMARY
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  (Anomaly flags are summarized in the Anomaly Report.)
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-SECTION 8 — OVERALL ASSESSMENT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  Overall Status: {"ON TRACK" if on_track else "NEEDS ATTENTION"}
-  Recommendation: {"Approve claim review if all conditions are met." if on_track else "Escalate corrective action and re-check KPIs."}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Generated by RBF Digital Platform
-  UNDP Lesotho — Renewable Energy Programme
-  This report is system-generated and auditable.
-  Report ID: {rid}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-"""
-        return title, text
-
-    # Verification report (Per Project) — used by RMT/TAC/DoE
-    if report_type in {"rmt_verification_project", "doe_verification_summary"}:
-        title = "FIELD VERIFICATION REPORT"
-        prj_ref = project.project_reference if project else (project_id or "All Projects")
-        generated_by = (user.full_name or user.username or "User")
-
-        reports_qs = InstallationReport.objects.filter(project=project) if project else InstallationReport.objects.none()
-        fv_qs = FieldVerification.objects.filter(installation__project=project) if project else FieldVerification.objects.none()
-        task_qs = VerificationTask.objects.filter(report__project=project) if project else VerificationTask.objects.none()
-
-        total_submitted = reports_qs.count()
-        total_verifications = fv_qs.count()
-        verification_rate = (total_verifications / total_submitted * 100.0) if total_submitted else 0.0
-
-        verified_count = fv_qs.filter(verification_status=FieldVerificationStatus.VERIFIED).count()
-        partial_count = fv_qs.filter(verification_status=FieldVerificationStatus.PARTIAL).count()
-        flagged_count = fv_qs.filter(verification_status=FieldVerificationStatus.FLAGGED).count()
-
-        distances = task_qs.exclude(distance_meters__isnull=True)
-        within_10m = distances.filter(distance_meters__lte=10).count()
-        within_50m = distances.filter(distance_meters__gt=10, distance_meters__lte=50).count()
-        over_50m = distances.filter(distance_meters__gt=50).count()
-        avg_gps = distances.aggregate(avg=Avg("distance_meters")).get("avg")
-        avg_gps_val = float(avg_gps) if avg_gps is not None else None
-
-        fo_stats = []
-        if project:
-            rows = (
-                fv_qs.values("field_officer__full_name", "field_officer__username")
-                .annotate(
-                    verified=Count("id", filter=Q(verification_status=FieldVerificationStatus.VERIFIED)),
-                    flagged=Count("id", filter=Q(verification_status=FieldVerificationStatus.FLAGGED)),
-                    avg_gps=Avg("location_distance_meters"),
-                )
-                .order_by("-verified")[:10]
-            )
-            for r in rows:
-                name = r.get("field_officer__full_name") or r.get("field_officer__username") or "Field Officer"
-                fo_stats.append((name, int(r.get("verified") or 0), int(r.get("flagged") or 0), float(r.get("avg_gps") or 0)))
-
-        flagged_details = []
-        if project:
-            flagged_fv = (
-                fv_qs.filter(verification_status=FieldVerificationStatus.FLAGGED)
-                .select_related("installation")
-                .order_by("-verified_at")[:20]
-            )
-            for fv in flagged_fv:
-                ins = fv.installation
-                flagged_details.append((
-                    f"INS-{ins.id}",
-                    (fv.flag_reason or fv.observation_notes or "Flagged"),
-                    f"{float(fv.location_distance_meters or 0):.0f}m",
-                    "✅" if fv.location_match else "❌",
-                ))
-
-        text = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-         FIELD VERIFICATION REPORT — {prj_ref}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-REPORT DETAILS:
-  Project:         {prj_ref}
-  Period:          {date_from or 'N/A'} — {date_to or 'N/A'}
-  Generated By:    {generated_by}
-  Report ID:       {rid}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-SECTION 1 — VERIFICATION SUMMARY
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  Total installations submitted:    {total_submitted}
-  Total verifications conducted:    {total_verifications}
-  Verification rate:                {verification_rate:.1f}%
-
-  Outcomes:
-    Verified:    {verified_count}
-    Partial:     {partial_count}
-    Flagged:     {flagged_count}
-
-  GPS Match Quality (Verification Tasks):
-    Within 10m:   {within_10m}
-    10–50m:       {within_50m}
-    Over 50m:     {over_50m}
-  Average GPS distance:  {f"{avg_gps_val:.1f} meters" if avg_gps_val is not None else "N/A"}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-SECTION 2 — FIELD OFFICER PERFORMANCE
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-"""
-
-        if fo_stats:
-            text += """
-  ┌──────────────────┬──────────┬────────┬──────────┐
-  │ Field Officer    │ Verified │ Flagged│ Avg GPS  │
-  ├──────────────────┼──────────┼────────┼──────────┤
-"""
-            for (name, v, f, avgd) in fo_stats:
-                text += f"  │ {name[:16].ljust(16)} │ {str(v).ljust(8)} │ {str(f).ljust(6)} │ {str(int(avgd)).rjust(4)}m   │\n"
-            text += "  └──────────────────┴──────────┴────────┴──────────┘\n"
-        else:
-            text += "\n  No field verification records available.\n"
-
-        text += """
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-SECTION 3 — FLAGGED VERIFICATIONS DETAIL
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-"""
-        if flagged_details:
-            text += """
-  ┌────────┬──────────────┬──────────────────┬───────────┐
-  │ INS ID │ Flag Reason  │ GPS Discrepancy  │ Match     │
-  ├────────┼──────────────┼──────────────────┼───────────┤
-"""
-            for ins_id, reason, dist, match in flagged_details:
-                text += f"  │ {ins_id[:6].ljust(6)} │ {reason[:12].ljust(12)} │ {dist[:16].ljust(16)} │ {match.ljust(9)} │\n"
-            text += "  └────────┴──────────────┴──────────────────┴───────────┘\n"
-        else:
-            text += "\n  No flagged verification records for this scope.\n"
-
-        text += """
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-EXPORT: [ Download PDF ] [ Download Excel ] [ Download CSV ]
-"""
-        return title, text
-
-    # Financial disbursement (portfolio)
-    if report_type in {"rmt_financial_disbursement", "psc_financial_summary", "psc_disbursement_summary"}:
-        title = "FINANCIAL DISBURSEMENT REPORT"
-        claims = PaymentClaim.objects.select_related("project", "vendor").order_by("-submitted_at")[:500]
-        total_contracted = sum(float(p.budget or 0) for p in _user_project_queryset(user)[:500])
-        total_disbursed = sum(float(c.claim_amount or 0) for c in claims if str(c.status).lower() == "paid")
-        pending = max(0.0, total_contracted - total_disbursed)
-        text = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-       FINANCIAL DISBURSEMENT REPORT
-       RBF Programme — All Projects
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-PERIOD:      {date_from or 'N/A'} — {date_to or 'N/A'}
-GENERATED:   {_format_datetime(now)} by {(user.full_name or user.username or 'User')}
-REPORT ID:   {rid}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-SECTION 1 — PORTFOLIO FINANCIAL SUMMARY
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  Total Contracted Value:   {_format_currency_lsl(total_contracted)}
-  Total Disbursed to Date:  {_format_currency_lsl(total_disbursed)}
-  Total Pending:            {_format_currency_lsl(pending)}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-SECTION 2 — DISBURSEMENT BY PROJECT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  (See Excel/CSV export for full table.)
-
-EXPORT: [ Download PDF ] [ Download Excel ]
-"""
-        return title, text
-
-    # Portfolio summary
-    if report_type in {"rmt_portfolio_summary"}:
-        title = "RBF PROGRAMME — PORTFOLIO SUMMARY"
-        qs = _user_project_queryset(user)
-        total = qs.count()
-        active = qs.filter(status=ProjectStatus.ACTIVE).count()
-        completed = qs.filter(status__in=[ProjectStatus.COMPLETED, ProjectStatus.LEGACY_COMPLETED]).count()
-        text = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-         RBF PROGRAMME — PORTFOLIO SUMMARY
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-SECTION 1 — PROGRAMME OVERVIEW
-  Total Active Projects:     {active}
-  Total Projects:            {total}
-  Completed Projects:        {completed}
-
-SECTION 2 — INSTALLATION PROGRESS
-  (See KPI dashboards and exports for detailed progress tables.)
-
-SECTION 3 — GENDER AND INCLUSION
-  (See Gender Impact report.)
-
-SECTION 4 — FINANCIAL
-  (See Financial Disbursement report.)
-
-EXPORT: [ Download PDF ] [ Download Excel ]
-"""
-        return title, text
-
-    # Anomaly report
-    if report_type == "rmt_anomaly_report":
-        title = "ANOMALY FLAGS REPORT"
-        base_flags = AnomalyFlag.objects.order_by("-created_at")
-        total = base_flags.count()
-        resolved = base_flags.filter(is_resolved=True).count()
-        unresolved = total - resolved
-        text = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-              ANOMALY FLAGS REPORT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-PERIOD:       {date_from or 'N/A'} — {date_to or 'N/A'}
-SCOPE:        All Projects
-REPORT ID:    {rid}
-
-SUMMARY:
-  Total Flags Raised:   {total}
-  Resolved:             {resolved}
-  Unresolved:           {unresolved}
-
-OPEN FLAGS REQUIRING ACTION:
-  (See Excel/CSV export for full open-flags table.)
-
-EXPORT: [ Download PDF ] [ Download Excel ] [ Download CSV ]
-"""
-        return title, text
-
-    if report_type == "rmt_gender_impact":
-        title = "GENDER AND INCLUSION IMPACT REPORT"
-        projects_qs = _user_project_queryset(user)
-        verified_qs = InstallationReport.objects.filter(project__in=projects_qs, status=InstallationStatus.VERIFIED)
-        total_verified = verified_qs.count()
-
-        def _pct(count: int) -> float:
-            return (count / total_verified * 100.0) if total_verified else 0.0
-
-        female_count = verified_qs.filter(household_type__icontains="female").count()
-        vuln_count = verified_qs.filter(household_type__icontains="vulnerable").count()
-        low_count = verified_qs.filter(Q(household_type__icontains="low") | Q(household_type__icontains="income")).count()
-
-        female_pct = _pct(female_count)
-        vuln_pct = _pct(vuln_count)
-        low_pct = _pct(low_count)
-
-        tech_rows = []
-        for tech in projects_qs.values_list("tech_type", flat=True).distinct():
-            if not tech:
-                continue
-            tqs = verified_qs.filter(project__tech_type=tech)
-            ttotal = tqs.count()
-            if not ttotal:
-                continue
-            tf = tqs.filter(household_type__icontains="female").count()
-            tv = tqs.filter(household_type__icontains="vulnerable").count()
-            tl = tqs.filter(Q(household_type__icontains="low") | Q(household_type__icontains="income")).count()
-            tech_rows.append((tech, tf / ttotal * 100.0, tv / ttotal * 100.0, tl / ttotal * 100.0))
-
-        district_rows = []
-        for dist in projects_qs.values_list("district", flat=True).distinct():
-            if not dist:
-                continue
-            dqs = verified_qs.filter(project__district=dist)
-            dtotal = dqs.count()
-            if not dtotal:
-                continue
-            df = dqs.filter(household_type__icontains="female").count()
-            dv = dqs.filter(household_type__icontains="vulnerable").count()
-            dl = dqs.filter(Q(household_type__icontains="low") | Q(household_type__icontains="income")).count()
-            district_rows.append((dist, df / dtotal * 100.0, dv / dtotal * 100.0, dl / dtotal * 100.0))
-
-        tech_rows.sort(key=lambda r: r[0])
-        district_rows.sort(key=lambda r: r[0])
-
-        text = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-           GENDER AND INCLUSION IMPACT REPORT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-SECTION 1 — OVERALL GENDER KPI
-  Female-headed HH:   {female_pct:.1f}%  TARGET: ≥50%  {"✅" if female_pct >= 50 else "⚠"}
-  Vulnerable Groups:  {vuln_pct:.1f}%  TARGET: ≥30%  {"✅" if vuln_pct >= 30 else "⚠"}
-  Low-income HH:      {low_pct:.1f}%  TARGET: ≥60%  {"✅" if low_pct >= 60 else "⚠"}
-
-SECTION 2 — BY TECHNOLOGY
-  ┌────────┬──────────┬────────────┬────────────┐
-  │ Tech   │ Female % │ Vulnerable%│ Low-income%│
-  ├────────┼──────────┼────────────┼────────────┤
-"""
-        if tech_rows:
-            for tech, f, v, l in tech_rows[:12]:
-                text += f"  │ {tech[:6].ljust(6)} │ {f:>7.1f}%  │ {v:>9.1f}%  │ {l:>9.1f}%  │\n"
-        else:
-            text += "  │ N/A    │   0.0%   │    0.0%    │    0.0%    │\n"
-        text += """  └────────┴──────────┴────────────┴────────────┘
-
-SECTION 3 — BY DISTRICT
-  ┌────────────┬──────────┬────────────┬────────────┐
-  │ District   │ Female % │ Vulnerable%│ Low-income%│
-  ├────────────┼──────────┼────────────┼────────────┤
-"""
-        if district_rows:
-            for dist, f, v, l in district_rows[:12]:
-                text += f"  │ {dist[:10].ljust(10)} │ {f:>7.1f}%  │ {v:>9.1f}%  │ {l:>9.1f}%  │\n"
-        else:
-            text += "  │ N/A        │   0.0%   │    0.0%    │    0.0%    │\n"
-        text += """  └────────────┴──────────┴────────────┴────────────┘
-
-EXPORT: [ Download PDF ] [ Download Excel ]
-"""
-        return title, text
-
-    # Field Officer reports
-    if report_type == "fo_daily_summary":
-        title = "MY REPORTS — DAILY SUMMARY"
-        text = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-                 DAILY SUMMARY
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Officer:     {(user.full_name or user.username or 'Field Officer')}
-Date:        {_format_date(now)}
-Report ID:   {rid}
-
-(Daily summary is derived from your verification tasks for today.)
-
-EXPORT: [ Download PDF ]
-"""
-        return title, text
-
-    if report_type == "fo_performance_summary":
-        title = "MY PERFORMANCE SUMMARY"
-        text = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-     MY PERFORMANCE SUMMARY — {(user.full_name or user.username or 'Field Officer')}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-This report covers YOUR verifications only.
-Report ID: {rid}
-
-EXPORT: [ Download PDF ]
-"""
-        return title, text
-
-    if report_type == "fo_verification_history":
-        title = "MY VERIFICATION HISTORY"
-        text = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-      MY VERIFICATION HISTORY — {(user.full_name or user.username or 'Field Officer')}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-PERIOD:     {date_from or 'N/A'} — {date_to or 'N/A'}
-Report ID:  {rid}
-
-NOTE: Beneficiary NID and phone not shown for privacy.
-
-EXPORT: [ Download PDF ] [ Download CSV ]
-"""
-        return title, text
-
-    # Auditor (export-focused)
-    if report_type == "auditor_full_audit":
-        title = "FULL AUDIT REPORT — RBF PROGRAMME"
-        text = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        FULL AUDIT REPORT — RBF PROGRAMME
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Scope:        All Projects, All Users
-Period:       {date_from or 'N/A'} — {date_to or 'N/A'}
-Generated By: {(user.full_name or user.username or 'Auditor')}
-Report ID:    {rid}
-
-EXPORT: [ Download PDF ] [ Download CSV ]
-"""
-        return title, text
-
-    if report_type == "auditor_payment_chain_audit":
-        title = "PAYMENT CHAIN AUDIT REPORT"
-        text = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-          PAYMENT CHAIN AUDIT REPORT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Purpose: Validate full approval chain for payments.
-Report ID: {rid}
-
-EXPORT: [ Download PDF ] [ Download Excel ]
-"""
-        return title, text
-
-    if report_type == "auditor_kpi_compliance_audit":
-        title = "KPI COMPLIANCE AUDIT REPORT"
-        text = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-         KPI COMPLIANCE AUDIT REPORT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Purpose: Verify milestone approvals occurred only when KPI conditions were met.
-Report ID: {rid}
-
-EXPORT: [ Download PDF ] [ Download Excel ]
-"""
-        return title, text
-
-    if report_type == "auditor_data_integrity":
-        title = "DATA INTEGRITY REPORT"
-        text = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-           DATA INTEGRITY REPORT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-SECTION 1 — OUR DATABASE vs PROSPECT
-  (See exports for discrepancy tables.)
-
-SECTION 2 — GPS VALIDATION INTEGRITY
-  (See exports for validation counts.)
-
-SECTION 3 — METER DATA INTEGRITY
-  (See exports for accepted/rejected upload rows.)
-
-EXPORT: [ Download PDF ] [ Download Excel ]
-"""
-        return title, text
-
-    if report_type == "auditor_prospect_sync":
-        title = "PROSPECT SYNC AUDIT"
-        text = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-              PROSPECT SYNC AUDIT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Scope:      All operations
-Report ID:  {rid}
-
-EXPORT: [ Download PDF ] [ Download Excel ] [ Download CSV ]
-"""
-        return title, text
-
-    # Default fallback (should not happen if templates are correct)
-    return report_type, f"Report template '{report_type}' is not implemented."
-
-
-def _build_report_payload(request, report_type: str, params: dict) -> tuple[list[str], list[list[object]]]:
-    user = request.user
-    projects = _user_project_queryset(user)
-    project_id = (params or {}).get('project') or (params or {}).get('project_id')
-    if project_id:
-        projects = projects.filter(id=project_id)
-
-    if report_type in {'rbf_portfolio_matrix', 'rmt_portfolio_summary'}:
-        columns = ['Project ID', 'Reference', 'Vendor', 'Technology', 'Progress %', 'Gender Impact %', 'Status']
-        rows = [
-            [
-                str(project.id),
-                project.project_reference or '',
-                project.vendor_name or '',
-                project.tech_type or '',
-                str(project.progress or 0),
-                str(project.gender_impact or 0),
-                project.status or '',
-            ]
-            for project in projects.order_by('-progress')[:200]
-        ]
-        return columns, rows
-
-    if report_type in {'doe_regional_progress'}:
-        columns = ['Project ID', 'Reference', 'District/Region', 'Technology', 'Progress', 'Verified', 'Female %', 'Status']
-        rows = [
-            [
-                str(project.id),
-                project.project_reference or '',
-                project.district or project.region or '',
-                project.tech_type or '',
-                f"{project.progress or 0}%",
-                f"{project.verified_installations or 0}",
-                f"{project.gender_impact or 0}%",
-                project.status or '',
-            ]
-            for project in projects.order_by('-progress')[:200]
-        ]
-        return columns, rows
-
-    if report_type in {'doe_verification_summary', 'rmt_verification_project'}:
-        columns = ['Project ID', 'Reference', 'District/Region', 'Technology', 'Verified', 'Flagged']
-        rows = [
-            [
-                str(project.id),
-                project.project_reference or '',
-                project.district or project.region or '',
-                project.tech_type or '',
-                f"{getattr(project, 'verified_installations', 0) or 0}",
-                f"{getattr(project, 'flagged_installations', 0) or 0}",
-            ]
-            for project in projects.order_by('-progress')[:200]
-        ]
-        return columns, rows
-
-    if report_type in {'rmt_kpi_project'}:
-        # One-row KPI snapshot for Excel/CSV exports.
-        project = projects.first()
-        if not project:
-            return ['Message'], [['No project selected or project not found for scope.']]
-        try:
-            summary = KpiService.for_project(str(project.id)).getFullKpiSummary()
-        except Exception:
-            summary = {}
-        ip = summary.get('installation_progress') or {}
-        gender = summary.get('gender_kpi') or {}
-        energy = summary.get('energy_kpi') or {}
-        uptime = summary.get('uptime_kpi') or {}
-        columns = [
-            'Project',
-            'Vendor',
-            'Technology',
-            'District',
-            'Target Installations',
-            'Submitted',
-            'Verified',
-            'Pending',
-            'Flagged',
-            'Progress %',
-            'Expected %',
-            'Female %',
-            'Vulnerable %',
-            'Low-income %',
-            'Current Energy Achievement %',
-            'Average Uptime %',
-            'Generated At',
-        ]
-        rows = [[
-            project.project_reference or str(project.id),
-            project.vendor_name or '',
-            project.tech_type or '',
-            project.district or project.region or '',
-            int(ip.get('target') or project.target_installations or 0),
-            int(ip.get('submitted') or 0),
-            int(ip.get('verified') or 0),
-            int(ip.get('pending') or 0),
-            int(ip.get('flagged') or 0),
-            float(ip.get('progress_pct') or 0),
-            float(ip.get('expected_progress_pct') or 0),
-            float((gender.get('female_headed') or {}).get('percentage') or 0),
-            float((gender.get('vulnerable') or {}).get('percentage') or 0),
-            float((gender.get('low_income') or {}).get('percentage') or 0),
-            float(energy.get('current_month_pct') or 0),
-            float(uptime.get('average_uptime_pct') or 0),
-            summary.get('generated_at') or '',
-        ]]
-        return columns, rows
-
-    if report_type in {'psc_disbursement_summary', 'psc_financial_summary', 'rmt_financial_disbursement'}:
-        claims = PaymentClaim.objects.select_related('project', 'vendor').order_by('-submitted_at')[:300]
-        columns = ['Claim ID', 'Project', 'Vendor', 'Status', 'Claim Amount', 'Submitted At', 'Approved At', 'Paid At']
-        rows = [
-            [
-                str(claim.id),
-                claim.project.project_reference if claim.project else '',
-                claim.vendor.full_name or claim.vendor.username if claim.vendor else '',
-                claim.status,
-                str(claim.claim_amount or 0),
-                claim.submitted_at.isoformat() if getattr(claim, 'submitted_at', None) else '',
-                claim.approved_at.isoformat() if getattr(claim, 'approved_at', None) else '',
-                claim.paid_at.isoformat() if getattr(claim, 'paid_at', None) else '',
-            ]
-            for claim in claims[:300]
-        ]
-        return columns, rows
-
-    if report_type in {'psc_vendor_payment_trail', 'auditor_payment_chain_audit'}:
-        claims = PaymentClaim.objects.select_related('project', 'vendor').order_by('-submitted_at')[:300]
-        columns = ['Claim ID', 'Vendor', 'Project', 'Status', 'Requested', 'Approved', 'Paid']
-        rows = [
-            [
-                str(claim.id),
-                claim.vendor.full_name or claim.vendor.username if claim.vendor else '',
-                claim.project.project_reference if claim.project else '',
-                claim.status,
-                str(claim.claim_amount or 0),
-                claim.approved_at.isoformat() if getattr(claim, 'approved_at', None) else '',
-                claim.paid_at.isoformat() if getattr(claim, 'paid_at', None) else '',
-            ]
-            for claim in claims[:300]
-        ]
-        return columns, rows
-
-    if report_type in {'field_verifier_activity', 'fo_verification_history'}:
-        tasks = VerificationTask.objects.filter(field_verifier_task_scope_filter(user, task_prefix='')).select_related('report', 'report__project').order_by('-created_at')[:300]
-        columns = ['Task ID', 'Installation', 'Project', 'Outcome', 'GPS Distance (m)', 'Submitted At', 'Updated At']
-        rows = [
-            [
-                str(task.id),
-                str(task.report.id) if task.report else '',
-                task.report.project.project_reference if task.report and task.report.project else '',
-                task.status,
-                str(getattr(task, 'distance_meters', '') or ''),
-                task.created_at.isoformat() if task.created_at else '',
-                task.updated_at.isoformat() if task.updated_at else '',
-            ]
-            for task in tasks
-        ]
-        return columns, rows
-
-    if report_type in {'auditor_audit_report', 'auditor_full_audit'}:
-        logs = AuditLog.objects.select_related('actor').order_by('-created_at')[:500]
-        columns = ['Timestamp', 'Actor', 'Role', 'Action', 'Module', 'Record', 'Notes']
-        rows = [
-            [
-                timezone.localtime(log.created_at).isoformat(),
-                (log.actor.full_name or log.actor.username) if log.actor else 'System',
-                log.actor_role,
-                log.action,
-                log.module,
-                log.entity_id or log.record_id or '',
-                log.notes,
-            ]
-            for log in logs
-        ]
-        return columns, rows
-
-    if report_type in {'auditor_prospect_sync', 'auditor_prospect_sync'}:
-        syncs = ProspectSyncLog.objects.order_by('-created_at')[:300]
-        columns = ['Sync ID', 'Method', 'Status', 'Created At', 'Updated At', 'Attempts', 'Error']
-        rows = [
-            [
-                str(sync.id),
-                sync.method_name,
-                sync.status,
-                sync.created_at.isoformat() if sync.created_at else '',
-                sync.updated_at.isoformat() if sync.updated_at else '',
-                str(sync.attempts or 0),
-                sync.error_message or '',
-            ]
-            for sync in syncs
-        ]
-        return columns, rows
-
-    if report_type in {'rmt_anomaly_report'}:
-        flags = AnomalyFlag.objects.select_related('project').order_by('-created_at')[:500]
-        columns = ['Flag ID', 'Project', 'Type', 'Resolved', 'Created At', 'Resolved At', 'Description']
-        rows = [
-            [
-                str(flag.id),
-                flag.project.project_reference if getattr(flag, 'project', None) else '',
-                flag.flag_type,
-                'Yes' if flag.is_resolved else 'No',
-                flag.created_at.isoformat() if flag.created_at else '',
-                flag.resolved_at.isoformat() if flag.resolved_at else '',
-                flag.description or '',
-            ]
-            for flag in flags
-        ]
-        return columns, rows
-
-    if report_type in {'rmt_gender_impact'}:
-        projects_qs = _user_project_queryset(user)
-        verified_qs = InstallationReport.objects.filter(project__in=projects_qs, status=InstallationStatus.VERIFIED)
-        columns = ['Group', 'Key', 'Total Verified', 'Female %', 'Vulnerable %', 'Low-income %']
-        rows: list[list[object]] = []
-
-        total = verified_qs.count()
-        if total:
-            female = verified_qs.filter(household_type__icontains="female").count()
-            vuln = verified_qs.filter(household_type__icontains="vulnerable").count()
-            low = verified_qs.filter(Q(household_type__icontains="low") | Q(household_type__icontains="income")).count()
-            rows.append(['overall', 'portfolio', total, female / total * 100.0, vuln / total * 100.0, low / total * 100.0])
-
-        for tech in projects_qs.values_list("tech_type", flat=True).distinct():
-            if not tech:
-                continue
-            tqs = verified_qs.filter(project__tech_type=tech)
-            ttotal = tqs.count()
-            if not ttotal:
-                continue
-            female = tqs.filter(household_type__icontains="female").count()
-            vuln = tqs.filter(household_type__icontains="vulnerable").count()
-            low = tqs.filter(Q(household_type__icontains="low") | Q(household_type__icontains="income")).count()
-            rows.append(['technology', tech, ttotal, female / ttotal * 100.0, vuln / ttotal * 100.0, low / ttotal * 100.0])
-
-        for dist in projects_qs.values_list("district", flat=True).distinct():
-            if not dist:
-                continue
-            dqs = verified_qs.filter(project__district=dist)
-            dtotal = dqs.count()
-            if not dtotal:
-                continue
-            female = dqs.filter(household_type__icontains="female").count()
-            vuln = dqs.filter(household_type__icontains="vulnerable").count()
-            low = dqs.filter(Q(household_type__icontains="low") | Q(household_type__icontains="income")).count()
-            rows.append(['district', dist, dtotal, female / dtotal * 100.0, vuln / dtotal * 100.0, low / dtotal * 100.0])
-
-        rows.sort(key=lambda r: (str(r[0]), str(r[1])))
-        return columns, rows
-
-    # Placeholder payloads for reports whose live view exists elsewhere.
-    columns = ['Report', 'Status', 'Note']
-    rows = [[report_type, 'AVAILABLE', 'This export is a structured placeholder; KPI dashboards provide the live view.']]
-    return columns, rows
+# --- Reports ------------------------------------------------------------------------
+# Report definitions, data scope and rendering live in report_engine; generation runs in the
+# background through report_queue. These views queue jobs and expose their results.
+
+REPORT_HISTORY_ALL_ROLES = {UserRole.ADMIN, UserRole.AUDITOR}
+REPORT_HISTORY_PAGE_SIZE = 25
+
+
+def _report_row(report: GeneratedReport) -> dict:
+    filters = report.filters or {}
+    period = (
+        f"{filters.get('from') or 'start'} to {filters.get('to') or 'today'}"
+        if (filters.get('from') or filters.get('to')) else 'Programme to date'
+    )
+    applied = [f'{key}: {filters[key]}' for key in ('district', 'technology', 'vendor', 'tender') if filters.get(key)]
+    return {
+        'id': str(report.id),
+        'reportType': report.report_type,
+        'title': report.title or report.report_type,
+        'status': report.status,
+        'error': report.error,
+        'rowCount': report.row_count,
+        'project': report.project.project_reference if report.project else '',
+        'period': period,
+        'filters': ', '.join(applied),
+        'generatedBy': (report.generated_by.full_name or report.generated_by.username) if report.generated_by else '',
+        'generatedAt': timezone.localtime(report.generated_at).isoformat(),
+        'completedAt': timezone.localtime(report.completed_at).isoformat() if report.completed_at else None,
+        'format': report.format,
+        'downloadUrl': f'/api/projects/reports/{report.id}/download/' if report.status == GeneratedReport.Status.READY and report.file else None,
+        'approvalStatus': report.approval_status,
+        'version': report.version,
+        'supersedesId': str(report.supersedes_id) if report.supersedes_id else None,
+        'reviewedBy': (report.reviewed_by.full_name or report.reviewed_by.username) if report.reviewed_by_id else None,
+        'approvedBy': (report.approved_by.full_name or report.approved_by.username) if report.approved_by_id else None,
+        'approvedAt': timezone.localtime(report.approved_at).isoformat() if report.approved_at else None,
+        'reviewNotes': report.review_notes,
+        'generatedById': str(report.generated_by_id) if report.generated_by_id else None,
+        'reviewedById': str(report.reviewed_by_id) if report.reviewed_by_id else None,
+        'scheduleName': report.schedule.name if report.schedule_id else None,
+        'distributedAt': timezone.localtime(report.distributed_at).isoformat() if report.distributed_at else None,
+    }
+
+
+def _visible_reports(user):
+    queryset = GeneratedReport.objects.select_related(
+        'generated_by', 'project', 'reviewed_by', 'approved_by', 'schedule',
+    ).order_by('-generated_at')
+    if user.role not in REPORT_HISTORY_ALL_ROLES:
+        queryset = queryset.filter(generated_by=user)
+    return queryset
 
 
 class ProjectReportTemplatesView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        user = request.user
-        if user.role == UserRole.ADMIN:
-            templates = REPORT_TEMPLATES
-        else:
-            templates = [tpl for tpl in REPORT_TEMPLATES if user.role in tpl['roles']]
+        from .report_engine import definitions_for
+
         return Response([
             {
-                'id': tpl['id'],
-                'title': tpl['title'],
-                'description': tpl['description'],
-                'category': tpl.get('category') or 'Reports',
-                'quick': bool(tpl.get('quick')),
-                'formats': _report_formats_for_user(user, tpl['id']),
+                'id': d.id,
+                'title': d.title,
+                'description': d.description,
+                'category': d.category,
+                'quick': d.quick,
+                'formats': list(d.formats),
+                'requires_project': d.requires_project,
+                'requires_tender': d.requires_tender,
+                'requires_reason': d.requires_reason,
+                'filters': list(d.filters),
+                'method': d.method,
             }
-            for tpl in templates
+            for d in definitions_for(request.user)
         ])
 
 
-class ProjectReportGenerateView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request):
-        report_type = str(request.data.get('report_type') or '').strip()
-        format_type = str(request.data.get('format') or 'csv').strip().lower()
-        if format_type not in {'csv', 'pdf', 'excel'}:
-            raise PermissionDenied('Unsupported report format.')
-        filters = request.data.get('filters') or {}
-        columns, rows = _build_report_payload(request, report_type, filters)
-        
-        filename_base = f'{_safe_filename_base(report_type)}_{timezone.localdate().isoformat()}'
-        project = None
-        project_id = filters.get('project') or filters.get('project_id')
-        if project_id:
-            try:
-                project = Project.objects.get(id=project_id)
-            except Exception:
-                project = None
-
-        content_bytes: bytes
-        content_type: str
-        ext: str
-
-        if format_type == 'csv':
-            buffer = io.StringIO()
-            writer = csv.writer(buffer)
-            writer.writerow(columns)
-            for row in rows:
-                writer.writerow([str(item or '') for item in row])
-            content_bytes = buffer.getvalue().encode('utf-8')
-            content_type = 'text/csv'
-            ext = 'csv'
-        elif format_type == 'excel':
-            content_bytes = _xlsx_bytes(columns, rows)
-            content_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-            ext = 'xlsx'
-        else:
-            # Professional PDF rendering
-            from .reports import build_report_html
-            pdf_title, report_html = build_report_html(request, report_type, filters)
-            
-            # Use the existing _render_pdf but with our professional HTML
-            from rbf.tenders.pba_pdf import _render_pdf
-            tmp_dir = Path(tempfile.mkdtemp(prefix="report_pdf_"))
-            output_path = tmp_dir / f"report_{uuid.uuid4().hex}.pdf"
-            
-            # _render_pdf expects (html_string, output_path, contract_reference)
-            # We'll use the title or RID as contract_reference for the header
-            _render_pdf(report_html, output_path, pdf_title[:32])
-            
-            content_bytes = output_path.read_bytes()
-            content_type = 'application/pdf'
-            ext = 'pdf'
-
-        generated = GeneratedReport.objects.create(
-            report_type=report_type,
-            format=format_type,
-            filters=filters,
-            scope_label=str(filters.get('scope_label') or ''),
-            project=project,
-            generated_by=request.user,
-            file=ContentFile(content_bytes, name=f'{filename_base}.{ext}'),
-        )
-        AuditLog.objects.create(
-            actor=request.user if getattr(request.user, 'is_authenticated', False) else None,
-            actor_role=str(getattr(request.user, 'role', '') or ''),
-            action='report_generated',
-            module='report',
-            entity_type='Report',
-            entity_id=str(generated.id),
-            record_id=None,
-            record_type='Report',
-            old_status='',
-            new_status='',
-            notes=f'{report_type} generated as {format_type}',
-            ip_address=AuditLogger._ip_address(request),
-            details={'report_type': report_type, 'format': format_type, 'generated_report_id': str(generated.id)},
-        )
-        response = HttpResponse(content_bytes, content_type=content_type)
-        response['Content-Disposition'] = f'attachment; filename="{filename_base}.{ext}"'
-        response['X-Generated-Report-Id'] = str(generated.id)
-        return response
-
-
-class ProjectReportHistoryView(APIView):
+class ProjectReportFilterOptionsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        queryset = GeneratedReport.objects.select_related('generated_by', 'project').order_by('-generated_at')
-        if request.user.role not in {UserRole.ADMIN, UserRole.RBF_OFFICIAL, UserRole.AUDITOR, UserRole.UNDP_DONOR, UserRole.DOE_OFFICER}:
-            queryset = queryset.filter(generated_by=request.user)
-        items = []
-        for report in queryset[:20]:
-            items.append({
-                'id': str(report.id),
-                'reportType': report.report_type,
-                'project': report.project.project_reference if report.project else '',
-                'generatedBy': (report.generated_by.full_name or report.generated_by.username) if report.generated_by else '',
-                'generatedAt': timezone.localtime(report.generated_at).isoformat(),
-                'format': report.format,
-                'downloadUrl': f'/api/projects/reports/{report.id}/download/',
-            })
-        return Response(items)
+        from .report_engine import definitions_for, filter_options
+
+        if not definitions_for(request.user):
+            return Response({'districts': [], 'technologies': [], 'vendors': [], 'tenders': [], 'projects': []})
+        return Response(filter_options(request.user))
+
+
+class ProjectReportGenerateView(APIView):
+    """Queue a report. Access and filters are checked now; the file is generated in the background."""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from .report_queue import enqueue
+
+        report_type = str(request.data.get('report_type') or '').strip()
+        format_type = str(request.data.get('format') or 'pdf').strip().lower()
+        filters = request.data.get('filters') or {}
+        if not isinstance(filters, dict):
+            raise ValidationError({'filters': 'Filters must be an object.'})
+        report = enqueue(request.user, report_type, format_type, filters)
+        return Response(_report_row(report), status=status.HTTP_202_ACCEPTED)
+
+
+class ProjectReportStatusView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, report_id):
+        report = _visible_reports(request.user).filter(id=report_id).first()
+        if report is None:
+            raise Http404('Report not found.')
+        return Response(_report_row(report))
+
+
+class ProjectReportHistoryView(APIView):
+    """Your own generated reports, newest first, paged and searchable; Admin and Auditor see everyone's."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        queryset = _visible_reports(request.user)
+        search = str(request.query_params.get('search') or '').strip()
+        if search:
+            queryset = queryset.filter(Q(title__icontains=search) | Q(report_type__icontains=search) | Q(generated_by__username__icontains=search))
+        state = str(request.query_params.get('status') or '').strip()
+        if state in GeneratedReport.Status.values:
+            queryset = queryset.filter(status=state)
+        if request.query_params.get('active') in {'1', 'true'}:
+            queryset = queryset.filter(status__in=[GeneratedReport.Status.QUEUED, GeneratedReport.Status.RUNNING])
+        try:
+            page = max(1, int(request.query_params.get('page') or 1))
+        except ValueError:
+            page = 1
+        total = queryset.count()
+        start = (page - 1) * REPORT_HISTORY_PAGE_SIZE
+        return Response({
+            'count': total,
+            'page': page,
+            'page_size': REPORT_HISTORY_PAGE_SIZE,
+            'results': [_report_row(r) for r in queryset[start:start + REPORT_HISTORY_PAGE_SIZE]],
+        })
+
+
+def _report_for_action(request, report_id) -> GeneratedReport:
+    report = GeneratedReport.objects.select_related('generated_by', 'schedule').filter(id=report_id).first()
+    if report is None:
+        raise Http404('Report not found.')
+    return report
+
+
+class ProjectReportActionView(APIView):
+    """Sign-off and distribution steps for a generated report."""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, report_id, step):
+        from . import report_workflow as wf
+
+        report = _report_for_action(request, report_id)
+        notes = str(request.data.get('notes') or '').strip()
+        if step == 'submit':
+            report = wf.submit_for_review(report, request.user)
+        elif step == 'review':
+            report = wf.review(report, request.user, accept=request.data.get('decision') != 'return', notes=notes)
+        elif step == 'approve':
+            report = wf.approve(report, request.user, accept=request.data.get('decision') != 'return', notes=notes)
+        elif step == 'new-version':
+            report = wf.new_version(report, request.user)
+            return Response(_report_row(report), status=status.HTTP_202_ACCEPTED)
+        elif step == 'distribute':
+            if request.user.role not in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}:
+                raise PermissionDenied('Only the RBF Management Team or Super Admin can distribute reports.')
+            roles = [r for r in (request.data.get('roles') or []) if r in UserRole.values and r != UserRole.VENDOR]
+            if not roles:
+                raise ValidationError({'roles': 'Choose who should receive the report.'})
+            count = wf.distribute(report, request.user, roles=roles)
+            return Response({**_report_row(report), 'recipients': count})
+        else:
+            raise Http404('Unknown step.')
+        report.refresh_from_db()
+        return Response(_report_row(report))
+
+
+class ProjectReportInboxView(APIView):
+    """Reports shared with me, and formal reports waiting for my review or approval."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        base = GeneratedReport.objects.select_related('generated_by', 'project', 'reviewed_by', 'approved_by', 'schedule')
+        shared = base.filter(distributed_to=user).order_by('-distributed_at')[:50]
+        waiting = []
+        if user.role in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}:
+            waiting = list(
+                base.filter(approval_status=GeneratedReport.Approval.IN_REVIEW).exclude(generated_by=user)
+            ) + list(
+                base.filter(approval_status=GeneratedReport.Approval.REVIEWED).exclude(generated_by=user).exclude(reviewed_by=user)
+            )
+        return Response({
+            'shared': [_report_row(r) for r in shared],
+            'awaiting': [_report_row(r) for r in sorted(waiting, key=lambda r: r.generated_at)],
+        })
 
 
 class ProjectReportDownloadView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, report_id):
-        report = GeneratedReport.objects.select_related('generated_by').get(id=report_id)
-        privileged = request.user.role in {
-            UserRole.ADMIN,
-            UserRole.RBF_OFFICIAL,
-            UserRole.AUDITOR,
-            UserRole.UNDP_DONOR,
-            UserRole.DOE_OFFICER,
-            UserRole.TAC,
+        report = GeneratedReport.objects.select_related('generated_by').filter(id=report_id).first()
+        if report is None:
+            raise Http404('Report not found.')
+        shared_with_me = report.distributed_to.filter(id=request.user.id).exists()
+        signer = request.user.role in {UserRole.RBF_OFFICIAL, UserRole.ADMIN} and report.approval_status in {
+            GeneratedReport.Approval.IN_REVIEW, GeneratedReport.Approval.REVIEWED, GeneratedReport.Approval.APPROVED,
         }
-        if not privileged and report.generated_by_id != request.user.id:
-            raise PermissionDenied('You do not have permission to download this report.')
+        if request.user.role not in REPORT_HISTORY_ALL_ROLES and report.generated_by_id != request.user.id and not shared_with_me and not signer:
+            raise PermissionDenied('You can only download reports you generated or that were shared with you.')
+        if report.status != GeneratedReport.Status.READY or not report.file:
+            return Response({'detail': 'This report is not ready yet.'}, status=status.HTTP_409_CONFLICT)
+        log_audit(request.user, 'report_downloaded', report, {
+            'module': 'report', 'report_type': report.report_type, 'format': report.format, 'filters': report.filters,
+        })
         return FileResponse(report.file.open('rb'), as_attachment=True, filename=Path(report.file.name).name)
 
 
-class ConcernViewSet(viewsets.ModelViewSet):
-    queryset = Concern.objects.select_related('raised_by', 'linked_project').all()
-    serializer_class = ConcernSerializer
-    permission_classes = [IsAuthenticated]
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    filterset_fields = ['status', 'severity', 'concern_type']
-    search_fields = ['description', 'id']
-    ordering_fields = ['created_at', 'severity']
+DOE_RECORD_READ_ROLES = {UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.AUDITOR, UserRole.TAC, UserRole.UNDP_DONOR}
 
-    def get_queryset(self):
+
+class DoeRegionalRecordMixin:
+    """Shared rules for records DoE officers create: region-scoped, owner-edited, never deleted."""
+
+    http_method_names = ['get', 'post', 'patch', 'put', 'head', 'options']
+    owner_field = ''
+    record_label = 'records'
+
+    def scope_queryset(self, qs):
         user = self.request.user
         if user.role == UserRole.DOE_OFFICER:
-            return self.queryset.filter(raised_by=user)
-        if user.role == UserRole.AUDITOR:
-            return self.queryset.none()
-        if user.role == UserRole.RBF_OFFICIAL:
-            return self.queryset.all()
-        if user.role == "Project Steering Committee" or user.role == "UNDP_DONOR":
-            return self.queryset.filter(notify_psc=True)
-        return self.queryset.none()
+            return qs.filter(doe_region_filter(user, prefix='project__')).distinct()
+        if user.role in DOE_RECORD_READ_ROLES:
+            return qs
+        return qs.none()
 
-    def perform_create(self, serializer):
-        concern = serializer.save(raised_by=self.request.user)
-        if concern.notify_rmt:
-            NotificationService.notify_pseudo(
-                "rmt",
-                title=f"[{concern.severity.upper()}] New concern raised by DoE",
-                body=f"{concern.linked_project.project_reference if concern.linked_project else 'General'} — {concern.get_concern_type_display()}",
-                event="doe_concern",
-                linked_entity_id=concern.id,
-            )
-        if concern.notify_psc:
-            NotificationService.notify_pseudo(
-                "psc",
-                title=f"DoE has flagged a concern",
-                body=f"Review recommended: {concern.description[:100]}",
-                event="doe_concern",
-                linked_entity_id=concern.id,
-            )
+    def assert_can_write(self, project):
+        user = self.request.user
+        if user.role != UserRole.DOE_OFFICER:
+            raise PermissionDenied(f'Only DoE Officers can create or update {self.record_label}.')
+        if not Project.objects.filter(id=project.id).filter(doe_region_filter(user)).exists():
+            raise PermissionDenied('You can only work on projects in your region.')
+
+    def assert_owner(self, instance):
+        if getattr(instance, f'{self.owner_field}_id') != self.request.user.id:
+            raise PermissionDenied(f'You can only update {self.record_label} you created.')
 
 
-class ConcernResponseViewSet(viewsets.ModelViewSet):
-    queryset = ConcernResponse.objects.select_related('responded_by', 'concern').all()
-    serializer_class = ConcernResponseSerializer
+class SiteMonitoringVisitViewSet(ArchiveScopedListMixin, DoeRegionalRecordMixin, viewsets.ModelViewSet):
+    queryset = SiteMonitoringVisit.objects.select_related('project', 'installation', 'visited_by').prefetch_related('photos')
+    serializer_class = SiteMonitoringVisitSerializer
     permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['project', 'installation', 'follow_up_status']
+    search_fields = ['observations', 'follow_up_action', 'project__project_reference']
+    ordering_fields = ['visit_date', 'created_at']
+    owner_field = 'visited_by'
+    record_label = 'site monitoring visits'
 
     def get_queryset(self):
-        user = self.request.user
-        if user.role in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}:
-            return self.queryset.all()
-        if user.role == "Project Steering Committee" or user.role == "UNDP_DONOR":
-            return self.queryset.all()
-        return self.queryset.none()
+        return self.scope_queryset(self.queryset.all())
+
+    def _save_photos(self, visit):
+        uploads = self.request.FILES.getlist('photos')
+        if len(uploads) + visit.photos.count() > 10:
+            raise ValidationError({'photos': 'A visit can have at most 10 photos.'})
+        for upload in uploads:
+            SiteMonitoringVisitSerializer.validate_photo(upload)
+        for upload in uploads:
+            SiteMonitoringPhoto.objects.create(visit=visit, file=upload)
 
     def perform_create(self, serializer):
-        response = serializer.save(responded_by=self.request.user)
-        
-        user = self.request.user
-        if user.role == "Project Steering Committee" or user.role == "UNDP_DONOR":
-            NotificationService.notify_pseudo(
-                "rmt",
-                title=f"PSC Comment on {response.concern.id}",
-                body=f"PSC has added a comment to concern {response.concern.id}: {response.response_text[:100]}",
-                event="psc_comment",
-                linked_entity_id=response.concern.id,
+        self.assert_can_write(serializer.validated_data['project'])
+        with transaction.atomic():
+            visit = serializer.save(visited_by=self.request.user)
+            self._save_photos(visit)
+        log_audit(self.request.user, 'site_monitoring_visit_recorded', visit, {'project_id': str(visit.project_id)})
+        if visit.follow_up_status in {SiteVisitFollowUpStatus.OPEN, SiteVisitFollowUpStatus.IN_PROGRESS}:
+            notify_project_oversight(
+                visit.project,
+                'DoE site visit needs follow-up',
+                f"{self.request.user.full_name or self.request.user.username} visited "
+                f"{visit.project.project_reference or visit.project_id} on {visit.visit_date}: "
+                f"{visit.follow_up_action or visit.observations[:120]}",
             )
 
+    def perform_update(self, serializer):
+        self.assert_can_write(serializer.instance.project)
+        self.assert_owner(serializer.instance)
+        with transaction.atomic():
+            visit = serializer.save()
+            self._save_photos(visit)
+        log_audit(self.request.user, 'site_monitoring_visit_updated', visit, {'project_id': str(visit.project_id)})
 
-class AuditFindingViewSet(viewsets.ModelViewSet):
-    queryset = AuditFinding.objects.select_related('raised_by', 'linked_project').all()
-    serializer_class = AuditFindingSerializer
+    @action(detail=True, methods=['post'], url_path=r'photos/(?P<photo_id>[^/.]+)/remove')
+    def remove_photo(self, request, pk=None, photo_id=None):
+        visit = self.get_object()
+        self.assert_can_write(visit.project)
+        self.assert_owner(visit)
+        photo = visit.photos.filter(id=photo_id).first()
+        if not photo:
+            raise Http404('Photo not found.')
+        photo.delete()
+        return Response(self.get_serializer(visit).data)
+
+
+class KpiReviewViewSet(ArchiveScopedListMixin, DoeRegionalRecordMixin, viewsets.ModelViewSet):
+    queryset = KpiReview.objects.select_related('project', 'reviewer')
+    serializer_class = KpiReviewSerializer
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    filterset_fields = ['status', 'risk_level', 'finding_category']
-    search_fields = ['description', 'id']
-    ordering_fields = ['created_at', 'risk_level']
+    filterset_fields = ['project', 'rating', 'review_period']
+    search_fields = ['summary', 'project__project_reference']
+    ordering_fields = ['review_period', 'updated_at']
+    owner_field = 'reviewer'
+    record_label = 'KPI reviews'
 
     def get_queryset(self):
-        user = self.request.user
-        if user.role == UserRole.AUDITOR:
-            return self.queryset.filter(raised_by=user)
-        if user.role in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}:
-            return self.queryset.all()
-        if user.role == "Project Steering Committee" or user.role == "UNDP_DONOR":
-            return self.queryset.all()
-        return self.queryset.none()
+        return self.scope_queryset(self.queryset.all())
+
+    def _assert_unique_period(self, project, period, exclude_id=None):
+        clash = KpiReview.objects.filter(project=project, reviewer=self.request.user, review_period=period)
+        if exclude_id:
+            clash = clash.exclude(id=exclude_id)
+        if clash.exists():
+            raise ValidationError({'review_period': 'You already reviewed this project for that month. Edit the existing review instead.'})
 
     def perform_create(self, serializer):
-        finding = serializer.save(raised_by=self.request.user)
-        
-        log_audit(
-            actor=self.request.user,
-            action="audit_finding_raised",
-            entity=finding,
-            details={
-                "finding_category": finding.finding_category,
-                "risk_level": finding.risk_level,
-                "linked_project": finding.linked_project.id if finding.linked_project else None,
-                "linked_claim": finding.linked_claim.id if finding.linked_claim else None,
-                "description": finding.description[:200],
-            },
+        project = serializer.validated_data['project']
+        self.assert_can_write(project)
+        self._assert_unique_period(project, serializer.validated_data['review_period'])
+        review = serializer.save(reviewer=self.request.user)
+        log_audit(self.request.user, 'kpi_review_submitted', review, {'project_id': str(review.project_id), 'rating': review.rating})
+        if review.rating == KpiReviewRating.AT_RISK:
+            notify_project_oversight(
+                review.project,
+                'DoE KPI review: project at risk',
+                f"{self.request.user.full_name or self.request.user.username} rated "
+                f"{review.project.project_reference or review.project_id} at risk for {review.review_period}: {review.summary[:150]}",
+            )
+
+    def perform_update(self, serializer):
+        instance = serializer.instance
+        self.assert_can_write(instance.project)
+        self.assert_owner(instance)
+        period = serializer.validated_data.get('review_period', instance.review_period)
+        self._assert_unique_period(instance.project, period, exclude_id=instance.id)
+        review = serializer.save()
+        log_audit(self.request.user, 'kpi_review_updated', review, {'project_id': str(review.project_id), 'rating': review.rating})
+
+
+class OversightReviewViewSet(viewsets.ModelViewSet):
+    """Shared oversight reviews, flags and comments (DoE, PSC, RMT) on existing project records.
+
+    Readers: RMT, Admin, PSC, TAC, Auditor (national); DoE (own region). Writers: DoE, PSC, RMT, Admin.
+    Records are never deleted; the reviewer may amend their own entry until it is resolved, and the
+    RBF Management Team tracks the follow-up.
+    """
+
+    queryset = OversightReview.objects.select_related(
+        'reviewer', 'resolved_by', 'project', 'vendor', 'verification_task__report', 'payment_claim',
+    )
+    serializer_class = OversightReviewSerializer
+    permission_classes = [IsAuthenticated]
+    http_method_names = ['get', 'post', 'patch', 'head', 'options']
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = [
+        'subject_type', 'review_status', 'follow_up_status', 'project', 'reviewer', 'reviewer_role',
+        'verification_task', 'payment_claim', 'vendor', 'milestone',
+    ]
+    search_fields = ['comment', 'action_required', 'issue_category', 'project__project_reference']
+    ordering_fields = ['created_at', 'follow_up_date', 'updated_at']
+
+    READ_ROLES = {UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.UNDP_DONOR, UserRole.TAC, UserRole.AUDITOR}
+    WRITE_ROLES = {UserRole.DOE_OFFICER, UserRole.UNDP_DONOR, UserRole.RBF_OFFICIAL, UserRole.ADMIN}
+    FOLLOW_UP_ROLES = {UserRole.RBF_OFFICIAL, UserRole.ADMIN}
+    # Statuses a reviewer may record directly; acknowledgement and re-verification are workflow actions.
+    ROLE_STATUSES = {
+        UserRole.UNDP_DONOR: {OversightReviewStatus.COMPLIANT, OversightReviewStatus.DELAYED, OversightReviewStatus.FLAGGED, OversightReviewStatus.COMMENT},
+        UserRole.DOE_OFFICER: {OversightReviewStatus.FLAGGED, OversightReviewStatus.COMMENT},
+        UserRole.RBF_OFFICIAL: {OversightReviewStatus.FLAGGED, OversightReviewStatus.COMMENT},
+        UserRole.ADMIN: {OversightReviewStatus.FLAGGED, OversightReviewStatus.COMMENT},
+    }
+    OWNER_EDITABLE = {'comment', 'review_status', 'issue_category', 'action_required', 'follow_up_date'}
+
+    def get_queryset(self):
+        qs = self.queryset.all()
+        user = self.request.user
+        if user.role == UserRole.DOE_OFFICER:
+            qs = qs.filter(doe_region_filter(user, prefix='project__')).distinct()
+        elif user.role not in self.READ_ROLES:
+            return qs.none()
+        if self.request.query_params.get('mine') in {'1', 'true'}:
+            qs = qs.filter(reviewer=user)
+        if self.request.query_params.get('open') in {'1', 'true'}:
+            qs = qs.filter(follow_up_status__in=[OversightFollowUpStatus.OPEN, OversightFollowUpStatus.IN_PROGRESS])
+        return qs
+
+    @staticmethod
+    def _derive_project(data):
+        for key, attr in (('verification_task', 'report.project'), ('payment_claim', 'project'), ('milestone', 'project'),
+                          ('kpi_review', 'project'), ('monitoring_visit', 'project')):
+            obj = data.get(key)
+            if obj is not None:
+                for part in attr.split('.'):
+                    obj = getattr(obj, part)
+                return obj
+        return data.get('project')
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        if user.role not in self.WRITE_ROLES:
+            raise PermissionDenied('You do not have permission to record oversight reviews.')
+        data = serializer.validated_data
+        if data['review_status'] not in self.ROLE_STATUSES.get(user.role, set()):
+            raise ValidationError({'review_status': 'This review status is not available to your role.'})
+        project = self._derive_project(data)
+        if data.get('project') and project and data['project'].id != project.id:
+            raise ValidationError({'project': 'The linked record belongs to a different project.'})
+        if data['subject_type'] != OversightSubject.VENDOR and project is None:
+            raise ValidationError({'project': 'Link the review to a project or project record.'})
+        if data['subject_type'] == OversightSubject.VENDOR and not (data.get('vendor') or project):
+            raise ValidationError({'vendor': 'Select the vendor being reviewed.'})
+        if user.role == UserRole.DOE_OFFICER:
+            if project is None or not Project.objects.filter(id=project.id).filter(doe_region_filter(user)).exists():
+                raise PermissionDenied('You can only review records in your region.')
+        follow_up = data.get('follow_up_status') or OversightFollowUpStatus.NONE
+        if data['review_status'] in {OversightReviewStatus.FLAGGED, OversightReviewStatus.DELAYED} and follow_up == OversightFollowUpStatus.NONE:
+            follow_up = OversightFollowUpStatus.OPEN
+        if follow_up == OversightFollowUpStatus.RESOLVED:
+            raise ValidationError({'follow_up_status': 'A new review cannot be created as resolved.'})
+        review = serializer.save(
+            reviewer=user,
+            reviewer_role=user.role,
+            project=project,
+            follow_up_status=follow_up,
+            verification_round=data['verification_task'].verification_round if data.get('verification_task') else None,
         )
-        
-        if finding.rised_to_rmt:
-            NotificationService.notify_pseudo(
-                "rmt",
-                title=f"[{finding.risk_level.upper()} AUDIT FINDING] raised by Auditor",
-                body=f"{finding.linked_project.project_reference if finding.linked_project else 'General'} — {finding.get_finding_category_display()}",
-                event="audit_finding",
-                linked_entity_id=finding.id,
+        log_audit(user, 'oversight_review_recorded', review, {
+            'subject_type': review.subject_type, 'review_status': review.review_status,
+            'project_id': str(review.project_id or ''), 'module': 'oversight',
+        })
+        if review.review_status in {OversightReviewStatus.FLAGGED, OversightReviewStatus.DELAYED} and review.project:
+            notify_project_oversight(
+                review.project,
+                f'{review.get_review_status_display()} by {user.get_role_display()}: {review.project.project_reference or review.project_id}',
+                review.comment[:200],
+                linked_entity_id=str(review.project_id),
             )
-        if finding.rised_to_psc:
-            NotificationService.notify_pseudo(
-                "psc",
-                title=f"Audit finding requires your attention",
-                body=f"A {finding.risk_level} finding has been raised on {finding.linked_project.project_reference if finding.linked_project else 'project'}.",
-                event="audit_finding",
-                linked_entity_id=finding.id,
+
+    def perform_update(self, serializer):
+        review = serializer.instance
+        user = self.request.user
+        if review.reviewer_id != user.id:
+            raise PermissionDenied('You can only amend reviews you recorded. Use follow-up to track progress.')
+        if review.follow_up_status == OversightFollowUpStatus.RESOLVED:
+            raise PermissionDenied('Resolved reviews are closed and cannot be amended.')
+        if review.review_status in {OversightReviewStatus.ACKNOWLEDGED, OversightReviewStatus.REVERIFICATION_REQUESTED}:
+            raise PermissionDenied('Workflow records cannot be amended.')
+        changed = set(serializer.validated_data) - self.OWNER_EDITABLE
+        if changed:
+            raise ValidationError({field: 'This field cannot be changed after the review is recorded.' for field in changed})
+        new_status = serializer.validated_data.get('review_status')
+        if new_status and new_status not in self.ROLE_STATUSES.get(user.role, set()):
+            raise ValidationError({'review_status': 'This review status is not available to your role.'})
+        review = serializer.save()
+        log_audit(user, 'oversight_review_amended', review, {'review_status': review.review_status, 'module': 'oversight'})
+
+    @action(detail=True, methods=['post'])
+    def follow_up(self, request, pk=None):
+        review = self.get_object()
+        user = request.user
+        if user.role not in self.FOLLOW_UP_ROLES and review.reviewer_id != user.id:
+            raise PermissionDenied('Only the RBF Management Team or the reviewer can update the follow-up.')
+        new_status = str(request.data.get('follow_up_status') or '').strip()
+        if new_status not in OversightFollowUpStatus.values:
+            return Response({'detail': 'Choose a valid follow-up status.'}, status=status.HTTP_400_BAD_REQUEST)
+        note = str(request.data.get('resolution_note') or '').strip()
+        if new_status == OversightFollowUpStatus.RESOLVED and not note:
+            return Response({'detail': 'Describe how the issue was resolved.'}, status=status.HTTP_400_BAD_REQUEST)
+        previous = review.follow_up_status
+        review.follow_up_status = new_status
+        if note:
+            review.resolution_note = note
+        if new_status == OversightFollowUpStatus.RESOLVED:
+            review.resolved_by = user
+            review.resolved_at = timezone.now()
+        else:
+            review.resolved_by = None
+            review.resolved_at = None
+        review.save(update_fields=['follow_up_status', 'resolution_note', 'resolved_by', 'resolved_at', 'updated_at'])
+        log_audit(user, 'oversight_follow_up_updated', review, {'old_status': previous, 'new_status': new_status, 'module': 'oversight'})
+        if review.reviewer_id and review.reviewer_id != user.id:
+            Notification.objects.create(
+                recipient_id=str(review.reviewer_id),
+                recipient_name=review.reviewer.full_name or review.reviewer.username,
+                type=NotificationChannel.IN_APP,
+                event='oversight_follow_up',
+                title=f'Follow-up {review.get_follow_up_status_display().lower()}',
+                body=note or f'Your {review.get_review_status_display().lower()} review is now {review.get_follow_up_status_display().lower()}.',
+                status=NotificationStatus.SENT,
+                linked_entity_id=str(review.project_id or ''),
             )
-        if finding.risk_level == 'critical':
-            NotificationService.notify_pseudo(
-                "super_admin",
-                title="CRITICAL AUDIT FINDING — Immediate action required",
-                body=finding.description[:200],
-                event="critical_audit_finding",
-                linked_entity_id=finding.id,
+        return Response(self.get_serializer(review).data)
+
+
+def _notify_users(users, *, event: str, title: str, body: str, linked_entity_id: str = ''):
+    Notification.objects.bulk_create([
+        Notification(
+            recipient_id=str(user.id),
+            recipient_name=user.full_name or user.username,
+            type=NotificationChannel.IN_APP,
+            event=event,
+            title=title,
+            body=body,
+            status=NotificationStatus.SENT,
+            linked_entity_id=linked_entity_id,
+        )
+        for user in users
+    ], ignore_conflicts=True)
+
+
+class AuditCaseViewSet(viewsets.ModelViewSet):
+    """Independent audit cases and compliance reviews.
+
+    The Auditor creates cases and drives every workflow step; the cases link to the source
+    records under audit and never change them. The RBF Management Team sees a case once the
+    Auditor asks for a management response, and records that response and corrective-action
+    progress. PSC sees cases from that point on, read-only. Cases are never deleted.
+
+    Draft -> Under Review -> Evidence Collected -> Finding Recorded -> Management Response
+          -> Audit Finalized -> Closed   (a compliant finding may be finalized without a response)
+    """
+
+    queryset = AuditCase.objects.select_related(
+        'auditor', 'responded_by', 'project', 'vendor', 'tender', 'contract', 'payment_claim',
+        'verification_task__report',
+    ).prefetch_related('evidence__added_by')
+    serializer_class = AuditCaseSerializer
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+    http_method_names = ['get', 'post', 'patch', 'head', 'options']
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = [
+        'status', 'case_type', 'audit_area', 'finding_type', 'risk_level', 'corrective_action_status',
+        'project', 'vendor', 'tender', 'payment_claim', 'verification_task',
+    ]
+    search_fields = ['reference', 'title', 'scope', 'finding', 'project__project_reference']
+    ordering_fields = ['created_at', 'updated_at', 'corrective_action_due']
+
+    AUDITOR_ROLES = {UserRole.AUDITOR}
+    FULL_READ_ROLES = {UserRole.AUDITOR, UserRole.ADMIN}
+    RESPONSE_ROLES = {UserRole.RBF_OFFICIAL, UserRole.ADMIN}
+    SHARED_READ_ROLES = {UserRole.RBF_OFFICIAL, UserRole.UNDP_DONOR}
+    # The Auditor's working papers stay private until management is asked to respond.
+    SHARED_STATUSES = {AuditCaseStatus.MANAGEMENT_RESPONSE, AuditCaseStatus.FINALIZED, AuditCaseStatus.CLOSED}
+    LOCKED_STATUSES = {AuditCaseStatus.FINALIZED, AuditCaseStatus.CLOSED}
+    FINDING_FIELDS = {'finding_type', 'risk_level', 'finding', 'recommendation', 'criteria'}
+
+    def get_queryset(self):
+        qs = self.queryset.all()
+        user = self.request.user
+        if user.role in self.FULL_READ_ROLES:
+            return qs
+        if user.role in self.SHARED_READ_ROLES:
+            return qs.filter(status__in=self.SHARED_STATUSES)
+        return qs.none()
+
+    def _assert_auditor(self):
+        if self.request.user.role not in self.AUDITOR_ROLES:
+            raise PermissionDenied('Only the Auditor can manage audit cases.')
+
+    @staticmethod
+    def _derive_links(data):
+        claim = data.get('payment_claim')
+        task = data.get('verification_task')
+        contract = data.get('contract')
+        if not data.get('project'):
+            if claim is not None:
+                data['project'] = claim.project
+            elif task is not None:
+                data['project'] = task.report.project
+        if not data.get('tender') and contract is not None:
+            data['tender'] = contract.tender
+        if not data.get('vendor') and claim is not None:
+            data['vendor'] = claim.vendor
+        return data
+
+    def perform_create(self, serializer):
+        self._assert_auditor()
+        data = self._derive_links(dict(serializer.validated_data))
+        prefix = 'CR' if data.get('case_type') == AuditCaseType.COMPLIANCE_REVIEW else 'AUD'
+        with transaction.atomic():
+            case = serializer.save(
+                auditor=self.request.user,
+                reference=f'TMP-{uuid.uuid4().hex[:20]}',
+                status=AuditCaseStatus.DRAFT,
+                project=data.get('project'),
+                tender=data.get('tender'),
+                vendor=data.get('vendor'),
             )
+            case.reference = f'{prefix}-{timezone.localdate().year}-{case.id:04d}'
+            case.save(update_fields=['reference'])
+        log_audit(self.request.user, 'audit_case_opened', case, {
+            'new_status': case.status, 'audit_area': case.audit_area, 'module': 'audit',
+            'project_id': str(case.project_id or ''),
+        })
+
+    def perform_update(self, serializer):
+        self._assert_auditor()
+        case = serializer.instance
+        if case.status in self.LOCKED_STATUSES:
+            raise PermissionDenied('A finalized audit case cannot be edited.')
+        if self.FINDING_FIELDS & set(serializer.validated_data) and case.status in {AuditCaseStatus.DRAFT, AuditCaseStatus.UNDER_REVIEW}:
+            raise ValidationError({'finding': 'Collect evidence before recording a finding.'})
+        if 'corrective_action_status' in serializer.validated_data:
+            raise ValidationError({'corrective_action_status': 'Corrective-action progress is recorded through its own action.'})
+        case = serializer.save()
+        log_audit(self.request.user, 'audit_case_updated', case, {'module': 'audit', 'fields': sorted(serializer.validated_data)})
+
+    def _move(self, case, new_status, action_name, **fields):
+        previous = case.status
+        case.status = new_status
+        for key, value in fields.items():
+            setattr(case, key, value)
+        case.save(update_fields=['status', 'updated_at', *fields.keys()])
+        log_audit(self.request.user, action_name, case, {'old_status': previous, 'new_status': new_status, 'module': 'audit'})
+        return Response(self.get_serializer(case).data)
+
+    def _expect(self, case, *statuses):
+        if case.status not in statuses:
+            labels = ', '.join(AuditCaseStatus(s).label for s in statuses)
+            raise ValidationError({'detail': f'This step is only available while the case is: {labels}.'})
+
+    @action(detail=True, methods=['post'])
+    def start_review(self, request, pk=None):
+        self._assert_auditor()
+        case = self.get_object()
+        self._expect(case, AuditCaseStatus.DRAFT)
+        return self._move(case, AuditCaseStatus.UNDER_REVIEW, 'audit_case_review_started')
+
+    @action(detail=True, methods=['post'])
+    def evidence_collected(self, request, pk=None):
+        self._assert_auditor()
+        case = self.get_object()
+        self._expect(case, AuditCaseStatus.UNDER_REVIEW)
+        if not case.evidence.exists():
+            raise ValidationError({'detail': 'Add at least one piece of evidence first.'})
+        return self._move(case, AuditCaseStatus.EVIDENCE_COLLECTED, 'audit_case_evidence_collected')
+
+    @action(detail=True, methods=['post'])
+    def record_finding(self, request, pk=None):
+        self._assert_auditor()
+        case = self.get_object()
+        self._expect(case, AuditCaseStatus.EVIDENCE_COLLECTED, AuditCaseStatus.FINDING_RECORDED)
+        finding_type = str(request.data.get('finding_type') or case.finding_type or '').strip()
+        risk_level = str(request.data.get('risk_level') or case.risk_level or '').strip()
+        def submitted(field):
+            return str(request.data.get(field, getattr(case, field)) or '').strip()
+
+        finding = submitted('finding')
+        errors = {}
+        if finding_type not in AuditFindingType.values:
+            errors['finding_type'] = 'Choose the finding type.'
+        if risk_level not in AuditRiskLevel.values:
+            errors['risk_level'] = 'Choose the risk level.'
+        if len(finding) < 20:
+            errors['finding'] = 'Describe the finding (at least 20 characters).'
+        corrective_action = submitted('corrective_action')
+        needs_action = finding_type in {AuditFindingType.EXCEPTION, AuditFindingType.NON_COMPLIANCE}
+        if needs_action and not corrective_action:
+            errors['corrective_action'] = 'An exception or non-compliance needs a recommended corrective action.'
+        if errors:
+            raise ValidationError(errors)
+        due = request.data.get('corrective_action_due') or case.corrective_action_due
+        return self._move(
+            case, AuditCaseStatus.FINDING_RECORDED, 'audit_finding_recorded',
+            finding_type=finding_type,
+            risk_level=risk_level,
+            finding=finding,
+            criteria=submitted('criteria'),
+            recommendation=submitted('recommendation'),
+            corrective_action=corrective_action,
+            corrective_action_owner=submitted('corrective_action_owner'),
+            corrective_action_due=due or None,
+            corrective_action_status=CorrectiveActionStatus.OPEN if corrective_action else CorrectiveActionStatus.NOT_REQUIRED,
+            finding_recorded_at=timezone.now(),
+        )
+
+    @action(detail=True, methods=['post'])
+    def request_response(self, request, pk=None):
+        self._assert_auditor()
+        case = self.get_object()
+        self._expect(case, AuditCaseStatus.FINDING_RECORDED)
+        response = self._move(case, AuditCaseStatus.MANAGEMENT_RESPONSE, 'audit_management_response_requested', response_requested_at=timezone.now())
+        _notify_users(
+            User.objects.filter(role__in=self.RESPONSE_ROLES, is_active=True).only('id', 'full_name', 'username'),
+            event='audit_response_requested',
+            title=f'Management response requested: {case.reference}',
+            body=f'{case.get_risk_level_display()} {case.get_finding_type_display().lower()}: {case.title}',
+            linked_entity_id=str(case.id),
+        )
+        return response
 
     @action(detail=True, methods=['post'])
     def respond(self, request, pk=None):
-        finding = self.get_object()
-        response_text = request.data.get('response', '')
-        action_taken = request.data.get('action_taken', '')
-
-        if not response_text:
-            return Response({'error': 'Response text is required'}, status=400)
-
-        user_role = str(request.user.role)
-        is_psc = user_role == "Project Steering Committee" or user_role == "UNDP_DONOR"
-
-        if is_psc and action_taken == 'psc_directive':
-            finding.psc_comment = response_text
-            finding.psc_commented_at = timezone.now()
-            finding.psc_commented_by = request.user
-            finding.save()
-
-            NotificationService.notify_pseudo(
-                "rmt",
-                title=f"PSC Comment on {finding.id}",
-                body=f"PSC has commented on audit finding {finding.id}: {response_text[:100]}",
-                event="psc_comment",
-                linked_entity_id=finding.id,
+        if request.user.role not in self.RESPONSE_ROLES:
+            raise PermissionDenied('Only the RBF Management Team can respond to audit findings.')
+        case = self.get_object()
+        self._expect(case, AuditCaseStatus.MANAGEMENT_RESPONSE)
+        text = str(request.data.get('management_response') or '').strip()
+        if len(text) < 10:
+            raise ValidationError({'management_response': 'Write the management response (at least 10 characters).'})
+        fields = {'management_response': text, 'responded_by': request.user, 'responded_at': timezone.now()}
+        progress = str(request.data.get('corrective_action_status') or '').strip()
+        if progress:
+            if case.corrective_action_status == CorrectiveActionStatus.NOT_REQUIRED or progress not in {
+                CorrectiveActionStatus.OPEN, CorrectiveActionStatus.IN_PROGRESS, CorrectiveActionStatus.IMPLEMENTED,
+            }:
+                raise ValidationError({'corrective_action_status': 'Choose open, in progress or implemented.'})
+            fields['corrective_action_status'] = progress
+        response = self._move(case, AuditCaseStatus.MANAGEMENT_RESPONSE, 'audit_management_response_recorded', **fields)
+        if case.auditor_id:
+            _notify_users(
+                [case.auditor], event='audit_response_received',
+                title=f'Management responded: {case.reference}', body=text[:200], linked_entity_id=str(case.id),
             )
+        return response
+
+    @action(detail=True, methods=['post'])
+    def corrective_action_progress(self, request, pk=None):
+        """RMT reports progress; only the Auditor can mark the action verified."""
+        user = request.user
+        case = self.get_object()
+        progress = str(request.data.get('corrective_action_status') or '').strip()
+        if case.corrective_action_status == CorrectiveActionStatus.NOT_REQUIRED:
+            raise ValidationError({'detail': 'This case has no corrective action.'})
+        if user.role in self.AUDITOR_ROLES:
+            allowed = {CorrectiveActionStatus.VERIFIED, CorrectiveActionStatus.IN_PROGRESS}
+        elif user.role in self.RESPONSE_ROLES:
+            allowed = {CorrectiveActionStatus.IN_PROGRESS, CorrectiveActionStatus.IMPLEMENTED}
         else:
-            resolution_statuses = [
-                'evidence_reviewed_no_issue',
-                'issue_confirmed_corrective',
-                'issue_confirmed_suspend',
-                'issue_confirmed_blacklist',
-                'referred_legal'
-            ]
+            raise PermissionDenied('You cannot update corrective actions.')
+        if progress not in allowed:
+            raise ValidationError({'corrective_action_status': 'This status is not available to your role.'})
+        if case.status not in {AuditCaseStatus.MANAGEMENT_RESPONSE, AuditCaseStatus.FINALIZED}:
+            raise ValidationError({'detail': 'Corrective actions are tracked after management is asked to respond and before closure.'})
+        if progress == CorrectiveActionStatus.VERIFIED and case.corrective_action_status != CorrectiveActionStatus.IMPLEMENTED:
+            raise ValidationError({'corrective_action_status': 'Management must report the action implemented before it can be verified.'})
+        previous = case.corrective_action_status
+        case.corrective_action_status = progress
+        case.save(update_fields=['corrective_action_status', 'updated_at'])
+        log_audit(user, 'audit_corrective_action_updated', case, {'old_status': previous, 'new_status': progress, 'module': 'audit'})
+        return Response(self.get_serializer(case).data)
 
-            if action_taken in resolution_statuses:
-                finding.status = 'resolved'
-            elif action_taken == 'escalated_to_psc':
-                finding.status = 'escalated_to_psc'
-            elif action_taken == 'under_investigation':
-                finding.status = 'under_investigation'
-            else:
-                finding.status = 'open'
+    @action(detail=True, methods=['post'])
+    def finalize(self, request, pk=None):
+        self._assert_auditor()
+        case = self.get_object()
+        self._expect(case, AuditCaseStatus.FINDING_RECORDED, AuditCaseStatus.MANAGEMENT_RESPONSE)
+        if case.status == AuditCaseStatus.FINDING_RECORDED and case.finding_type != AuditFindingType.COMPLIANT:
+            raise ValidationError({'detail': 'Request a management response before finalizing this finding.'})
+        if case.status == AuditCaseStatus.MANAGEMENT_RESPONSE and not case.responded_at:
+            raise ValidationError({'detail': 'Wait for the management response before finalizing.'})
+        conclusion = str(request.data.get('conclusion') or '').strip()
+        if len(conclusion) < 10:
+            raise ValidationError({'conclusion': 'Write the audit conclusion (at least 10 characters).'})
+        response = self._move(case, AuditCaseStatus.FINALIZED, 'audit_case_finalized', conclusion=conclusion, finalized_at=timezone.now())
+        _notify_users(
+            User.objects.filter(role__in={UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.UNDP_DONOR}, is_active=True).only('id', 'full_name', 'username'),
+            event='audit_case_finalized',
+            title=f'Audit finalized: {case.reference}',
+            body=f'{case.title} - {case.get_finding_type_display()} ({case.get_risk_level_display()}).',
+            linked_entity_id=str(case.id),
+        )
+        return response
 
-            finding.rmt_response = response_text
-            finding.rmt_response_action = action_taken
-            finding.rmt_responded_by = request.user
-            finding.rmt_responded_at = timezone.now()
-            finding.save()
+    @action(detail=True, methods=['post'])
+    def close(self, request, pk=None):
+        self._assert_auditor()
+        case = self.get_object()
+        self._expect(case, AuditCaseStatus.FINALIZED)
+        if case.corrective_action_status not in {CorrectiveActionStatus.NOT_REQUIRED, CorrectiveActionStatus.VERIFIED}:
+            raise ValidationError({'detail': 'Verify the corrective action before closing the case.'})
+        return self._move(case, AuditCaseStatus.CLOSED, 'audit_case_closed', closed_at=timezone.now())
 
-        return Response(AuditFindingSerializer(finding).data)
+    @action(detail=True, methods=['post'], url_path='evidence')
+    def add_evidence(self, request, pk=None):
+        self._assert_auditor()
+        case = self.get_object()
+        if case.status in self.LOCKED_STATUSES:
+            raise ValidationError({'detail': 'Evidence cannot be added to a finalized case.'})
+        serializer = AuditEvidenceSerializer(data=request.data, context=self.get_serializer_context())
+        serializer.is_valid(raise_exception=True)
+        kind = serializer.validated_data['kind']
+        upload = serializer.validated_data.get('file')
+        if len(serializer.validated_data['description'].strip()) < 5:
+            raise ValidationError({'description': 'Describe the evidence (at least 5 characters).'})
+        if kind == AuditEvidenceKind.FILE:
+            if not upload:
+                raise ValidationError({'file': 'Attach the evidence file.'})
+            validate_document_upload(upload, label='Evidence file', allowed=('pdf', 'jpg', 'jpeg', 'png', 'csv', 'xlsx', 'docx'))
+        elif upload:
+            raise ValidationError({'file': 'Only file evidence can carry an attachment.'})
+        if kind == AuditEvidenceKind.RECORD and not (serializer.validated_data.get('source_type') and serializer.validated_data.get('source_id')):
+            raise ValidationError({'source_id': 'Name the source record type and ID.'})
+        evidence = serializer.save(case=case, added_by=request.user)
+        log_audit(request.user, 'audit_evidence_added', case, {
+            'module': 'audit', 'evidence_id': evidence.id, 'kind': kind,
+            'source': f'{evidence.source_type}#{evidence.source_id}' if evidence.source_id else '',
+        })
+        return Response(self.get_serializer(case).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['get'])
+    def history(self, request, pk=None):
+        case = self.get_object()
+        logs = AuditLog.objects.filter(entity_type='AuditCase', entity_id=str(case.id)).select_related('actor').order_by('created_at')
+        return Response(AuditLogSerializer(logs, many=True).data)
+
+    @action(detail=True, methods=['get'])
+    def report(self, request, pk=None):
+        case = self.get_object()
+        esc = html.escape
+
+        def row(label, value):
+            return f'<tr><th>{esc(label)}</th><td>{esc(str(value or "-"))}</td></tr>'
+
+        links = [
+            ('Project', case.project.project_reference if case.project_id else ''),
+            ('Vendor', AuditCaseSerializer().get_vendor_display(case) or ''),
+            ('Tender', case.tender.reference_number if case.tender_id else ''),
+            ('Contract', case.contract.reference_number if case.contract_id else ''),
+            ('Payment claim', f'#{case.payment_claim_id}' if case.payment_claim_id else ''),
+            ('Installation', case.verification_task.report.serial_number if case.verification_task_id else ''),
+        ]
+        evidence_rows = ''.join(
+            f'<tr><td>{esc(e.get_kind_display())}</td><td>{esc(e.description)}</td>'
+            f'<td>{esc(f"{e.source_type} #{e.source_id}" if e.source_id else (Path(e.file.name).name if e.file else ""))}</td>'
+            f'<td>{esc(timezone.localtime(e.added_at).strftime("%Y-%m-%d"))}</td></tr>'
+            for e in case.evidence.all()
+        )
+        body = f"""
+        <html><head><style>
+          body {{ font-family: Arial, sans-serif; color: #0f172a; padding: 24px; font-size: 12px; }}
+          h1 {{ font-size: 20px; margin: 0 0 4px; }} h2 {{ font-size: 14px; margin: 20px 0 6px; }}
+          table {{ width: 100%; border-collapse: collapse; }}
+          th, td {{ border: 1px solid #cbd5e1; padding: 6px; text-align: left; vertical-align: top; }}
+          th {{ background: #f1f5f9; width: 28%; }} p.muted {{ color: #475569; margin: 0 0 12px; }}
+          .pre {{ white-space: pre-wrap; }}
+        </style></head><body>
+          <h1>Audit Report {esc(case.reference)}</h1>
+          <p class="muted">{esc(case.get_case_type_display())} | {esc(case.get_audit_area_display())} | Status: {esc(case.get_status_display())}
+           | Generated {esc(timezone.localtime(timezone.now()).strftime("%Y-%m-%d %H:%M"))}</p>
+          <table>
+            {row('Title', case.title)}
+            {row('Auditor', AuditCaseSerializer().get_auditor_name(case))}
+            {''.join(row(label, value) for label, value in links if value)}
+            {row('Scope', case.scope)}
+            {row('Criteria', case.criteria)}
+          </table>
+          <h2>Finding</h2>
+          <table>
+            {row('Finding type', case.get_finding_type_display() if case.finding_type else '')}
+            {row('Risk level', case.get_risk_level_display() if case.risk_level else '')}
+            {row('Finding', case.finding)}
+            {row('Recommendation', case.recommendation)}
+          </table>
+          <h2>Management Response and Corrective Action</h2>
+          <table>
+            {row('Management response', case.management_response)}
+            {row('Responded by', AuditCaseSerializer().get_responded_by_name(case))}
+            {row('Corrective action', case.corrective_action)}
+            {row('Owner', case.corrective_action_owner)}
+            {row('Due', case.corrective_action_due)}
+            {row('Status', case.get_corrective_action_status_display())}
+          </table>
+          <h2>Conclusion</h2><p class="pre">{esc(case.conclusion or 'Not yet finalized.')}</p>
+          <h2>Evidence</h2>
+          <table><tr><th>Kind</th><th>Description</th><th>Source</th><th>Added</th></tr>
+          {evidence_rows or '<tr><td colspan="4">No evidence recorded.</td></tr>'}</table>
+        </body></html>
+        """
+        from rbf.tenders.pba_pdf import _render_pdf
+
+        tmp_dir = Path(tempfile.mkdtemp(prefix='audit_case_pdf_'))
+        output_path = tmp_dir / f'{case.reference}.pdf'
+        from .report_pdf import report_footer, report_header
+
+        _render_pdf(body, output_path, case.reference, header_template=report_header(f'Audit Report {case.reference}'),
+                    footer_template=report_footer(request.user.full_name or request.user.username))
+        log_audit(request.user, 'audit_report_generated', case, {'module': 'audit'})
+        return FileResponse(output_path.open('rb'), as_attachment=True, filename=output_path.name)
+
+
+class VendorPerformanceViewSet(viewsets.ViewSet):
+    """Read-only vendor performance computed from the shared project, verification and claim records.
+
+    DoE Officers see vendors working in their region; PSC, TAC, Auditor, RMT and Admin see all.
+    """
+
+    permission_classes = [IsAuthenticated]
+    READ_ROLES = {UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.UNDP_DONOR, UserRole.TAC, UserRole.AUDITOR, UserRole.DOE_OFFICER}
+    PAID_STATUSES = claim_status.PAID
+
+    def list(self, request):
+        user = request.user
+        if user.role not in self.READ_ROLES:
+            raise PermissionDenied('You do not have access to vendor performance.')
+        projects = Project.objects.exclude(vendor_id='')
+        if user.role == UserRole.DOE_OFFICER:
+            projects = projects.filter(doe_region_filter(user))
+        project_rows = list(projects.values('id', 'vendor_id', 'vendor_name', 'status', 'district', 'region', 'project_reference'))
+        if not project_rows:
+            return Response([])
+        project_ids = [row['id'] for row in project_rows]
+
+        def by_project(qs, **aggregates):
+            return {row['project_id']: row for row in qs.values('project_id').annotate(**aggregates)}
+
+        installs = by_project(
+            InstallationReport.objects.filter(project_id__in=project_ids),
+            total=Count('id'),
+            verified=Count('id', filter=Q(status=InstallationStatus.VERIFIED)),
+            flagged=Count('id', filter=Q(status=InstallationStatus.FLAGGED)),
+        )
+        tasks = {
+            row['report__project_id']: row
+            for row in VerificationTask.objects.filter(report__project_id__in=project_ids).values('report__project_id').annotate(
+                pending=Count('id', filter=Q(status__in=[VerificationStatus.PENDING, VerificationStatus.REVERIFICATION_REQUIRED])),
+                reverified=Count('id', filter=Q(verification_round__gt=1)),
+            )
+        }
+        claims = by_project(
+            PaymentClaim.objects.filter(project_id__in=project_ids),
+            count=Count('id'),
+            claimed=Sum('claim_amount'),
+            paid=Sum('claim_amount', filter=Q(status__in=self.PAID_STATUSES)),
+            rejected=Count('id', filter=Q(status=PaymentClaimStatus.REJECTED)),
+            held=Count('id', filter=Q(status=PaymentClaimStatus.HELD_AUDIT)),
+        )
+        open_flags = by_project(
+            OversightReview.objects.filter(
+                project_id__in=project_ids,
+                follow_up_status__in=[OversightFollowUpStatus.OPEN, OversightFollowUpStatus.IN_PROGRESS],
+            ),
+            n=Count('id'),
+        )
+        latest_ratings = {}
+        for review in KpiReview.objects.filter(project_id__in=project_ids).order_by('review_period', 'updated_at'):
+            latest_ratings[review.project_id] = (review.review_period, review.rating)
+
+        vendors: dict[str, dict] = {}
+        for row in project_rows:
+            pid = row['id']
+            entry = vendors.setdefault(row['vendor_id'], {
+                'vendor_id': row['vendor_id'], 'vendor_name': row['vendor_name'], 'districts': set(),
+                'projects': 0, 'active_projects': 0, 'completed_projects': 0,
+                'installations': 0, 'verified': 0, 'flagged': 0, 'pending_verification': 0, 'reverifications': 0,
+                'claims': 0, 'claimed_amount': 0, 'paid_amount': 0, 'rejected_claims': 0, 'held_claims': 0,
+                'open_issues': 0, 'kpi_reviews': {}, 'project_refs': [],
+            })
+            entry['projects'] += 1
+            entry['project_refs'].append({'id': pid, 'reference': row['project_reference'] or f'Project {pid}'})
+            entry['active_projects'] += row['status'] == ProjectStatus.ACTIVE
+            entry['completed_projects'] += row['status'] in {'completed', 'Completed'}
+            entry['districts'].add(row['district'] or row['region'])
+            inst = installs.get(pid, {})
+            entry['installations'] += inst.get('total', 0)
+            entry['verified'] += inst.get('verified', 0)
+            entry['flagged'] += inst.get('flagged', 0)
+            task = tasks.get(pid, {})
+            entry['pending_verification'] += task.get('pending', 0)
+            entry['reverifications'] += task.get('reverified', 0)
+            claim = claims.get(pid, {})
+            entry['claims'] += claim.get('count', 0)
+            entry['claimed_amount'] += float(claim.get('claimed') or 0)
+            entry['paid_amount'] += float(claim.get('paid') or 0)
+            entry['rejected_claims'] += claim.get('rejected', 0)
+            entry['held_claims'] += claim.get('held', 0)
+            entry['open_issues'] += open_flags.get(pid, {}).get('n', 0)
+            if pid in latest_ratings:
+                entry['kpi_reviews'][str(pid)] = latest_ratings[pid]
+
+        account_ids = [vid for vid in vendors if str(vid).isdigit()]
+        accounts = {str(u.id): u for u in User.objects.filter(id__in=account_ids).only('id', 'status', 'organization_name', 'full_name', 'username')}
+        result = []
+        for vendor_id, entry in vendors.items():
+            ratings = [rating for _, rating in entry.pop('kpi_reviews').values()]
+            account = accounts.get(str(vendor_id))
+            entry['districts'] = sorted(d for d in entry['districts'] if d)
+            entry['vendor_status'] = account.status if account else ''
+            if account:
+                entry['vendor_name'] = account.organization_name or account.full_name or entry['vendor_name']
+            entry['verification_rate'] = round(100 * entry['verified'] / entry['installations'], 1) if entry['installations'] else None
+            entry['kpi_at_risk'] = ratings.count(KpiReviewRating.AT_RISK)
+            entry['kpi_needs_attention'] = ratings.count(KpiReviewRating.NEEDS_ATTENTION)
+            entry['kpi_on_track'] = ratings.count(KpiReviewRating.ON_TRACK)
+            result.append(entry)
+        result.sort(key=lambda e: (-(e['flagged'] + e['open_issues'] + e['kpi_at_risk']), e['vendor_name'] or ''))
+        return Response(result)
+
+
+class ResultsIndicatorViewSet(viewsets.ModelViewSet):
+    """The programme results framework. Read by the report audiences; edited by the Super Admin only.
+    Indicators are never deleted, so past reports can always be explained."""
+
+    queryset = ResultsIndicator.objects.select_related('updated_by').all()
+    serializer_class = ResultsIndicatorSerializer
+    permission_classes = [IsAuthenticated]
+    http_method_names = ['get', 'post', 'patch', 'head', 'options']
+    READ_ROLES = {UserRole.ADMIN, UserRole.RBF_OFFICIAL, UserRole.UNDP_DONOR, UserRole.AUDITOR, UserRole.TAC}
+
+    def get_queryset(self):
+        if self.request.user.role not in self.READ_ROLES:
+            return self.queryset.none()
+        return self.queryset
+
+    def _assert_admin(self):
+        if self.request.user.role != UserRole.ADMIN:
+            raise PermissionDenied('Only the Platform Administrator (Super Admin) can change the results framework.')
+
+    def perform_create(self, serializer):
+        self._assert_admin()
+        indicator = serializer.save(updated_by=self.request.user)
+        log_audit(self.request.user, 'results_indicator_created', indicator, {'module': 'results', 'code': indicator.code})
+
+    def perform_update(self, serializer):
+        self._assert_admin()
+        before = {f: str(getattr(serializer.instance, f)) for f in ('baseline', 'target', 'target_date', 'manual_actual')}
+        indicator = serializer.save(updated_by=self.request.user)
+        log_audit(self.request.user, 'results_indicator_updated', indicator, {'module': 'results', 'code': indicator.code, 'before': before})
+
+    @action(detail=False, methods=['get'])
+    def measures(self, request):
+        return Response([{'value': value, 'label': label} for value, label in ResultsMeasure.choices])
+
+
+class ReportScheduleSerializer(serializers.ModelSerializer):
+    prepared_by_name = serializers.SerializerMethodField()
+    report_title = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ReportSchedule
+        fields = [
+            'id', 'name', 'report_type', 'report_title', 'format', 'frequency', 'run_day', 'filters', 'prepared_by',
+            'prepared_by_name', 'recipient_roles', 'recipient_users', 'active', 'next_run_at', 'last_run_at', 'created_at',
+        ]
+        read_only_fields = ['id', 'next_run_at', 'last_run_at', 'created_at']
+
+    def get_prepared_by_name(self, obj):
+        return (obj.prepared_by.full_name or obj.prepared_by.username) if obj.prepared_by_id else None
+
+    def get_report_title(self, obj):
+        from .report_catalogue import REGISTRY
+
+        definition = REGISTRY.get(obj.report_type)
+        return definition.title if definition else obj.report_type
+
+    def validate(self, attrs):
+        from .report_catalogue import REGISTRY
+
+        report_type = attrs.get('report_type', getattr(self.instance, 'report_type', None))
+        prepared_by = attrs.get('prepared_by', getattr(self.instance, 'prepared_by', None))
+        fmt = attrs.get('format', getattr(self.instance, 'format', None))
+        definition = REGISTRY.get(report_type)
+        if definition is None:
+            raise serializers.ValidationError({'report_type': 'Choose a report from the catalogue.'})
+        if 'period' not in definition.filters:
+            raise serializers.ValidationError({'report_type': 'Only period-based reports can be scheduled.'})
+        if definition.requires_project:
+            raise serializers.ValidationError({'report_type': 'Per-project reports cannot be scheduled.'})
+        if definition.requires_tender or definition.requires_reason:
+            raise serializers.ValidationError({'report_type': 'Reports for one tender, or that need a stated reason, cannot be scheduled.'})
+        if prepared_by and prepared_by.role != UserRole.ADMIN and prepared_by.role not in definition.roles:
+            raise serializers.ValidationError({'prepared_by': f'{prepared_by.username} cannot generate this report.'})
+        if fmt not in definition.formats:
+            raise serializers.ValidationError({'format': 'This report is not available in that format.'})
+        run_day = attrs.get('run_day', getattr(self.instance, 'run_day', 5))
+        if not 1 <= int(run_day) <= 28:
+            raise serializers.ValidationError({'run_day': 'Choose a day between 1 and 28.'})
+        roles = attrs.get('recipient_roles', getattr(self.instance, 'recipient_roles', []))
+        if any(r not in UserRole.values or r == UserRole.VENDOR for r in roles):
+            raise serializers.ValidationError({'recipient_roles': 'Choose staff roles only.'})
+        filters = attrs.get('filters') or {}
+        attrs['filters'] = {k: v for k, v in filters.items() if k in {'district', 'technology', 'vendor', 'tender'} and v}
+        return attrs
+
+
+class ReportScheduleViewSet(viewsets.ModelViewSet):
+    """Report schedules and distribution lists (Super Admin)."""
+
+    queryset = ReportSchedule.objects.select_related('prepared_by').prefetch_related('recipient_users').all()
+    serializer_class = ReportScheduleSerializer
+    permission_classes = [IsAuthenticated]
+    http_method_names = ['get', 'post', 'patch', 'head', 'options']
+
+    def get_queryset(self):
+        if self.request.user.role != UserRole.ADMIN:
+            return self.queryset.none()
+        return self.queryset
+
+    def _assert_admin(self):
+        if self.request.user.role != UserRole.ADMIN:
+            raise PermissionDenied('Only the Platform Administrator (Super Admin) can manage report schedules.')
+
+    def create(self, request, *args, **kwargs):
+        self._assert_admin()
+        return super().create(request, *args, **kwargs)
+
+    def partial_update(self, request, *args, **kwargs):
+        self._assert_admin()
+        return super().partial_update(request, *args, **kwargs)
+
+    def perform_create(self, serializer):
+        from .report_workflow import next_run
+
+        self._assert_admin()
+        schedule = serializer.save(created_by=self.request.user)
+        schedule.next_run_at = next_run(schedule, timezone.now())
+        schedule.save(update_fields=['next_run_at'])
+        log_audit(self.request.user, 'report_schedule_created', schedule, {'module': 'report', 'report_type': schedule.report_type})
+
+    def perform_update(self, serializer):
+        from .report_workflow import next_run
+
+        self._assert_admin()
+        schedule = serializer.save()
+        schedule.next_run_at = next_run(schedule, timezone.now()) if schedule.active else None
+        schedule.save(update_fields=['next_run_at'])
+        log_audit(self.request.user, 'report_schedule_updated', schedule, {'module': 'report', 'active': schedule.active})
+
+    @action(detail=True, methods=['post'])
+    def run_now(self, request, pk=None):
+        from .report_workflow import run_schedule
+
+        self._assert_admin()
+        schedule = self.get_object()
+        report = run_schedule(schedule)
+        log_audit(request.user, 'report_schedule_run_now', schedule, {'module': 'report', 'report_id': str(report.id)})
+        return Response(_report_row(report), status=status.HTTP_202_ACCEPTED)
+
+    @action(detail=False, methods=['get'], url_path='form-options')
+    def form_options(self, request):
+        from .report_catalogue import REGISTRY
+
+        self._assert_admin()
+        return Response({
+            'reports': [
+                {'id': d.id, 'title': d.title, 'formats': list(d.formats), 'roles': sorted(d.roles), 'formal': d.formal}
+                for d in REGISTRY.values()
+                if 'period' in d.filters and not (d.requires_project or d.requires_tender or d.requires_reason)
+            ],
+            'roles': [{'value': v, 'label': l} for v, l in UserRole.choices if v != UserRole.VENDOR],
+            'preparers': [
+                {'id': u.id, 'name': u.full_name or u.username, 'role': u.role}
+                for u in User.objects.filter(is_active=True).exclude(role=UserRole.VENDOR).order_by('role', 'username')
+            ],
+        })

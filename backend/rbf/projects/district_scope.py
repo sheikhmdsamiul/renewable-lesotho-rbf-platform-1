@@ -112,3 +112,34 @@ def resolve_installation_district(project, latitude, longitude) -> str:
         if distance is not None and (best_distance is None or distance < best_distance):
             best, best_distance = district, distance
     return best
+
+
+# --- Role scopes shared by views and reports ---------------------------------------
+
+def vendor_query_filter(user, prefix: str = ''):
+    vendor_ids = {str(user.id)}
+    if user.username:
+        vendor_ids.add(user.username)
+    vendor_names = {user.full_name, user.organization_name, user.username}
+    vendor_names = {name for name in vendor_names if name}
+    return Q(**{f'{prefix}vendor_id__in': vendor_ids}) | Q(**{f'{prefix}vendor_name__in': vendor_names})
+
+
+def doe_districts(user) -> list[str]:
+    """Every district a DoE officer covers: the assigned `districts` list, else the
+    comma-separated `region` (older accounts store one or several names there)."""
+    names = [str(d or '').strip() for d in (getattr(user, 'districts', None) or []) if str(d or '').strip()]
+    if not names:
+        raw = getattr(user, 'region', '') or getattr(user, 'district', '') or ''
+        names = [part.strip() for part in str(raw).split(',') if part.strip()]
+    return names
+
+
+def doe_region_filter(user, prefix: str = ''):
+    names = doe_districts(user)
+    if not names:
+        return Q(pk__in=[])
+    condition = Q()
+    for name in names:
+        condition |= Q(**{f'{prefix}region__iexact': name}) | Q(**{f'{prefix}district__iexact': name})
+    return condition

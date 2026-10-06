@@ -327,6 +327,63 @@ class BlacklistAppeal(models.Model):
         return f"Appeal {self.id} - {self.vendor} ({self.status})"
 
 
+class BlacklistRecommendationStatus(models.TextChoices):
+    SUBMITTED = 'Submitted'
+    ACCEPTED = 'Accepted'
+    DECLINED = 'Declined'
+
+
+class BlacklistRecommendation(models.Model):
+    """A DoE officer's recommendation that RMT open a blacklisting case for a vendor."""
+
+    vendor = models.ForeignKey(User, related_name='blacklist_recommendations', on_delete=models.CASCADE)
+    recommended_by = models.ForeignKey(
+        User,
+        related_name='submitted_blacklist_recommendations',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    project = models.ForeignKey(
+        'projects.Project',
+        related_name='blacklist_recommendations',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    reason = models.CharField(max_length=64, choices=BlacklistReason.choices)
+    justification = models.TextField()
+    evidence_document = models.FileField(upload_to='blacklisting/recommendations/', blank=True, null=True)
+    status = models.CharField(
+        max_length=16,
+        choices=BlacklistRecommendationStatus.choices,
+        default=BlacklistRecommendationStatus.SUBMITTED,
+    )
+    responded_by = models.ForeignKey(
+        User,
+        related_name='responded_blacklist_recommendations',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    responded_at = models.DateTimeField(null=True, blank=True)
+    response_notes = models.TextField(blank=True)
+    linked_case = models.ForeignKey(
+        VendorBlacklistCase,
+        related_name='recommendations',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Recommendation {self.id} - {self.vendor} ({self.status})"
+
+
 class OrganizationType(models.TextChoices):
     GOVERNMENT = 'Government', 'Government'
     INTERNATIONAL = 'International', 'International'
@@ -407,6 +464,23 @@ def default_currencies():
         {'value': 'USD', 'isDefault': False},
         {'value': 'ZAR', 'isDefault': False},
     ]
+
+
+INCLUSION_TARGET_DEFAULTS = {'female': 50, 'vulnerable': 30, 'low_income': 60}
+
+
+def inclusion_targets() -> dict:
+    """The programme's minimum inclusion targets (% of households), set by the Super Admin in
+    Platform Configuration. Bids must commit to at least these, new projects start from them,
+    and programme-level reports measure against them."""
+    config = PlatformConfiguration.objects.order_by('id').first()
+    if config is None:
+        return dict(INCLUSION_TARGET_DEFAULTS)
+    return {
+        'female': int(config.female_target_minimum),
+        'vulnerable': int(config.vulnerable_target_minimum),
+        'low_income': int(config.low_income_target_minimum),
+    }
 
 
 class PlatformConfiguration(models.Model):
