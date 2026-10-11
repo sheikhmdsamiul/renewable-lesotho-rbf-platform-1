@@ -1,4 +1,5 @@
 from datetime import date, timedelta, timezone as dt_timezone
+from decimal import Decimal
 from pathlib import Path
 import re
 import tempfile
@@ -19,7 +20,7 @@ from django.http import FileResponse, Http404, HttpResponse
 from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
 from django.db import transaction
-from django.db.models import Q, F, Value, OuterRef, Subquery, Count, Avg, CharField, Case, When, Sum
+from django.db.models import Q, F, Value, OuterRef, Subquery, Count, Avg, CharField, Case, When, Sum, Prefetch
 from django.db.models.functions import Coalesce, NullIf
 from django.utils import timezone
 import csv
@@ -59,6 +60,7 @@ from .models import (
     ProjectDocument,
     InstallationReport,
     InstallationStatus,
+    INSTALLATION_MAX_RESUBMISSIONS,
     BeneficiaryGender,
     FieldVerification,
     FieldVerificationStatus,
@@ -144,7 +146,8 @@ from .meter_integrity import (
     parse_meter_timestamp_error,
     run_integrity_checks,
 )
-from .milestone_reviews import is_last_milestone, next_milestone_blocker, open_completion_review
+from .milestone_reviews import is_last_milestone, is_zero_value_milestone, next_milestone_blocker, open_completion_review
+from . import partial_payments, payment_holds
 from rbf.notifications.models import Notification, NotificationChannel, NotificationStatus
 from rbf.notifications.services import NotificationService
 from rbf.tenders.models import ContractStatus, TenderContract
@@ -169,7 +172,10 @@ def _build_disbursement_sheet_payload(claim: PaymentClaim) -> dict:
         'vendor_bank_sort_code': bank_snapshot['bank_sort_code'],
         'vendor_account_holder_name': bank_snapshot['bank_account_name'],
         'vendor_account_number': bank_snapshot['bank_account_number'],
-        'total_approved_amount': str(claim.claim_amount),
+        'total_approved_amount': str(claim.payable_amount),
+        'claim_amount': str(claim.claim_amount),
+        'is_partial': claim.is_partial,
+        'completion_pct': str(claim.completion_pct) if claim.completion_pct is not None else None,
         'claim_status': claim.status,
     }
 
@@ -182,17 +188,36 @@ def _assert_national_budget_available(claim: PaymentClaim):
     already_paid = (
         PaymentClaim.objects.filter(status__in={PaymentClaimStatus.COMPLETED, PaymentClaimStatus.LEGACY_PAID})
         .exclude(id=claim.id)
-        .aggregate(total=Sum('claim_amount'))
+        .aggregate(total=Sum(claim_status.payable_amount()))
         .get('total')
         or 0
     )
     remaining = configured_budget - float(already_paid)
-    claim_amount = float(claim.claim_amount or 0)
+    claim_amount = float(claim.payable_amount or 0)
     if claim_amount > remaining:
         raise ValueError(
             f'Insufficient National/Main Program Budget. Remaining balance is {remaining:.2f}, '
             f'but this claim requires {claim_amount:.2f}.'
         )
+
+
+def _send_notification(*, recipient_id: str, event: str, linked_entity_id: str = '', **fields) -> Notification:
+    """Record one notification for one user. Each call is a new entry in the recipient's inbox,
+    so a project's second claim reaching the same stage does not replace the first one's."""
+    return Notification.objects.create(
+        recipient_id=recipient_id, event=event, linked_entity_id=str(linked_entity_id or ''), **fields,
+    )
+
+
+def _payment_hold_response(claim):
+    """409 with the list of open findings holding this claim, or None when it may advance."""
+    blockers = payment_holds.claim_payment_blockers(claim)
+    if not blockers:
+        return None
+    return Response(
+        {'detail': payment_holds.blocker_message(blockers), 'blockers': blockers},
+        status=status.HTTP_409_CONFLICT,
+    )
 
 
 def create_project_activity_update(project: Project, author, title: str, body: str):
@@ -211,7 +236,7 @@ def assert_user_not_blacklisted_for_writes(user: User, message: str):
 
 def notify_project_oversight(project: Project, title: str, body: str, linked_entity_id: str = ''):
     recipients = User.objects.filter(
-        role__in={UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.UNDP_DONOR}
+        role__in={UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.UNDP_DONOR}, is_active=True,
     ).only('id', 'full_name', 'username')
     notifications = [
         Notification(
@@ -248,7 +273,7 @@ def notify_vendor_and_oversight(project: Project, *, vendor, event: str, title: 
             linked_entity_id=linked_entity_id,
         )
     ]
-    oversight_users = User.objects.filter(role__in={UserRole.RBF_OFFICIAL, UserRole.ADMIN}).only('id', 'full_name', 'username')
+    oversight_users = User.objects.filter(role__in={UserRole.RBF_OFFICIAL, UserRole.ADMIN}, is_active=True).only('id', 'full_name', 'username')
     notifications.extend(
         Notification(
             recipient_id=str(user.id),
@@ -590,8 +615,13 @@ class ProjectViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
         project.refresh_from_db()
         return Response(ProjectSerializer(project, context={'request': request}).data, status=status.HTTP_200_OK)
 
+    # Projects normally come from assigning an approved contract (tenders
+    # _create_project_assignment); direct creation is an RMT / Super Admin fallback only.
+    CREATE_ROLES = {UserRole.RBF_OFFICIAL, UserRole.ADMIN}
+
     def create(self, request, *args, **kwargs):
-        self._assert_write_permission()
+        if request.user.role not in self.CREATE_ROLES:
+            raise PermissionDenied('Projects are created by assigning an approved contract. Only RMT or Super Admin can create one directly.')
         return super().create(request, *args, **kwargs)
 
     def update(self, request, *args, **kwargs):
@@ -1613,10 +1643,12 @@ class MilestoneViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
     search_fields = ['name']
     ordering_fields = ['percentage', 'amount', 'created_at']
 
-    WRITE_ROLES = {UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.VENDOR}
+    # Milestone amounts, shares and thresholds are set by RMT at assignment; vendors only
+    # read them (claiming goes through PaymentClaimViewSet).
+    WRITE_ROLES = {UserRole.RBF_OFFICIAL, UserRole.ADMIN}
 
     def get_queryset(self):
-        qs = Milestone.objects.select_related('project', 'completion_review__reviewed_by').all().order_by('id')
+        qs = Milestone.objects.select_related('project', 'completion_review__reviewed_by').prefetch_related('carry_overs_in__from_milestone').all().order_by('id')
         user = self.request.user
         if user.role != UserRole.VENDOR:
             return qs
@@ -1685,7 +1717,7 @@ class MilestoneViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='completion-review')
     def completion_review(self, request, pk=None):
-        """Verify a paid milestone and decide the project's next step:
+        """Verify a paid milestone (or a 0% milestone whose conditions are met) and decide the project's next step:
         proceed to the next milestone, close the project, transfer the remaining
         milestones to another vendor, or (final milestone) complete the project."""
         if request.user.role not in self.REVIEW_ROLES:
@@ -1694,7 +1726,12 @@ class MilestoneViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
         project = milestone.project
         review = getattr(milestone, 'completion_review', None)
         if review is None:
-            return Response({'detail': 'This milestone has not been paid yet, so there is nothing to verify.'}, status=status.HTTP_400_BAD_REQUEST)
+            detail = (
+                "This milestone's conditions have not been met yet, so there is nothing to verify."
+                if is_zero_value_milestone(milestone)
+                else 'This milestone has not been paid yet, so there is nothing to verify.'
+            )
+            return Response({'detail': detail}, status=status.HTTP_400_BAD_REQUEST)
         if review.status != MilestoneReviewStatus.PENDING:
             return Response({'detail': 'A decision has already been recorded for this milestone.'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1752,6 +1789,7 @@ class MilestoneViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
                 ).update(status='cancelled', updated_at=timezone.now())
                 project.status = ProjectStatus.CLOSED
                 project.save(update_fields=['status', 'updated_at'])
+                partial_payments.forfeit_pending_carry_overs(project)
                 activity = f'{milestone_label} verified and the project was closed. {cancelled} remaining milestone(s) cancelled.'
             elif decision == MilestoneReviewDecision.TRANSFER:
                 project.vendor_id = str(new_vendor.id)
@@ -1953,6 +1991,10 @@ class PaymentClaimViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
     filterset_fields = ['status', 'project', 'vendor']
     search_fields = ['payment_reference', 'implementation_notes', 'remarks']
     ordering_fields = ['submitted_at', 'claim_amount', 'approved_at', 'paid_at']
+    # A claim is never edited or deleted in place: it moves only through the workflow
+    # actions (verify / approve / reject / return / resubmit / pay / confirm-paid), so the
+    # amount and history stay as reviewed. No PUT, PATCH or DELETE.
+    http_method_names = ['get', 'post', 'head', 'options']
 
     WRITE_ROLES = {UserRole.VENDOR}
     VERIFY_ROLES = {UserRole.RBF_OFFICIAL, UserRole.ADMIN}
@@ -2000,20 +2042,44 @@ class PaymentClaimViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
                 milestone_id=milestone_id,
             ).exclude(status=PaymentClaimStatus.REJECTED).first()
         if existing_claim:
+            if existing_claim.status == PaymentClaimStatus.RETURNED:
+                return Response(
+                    {'detail': 'This milestone claim was returned for completion. Fix the listed items and resubmit the existing claim.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             return Response(
                 {'detail': 'A claim for this milestone already exists and the milestone is locked from duplicate submissions.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         claim_milestone = serializer.validated_data.get('milestone')
-        if claim_milestone is not None:
-            blocker = next_milestone_blocker(claim_milestone)
-            if blocker:
-                return Response({'detail': blocker}, status=status.HTTP_400_BAD_REQUEST)
-        claim = serializer.save()
+        if claim_milestone is None:
+            return Response({'milestone': ['Select the milestone this claim is for.']}, status=status.HTTP_400_BAD_REQUEST)
+        if claim_milestone.project_id != project.id:
+            return Response({'milestone': ['This milestone does not belong to the selected project.']}, status=status.HTTP_400_BAD_REQUEST)
+        blocker = next_milestone_blocker(claim_milestone)
+        if blocker:
+            return Response({'detail': blocker}, status=status.HTTP_400_BAD_REQUEST)
+        # Re-evaluate the KPI conditions now (this also unlocks a milestone that has just
+        # become eligible), then only accept claims against a milestone that is claimable.
+        KpiService(str(project.id)).getMilestoneEligibility()
+        claim_milestone.refresh_from_db(fields=['status'])
+        if str(claim_milestone.status).strip().lower() != 'claimable':
+            return Response(
+                {'detail': (
+                    f'Milestone {claim_milestone.milestone_number} is not claimable yet. Its conditions '
+                    '(verified installations, inclusion targets, meter data, open anomaly flags) must be met first.'
+                )},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        claim = serializer.save(claim_amount=claim_milestone.amount or 0)
         claim.status = PaymentClaimStatus.SUBMITTED
-        if claim.milestone and not claim.claim_amount:
-            claim.claim_amount = claim.milestone.amount
-        claim.save(update_fields=['status', 'claim_amount'])
+        # The amount is the milestone's, never the vendor's figure, plus any unpaid
+        # shortfall carried over from an earlier partially-paid milestone.
+        carry_amount, carry_units = partial_payments.carry_in_totals(claim_milestone)
+        claim.carry_in_amount = carry_amount
+        claim.carry_in_units = carry_units
+        claim.claim_amount = (claim_milestone.amount or 0) + carry_amount
+        claim.save(update_fields=['status', 'claim_amount', 'carry_in_amount', 'carry_in_units'])
         if claim.milestone:
             claim.milestone.status = 'claimed'
             claim.milestone.save(update_fields=['status', 'updated_at'])
@@ -2044,18 +2110,6 @@ class PaymentClaimViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
             )
         return Response(self.get_serializer(claim).data, status=status.HTTP_201_CREATED)
 
-    def update(self, request, *args, **kwargs):
-        self._assert_write_permission()
-        return super().update(request, *args, **kwargs)
-
-    def partial_update(self, request, *args, **kwargs):
-        self._assert_write_permission()
-        return super().partial_update(request, *args, **kwargs)
-
-    def destroy(self, request, *args, **kwargs):
-        self._assert_write_permission()
-        return super().destroy(request, *args, **kwargs)
-
     @action(detail=True, methods=['post'])
     def verify(self, request, pk=None):
         if request.user.role not in self.VERIFY_ROLES:
@@ -2065,17 +2119,42 @@ class PaymentClaimViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
             return Response({'detail': 'This vendor is suspended or blacklisted. Claim remains on Held/Audit.'}, status=status.HTTP_400_BAD_REQUEST)
         if claim.status not in {PaymentClaimStatus.SUBMITTED, PaymentClaimStatus.LEGACY_PENDING}:
             return Response({'detail': 'Only submitted claims can be approved by RMT.'}, status=status.HTTP_400_BAD_REQUEST)
+        held = _payment_hold_response(claim)
+        if held:
+            return held
+        decision = str(request.data.get('decision') or partial_payments.DECISION_FULL).strip().lower()
+        try:
+            partial_payments.apply_rmt_decision(
+                claim,
+                decision,
+                assessed_pct=request.data.get('assessed_pct'),
+                deficiencies=request.data.get('deficiencies'),
+            )
+        except ValueError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         claim.status = PaymentClaimStatus.RMT_APPROVED
         claim.verified_at = timezone.now()
         claim.reviewed_by = request.user
         claim.remarks = request.data.get('remarks', claim.remarks)
-        claim.save(update_fields=['status', 'verified_at', 'reviewed_by', 'remarks'])
-        log_audit(request.user, 'claim_rmt_approved', claim, {'status': claim.status})
+        claim.save(update_fields=['status', 'verified_at', 'reviewed_by', 'remarks', *partial_payments.DECISION_FIELDS])
+        log_audit(request.user, 'claim_rmt_approved', claim, {
+            'status': claim.status,
+            'decision': decision,
+            'approved_amount': str(claim.approved_amount),
+            'completion_pct': str(claim.completion_pct),
+        })
+        if claim.is_partial:
+            approval_summary = (
+                f"Payment claim {claim.id} was partially approved by RMT: {claim.completion_pct}% delivered, "
+                f"M {claim.approved_amount} of M {claim.claim_amount}. The rest carries over to the next milestone."
+            )
+        else:
+            approval_summary = f"Payment claim {claim.id} was approved by RMT."
         create_project_activity_update(
             claim.project,
             request.user,
-            'Claim Approved By RMT',
-            f"Payment claim {claim.id} was approved by RMT.",
+            'Claim Partially Approved By RMT' if claim.is_partial else 'Claim Approved By RMT',
+            approval_summary,
         )
         tac_users = User.objects.filter(role=UserRole.TAC).only('id', 'full_name', 'username')
         if tac_users:
@@ -2095,13 +2174,19 @@ class PaymentClaimViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
                 ],
                 ignore_conflicts=True,
             )
-        Notification.objects.create(
+        _send_notification(
             recipient_id=str(claim.vendor_id),
             recipient_name=claim.vendor.full_name or claim.vendor.username,
             type=NotificationChannel.IN_APP,
             event='payment_claim_verified',
-            title='Milestone Claim Approved By RMT',
-            body=f'Claim {claim.id} passed RMT review and is now waiting for TAC endorsement.',
+            title='Milestone Claim Partially Approved By RMT' if claim.is_partial else 'Milestone Claim Approved By RMT',
+            body=(
+                f'Claim {claim.id} was partially approved: M {claim.approved_amount} of M {claim.claim_amount} '
+                f'({claim.completion_pct}% delivered). The remaining M {claim.shortfall_amount} will be added to your '
+                'next milestone claim once the missing items are delivered and verified. It now awaits TAC endorsement.'
+                if claim.is_partial
+                else f'Claim {claim.id} passed RMT review and is now waiting for TAC endorsement.'
+            ),
             status=NotificationStatus.SENT,
             linked_entity_id=str(claim.project_id),
         )
@@ -2118,6 +2203,9 @@ class PaymentClaimViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
         if request.user.role in self.TAC_APPROVE_ROLES:
             if claim.status not in {PaymentClaimStatus.RMT_APPROVED, PaymentClaimStatus.LEGACY_VERIFIED}:
                 return Response({'detail': 'Claim must first be approved by RMT before TAC endorsement.'}, status=status.HTTP_400_BAD_REQUEST)
+            held = _payment_hold_response(claim)
+            if held:
+                return held
             claim.status = PaymentClaimStatus.TAC_ENDORSED
             claim.approved_at = timezone.now()
             claim.reviewed_by = request.user
@@ -2148,7 +2236,7 @@ class PaymentClaimViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
                     ],
                     ignore_conflicts=True,
                 )
-            Notification.objects.create(
+            _send_notification(
                 recipient_id=str(claim.vendor_id),
                 recipient_name=claim.vendor.full_name or claim.vendor.username,
                 type=NotificationChannel.IN_APP,
@@ -2162,6 +2250,9 @@ class PaymentClaimViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
 
         if claim.status not in {PaymentClaimStatus.TAC_ENDORSED, PaymentClaimStatus.LEGACY_APPROVED}:
             return Response({'detail': 'Claim must first be endorsed by TAC before PSC approval.'}, status=status.HTTP_400_BAD_REQUEST)
+        held = _payment_hold_response(claim)
+        if held:
+            return held
         claim.status = PaymentClaimStatus.PSC_APPROVED
         claim.reviewed_by = request.user
         claim.remarks = request.data.get('remarks', claim.remarks)
@@ -2191,7 +2282,7 @@ class PaymentClaimViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
                 ],
                 ignore_conflicts=True,
             )
-        Notification.objects.create(
+        _send_notification(
             recipient_id=str(claim.vendor_id),
             recipient_name=claim.vendor.full_name or claim.vendor.username,
             type=NotificationChannel.IN_APP,
@@ -2254,6 +2345,148 @@ class PaymentClaimViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
         })
         return Response(payload, status=status.HTTP_200_OK)
 
+    @action(detail=True, methods=['get'])
+    def assessment(self, request, pk=None):
+        """What RMT needs to decide a claim: verified delivery against the milestone's
+        units, the minimum share for a partial payment, and what a partial would pay."""
+        if request.user.role not in self.VERIFY_ROLES | self.REJECT_ROLES:
+            raise PermissionDenied('You do not have permission to assess claims.')
+        claim = self.get_object()
+        result = partial_payments.assess_claim(claim)
+        pct = result['completion_pct']
+        final = claim.milestone is None or partial_payments.next_payable_milestone(claim.milestone) is None
+        minimum = partial_payments.partial_payment_min_pct()
+        return Response({
+            **result,
+            'claim_amount': str(claim.claim_amount),
+            'carry_in_amount': str(claim.carry_in_amount),
+            'partial_payment_min_pct': minimum,
+            'is_final_milestone': final,
+            'partial_allowed': not final and (pct is None or minimum <= pct < 100),
+            'partial_amount': (
+                str((claim.claim_amount * Decimal(str(pct)) / 100).quantize(Decimal('0.01')))
+                if pct is not None else None
+            ),
+            'payment_blockers': payment_holds.claim_payment_blockers(claim),
+        })
+
+    @action(detail=True, methods=['get'])
+    def blockers(self, request, pk=None):
+        """Open findings holding this claim back (empty when it may advance)."""
+        claim = self.get_object()
+        if request.user.role not in self.VERIFY_ROLES | self.REJECT_ROLES | self.TAC_APPROVE_ROLES | self.PSC_APPROVE_ROLES | self.PAY_ROLES | {UserRole.VENDOR}:
+            raise PermissionDenied('You do not have permission to view payment holds.')
+        blockers = payment_holds.claim_payment_blockers(claim)
+        if request.user.role == UserRole.VENDOR:
+            # A vendor is told what to fix, not that an independent audit is under way.
+            blockers = [b for b in blockers if b['source'] != 'audit']
+        return Response({'blockers': blockers})
+
+    @action(detail=True, methods=['post'], url_path='return')
+    def return_for_completion(self, request, pk=None):
+        """RMT sends a submitted claim back with the list of what is missing; the vendor
+        completes it and resubmits the same claim."""
+        if request.user.role not in self.VERIFY_ROLES:
+            raise PermissionDenied('Only the RBF Management Team or Super Admin can return claims for completion.')
+        claim = self.get_object()
+        if claim.status not in {PaymentClaimStatus.SUBMITTED, PaymentClaimStatus.LEGACY_PENDING}:
+            return Response({'detail': 'Only claims awaiting RMT review can be returned for completion.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            deficiencies = partial_payments.clean_deficiencies(request.data.get('deficiencies'))
+        except ValueError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        if not deficiencies:
+            return Response({'detail': 'List what the vendor must complete before resubmitting.'}, status=status.HTTP_400_BAD_REQUEST)
+        assessment = partial_payments.assess_claim(claim)
+        partial_payments.clear_rmt_decision(claim)
+        claim.expected_units = assessment['expected_units']
+        claim.verified_units = assessment['verified_units']
+        claim.deficiencies = deficiencies
+        claim.status = PaymentClaimStatus.RETURNED
+        claim.returned_at = timezone.now()
+        claim.reviewed_by = request.user
+        claim.remarks = request.data.get('remarks', claim.remarks)
+        claim.save(update_fields=['status', 'returned_at', 'reviewed_by', 'remarks', *partial_payments.DECISION_FIELDS])
+        log_audit(request.user, 'payment_claim_returned', claim, {
+            'status': claim.status,
+            'deficiencies': len(deficiencies),
+            'verified_units': claim.verified_units,
+            'expected_units': claim.expected_units,
+        })
+        create_project_activity_update(
+            claim.project,
+            request.user,
+            'Payment Claim Returned For Completion',
+            f"Payment claim {claim.id} was returned to the vendor with {len(deficiencies)} item(s) to complete.",
+        )
+        _send_notification(
+            recipient_id=str(claim.vendor_id),
+            recipient_name=claim.vendor.full_name or claim.vendor.username,
+            type=NotificationChannel.IN_APP,
+            event='payment_claim_returned',
+            title='Milestone Claim Returned For Completion',
+            body=(
+                f'Claim {claim.id} was returned by RMT. Complete the following and resubmit: '
+                + '; '.join(d['description'] for d in deficiencies[:5])
+                + (' ...' if len(deficiencies) > 5 else '')
+            ),
+            status=NotificationStatus.SENT,
+            linked_entity_id=str(claim.project_id),
+        )
+        return Response(self.get_serializer(claim).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def resubmit(self, request, pk=None):
+        """Vendor resubmits a returned claim after completing the listed items."""
+        self._assert_write_permission()
+        claim = self.get_object()
+        if claim.status != PaymentClaimStatus.RETURNED:
+            return Response({'detail': 'Only claims returned for completion can be resubmitted.'}, status=status.HTTP_400_BAD_REQUEST)
+        if claim.milestone is not None:
+            blocker = next_milestone_blocker(claim.milestone)
+            if blocker:
+                return Response({'detail': blocker}, status=status.HTTP_400_BAD_REQUEST)
+        update_fields = ['status', 'resubmission_count']
+        notes = request.data.get('implementation_notes')
+        if notes is not None:
+            claim.implementation_notes = str(notes)
+            update_fields.append('implementation_notes')
+        evidence = request.data.get('evidence_files')
+        if isinstance(evidence, list):
+            claim.evidence_files = evidence
+            update_fields.append('evidence_files')
+        claim.status = PaymentClaimStatus.SUBMITTED
+        claim.resubmission_count += 1
+        claim.save(update_fields=update_fields)
+        log_audit(request.user, 'payment_claim_resubmitted', claim, {
+            'status': claim.status,
+            'resubmission_count': claim.resubmission_count,
+        })
+        create_project_activity_update(
+            claim.project,
+            request.user,
+            'Payment Claim Resubmitted',
+            f"Payment claim {claim.id} was resubmitted after completing the items RMT returned it for.",
+        )
+        rmt_users = User.objects.filter(role__in=self.VERIFY_ROLES).only('id', 'full_name', 'username')
+        Notification.objects.bulk_create(
+            [
+                Notification(
+                    recipient_id=str(user.id),
+                    recipient_name=user.full_name or user.username,
+                    type=NotificationChannel.IN_APP,
+                    event='payment_claim_resubmitted',
+                    title='Returned Claim Resubmitted',
+                    body=f'Claim {claim.id} for project {claim.project.project_reference or claim.project.id} was resubmitted and awaits RMT review.',
+                    status=NotificationStatus.SENT,
+                    linked_entity_id=str(claim.project_id),
+                )
+                for user in rmt_users
+            ],
+            ignore_conflicts=True,
+        )
+        return Response(self.get_serializer(claim).data, status=status.HTTP_200_OK)
+
     @action(detail=True, methods=['post'])
     def reject(self, request, pk=None):
         if request.user.role not in self.REJECT_ROLES:
@@ -2272,7 +2505,9 @@ class PaymentClaimViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
             activity_body = f"Payment claim {claim.id} was rejected."
         claim.reviewed_by = request.user
         claim.remarks = request.data.get('remarks', claim.remarks)
-        claim.save(update_fields=['status', 'reviewed_by', 'remarks'])
+        # Any approval RMT recorded no longer stands; it is decided afresh on re-review.
+        partial_payments.clear_rmt_decision(claim)
+        claim.save(update_fields=['status', 'reviewed_by', 'remarks', *partial_payments.DECISION_FIELDS])
         if claim.milestone:
             claim.milestone.status = 'claimable'
             claim.milestone.save(update_fields=['status', 'updated_at'])
@@ -2282,6 +2517,32 @@ class PaymentClaimViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
             request.user,
             activity_title,
             activity_body,
+        )
+        project_label = claim.project.project_reference or claim.project_id
+        remarks = str(request.data.get('remarks') or '').strip()
+        pushed_back = claim.status == PaymentClaimStatus.SUBMITTED
+        reason = f' Reason: {remarks}' if remarks else ''
+        _send_notification(
+            recipient_id=str(claim.vendor_id),
+            recipient_name=claim.vendor.full_name or claim.vendor.username,
+            type=NotificationChannel.IN_APP,
+            event='payment_claim_pushed_back' if pushed_back else 'payment_claim_rejected',
+            title='Milestone Claim Sent Back For RMT Review' if pushed_back else 'Milestone Claim Rejected',
+            body=(
+                f'TAC sent claim {claim.id} for project {project_label} back to the RMT for clarification.{reason}'
+                if pushed_back
+                else f'Claim {claim.id} for project {project_label} was rejected by the {request.user.get_role_display()}.'
+                     f'{reason} The milestone is open again: you may submit a new claim once the issues are addressed.'
+            ),
+            status=NotificationStatus.SENT,
+            linked_entity_id=str(claim.project_id),
+        )
+        _notify_users(
+            User.objects.filter(role__in=self.VERIFY_ROLES, is_active=True).exclude(id=request.user.id).only('id', 'full_name', 'username'),
+            event='payment_claim_pushed_back' if pushed_back else 'payment_claim_rejected',
+            title=f'Claim {claim.id} {"pushed back by TAC" if pushed_back else "rejected"}: {project_label}',
+            body=f'{request.user.get_role_display()} {"pushed back" if pushed_back else "rejected"} claim {claim.id} for project {project_label}.{reason}',
+            linked_entity_id=str(claim.project_id),
         )
         return Response(self.get_serializer(claim).data, status=status.HTTP_200_OK)
 
@@ -2294,6 +2555,9 @@ class PaymentClaimViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
             return Response({'detail': 'This vendor is suspended or blacklisted. New disbursements are frozen.'}, status=status.HTTP_400_BAD_REQUEST)
         if claim.status not in {PaymentClaimStatus.PSC_APPROVED, PaymentClaimStatus.LEGACY_APPROVED}:
             return Response({'detail': 'Claim must be approved by PSC before Finance can pay it.'}, status=status.HTTP_400_BAD_REQUEST)
+        held = _payment_hold_response(claim)
+        if held:
+            return held
 
         reference = str(request.data.get('payment_reference') or f"PMT-{uuid.uuid4().hex[:10].upper()}")
         claim.payment_reference = reference
@@ -2303,7 +2567,7 @@ class PaymentClaimViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
         disbursement, _ = Disbursement.objects.update_or_create(
             claim=claim,
             defaults={
-                'amount': claim.claim_amount,
+                'amount': claim.payable_amount,
                 'status': DisbursementStatus.COMPLETED,
                 'reference': reference,
                 'notes': request.data.get('notes', ''),
@@ -2341,7 +2605,7 @@ class PaymentClaimViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
                 ],
                 ignore_conflicts=True,
             )
-        Notification.objects.create(
+        _send_notification(
             recipient_id=str(claim.vendor_id),
             recipient_name=claim.vendor.full_name or claim.vendor.username,
             type=NotificationChannel.IN_APP,
@@ -2366,6 +2630,9 @@ class PaymentClaimViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
         reference = str(request.data.get('payment_reference') or '').strip()
         if not reference:
             return Response({'detail': 'payment_reference is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        held = _payment_hold_response(claim)
+        if held:
+            return held
         try:
             _assert_national_budget_available(claim)
         except ValueError as exc:
@@ -2380,7 +2647,7 @@ class PaymentClaimViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
         disbursement, _ = Disbursement.objects.update_or_create(
             claim=claim,
             defaults={
-                'amount': claim.claim_amount,
+                'amount': claim.payable_amount,
                 'status': DisbursementStatus.COMPLETED,
                 'reference': reference,
                 'notes': request.data.get('notes', ''),
@@ -2400,19 +2667,28 @@ class PaymentClaimViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
             'Payment Marked As Paid',
             f"RMT marked payment claim {claim.id} as paid with reference {reference}.",
         )
-        Notification.objects.create(
+        _send_notification(
             recipient_id=str(claim.vendor_id),
             recipient_name=claim.vendor.full_name or claim.vendor.username,
             type=NotificationChannel.IN_APP,
             event='payment_claim_completed',
             title='Milestone Payment Completed',
-            body=f'Payment of {claim.claim_amount} for claim {claim.id} has been completed. Reference: {reference}.',
+            body=f'Payment of {claim.payable_amount} for claim {claim.id} has been completed. Reference: {reference}.',
             status=NotificationStatus.SENT,
             linked_entity_id=str(claim.project_id),
         )
         if claim.milestone:
             claim.milestone.status = 'paid'
             claim.milestone.save(update_fields=['status', 'updated_at'])
+            carry_over = partial_payments.settle_on_payment(claim)
+            if carry_over is not None:
+                create_project_activity_update(
+                    claim.project,
+                    request.user,
+                    'Milestone Shortfall Carried Over',
+                    f"Milestone {claim.milestone.milestone_number} was paid partially. M {carry_over.shortfall_amount} "
+                    f"({carry_over.shortfall_units} unit(s)) carries over to Milestone {carry_over.to_milestone.milestone_number}.",
+                )
             _, review_opened = open_completion_review(claim.milestone)
             if review_opened:
                 milestone_label = f'Milestone {claim.milestone.milestone_number}'
@@ -2464,7 +2740,9 @@ class InstallationReportViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
     WRITE_ROLES = {UserRole.VENDOR, UserRole.RBF_OFFICIAL, UserRole.ADMIN}
 
     def get_queryset(self):
-        qs = self.queryset.order_by('-submitted_at')
+        # Prefetched because to_representation asks whether a field verification exists for
+        # every row (the field verifier's blind-inspection withholding).
+        qs = self.queryset.order_by('-submitted_at').prefetch_related('field_verifications')
         user = self.request.user
         if user.role == UserRole.VENDOR:
             return qs.filter(vendor=user)
@@ -2498,13 +2776,9 @@ class InstallationReportViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
             if not setup or not setup.setup_completed_at:
                 raise PermissionDenied('Complete project setup before submitting installations.')
 
-    def create(self, request, *args, **kwargs):
-        self._assert_write_permission()
-        data = request.data.copy()
-        project_id = str(data.get('project') or '')
-        self._assert_project_access(project_id)
-        project = Project.objects.select_related('lot').filter(id=project_id).first()
-
+    def _checked_location(self, project, data):
+        """Parse gps_lat / gps_lng from `data` and run the Lesotho and project-district
+        checks. Returns (latitude, longitude, None) or (None, None, error_response)."""
         errors: dict[str, list[str]] = {}
         lat_raw = data.get('gps_lat')
         lng_raw = data.get('gps_lng')
@@ -2523,12 +2797,12 @@ class InstallationReportViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
             errors['gps_lng'] = ['Longitude must be a decimal between -180 and 180.']
             longitude = None
         if errors:
-            return Response({'success': False, 'errors': errors}, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
+            return None, None, Response({'success': False, 'errors': errors}, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
 
         try:
             inside_lesotho = GpsValidator.isInsideLesotho(latitude, longitude)
         except FileNotFoundError:
-            return Response(
+            return None, None, Response(
                 {
                     'success': False,
                     'errors': {
@@ -2541,7 +2815,7 @@ class InstallationReportViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
             )
 
         if not inside_lesotho:
-            return Response(
+            return None, None, Response(
                 {
                     'success': False,
                     'errors': {
@@ -2559,7 +2833,6 @@ class InstallationReportViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
             or getattr(project, 'region', '')
             or ''
         ).strip()
-        outside_district_warning = None
         if project_district_label and GpsValidator.districtBoundaryConfigured():
             is_inside = GpsValidator.isInsideProjectDistrict(latitude, longitude, project_district_label)
             if not is_inside:
@@ -2572,7 +2845,7 @@ class InstallationReportViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
                     else:
                         proximity = f" The location is {round(assigned_distance / 1000, 1)} km beyond the assigned district boundary."
                 location_note = f" Per the boundary data, the location falls within {resolved_district}." if resolved_district else ""
-                return Response(
+                return None, None, Response(
                     {
                         'success': False,
                         'errors': {
@@ -2583,6 +2856,48 @@ class InstallationReportViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
                     },
                     status=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 )
+        return latitude, longitude, None
+
+    @staticmethod
+    def _duplicate_identity_errors(serial_number, beneficiary_id, exclude_id=None) -> dict:
+        """One physical device and one household can be paid for once across the whole
+        programme: reject a serial number or beneficiary ID already used by another
+        installation (terminated ones excluded), in any project."""
+        errors: dict[str, list[str]] = {}
+        others = InstallationReport.objects.exclude(status=InstallationStatus.TERMINATED)
+        if exclude_id is not None:
+            others = others.exclude(id=exclude_id)
+        serial = str(serial_number or '').strip()
+        if serial:
+            clash = others.filter(serial_number__iexact=serial).only('id', 'project_id').first()
+            if clash:
+                errors['serial_number'] = [
+                    f'Serial number {serial} is already registered to installation #{clash.id} '
+                    f'(project {clash.project_id}). Each device can only be reported once.'
+                ]
+        beneficiary = str(beneficiary_id or '').strip()
+        if beneficiary:
+            clash = others.filter(beneficiary_id__iexact=beneficiary).only('id', 'project_id').first()
+            if clash:
+                errors['beneficiary_id'] = [
+                    f'Beneficiary {beneficiary} already has installation #{clash.id} '
+                    f'(project {clash.project_id}). A household can only be reported once.'
+                ]
+        return errors
+
+    def create(self, request, *args, **kwargs):
+        self._assert_write_permission()
+        data = request.data.copy()
+        project_id = str(data.get('project') or '')
+        self._assert_project_access(project_id)
+        project = Project.objects.select_related('lot').filter(id=project_id).first()
+
+        latitude, longitude, location_error = self._checked_location(project, data)
+        if location_error is not None:
+            return location_error
+        identity_errors = self._duplicate_identity_errors(data.get('serial_number'), data.get('beneficiary_id'))
+        if identity_errors:
+            return Response({'success': False, 'errors': identity_errors}, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
 
         duplicate_info = GpsValidator.hasDuplicateCoordinate(latitude, longitude, project_id)
 
@@ -2591,7 +2906,13 @@ class InstallationReportViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
         data.setdefault('installation_date', timezone.now().date().isoformat())
 
         serializer = self.get_serializer(data=data)
-        serializer.is_valid(raise_exception=True)
+        if not serializer.is_valid():
+            # The same field-keyed 422 contract as the GPS checks above, so the client can
+            # highlight the offending input instead of showing one generic failure.
+            return Response(
+                {'success': False, 'errors': serializer.errors},
+                status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
         installation_district = resolve_installation_district(project, latitude, longitude)
         if request.user.role == UserRole.VENDOR:
             report = serializer.save(vendor=request.user, gis_status=GisStatus.YELLOW, district=installation_district)
@@ -2636,7 +2957,9 @@ class InstallationReportViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
                 event='verification_task_created',
                 title='New Verification Task',
                 body=f'Installation report {report.id} requires field verification.',
-                linked_entity_id=str(report.project_id),
+                # One per installation: linking to the project hit the (recipient, event,
+                # entity) unique constraint on the project's second installation.
+                linked_entity_id=str(report.id),
             )
         if report.meter_id or report.kwh_reading:
             SmartMeterReading.objects.create(
@@ -2685,16 +3008,146 @@ class InstallationReportViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
             raise PermissionDenied('This installation has been field-verified; its evidence is locked.')
         assert_user_not_blacklisted_for_writes(user, 'Your vendor account is suspended or blacklisted. Installation reporting is restricted.')
 
+    def _assert_identity_unique(self, report, data):
+        errors = self._duplicate_identity_errors(
+            data.get('serial_number', report.serial_number),
+            data.get('beneficiary_id', report.beneficiary_id),
+            exclude_id=report.id,
+        )
+        if errors:
+            raise ValidationError(errors)
+
     def update(self, request, *args, **kwargs):
-        self._assert_editable(self.get_object())
+        report = self.get_object()
+        self._assert_editable(report)
+        self._assert_identity_unique(report, request.data)
         return super().update(request, *args, **kwargs)
 
     def partial_update(self, request, *args, **kwargs):
-        self._assert_editable(self.get_object())
+        report = self.get_object()
+        self._assert_editable(report)
+        self._assert_identity_unique(report, request.data)
         return super().partial_update(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
         raise PermissionDenied('Installation reports are permanent records and cannot be deleted.')
+
+    # What a vendor may correct on a flagged installation. Status, verification outcome and
+    # project are never vendor-editable; GPS is handled separately (re-validated).
+    CORRECTABLE_FIELDS = (
+        'serial_number', 'beneficiary_id', 'beneficiary_name', 'beneficiary_phone', 'household_type',
+        'household_members', 'male_members', 'female_members', 'household_income_level',
+        'household_employment', 'meter_id', 'installation_date',
+    )
+
+    @action(detail=True, methods=['post'])
+    def resubmit(self, request, pk=None):
+        """Vendor corrects a Flagged installation and sends it back for a new field-verification
+        round. Limited to INSTALLATION_MAX_RESUBMISSIONS; afterwards RMT / DoE decide."""
+        report = self.get_object()
+        user = request.user
+        if user.role != UserRole.VENDOR or report.vendor_id != user.id:
+            raise PermissionDenied('Only the vendor who submitted this installation can correct it.')
+        assert_user_not_blacklisted_for_writes(user, 'Your vendor account is suspended or blacklisted. Installation reporting is restricted.')
+        if report.status != InstallationStatus.FLAGGED:
+            return Response({'detail': 'Only flagged installations can be corrected and resubmitted.'}, status=status.HTTP_400_BAD_REQUEST)
+        if report.resubmission_count >= INSTALLATION_MAX_RESUBMISSIONS:
+            return Response(
+                {'detail': (
+                    f'This installation has already been resubmitted {report.resubmission_count} times. '
+                    'Contact the RBF Management Team to review it.'
+                )},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        task = getattr(report, 'verification_task', None)
+        if task is None:
+            return Response({'detail': 'This installation has no verification task.'}, status=status.HTTP_400_BAD_REQUEST)
+        note = str(request.data.get('correction_note') or '').strip()
+        if len(note) < 10:
+            return Response({'correction_note': ['Describe what you corrected (at least 10 characters).']}, status=status.HTTP_400_BAD_REQUEST)
+
+        changes = {name: request.data.get(name) for name in self.CORRECTABLE_FIELDS if name in request.data}
+        new_location = None
+        if request.data.get('gps_lat') not in (None, '') or request.data.get('gps_lng') not in (None, ''):
+            latitude, longitude, location_error = self._checked_location(report.project, request.data)
+            if location_error is not None:
+                return location_error
+            new_location = (latitude, longitude)
+        identity_errors = self._duplicate_identity_errors(
+            changes.get('serial_number', report.serial_number),
+            changes.get('beneficiary_id', report.beneficiary_id),
+            exclude_id=report.id,
+        )
+        if identity_errors:
+            return Response({'success': False, 'errors': identity_errors}, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
+        serializer = self.get_serializer(report, data=changes, partial=True)
+        if not serializer.is_valid():
+            return Response({'success': False, 'errors': serializer.errors}, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
+
+        from django.core.files.storage import default_storage
+        with transaction.atomic():
+            report = serializer.save()
+            update_fields = ['status', 'gis_status', 'resubmission_count', 'correction_note', 'resubmitted_at']
+            if new_location is not None:
+                report.gps_lat, report.gps_lng = new_location
+                report.district = resolve_installation_district(report.project, *new_location)
+                update_fields += ['gps_lat', 'gps_lng', 'district']
+            new_photos = [
+                default_storage.save(f'installation_photos/{file.name}', file) for file in request.FILES.getlist('photos')
+            ]
+            if new_photos:
+                report.photo_files = [*(report.photo_files or []), *new_photos]
+                update_fields.append('photo_files')
+            report.status = InstallationStatus.SUBMITTED
+            report.gis_status = GisStatus.YELLOW
+            report.resubmission_count += 1
+            report.correction_note = note
+            report.resubmitted_at = timezone.now()
+            report.save(update_fields=update_fields)
+
+            # A new verification round; earlier FieldVerification records stay as history.
+            task.status = VerificationStatus.REVERIFICATION_REQUIRED
+            task.verification_round += 1
+            task.reverification_reason = f'Vendor correction #{report.resubmission_count}: {note}'
+            task.reverification_requested_by = user
+            task.reverification_requested_at = timezone.now()
+            task_fields = ['status', 'verification_round', 'reverification_reason', 'reverification_requested_by',
+                           'reverification_requested_at', 'updated_at']
+            if new_location is not None:
+                task.vendor_lat, task.vendor_lng = new_location
+                task_fields += ['vendor_lat', 'vendor_lng']
+            task.save(update_fields=task_fields)
+
+        log_audit(user, 'installation_resubmitted', report, {
+            'resubmission_count': report.resubmission_count,
+            'round': task.verification_round,
+            'changed_fields': sorted(changes),
+            'gps_changed': new_location is not None,
+            'photos_added': len(new_photos),
+            'module': 'field_verification',
+        })
+        create_project_activity_update(
+            report.project,
+            user,
+            'Installation Corrected And Resubmitted',
+            f"Installation {report.id} was corrected by the vendor and sent for field verification round {task.verification_round}.",
+        )
+        recipients = list(User.objects.filter(role__in={UserRole.RBF_OFFICIAL, UserRole.ADMIN}).only('id', 'full_name', 'username'))
+        if task.assigned_verifier_id:
+            recipients.append(task.assigned_verifier)
+        for recipient in recipients:
+            _send_notification(
+                recipient_id=str(recipient.id),
+                event='installation_resubmitted',
+                linked_entity_id=str(report.id),
+                recipient_name=recipient.full_name or recipient.username,
+                type=NotificationChannel.IN_APP,
+                title=f'Installation #{report.id} corrected by vendor',
+                body=f'Round {task.verification_round} field verification needed. Vendor note: {note}',
+                status=NotificationStatus.SENT,
+            )
+        refresh_project_kpis(str(report.project_id))
+        return Response({'success': True, 'data': self.get_serializer(report).data}, status=status.HTTP_200_OK)
 
 
 class VerificationTaskViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
@@ -2717,7 +3170,16 @@ class VerificationTaskViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
     COMPLETED_STATUSES = {VerificationStatus.VERIFIED, VerificationStatus.FLAGGED, VerificationStatus.PARTIAL}
 
     def get_queryset(self):
-        qs = self.queryset.select_related('report__project', 'reverification_requested_by').order_by('-created_at')
+        qs = (
+            self.queryset.select_related('report__project', 'reverification_requested_by')
+            .prefetch_related(
+                Prefetch(
+                    'report__field_verifications',
+                    queryset=FieldVerification.objects.select_related('field_officer'),
+                )
+            )
+            .order_by('-created_at')
+        )
         user = self.request.user
         if user.role == UserRole.FIELD_VERIFIER:
             return qs.filter(field_verifier_task_scope_filter(user)).distinct().order_by('created_at')
@@ -2812,7 +3274,7 @@ class VerificationTaskViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
                 type=NotificationChannel.IN_APP,
                 event='verification_reverification_requested',
                 title=f'Re-verification required: installation #{report.id}',
-                body=f'{requester} requested re-verification of {report.serial_number or report.id}: {reason[:200]}',
+                body=f'{requester} requested re-verification of {report.serial_number or report.id}: {reason}',
                 status=NotificationStatus.SENT,
                 linked_entity_id=str(report.id),
             )
@@ -3025,17 +3487,26 @@ class VerificationTaskViewSet(ArchiveScopedListMixin, viewsets.ModelViewSet):
             'Installation Verification Completed',
             f"Installation report {report.id} was {str(next_status).lower()} after field verification.",
         )
-        Notification.objects.get_or_create(
+        vendor_body = f'Installation #{report.id} was {verification_record_status} by the field officer.'
+        if next_status == VerificationStatus.FLAGGED:
+            remaining = max(INSTALLATION_MAX_RESUBMISSIONS - report.resubmission_count, 0)
+            vendor_body += f' Reason: {flag_reason or "GPS mismatch at the site."}'
+            vendor_body += (
+                f' Correct it and resubmit from Field Work ({remaining} resubmission(s) left).'
+                if remaining else ' No resubmissions left; contact the RBF Management Team.'
+            )
+        elif flag_reason:
+            vendor_body += f' Note: {flag_reason}'
+        # Refreshed every round (a plain get_or_create would keep the first round's message).
+        _send_notification(
             recipient_id=str(report.vendor_id),
             event='installation_verification_vendor',
             linked_entity_id=str(report.id),
-            defaults={
-                'recipient_name': report.vendor.full_name or report.vendor.username,
-                'type': NotificationChannel.IN_APP,
-                'title': f'Installation #{report.id} {verification_record_status}',
-                'body': f'Installation #{report.id} was {verification_record_status} by the field officer.',
-                'status': NotificationStatus.SENT,
-            },
+            recipient_name=report.vendor.full_name or report.vendor.username,
+            type=NotificationChannel.IN_APP,
+            title=f'Installation #{report.id} {verification_record_status}',
+            body=vendor_body,
+            status=NotificationStatus.SENT,
         )
         district_name = report.district or report.project.district or report.project.region or ''
         project_areas = {value.lower() for value in (report.project.region, report.project.district) if value}
@@ -3124,6 +3595,22 @@ class MapInstallationView(APIView):
         # `district` is a model field, so values() cannot alias the annotation to it.
         for record in records:
             record['district'] = record.pop('district_name')
+        # Blind inspection applies to the map too: a field verifier is still routed to the
+        # site (coordinates, GIS status, vendor, district) but the popup must not read back
+        # what the vendor claimed until their own verification is on record.
+        if request.user.role == UserRole.FIELD_VERIFIER:
+            verified_installation_ids = set(
+                FieldVerification.objects.filter(
+                    installation_id__in=[record['id'] for record in records]
+                ).values_list('installation_id', flat=True)
+            )
+            for record in records:
+                if record['id'] in verified_installation_ids:
+                    continue
+                record['serial_number'] = ''
+                record['beneficiary_name'] = ''
+                record['household_type'] = ''
+                record['installation_date'] = None
         vendor_keys = {
             str(record.get('project_vendor_id') or '').strip()
             for record in records
@@ -3774,6 +4261,7 @@ class ProspectSyncLogViewSet(viewsets.ReadOnlyModelViewSet):
 
 ANOMALY_EVIDENCE_ALLOWED_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp', '.pdf'}
 ANOMALY_EVIDENCE_MAX_BYTES = 5 * 1024 * 1024
+ANOMALY_DEFAULT_RESPONSE_DAYS = 14
 
 
 def _record_anomaly_review_event(*, flag: AnomalyFlag, user, from_status: str, to_status: str) -> AnomalyReviewEvent:
@@ -3819,11 +4307,6 @@ def _notify_vendor_of_anomaly_review(flag: AnomalyFlag, *, event: str, title: st
         vendor = User.objects.only('id', 'full_name', 'username').get(id=vendor_id)
     except User.DoesNotExist:
         return
-    Notification.objects.filter(
-        recipient_id=str(vendor.id),
-        event=event,
-        linked_entity_id=str(flag.id),
-    ).delete()
     Notification.objects.create(
         recipient_id=str(vendor.id),
         recipient_name=vendor.full_name or vendor.username,
@@ -3958,6 +4441,12 @@ class AnomalyFlagViewSet(ArchiveScopedListMixin, viewsets.ReadOnlyModelViewSet):
                 setattr(flag, field, str(request.data.get(field) or '').strip())
         if 'due_date' in request.data:
             flag.due_date = due_date or None
+        if next_status in payment_holds.VENDOR_ACTION_STATUSES and not flag.due_date:
+            # Every request to the vendor carries a deadline; the daily sweep escalates it when missed.
+            flag.due_date = timezone.localdate() + timedelta(days=ANOMALY_DEFAULT_RESPONSE_DAYS)
+        if next_status == AnomalyFlagStatus.ESCALATED and previous_status != AnomalyFlagStatus.ESCALATED:
+            flag.escalated_at = timezone.now()
+            update_fields.append('escalated_at')
         flag.is_resolved = next_status in {AnomalyFlagStatus.RESOLVED, AnomalyFlagStatus.FALSE_POSITIVE}
         flag.resolved_at = timezone.now() if flag.is_resolved else None
         flag.save(update_fields=update_fields)
@@ -3978,7 +4467,17 @@ class AnomalyFlagViewSet(ArchiveScopedListMixin, viewsets.ReadOnlyModelViewSet):
                 flag,
                 event='anomaly_evidence_requested',
                 title='Additional Evidence Requested',
-                body=f'Project {project_ref}: RMT is awaiting additional evidence for {finding_title}.',
+                body=f'Project {project_ref}: RMT is awaiting additional evidence for {finding_title}. Due {flag.due_date}.',
+            )
+        elif next_status == AnomalyFlagStatus.ESCALATED and previous_status != AnomalyFlagStatus.ESCALATED:
+            payment_holds.notify_anomaly_escalated(flag, flag.resolution_reason or notes)
+        elif next_status in {AnomalyFlagStatus.RESOLVED, AnomalyFlagStatus.FALSE_POSITIVE}:
+            outcome = 'resolved' if next_status == AnomalyFlagStatus.RESOLVED else 'closed as a false positive'
+            _notify_vendor_of_anomaly_review(
+                flag,
+                event='anomaly_resolved',
+                title='Anomaly Flag Closed',
+                body=f'Project {project_ref}: RMT {outcome} {finding_title}. Decision: {flag.resolution_reason}',
             )
         refresh_project_kpis(str(flag.project_id))
         log_audit(request.user, 'anomaly_flag_reviewed', flag, {
@@ -3986,6 +4485,64 @@ class AnomalyFlagViewSet(ArchiveScopedListMixin, viewsets.ReadOnlyModelViewSet):
             'previous_status': previous_status,
             'new_status': next_status,
             'resolution_reason': flag.resolution_reason,
+        })
+        return Response(self.get_serializer(flag).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def respond(self, request, pk=None):
+        """The vendor answers a correction or evidence request; the flag goes back to the RMT
+        for investigation. Files go to the flag's evidence list."""
+        if request.user.role != UserRole.VENDOR:
+            raise PermissionDenied('Only the project vendor can respond to an anomaly request.')
+        assert_user_not_blacklisted_for_writes(request.user, 'Suspended or blacklisted vendors cannot respond to anomaly flags.')
+        flag = self.get_object()
+        if flag.status not in payment_holds.VENDOR_ACTION_STATUSES:
+            return Response(
+                {'detail': 'You can respond only while the RMT has requested a correction or evidence.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        text = str(request.data.get('response') or '').strip()
+        if len(text) < 10:
+            return Response({'response': 'Describe what you did or what the evidence shows (at least 10 characters).'}, status=status.HTTP_400_BAD_REQUEST)
+        files = list(request.FILES.getlist('evidence_files'))
+        for file in files:
+            extension = os.path.splitext(str(file.name or ''))[1].lower()
+            if extension not in ANOMALY_EVIDENCE_ALLOWED_EXTENSIONS:
+                return Response({'detail': f'{file.name}: only jpg, png, webp, and pdf files are accepted.'}, status=status.HTTP_400_BAD_REQUEST)
+            if file.size and file.size > ANOMALY_EVIDENCE_MAX_BYTES:
+                return Response({'detail': f'{file.name}: files must be 5 MB or smaller.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        previous_status = flag.status
+        flag.vendor_response = text
+        flag.vendor_responded_at = timezone.now()
+        flag.status = AnomalyFlagStatus.UNDER_INVESTIGATION
+        flag.save(update_fields=['vendor_response', 'vendor_responded_at', 'status'])
+        AnomalyReviewEvent.objects.create(
+            flag=flag, actor=request.user, actor_role=request.user.role, from_status=previous_status,
+            to_status=flag.status, investigation_notes=f'Vendor response: {text}',
+            corrective_action=flag.corrective_action or '', resolution_reason='',
+            evidence_reference=f'{len(files)} file(s) attached' if files else '',
+        )
+        if files:
+            _save_anomaly_evidence_files(flag=flag, user=request.user, files=files)
+        project_ref = flag.project.project_reference or str(flag.project_id)
+        recipients = [flag.assigned_to] if flag.assigned_to_id else list(
+            User.objects.filter(role__in={UserRole.RBF_OFFICIAL, UserRole.ADMIN}, is_active=True).only('id', 'full_name', 'username')
+        )
+        for user in recipients:
+            _send_notification(
+                recipient_id=str(user.id),
+                recipient_name=user.full_name or user.username,
+                type=NotificationChannel.IN_APP,
+                event='anomaly_vendor_responded',
+                title=f'Vendor responded to anomaly #{flag.id}',
+                body=f'Project {project_ref}: {text}',
+                status=NotificationStatus.SENT,
+                linked_entity_id=str(flag.id),
+            )
+        refresh_project_kpis(str(flag.project_id))
+        log_audit(request.user, 'anomaly_vendor_responded', flag, {
+            'project_id': str(flag.project_id), 'previous_status': previous_status, 'files': len(files),
         })
         return Response(self.get_serializer(flag).data, status=status.HTTP_200_OK)
 
@@ -4347,7 +4904,7 @@ class SiteMonitoringVisitViewSet(ArchiveScopedListMixin, DoeRegionalRecordMixin,
                 'DoE site visit needs follow-up',
                 f"{self.request.user.full_name or self.request.user.username} visited "
                 f"{visit.project.project_reference or visit.project_id} on {visit.visit_date}: "
-                f"{visit.follow_up_action or visit.observations[:120]}",
+                f"{visit.follow_up_action or visit.observations}",
             )
 
     def perform_update(self, serializer):
@@ -4402,7 +4959,7 @@ class KpiReviewViewSet(ArchiveScopedListMixin, DoeRegionalRecordMixin, viewsets.
                 review.project,
                 'DoE KPI review: project at risk',
                 f"{self.request.user.full_name or self.request.user.username} rated "
-                f"{review.project.project_reference or review.project_id} at risk for {review.review_period}: {review.summary[:150]}",
+                f"{review.project.project_reference or review.project_id} at risk for {review.review_period}: {review.summary}",
             )
 
     def perform_update(self, serializer):
@@ -4495,11 +5052,17 @@ class OversightReviewViewSet(viewsets.ModelViewSet):
             follow_up = OversightFollowUpStatus.OPEN
         if follow_up == OversightFollowUpStatus.RESOLVED:
             raise ValidationError({'follow_up_status': 'A new review cannot be created as resolved.'})
+        # A flag on a claim or disbursement always holds payment; on anything else the reviewer decides.
+        holds_payment = data['review_status'] == OversightReviewStatus.FLAGGED and project is not None and (
+            bool(data.get('holds_payment')) or data.get('payment_claim') is not None
+            or data['subject_type'] == OversightSubject.DISBURSEMENT
+        )
         review = serializer.save(
             reviewer=user,
             reviewer_role=user.role,
             project=project,
             follow_up_status=follow_up,
+            holds_payment=holds_payment,
             verification_round=data['verification_task'].verification_round if data.get('verification_task') else None,
         )
         log_audit(user, 'oversight_review_recorded', review, {
@@ -4510,7 +5073,7 @@ class OversightReviewViewSet(viewsets.ModelViewSet):
             notify_project_oversight(
                 review.project,
                 f'{review.get_review_status_display()} by {user.get_role_display()}: {review.project.project_reference or review.project_id}',
-                review.comment[:200],
+                review.comment + (' Milestone payments for this project are on hold until it is resolved.' if review.holds_payment else ''),
                 linked_entity_id=str(review.project_id),
             )
 
@@ -4529,7 +5092,9 @@ class OversightReviewViewSet(viewsets.ModelViewSet):
         new_status = serializer.validated_data.get('review_status')
         if new_status and new_status not in self.ROLE_STATUSES.get(user.role, set()):
             raise ValidationError({'review_status': 'This review status is not available to your role.'})
-        review = serializer.save()
+        # Downgrading a flag to a comment or compliant note lifts its payment hold.
+        lift_hold = bool(new_status) and new_status != OversightReviewStatus.FLAGGED
+        review = serializer.save(**({'holds_payment': False} if lift_hold else {}))
         log_audit(user, 'oversight_review_amended', review, {'review_status': review.review_status, 'module': 'oversight'})
 
     @action(detail=True, methods=['post'])
@@ -4557,7 +5122,7 @@ class OversightReviewViewSet(viewsets.ModelViewSet):
         review.save(update_fields=['follow_up_status', 'resolution_note', 'resolved_by', 'resolved_at', 'updated_at'])
         log_audit(user, 'oversight_follow_up_updated', review, {'old_status': previous, 'new_status': new_status, 'module': 'oversight'})
         if review.reviewer_id and review.reviewer_id != user.id:
-            Notification.objects.create(
+            _send_notification(
                 recipient_id=str(review.reviewer_id),
                 recipient_name=review.reviewer.full_name or review.reviewer.username,
                 type=NotificationChannel.IN_APP,
@@ -4789,7 +5354,7 @@ class AuditCaseViewSet(viewsets.ModelViewSet):
         if case.auditor_id:
             _notify_users(
                 [case.auditor], event='audit_response_received',
-                title=f'Management responded: {case.reference}', body=text[:200], linked_entity_id=str(case.id),
+                title=f'Management responded: {case.reference}', body=text, linked_entity_id=str(case.id),
             )
         return response
 
@@ -5000,7 +5565,7 @@ class VendorPerformanceViewSet(viewsets.ViewSet):
             PaymentClaim.objects.filter(project_id__in=project_ids),
             count=Count('id'),
             claimed=Sum('claim_amount'),
-            paid=Sum('claim_amount', filter=Q(status__in=self.PAID_STATUSES)),
+            paid=Sum(claim_status.payable_amount(), filter=Q(status__in=self.PAID_STATUSES)),
             rejected=Count('id', filter=Q(status=PaymentClaimStatus.REJECTED)),
             held=Count('id', filter=Q(status=PaymentClaimStatus.HELD_AUDIT)),
         )

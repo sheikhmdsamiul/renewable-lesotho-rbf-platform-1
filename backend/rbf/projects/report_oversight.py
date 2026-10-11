@@ -251,7 +251,7 @@ def build_regional_impact(ctx: ReportContext) -> ReportData:
     claims = list(PaymentClaim.objects.filter(project__in=projects, status__in=claim_status.PAID).select_related('project'))
     paid_by_district: dict = defaultdict(float)
     for c in claims:
-        paid_by_district[c.project.district or c.project.region or 'Unknown'] += float(c.claim_amount or 0)
+        paid_by_district[c.project.district or c.project.region or 'Unknown'] += float(c.payable_amount or 0)
     budget_by_district: dict = defaultdict(float)
     project_count: Counter = Counter()
     for p in projects:
@@ -308,9 +308,9 @@ def build_budget_utilisation(ctx: ReportContext) -> ReportData:
     for c in end_claims:
         e = entry(c.project.tender, c.project.lot)
         if c.status in claim_status.PAID:
-            e[5] += float(c.claim_amount or 0)
+            e[5] += float(c.payable_amount or 0)
             if not ctx.date_from or (c.submitted_at and timezone.localtime(c.submitted_at).date() >= ctx.date_from):
-                e[6] += float(c.claim_amount or 0)
+                e[6] += float(c.payable_amount or 0)
     for e in rows.values():
         e[7] = e[4] - e[5]
     table = sorted(rows.values(), key=lambda r: (r[0], r[1], r[2]))
@@ -351,7 +351,7 @@ def build_annual_report(ctx: ReportContext) -> ReportData:
             sex[inst_id] = gender or 'unknown'
     by_sex = Counter(sex.values())
     claims = list(ctx.in_period(PaymentClaim.objects.filter(project__in=projects), 'submitted_at'))
-    paid = sum(float(c.claim_amount or 0) for c in claims if c.status in claim_status.PAID)
+    paid = sum(float(c.payable_amount or 0) for c in claims if c.status in claim_status.PAID)
     data = ReportData(title='Annual and Final Progress Report')
     data.summary = [
         ('Verified installations in period', verified.count()), ('Verified installations to date', verified_all.count()),

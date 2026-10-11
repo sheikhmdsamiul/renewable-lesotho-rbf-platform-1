@@ -123,7 +123,7 @@ def review(report: GeneratedReport, actor, *, accept: bool, notes: str) -> Gener
                 body=f'{report.title} (version {report.version}) was reviewed by {_name(actor)} and is waiting for approval.', report=report)
     elif report.generated_by:
         _notify([report.generated_by], event='report_returned', title=f'Returned: {report.title} v{report.version}',
-                body=f'{_name(actor)} returned the report for correction: {notes.strip()[:200]}', report=report)
+                body=f'{_name(actor)} returned the report for correction: {notes.strip()}', report=report)
     return report
 
 
@@ -143,7 +143,7 @@ def approve(report: GeneratedReport, actor, *, accept: bool, notes: str) -> Gene
     if report.generated_by:
         _notify([report.generated_by], event='report_approved' if accept else 'report_returned',
                 title=f'{"Approved" if accept else "Returned"}: {report.title} v{report.version}',
-                body=f'{_name(actor)} {"approved" if accept else "returned"} the report. {notes.strip()[:200]}', report=report)
+                body=f'{_name(actor)} {"approved" if accept else "returned"} the report. {notes.strip()}', report=report)
     if accept and report.schedule_id:
         distribute(report, actor)
     return report

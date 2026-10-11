@@ -384,6 +384,9 @@ class PaymentClaimStatus(models.TextChoices):
     COMPLETED = 'Completed', 'Completed'
     HELD_AUDIT = 'Held/Audit', 'Held/Audit'
     REJECTED = 'Rejected', 'Rejected'
+    # RMT found gaps during verification and sent the claim back; the vendor fixes them
+    # and resubmits the same claim (see PaymentClaimViewSet.return_for_completion / resubmit).
+    RETURNED = 'Returned', 'Returned for Completion'
     LEGACY_PENDING = 'Pending', 'Pending (Legacy)'
     LEGACY_VERIFIED = 'Verified', 'Verified (Legacy)'
     LEGACY_APPROVED = 'Approved', 'Approved (Legacy)'
@@ -402,6 +405,13 @@ class GisStatus(models.TextChoices):
     GREEN = 'green'
     YELLOW = 'yellow'
     RED = 'red'
+
+
+class HouseholdIncomeLevel(models.TextChoices):
+    NO_REGULAR_INCOME = 'no_income', 'No regular income'
+    LOW = 'low_income', 'Low income'
+    MEDIUM = 'medium_income', 'Medium income'
+    HIGH = 'high_income', 'High income'
 
 
 class PaymentClaim(models.Model):
@@ -430,12 +440,77 @@ class PaymentClaim(models.Model):
         null=True,
         blank=True,
     )
+    # Unpaid shortfall from earlier partially-paid milestones, snapshotted into this claim
+    # when it was submitted (already included in claim_amount). See MilestoneCarryOver.
+    carry_in_amount = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    carry_in_units = models.PositiveIntegerField(default=0)
+    # Recorded by RMT at verification. approved_amount is what actually gets paid: the
+    # full claim_amount, or a pro-rata share of it when the milestone was only partly
+    # delivered (at least PlatformConfiguration.partial_payment_min_pct). None = not yet decided.
+    approved_amount = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    completion_pct = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    expected_units = models.PositiveIntegerField(null=True, blank=True)
+    verified_units = models.PositiveIntegerField(null=True, blank=True)
+    is_partial = models.BooleanField(default=False)
+    # What RMT found missing: [{'description': str, 'required_action': str,
+    # 'installation_ids': [int, ...]}]. Kept on a partial approval (the shortfall the
+    # vendor still owes) and on a return for completion (what to fix before resubmitting).
+    deficiencies = models.JSONField(default=list, blank=True)
+    returned_at = models.DateTimeField(null=True, blank=True)
+    resubmission_count = models.PositiveIntegerField(default=0)
 
     class Meta:
         ordering = ['-submitted_at']
 
     def __str__(self):
         return f"Claim {self.id} - {self.vendor} - {self.status}"
+
+    @property
+    def payable_amount(self):
+        """The amount that is (or will be) paid out for this claim."""
+        return self.claim_amount if self.approved_amount is None else self.approved_amount
+
+    @property
+    def shortfall_amount(self):
+        if self.approved_amount is None:
+            return 0
+        return max(self.claim_amount - self.approved_amount, 0)
+
+
+class CarryOverStatus(models.TextChoices):
+    PENDING = 'pending', 'Pending'
+    SETTLED = 'settled', 'Settled'
+    FORFEITED = 'forfeited', 'Forfeited'
+
+
+class MilestoneCarryOver(models.Model):
+    """The unpaid part of a partially-paid milestone claim. It is added to the next
+    milestone's claim; once that claim is paid the carry-over is settled (or, if that
+    claim is itself partial, rolled into a new carry-over). Forfeited when the project
+    is closed before it is delivered."""
+
+    project = models.ForeignKey(Project, related_name='milestone_carry_overs', on_delete=models.CASCADE)
+    from_claim = models.OneToOneField(PaymentClaim, related_name='carry_over', on_delete=models.CASCADE)
+    from_milestone = models.ForeignKey(Milestone, related_name='carry_overs_out', on_delete=models.CASCADE)
+    to_milestone = models.ForeignKey(Milestone, related_name='carry_overs_in', on_delete=models.CASCADE)
+    shortfall_units = models.PositiveIntegerField(default=0)
+    shortfall_amount = models.DecimalField(max_digits=14, decimal_places=2)
+    status = models.CharField(max_length=16, choices=CarryOverStatus.choices, default=CarryOverStatus.PENDING)
+    settled_by_claim = models.ForeignKey(
+        PaymentClaim,
+        related_name='settled_carry_overs',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Carry-over {self.id} - claim {self.from_claim_id} -> milestone {self.to_milestone_id} ({self.status})"
 
 
 class DisbursementStatus(models.TextChoices):
@@ -467,6 +542,9 @@ class Disbursement(models.Model):
         return f"Disbursement {self.id} - Claim {self.claim_id} - {self.status}"
 
 
+INSTALLATION_MAX_RESUBMISSIONS = 3
+
+
 class InstallationReport(models.Model):
     project = models.ForeignKey(Project, related_name='installation_reports', on_delete=models.CASCADE)
     vendor = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='installation_reports', on_delete=models.CASCADE)
@@ -485,6 +563,17 @@ class InstallationReport(models.Model):
     # for a lot-wise project can differ from the project's primary `district`.
     district = models.CharField(max_length=128, blank=True, default='')
     household_type = models.CharField(max_length=64, blank=True)
+    # Household composition and economic profile, captured on site so the gender and
+    # inclusion KPIs can be evidenced from the field instead of asserted by the vendor.
+    # All optional: a field team that cannot answer them still submits the installation,
+    # and an empty count is distinguishable from a recorded zero (None vs 0).
+    household_members = models.PositiveIntegerField(null=True, blank=True)
+    male_members = models.PositiveIntegerField(null=True, blank=True)
+    female_members = models.PositiveIntegerField(null=True, blank=True)
+    household_income_level = models.CharField(max_length=32, blank=True, choices=HouseholdIncomeLevel.choices)
+    # What the household does for work, in the field team's own words (e.g. subsistence
+    # farming, formal employment, informal trading, not working).
+    household_employment = models.CharField(max_length=128, blank=True)
     installation_date = models.DateField(null=True, blank=True)
     receipt_file = models.FileField(upload_to='installation_receipts/', null=True, blank=True)
     photo_files = models.JSONField(default=list, blank=True)
@@ -496,6 +585,12 @@ class InstallationReport(models.Model):
     prospect_sync_error = models.TextField(blank=True)
     prospect_synced_at = models.DateTimeField(null=True, blank=True)
     submitted_at = models.DateTimeField(auto_now_add=True)
+    # Vendor correction loop: a Flagged installation can be corrected and sent back for a
+    # new field-verification round, up to INSTALLATION_MAX_RESUBMISSIONS times. After that
+    # only RMT / DoE can reopen it (VerificationTaskViewSet.request_reverification).
+    resubmission_count = models.PositiveIntegerField(default=0)
+    correction_note = models.TextField(blank=True)
+    resubmitted_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ['-submitted_at']
@@ -778,6 +873,10 @@ class AnomalyFlag(models.Model):
     resolution_reason = models.TextField(blank=True)
     evidence_reference = models.TextField(blank=True)
     due_date = models.DateField(null=True, blank=True)
+    # The vendor's latest answer to a correction or evidence request (history is in review_events).
+    vendor_response = models.TextField(blank=True)
+    vendor_responded_at = models.DateTimeField(null=True, blank=True)
+    escalated_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     resolved_at = models.DateTimeField(null=True, blank=True)
 
@@ -1129,6 +1228,8 @@ class OversightReview(models.Model):
         max_length=16, choices=OversightFollowUpStatus.choices, default=OversightFollowUpStatus.NONE,
     )
     follow_up_date = models.DateField(null=True, blank=True)
+    # A flag that stops the project's milestone claims from advancing until its follow-up is resolved.
+    holds_payment = models.BooleanField(default=False)
     resolved_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, related_name='resolved_oversight_reviews', on_delete=models.SET_NULL, null=True, blank=True,
     )

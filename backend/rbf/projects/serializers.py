@@ -1,6 +1,8 @@
+from decimal import Decimal
 from rest_framework import serializers
 from django.db.models import Q, Sum
 from .models import (
+    CarryOverStatus,
     ResultsIndicator,
     AuditCase,
     AuditEvidence,
@@ -16,6 +18,9 @@ from .models import (
     ProjectUpdate,
     ProjectDocument,
     InstallationReport,
+    InstallationStatus,
+    INSTALLATION_MAX_RESUBMISSIONS,
+    FieldVerificationStatus,
     FieldVerification,
     VerificationTask,
     MeterDataBatch,
@@ -101,6 +106,20 @@ class MilestoneSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({'progress_percentage': 'Progress must be between 0 and 100.'})
 
         return attrs
+
+    pending_carry_in = serializers.SerializerMethodField()
+
+    def get_pending_carry_in(self, obj):
+        """Unpaid shortfall from earlier partially-paid milestones that will be added to
+        this milestone's claim, or None when nothing is carried in."""
+        carries = [c for c in obj.carry_overs_in.all() if c.status == CarryOverStatus.PENDING]
+        if not carries:
+            return None
+        return {
+            'amount': str(sum((c.shortfall_amount for c in carries), Decimal('0'))),
+            'units': sum(c.shortfall_units for c in carries),
+            'from_milestones': sorted({c.from_milestone.milestone_number for c in carries}),
+        }
 
     def get_completion_review(self, obj):
         # Reverse one-to-one raises RelatedObjectDoesNotExist (an AttributeError) when absent.
@@ -615,6 +634,22 @@ class PaymentClaimSerializer(serializers.ModelSerializer):
     payment_locked = serializers.SerializerMethodField()
     payment_lock_reason = serializers.SerializerMethodField()
     milestone_details = MilestoneSerializer(source='milestone', read_only=True)
+    payable_amount = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+    shortfall_amount = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+    carry_over = serializers.SerializerMethodField()
+
+    def get_carry_over(self, obj: PaymentClaim):
+        carry = getattr(obj, 'carry_over', None)
+        if carry is None:
+            return None
+        return {
+            'id': carry.id,
+            'to_milestone': carry.to_milestone_id,
+            'to_milestone_number': carry.to_milestone.milestone_number,
+            'shortfall_units': carry.shortfall_units,
+            'shortfall_amount': str(carry.shortfall_amount),
+            'status': carry.status,
+        }
 
     def get_vendor_legal_name(self, obj: PaymentClaim):
         if obj.vendor.organization_name:
@@ -709,12 +744,48 @@ class PaymentClaimSerializer(serializers.ModelSerializer):
             'payment_locked',
             'payment_lock_reason',
             'milestone_details',
+            'status',
+            'claim_amount',
+            'carry_in_amount',
+            'carry_in_units',
+            'approved_amount',
+            'completion_pct',
+            'expected_units',
+            'verified_units',
+            'is_partial',
+            'deficiencies',
+            'returned_at',
+            'resubmission_count',
+            'payable_amount',
+            'shortfall_amount',
+            'carry_over',
         ]
 
 
 class InstallationReportSerializer(serializers.ModelSerializer):
     vendor_username = serializers.CharField(source='vendor.username', read_only=True)
     receipt_file_url = serializers.SerializerMethodField()
+    latest_flag_reason = serializers.SerializerMethodField()
+    can_resubmit = serializers.SerializerMethodField()
+    resubmissions_left = serializers.SerializerMethodField()
+
+    def get_latest_flag_reason(self, obj: InstallationReport):
+        """Why the most recent field-verification round flagged (or partly passed) this
+        installation, so the vendor knows what to correct."""
+        rounds = [
+            fv for fv in obj.field_verifications.all()
+            if fv.verification_status in {FieldVerificationStatus.FLAGGED, FieldVerificationStatus.PARTIAL}
+        ]
+        if not rounds:
+            return None
+        latest = max(rounds, key=lambda fv: (fv.verification_round, fv.verified_at))
+        return latest.flag_reason or latest.observation_notes or None
+
+    def get_resubmissions_left(self, obj: InstallationReport):
+        return max(INSTALLATION_MAX_RESUBMISSIONS - obj.resubmission_count, 0)
+
+    def get_can_resubmit(self, obj: InstallationReport):
+        return obj.status == InstallationStatus.FLAGGED and obj.resubmission_count < INSTALLATION_MAX_RESUBMISSIONS
 
     def get_receipt_file_url(self, obj: InstallationReport):
         if obj.receipt_file:
@@ -740,13 +811,79 @@ class InstallationReportSerializer(serializers.ModelSerializer):
             data['beneficiary_id'] = ''
             data['beneficiary_name'] = None
             data['beneficiary_phone'] = ''
+            # Household composition and income are financial/socioeconomic detail about a
+            # named household, so the donor-facing aggregate view does without them: the
+            # inclusion KPIs are computed from household_type, not from these counts.
+            for field in ('household_members', 'male_members', 'female_members'):
+                data[field] = None
+            data['household_income_level'] = ''
+            data['household_employment'] = ''
+        elif role == UserRole.FIELD_VERIFIER and not instance.field_verifications.exists():
+            # Blind inspection: until a field verification has been submitted for this
+            # installation, the verifier reads none of what the vendor claims - device,
+            # beneficiary identity, household profile or evidence - so the observation is
+            # their own rather than a copy of the submission. Coordinates stay: the district
+            # map uses them to route the verifier to the site.
+            data['serial_number'] = ''
+            data['meter_id'] = ''
+            data['kwh_reading'] = None
+            data['beneficiary_id'] = ''
+            data['beneficiary_name'] = ''
+            data['beneficiary_phone'] = ''
+            data['household_type'] = ''
+            for field in ('household_members', 'male_members', 'female_members'):
+                data[field] = None
+            data['household_income_level'] = ''
+            data['household_employment'] = ''
+            data['installation_date'] = None
+            data['photo_files'] = []
+            data['receipt_file'] = ''
+            data['receipt_file_url'] = None
 
         return data
 
     class Meta:
         model = InstallationReport
         fields = '__all__'
-        read_only_fields = ['id', 'vendor', 'vendor_username', 'submitted_at', 'status', 'gis_status', 'receipt_file_url', 'district']
+        read_only_fields = [
+            'id', 'vendor', 'vendor_username', 'submitted_at', 'status', 'gis_status', 'receipt_file_url', 'district',
+            'resubmission_count', 'correction_note', 'resubmitted_at',
+        ]
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+
+        def count(name):
+            raw = attrs.get(name, getattr(self.instance, name, None))
+            if raw in (None, ''):
+                return None
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                raise serializers.ValidationError({name: 'Enter a whole number.'})
+            if value < 0:
+                raise serializers.ValidationError({name: 'Cannot be negative.'})
+            return value
+
+        members = count('household_members')
+        male = count('male_members') or 0
+        female = count('female_members') or 0
+        if members is not None and members == 0:
+            raise serializers.ValidationError({'household_members': 'A household must have at least one member.'})
+        if members is not None and male + female > members:
+            raise serializers.ValidationError(
+                {'male_members': f'{male} men + {female} women is more than the {members} people in the household.'}
+            )
+        return attrs
+
+    def to_internal_value(self, data):
+        # Empty strings from an HTML form mean "not recorded", which the nullable counts
+        # store as NULL; passing '' through would fail integer validation instead.
+        cleaned = data.copy() if hasattr(data, 'copy') else dict(data)
+        for name in ('household_members', 'male_members', 'female_members'):
+            if cleaned.get(name) == '':
+                cleaned[name] = None
+        return super().to_internal_value(cleaned)
 
 
 def _storage_urls(paths):
@@ -794,7 +931,13 @@ class VerificationTaskSerializer(serializers.ModelSerializer):
     def _history(self, obj):
         cached = getattr(obj, '_field_verification_history', None)
         if cached is None:
-            cached = list(obj.report.field_verifications.select_related('field_officer').all())
+            # Reuse the viewset's prefetch when it is there: one query for the whole task
+            # list instead of one per task (the field officer comes along with it).
+            prefetched = getattr(obj.report, '_prefetched_objects_cache', {}).get('field_verifications')
+            if prefetched is not None:
+                cached = list(prefetched)
+            else:
+                cached = list(obj.report.field_verifications.select_related('field_officer').all())
             obj._field_verification_history = cached
         return cached
 
@@ -810,21 +953,26 @@ class VerificationTaskSerializer(serializers.ModelSerializer):
     def get_installation(self, obj):
         report = obj.report
         project = report.project
+        # The same blind-inspection rule as InstallationReportSerializer: a field verifier
+        # learns nothing from the task summary either, or the withholding would be a screen
+        # decoration. Coordinates stay for the district map.
+        user = getattr(self.context.get('request'), 'user', None)
+        blind = getattr(user, 'role', None) == UserRole.FIELD_VERIFIER and not report.field_verifications.exists()
         return {
             'id': report.id,
             'project_id': project.id,
             'project_reference': project.project_reference,
             'project_title': project.project_title,
             'vendor_name': project.vendor_name,
-            'serial_number': report.serial_number,
+            'serial_number': '' if blind else report.serial_number,
             'district': report.district or project.district or project.region,
-            'household_type': report.household_type,
+            'household_type': '' if blind else report.household_type,
             'gps_lat': report.gps_lat,
             'gps_lng': report.gps_lng,
             'status': report.status,
             'gis_status': report.gis_status,
             'submitted_at': report.submitted_at,
-            'photo_urls': _storage_urls(report.photo_files),
+            'photo_urls': [] if blind else _storage_urls(report.photo_files),
         }
 
 
@@ -933,9 +1081,13 @@ class AnomalyFlagSerializer(serializers.ModelSerializer):
             'status', 'severity', 'assigned_to', 'assigned_to_username',
             'investigation_notes', 'corrective_action', 'resolution_reason',
             'evidence_reference', 'due_date', 'created_at', 'resolved_at',
+            'vendor_response', 'vendor_responded_at', 'escalated_at',
             'review_events', 'evidence_files',
         ]
-        read_only_fields = ['id', 'created_at', 'resolved_at', 'is_resolved', 'assigned_to_username']
+        read_only_fields = [
+            'id', 'created_at', 'resolved_at', 'is_resolved', 'assigned_to_username',
+            'vendor_response', 'vendor_responded_at', 'escalated_at',
+        ]
 
 
 class SiteMonitoringPhotoSerializer(serializers.ModelSerializer):

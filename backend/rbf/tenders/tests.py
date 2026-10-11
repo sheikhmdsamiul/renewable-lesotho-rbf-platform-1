@@ -2957,8 +2957,8 @@ class TenderBidSubmissionTests(APITestCase):
                 event="bid_submitted",
                 linked_entity_id=str(self.prequal_tender.id),
             ).count(),
-            1,
-            "Resubmitting must not create a duplicate vendor notification or raise.",
+            2,
+            "Each submission is confirmed to the vendor; resubmitting must not raise.",
         )
 
     def test_submitted_bid_is_locked_from_updates(self):
@@ -3653,12 +3653,12 @@ class TenderContractAssignmentTests(APITestCase):
         self.assertEqual(response.data["assignment_defaults"]["technology_type"], "SHS")
         self.assertEqual(response.data["assignment_defaults"]["verification_method"], "manual")
         self.assertEqual(response.data["assignment_defaults"]["female_target_pct"], 50)
-        self.assertEqual(response.data["assignment_defaults"]["m1_disbursement_pct"], 20)
+        self.assertEqual(response.data["assignment_defaults"]["m1_disbursement_pct"], 0)
         self.assertEqual(response.data["assignment_defaults"]["m2_installation_required_pct"], 80)
         self.assertEqual(response.data["assignment_defaults"]["m3_installation_required_pct"], 100)
         self.assertEqual(response.data["contract_details"]["contract_ref"], self.contract.reference_number)
         self.assertEqual(response.data["assignment_fields"]["technology_type_read_only"], True)
-        self.assertEqual(response.data["disbursement_preview"]["milestone_1_amount_lsl"], "24000.00")
+        self.assertEqual(response.data["disbursement_preview"]["milestone_1_amount_lsl"], "0.00")
 
     def test_assign_get_prefills_districts_from_tender_target_districts(self):
         self.tender.target_districts = ["Maseru", "Thaba-Tseka"]
@@ -3725,9 +3725,9 @@ class TenderContractAssignmentTests(APITestCase):
 
         milestones = list(project.milestones.order_by("milestone_number"))
         self.assertEqual(len(milestones), 3)
-        self.assertEqual([m.disbursement_pct for m in milestones], [20, 50, 30])
+        self.assertEqual([m.disbursement_pct for m in milestones], [0, 50, 50])
         self.assertEqual([m.status for m in milestones], ["pending", "locked", "locked"])
-        self.assertEqual([str(m.amount_lsl) for m in milestones], ["24000.00", "60000.00", "36000.00"])
+        self.assertEqual([str(m.amount_lsl) for m in milestones], ["0.00", "60000.00", "60000.00"])
 
         self.assertTrue(
             AuditLog.objects.filter(

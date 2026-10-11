@@ -238,7 +238,7 @@ def build_iati_export(ctx: ReportContext) -> ReportData:
     transactions = []
     for c in claims.order_by('paid_at', 'id'):
         when = c.paid_at or c.submitted_at
-        transactions.append([f'CLAIM-{c.id}', '3', 'Disbursement', when.date().isoformat() if when else '', float(c.claim_amount or 0), 'LSL',
+        transactions.append([f'CLAIM-{c.id}', '3', 'Disbursement', when.date().isoformat() if when else '', float(c.payable_amount or 0), 'LSL',
                              c.project.vendor_name, f'Results-based payment, {c.project.project_reference or c.project_id}'])
     results, _configured = results_rows(ctx)
     starts = [p.start_date for p in projects if p.start_date]

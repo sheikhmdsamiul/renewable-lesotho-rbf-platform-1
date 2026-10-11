@@ -494,6 +494,9 @@ class PlatformConfiguration(models.Model):
     gps_verification_max_distance_m = models.PositiveIntegerField(default=50)
     m2_verification_required_pct = models.PositiveIntegerField(default=80)
     m3_verification_required_pct = models.PositiveIntegerField(default=100)
+    # Minimum share (%) of a milestone that must be verified as delivered before RMT may
+    # approve a partial payment for it; below this the claim can only be returned or rejected.
+    partial_payment_min_pct = models.PositiveIntegerField(default=70)
     email_notifications_enabled = models.BooleanField(default=True)
     sms_notifications_enabled = models.BooleanField(default=False)
     email_host = models.CharField(max_length=255, blank=True, default='')

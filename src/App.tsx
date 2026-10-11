@@ -107,7 +107,11 @@ import {
   ProjectDocument,
   InstallationReport,
   InstallationStatus,
+  HouseholdIncomeLevel,
   PaymentClaim,
+  ClaimAssessment,
+  PaymentBlocker,
+  ClaimDeficiency,
   VendorPrequalification,
   Notification,
   NotificationChannel,
@@ -182,8 +186,8 @@ import {
   assignTenderInvitedVendors,
   closeTender,
   openFinancialStage,
-  fetchNotifications,
-  fetchUnreadNotificationCount,
+  fetchNotificationPage,
+  fetchNotificationSummary,
   loginUser,
   logoutUser,
   markAllNotificationsRead,
@@ -224,6 +228,10 @@ import {
   verifyPaymentClaim,
   approvePaymentClaim,
   rejectPaymentClaim,
+  fetchClaimAssessment,
+  fetchClaimPaymentBlockers,
+  returnPaymentClaim,
+  resubmitPaymentClaim,
   confirmPaymentClaim,
   flagProjectIssue,
   requestPasswordReset,
@@ -324,6 +332,17 @@ import { DoeDocumentUploader, DoeRegionalNotesPanel, confirmAndDeleteProjectDocu
 import RmtNoticeManagement from "./components/RmtNoticeManagement";
 import { PscDashboard } from "./components/PscPortal";
 import { TacDashboard } from "./components/TacPortal";
+import InstallationCorrectionModal from "./components/InstallationCorrectionModal";
+import AnomalyResponseModal from "./components/AnomalyResponseModal";
+import {
+  NotificationBellPanel,
+  NotificationDetailModal,
+  NotificationsPage,
+  NotificationTarget,
+  resolveNotificationTarget as resolveNotificationTargetForRole,
+  useNotificationActions,
+} from "./components/NotificationInbox";
+import ClaimDeliveryReview, { ClaimPayoutNotice, PaymentHoldNotice, RmtReviewChoice, emptyDeficiency, filledDeficiencies } from "./components/ClaimDeliveryReview";
 import { EvaluationCommitteeDashboard, FinancialEvaluationView } from "./components/EvaluationCommitteePortal";
 import { CommitteeScoresView } from "./components/CommitteeScoresView";
 import { SubmittedBidModal } from "./components/SubmittedBidModal";
@@ -775,6 +794,31 @@ const isNotificationError = (msg: string) => {
 
 const isServerError = (err: any) =>
   Number(err?.status) >= 500 || /^HTTP (5\d\d) /.test(String(err?.message || ""));
+
+const HOUSEHOLD_INCOME_LABELS: Record<string, string> = {
+  no_income: "No regular income",
+  low_income: "Low income",
+  medium_income: "Medium income",
+  high_income: "High income",
+};
+
+// Field teams reach the site over poor connections, so "location failed" usually means a
+// permission or an indoor GPS fix rather than a real fault. Say which, so they can act.
+const reportGeolocationError = (error: GeolocationPositionError): string => {
+  if (error.code === error.PERMISSION_DENIED) {
+    return "Location access was denied. Allow location access for this site in your browser, then try again.";
+  }
+  if (error.code === error.TIMEOUT) {
+    return "Location request timed out. Move to an open area with a clear view of the sky and try again, or enter the coordinates manually.";
+  }
+  if (error.code === error.POSITION_UNAVAILABLE) {
+    return "Your device could not determine a position. Turn on location services and try again outdoors, or enter the coordinates manually.";
+  }
+  if (typeof window !== "undefined" && !window.isSecureContext && window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1") {
+    return "Location access requires HTTPS or localhost in this browser. Enter the coordinates manually.";
+  }
+  return "Unable to retrieve your current location. Check your device's location settings or enter the coordinates manually.";
+};
 
 // DRF renders a field-keyed error dict as "key: message". These are machine keys that add
 // nothing for the user, so drop the prefix and show the sentence. Listed explicitly rather
@@ -1877,7 +1921,7 @@ const DEFAULT_MILESTONE_PLAN_DRAFT: {
   m2InstallationRequiredPct: number;
   m3InstallationRequiredPct: number;
 } = {
-  milestoneDisbursementPcts: [20, 50, 30],
+  milestoneDisbursementPcts: [0, 50, 50],
   m2InstallationRequiredPct: 80,
   m3InstallationRequiredPct: 100,
 };
@@ -9070,6 +9114,13 @@ const Disbursements = ({
   const [processingClaimId, setProcessingClaimId] = useState<string | null>(null);
   const [selectedClaimForReview, setSelectedClaimForReview] = useState<PaymentClaim | null>(null);
   const [reviewNotes, setReviewNotes] = useState<string>("");
+  const [claimAssessment, setClaimAssessment] = useState<ClaimAssessment | null>(null);
+  // Open findings holding the claim in the review or payment modal; null while loading.
+  const [claimBlockers, setClaimBlockers] = useState<PaymentBlocker[] | null>(null);
+  const [claimAssessmentLoading, setClaimAssessmentLoading] = useState(false);
+  const [rmtChoice, setRmtChoice] = useState<RmtReviewChoice>("full");
+  const [assessedPct, setAssessedPct] = useState("");
+  const [deficiencyItems, setDeficiencyItems] = useState<ClaimDeficiency[]>([emptyDeficiency()]);
   const [selectedClaimForDisbursement, setSelectedClaimForDisbursement] = useState<PaymentClaim | null>(null);
   const [selectedClaimForBankDetails, setSelectedClaimForBankDetails] = useState<PaymentClaim | null>(null);
   const [selectedVendorClaimDetails, setSelectedVendorClaimDetails] = useState<PaymentClaim | null>(null);
@@ -9192,11 +9243,32 @@ const Disbursements = ({
     showNotification("Payment schedule exported.");
   };
 
+  const isRmtVerificationStage = (claim: PaymentClaim) =>
+    canRmtApprove && (claim.status === "Submitted" || claim.status === "Pending");
+
+  const loadClaimBlockers = (claim: PaymentClaim) => {
+    setClaimBlockers(null);
+    fetchClaimPaymentBlockers(claim.id)
+      .then(setClaimBlockers)
+      .catch(() => setClaimBlockers([]));
+  };
+
   const openClaimReview = (claim: PaymentClaim) => {
     setSelectedClaimForReview(claim);
     setReviewNotes("");
     setVendorBankDetails(null);
     setDisbursementSheetDetails(null);
+    setRmtChoice("full");
+    setAssessedPct("");
+    setDeficiencyItems([emptyDeficiency()]);
+    setClaimAssessment(null);
+    loadClaimBlockers(claim);
+    if (!isRmtVerificationStage(claim)) return;
+    setClaimAssessmentLoading(true);
+    fetchClaimAssessment(claim.id)
+      .then(setClaimAssessment)
+      .catch(() => setClaimAssessment(null))
+      .finally(() => setClaimAssessmentLoading(false));
   };
 
   const loadVendorBankDetails = async (claim: PaymentClaim, revealFull = false) => {
@@ -9282,10 +9354,32 @@ const Disbursements = ({
             ? `Claim ${selectedClaimForReview.id} pushed back to RMT with TAC technical comments.`
             : `Claim ${selectedClaimForReview.id} rejected with notes.`
         );
-      } else if (canRmtApprove && (selectedClaimForReview.status === "Submitted" || selectedClaimForReview.status === "Pending")) {
-        // RMT Managerial Review: Contractual & Compliance Check
-        updated = await verifyPaymentClaim(selectedClaimForReview.id, remarks || "Approved by RMT - Contractual and compliance check complete.");
-        showNotification(`Claim ${selectedClaimForReview.id} approved by RMT. Moving to TAC review.`);
+      } else if (isRmtVerificationStage(selectedClaimForReview)) {
+        // RMT Managerial Review: Contractual & Compliance Check, plus delivery verification
+        const items = filledDeficiencies(deficiencyItems);
+        if (rmtChoice !== "full" && items.length === 0) {
+          showNotification(rmtChoice === "return" ? "List what the vendor must complete before returning the claim." : "List what is still owed before approving a partial payment.");
+          return;
+        }
+        if (rmtChoice === "return") {
+          updated = await returnPaymentClaim(selectedClaimForReview.id, items, remarks);
+          showNotification(`Claim ${selectedClaimForReview.id} returned to the vendor for completion.`);
+        } else {
+          updated = await verifyPaymentClaim(
+            selectedClaimForReview.id,
+            remarks || (rmtChoice === "partial" ? "Partially approved by RMT - verified share of the milestone delivered." : "Approved by RMT - Contractual and compliance check complete."),
+            {
+              decision: rmtChoice,
+              assessedPct: rmtChoice === "partial" && assessedPct !== "" ? Number(assessedPct) : null,
+              deficiencies: rmtChoice === "partial" ? items : [],
+            }
+          );
+          showNotification(
+            rmtChoice === "partial"
+              ? `Claim ${selectedClaimForReview.id} partially approved (M ${(updated.approvedAmount ?? 0).toLocaleString()}). Moving to TAC review.`
+              : `Claim ${selectedClaimForReview.id} approved by RMT. Moving to TAC review.`
+          );
+        }
       } else if (canTacEndorse && (selectedClaimForReview.status === "RMT Approved" || selectedClaimForReview.status === "Verified")) {
         // TAC Technical Review: Data Audit & Hardware Verification
         updated = await approvePaymentClaim(selectedClaimForReview.id, remarks || "Endorsed by TAC - Technical audit and hardware verification complete.");
@@ -9331,6 +9425,7 @@ const Disbursements = ({
       return;
     }
     setSelectedClaimForDisbursement(claim);
+    loadClaimBlockers(claim);
     setTransactionRef("");
     setDisbursementSheetDetails(null);
     void (async () => {
@@ -9415,10 +9510,10 @@ const Disbursements = ({
 
   const totalDisbursed = claims
     .filter(claim => claim.status === "Completed" || claim.status === "Paid" || claim.disbursement?.status === "Completed")
-    .reduce((sum, claim) => sum + claim.claimAmount, 0);
+    .reduce((sum, claim) => sum + claim.payableAmount, 0);
   const pendingApproval = claims
     .filter(claim => !["Completed", "Paid", "Rejected"].includes(claim.status))
-    .reduce((sum, claim) => sum + claim.claimAmount, 0);
+    .reduce((sum, claim) => sum + claim.payableAmount, 0);
   const projectsById = useMemo(() => new Map(projects.map((project) => [project.id, project])), [projects]);
   const reportsByProjectId = useMemo(() => {
     const map = new Map<string, InstallationReport[]>();
@@ -9464,13 +9559,14 @@ const Disbursements = ({
     };
   }, [projectKpis, projectsById, reportsByProjectId, tasksByReportId]);
   const getClaimWorkflowLabel = (claim: PaymentClaim) => {
-    if (claim.status === "Completed" || claim.status === "Paid") return "Paid";
+    if (claim.status === "Completed" || claim.status === "Paid") return claim.isPartial ? "Paid (partial)" : "Paid";
+    if (claim.status === "Returned") return "Returned for completion";
     return claim.status;
   };
 
   const getClaimWorkflowTone = (claim: PaymentClaim) => {
     const display = getClaimWorkflowLabel(claim);
-    if (display === "Paid") return "bg-emerald-100 text-emerald-700";
+    if (display === "Paid" || display === "Paid (partial)") return "bg-emerald-100 text-emerald-700";
     if (display === "PSC Approved") return "bg-violet-100 text-violet-700";
     if (display === "RMT Approved" || display === "TAC Endorsed" || display === "Verified" || display === "Approved") return "bg-blue-100 text-blue-700";
     return "bg-amber-100 text-amber-700";
@@ -9749,7 +9845,7 @@ const Disbursements = ({
                       </div>
                     </div>
                   ) : (
-                    <span className="font-bold text-slate-900">M {claim.claimAmount.toLocaleString()}</span>
+                    <span className="font-bold text-slate-900">M {claim.payableAmount.toLocaleString()}{claim.isPartial ? " (partial)" : ""}</span>
                   )}
                 </td>
                 <td className="px-6 py-4">
@@ -9990,7 +10086,10 @@ const Disbursements = ({
                   </div>
                   <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                     <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Claim Amount</p>
-                    <p className="mt-1 text-base font-semibold text-slate-900">M {selectedVendorClaimDetails.claimAmount.toLocaleString()}</p>
+                    <p className="mt-1 text-base font-semibold text-slate-900">M {selectedVendorClaimDetails.payableAmount.toLocaleString()}</p>
+                    {selectedVendorClaimDetails.isPartial && (
+                      <p className="text-xs text-slate-500">of M {selectedVendorClaimDetails.claimAmount.toLocaleString()} claimed</p>
+                    )}
                   </div>
                   <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                     <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Submitted</p>
@@ -10026,6 +10125,8 @@ const Disbursements = ({
                     </p>
                   </div>
                 </div>
+
+                <ClaimPayoutNotice claim={selectedVendorClaimDetails} />
 
                 {(selectedVendorClaimDetails.remarks || selectedVendorClaimDetails.disbursement?.notes) && (
                   <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
@@ -10125,12 +10226,33 @@ const Disbursements = ({
                     </p>
                   </div>
                   <div>
-                    <p className="text-xs font-bold text-slate-400 uppercase mb-1">Claim Amount</p>
+                    <p className="text-xs font-bold text-slate-400 uppercase mb-1">{selectedClaimForReview.isPartial ? "Approved Amount" : "Claim Amount"}</p>
                     <p className={`text-lg font-bold ${isTacView ? "text-slate-500" : "text-emerald-600"}`}>
-                      {isTacView ? "Not part of TAC decision" : `M ${selectedClaimForReview.claimAmount.toLocaleString()}`}
+                      {isTacView ? "Not part of TAC decision" : `M ${selectedClaimForReview.payableAmount.toLocaleString()}`}
                     </p>
+                    {!isTacView && selectedClaimForReview.isPartial && (
+                      <p className="text-xs text-slate-500">of M {selectedClaimForReview.claimAmount.toLocaleString()} claimed</p>
+                    )}
                   </div>
                 </div>
+
+                <PaymentHoldNotice blockers={claimBlockers} />
+
+                {isRmtVerificationStage(selectedClaimForReview) ? (
+                  <ClaimDeliveryReview
+                    claim={selectedClaimForReview}
+                    assessment={claimAssessment}
+                    loading={claimAssessmentLoading}
+                    choice={rmtChoice}
+                    onChoiceChange={setRmtChoice}
+                    assessedPct={assessedPct}
+                    onAssessedPctChange={setAssessedPct}
+                    deficiencies={deficiencyItems}
+                    onDeficienciesChange={setDeficiencyItems}
+                  />
+                ) : (
+                  <ClaimPayoutNotice claim={selectedClaimForReview} />
+                )}
 
                 {isTacView && (
                   <div className="space-y-3 pb-6 border-b border-slate-200">
@@ -10459,7 +10581,10 @@ const Disbursements = ({
                   </button>
                   <button
                     onClick={() => submitApproval("approve")}
-                    disabled={processingClaimId === selectedClaimForReview.id}
+                    disabled={
+                      processingClaimId === selectedClaimForReview.id
+                      || (Boolean(claimBlockers?.length) && !(isRmtVerificationStage(selectedClaimForReview) && rmtChoice === "return"))
+                    }
                     className="flex-1 px-4 py-3 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2"
                   >
                     {processingClaimId === selectedClaimForReview.id ? (
@@ -10472,7 +10597,15 @@ const Disbursements = ({
                     ) : (
                       <>
                         <Check size={18} />
-                        {isTacView ? "Endorse Claim" : isPscView ? "Approve Payment" : getClaimActionLabel(selectedClaimForReview) === "No Action" ? "Approve" : getClaimActionLabel(selectedClaimForReview)}
+                        {isTacView
+                          ? "Endorse Claim"
+                          : isPscView
+                            ? "Approve Payment"
+                            : isRmtVerificationStage(selectedClaimForReview) && rmtChoice === "return"
+                              ? "Return to Vendor"
+                              : isRmtVerificationStage(selectedClaimForReview) && rmtChoice === "partial"
+                                ? "Approve Partial Payment"
+                                : getClaimActionLabel(selectedClaimForReview) === "No Action" ? "Approve" : getClaimActionLabel(selectedClaimForReview)}
                       </>
                     )}
                   </button>
@@ -10630,7 +10763,8 @@ const Disbursements = ({
                 </div>
               </div>
 
-              <div className="border-t border-slate-200 bg-white px-6 py-4 md:px-8">
+              <div className="space-y-3 border-t border-slate-200 bg-white px-6 py-4 md:px-8">
+                <PaymentHoldNotice blockers={claimBlockers} />
                 <div className="flex flex-col gap-3 sm:flex-row">
                   <button
                     onClick={() => setSelectedClaimForDisbursement(null)}
@@ -10640,7 +10774,7 @@ const Disbursements = ({
                   </button>
                   <button
                     onClick={() => submitDisbursement()}
-                    disabled={processingClaimId === selectedClaimForDisbursement.id || !transactionRef.trim()}
+                    disabled={processingClaimId === selectedClaimForDisbursement.id || !transactionRef.trim() || Boolean(claimBlockers?.length)}
                     className="flex-1 px-4 py-3 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white font-semibold rounded-lg transition-colors flex items-center justify-center gap-2"
                   >
                     {processingClaimId === selectedClaimForDisbursement.id ? (
@@ -10676,267 +10810,6 @@ const Reports = ({ currentUser }: { currentUser: User | null; onNavigate?: (acti
 const BidFieldError = ({ message }: { message?: string }) => (
   message ? <p className="mt-1 text-xs font-semibold text-rose-600">{message}</p> : null
 );
-
-const NotificationCenter = ({
-  notifications,
-  onClose,
-  onViewAll,
-  onSelect,
-  onMarkAllRead,
-  unreadCount = 0,
-  browserPushEnabled = false,
-  onToggleBrowserPush,
-}: {
-  notifications: Notification[];
-  onClose: () => void;
-  onViewAll: () => void;
-  onSelect?: (notification: Notification) => void;
-  onMarkAllRead?: () => void;
-  unreadCount?: number;
-  browserPushEnabled?: boolean;
-  onToggleBrowserPush?: () => void;
-}) => {
-  return (
-    <motion.div 
-      initial={{ opacity: 0, y: 10, scale: 0.95 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      exit={{ opacity: 0, y: 10, scale: 0.95 }}
-      className="absolute top-16 right-8 w-96 bg-white rounded-3xl shadow-2xl border border-slate-100 z-[100] overflow-hidden"
-    >
-      <div className="p-6 border-b border-slate-50 flex items-center justify-between bg-slate-50/50">
-        <h3 className="font-bold text-slate-900 flex items-center gap-2">
-          <Bell size={18} className="text-emerald-600" />
-          Notifications
-          {unreadCount > 0 && (
-            <span className="bg-rose-500 text-white text-[10px] font-bold rounded-full min-w-[18px] h-[18px] px-1 flex items-center justify-center">
-              {unreadCount}
-            </span>
-          )}
-        </h3>
-        <div className="flex items-center gap-2">
-          {onToggleBrowserPush && (
-            <button
-              onClick={onToggleBrowserPush}
-              className={`flex items-center gap-1.5 text-[11px] font-bold rounded-full px-2.5 py-1 transition-colors ${
-                browserPushEnabled
-                  ? "bg-emerald-100 text-emerald-700"
-                  : "bg-slate-100 text-slate-500 hover:text-slate-700"
-              }`}
-              title={browserPushEnabled ? "Browser notifications on (click to turn off)" : "Turn on browser notifications"}
-            >
-              <BellRing size={12} />
-              {browserPushEnabled ? "On" : "Off"}
-            </button>
-          )}
-          {unreadCount > 0 && onMarkAllRead && (
-            <button
-              onClick={onMarkAllRead}
-              className="text-[11px] font-bold text-emerald-600 hover:text-emerald-700"
-            >
-              Mark all as read
-            </button>
-          )}
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-600">
-            <X size={18} />
-          </button>
-        </div>
-      </div>
-      <div className="max-h-[400px] overflow-y-auto">
-        {notifications.length > 0 ? (
-          <div className="divide-y divide-slate-50">
-            {notifications.map((n) => (
-              <div
-                key={n.id}
-                role="button"
-                tabIndex={0}
-                onClick={() => onSelect?.(n)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
-                    onSelect?.(n);
-                  }
-                }}
-                className={`p-4 hover:bg-slate-50 transition-colors cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400 ${n.status === NotificationStatus.SENT ? 'bg-emerald-50/30' : ''}`}
-              >
-                <div className="flex gap-3">
-                  <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
-                    n.type === NotificationChannel.EMAIL ? 'bg-blue-50 text-blue-600' :
-                    n.type === NotificationChannel.SMS ? 'bg-amber-50 text-amber-600' :
-                    'bg-emerald-50 text-emerald-600'
-                  }`}>
-                    {n.type === NotificationChannel.EMAIL ? <Mail size={18} /> :
-                     n.type === NotificationChannel.SMS ? <Zap size={18} /> :
-                     <Bell size={18} />}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex justify-between items-start mb-1">
-                      <p className="text-sm font-bold text-slate-900 truncate">{n.title}</p>
-                      <span className="text-[10px] text-slate-400 whitespace-nowrap ml-2">
-                        {new Date(n.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                      </span>
-                    </div>
-                    <p className="text-xs text-slate-500 line-clamp-2 leading-relaxed">{n.body}</p>
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div className="p-12 text-center">
-            <Bell size={40} className="mx-auto text-slate-200 mb-4" />
-            <p className="text-slate-500 text-sm">No new notifications</p>
-          </div>
-        )}
-      </div>
-      <div className="p-4 bg-slate-50 border-t border-slate-100 text-center">
-        <button onClick={onViewAll} className="text-xs font-bold text-emerald-600 hover:text-emerald-700">
-          View All Notifications
-        </button>
-      </div>
-    </motion.div>
-  );
-};
-
-const NotificationLogs = ({
-  logs,
-  onSelect,
-}: {
-  logs: Notification[];
-  onSelect?: (notification: Notification) => void;
-}) => {
-  const [statusFilter, setStatusFilter] = useState<"All" | NotificationStatus>("All");
-  const [message, setMessage] = useState<string | null>(null);
-
-  const showMessage = (msg: string) => {
-    setMessage(msg);
-    setTimeout(() => setMessage(null), 2500);
-  };
-
-  const handleResend = (id: string) => {
-    showMessage(`Resend queued for notification ${id}.`);
-  };
-
-  const handleFilterToggle = () => {
-    setStatusFilter(prev => {
-      if (prev === "All") return NotificationStatus.FAILED;
-      if (prev === NotificationStatus.FAILED) return NotificationStatus.SENT;
-      return "All";
-    });
-  };
-
-  const handleNewBroadcast = () => {
-    showMessage("Broadcast draft created.");
-  };
-
-  const visibleLogs = logs.filter((log) => statusFilter === "All" || log.status === statusFilter);
-
-  return (
-    <div className="space-y-6">
-      <AnimatePresence>
-        {message && (
-          <motion.div
-            initial={{ opacity: 0, y: -12 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -12 }}
-            className="fixed top-24 right-8 z-[300] bg-blue-600 text-white px-5 py-2.5 rounded-xl shadow-xl text-sm font-medium"
-          >
-            {message}
-          </motion.div>
-        )}
-      </AnimatePresence>
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900">Notification Delivery Logs</h1>
-          <p className="text-sm text-slate-500">
-            Monitor system alerts across all channels
-            <span className="ml-2 text-xs font-bold text-slate-400">Filter: {statusFilter}</span>
-          </p>
-        </div>
-        <div className="flex gap-3">
-          <button onClick={handleFilterToggle} className="btn-secondary flex items-center gap-2">
-            <Filter size={18} /> Filter Logs
-          </button>
-          <button onClick={handleNewBroadcast} className="btn-primary flex items-center gap-2">
-            <Plus size={18} /> New Broadcast
-          </button>
-        </div>
-      </div>
-
-      <div className="card overflow-hidden">
-        <table className="w-full text-left">
-          <thead>
-            <tr className="border-b border-slate-100 bg-slate-50/50">
-              <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest">ID</th>
-              <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest">Recipient</th>
-              <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest">Channel</th>
-              <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest">Event</th>
-              <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest">Status</th>
-              <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest">Timestamp</th>
-              <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest text-right">Actions</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-50">
-            {visibleLogs.map((log) => (
-              <tr
-                key={log.id}
-                className="hover:bg-slate-50/50 transition-colors cursor-pointer"
-                onClick={() => onSelect?.(log)}
-                title="View related section"
-              >
-                <td className="px-6 py-4 font-mono text-[10px] text-slate-500">{log.id}</td>
-                <td className="px-6 py-4">
-                  <p className="text-sm font-bold text-slate-900">{log.recipientName}</p>
-                  <p className="text-[10px] text-slate-400">{log.recipientId}</p>
-                </td>
-                <td className="px-6 py-4">
-                  <div className="flex items-center gap-2">
-                    {log.type === NotificationChannel.EMAIL ? <Mail size={14} className="text-blue-500" /> :
-                     log.type === NotificationChannel.SMS ? <Zap size={14} className="text-amber-500" /> :
-                     <Bell size={14} className="text-emerald-500" />}
-                    <span className="text-xs font-medium text-slate-600">{log.type}</span>
-                  </div>
-                </td>
-                <td className="px-6 py-4 text-xs text-slate-600 font-medium">{log.event}</td>
-                <td className="px-6 py-4">
-                  <span className={`px-2 py-1 rounded-full text-[10px] font-bold uppercase ${
-                    log.status === NotificationStatus.DELIVERED ? 'bg-emerald-100 text-emerald-700' :
-                    log.status === NotificationStatus.READ ? 'bg-blue-100 text-blue-700' :
-                    log.status === NotificationStatus.FAILED ? 'bg-rose-100 text-rose-700' :
-                    'bg-slate-100 text-slate-600'
-                  }`}>
-                    {log.status}
-                  </span>
-                </td>
-                <td className="px-6 py-4 text-xs text-slate-500">
-                  {new Date(log.timestamp).toLocaleString()}
-                </td>
-                <td className="px-6 py-4 text-right">
-                  <button 
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      handleResend(log.id);
-                    }}
-                    className="p-2 hover:bg-emerald-50 rounded-lg text-emerald-600 transition-colors"
-                    title="Resend"
-                  >
-                    <History size={16} />
-                  </button>
-                </td>
-              </tr>
-            ))}
-            {visibleLogs.length === 0 && (
-              <tr>
-                <td colSpan={7} className="px-6 py-12 text-center text-sm text-slate-500">
-                  No logs match the selected filter.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-};
 
 const getLatestApprovedPrequalification = (items: VendorPrequalification[]) => {
   return getLatestPrequalification(items.filter(item => String(item.status || "").toLowerCase() === "approved"));
@@ -19239,7 +19112,7 @@ const ProjectsHub = ({
   const canDecideMilestoneReviews = currentUser?.role === UserRole.RBF_OFFICIAL || currentUser?.role === UserRole.ADMIN;
   const projectTabs = isRbfPortal
     ? ["overview", "planning", "kpi", "map", "milestones", "payments", "documents", "updates"] as const
-    : ["overview", "planning", "kpi", "map", "milestones", "fieldwork", "device_readings", "payments", "documents", "updates"] as const;
+    : ["overview", "planning", "kpi", "map", "milestones", "fieldwork", "device_readings", "anomaly_flags", "payments", "documents", "updates"] as const;
   const createEmptyMilestoneDraft = () => ({
     name: "",
     description: "",
@@ -19268,6 +19141,7 @@ const ProjectsHub = ({
   const [anomalyStatusFilter, setAnomalyStatusFilter] = useState<string>("open");
   const [anomalyTypeFilter, setAnomalyTypeFilter] = useState("all");
   const [selectedAnomalyFlag, setSelectedAnomalyFlag] = useState<AnomalyFlag | null>(null);
+  const [respondingAnomalyFlag, setRespondingAnomalyFlag] = useState<AnomalyFlag | null>(null);
   const [anomalyEvidenceFiles, setAnomalyEvidenceFiles] = useState<File[]>([]);
   const [selectedInstallationId, setSelectedInstallationId] = useState<string | null>(null);
   const [anomalyReviewStatus, setAnomalyReviewStatus] = useState<AnomalyFlag["status"]>("under_investigation");
@@ -19340,11 +19214,19 @@ const ProjectsHub = ({
     beneficiaryId: "",
     beneficiaryPhone: "",
     householdType: "",
+    householdMembers: "",
+    maleMembers: "",
+    femaleMembers: "",
+    householdIncomeLevel: "" as HouseholdIncomeLevel | "",
+    householdEmployment: "",
     gpsLat: "",
     gpsLng: "",
     meterId: "",
     kwhReading: "",
   });
+  const [reportLocating, setReportLocating] = useState(false);
+  const [reportLocationNote, setReportLocationNote] = useState<string | null>(null);
+  const [reportLocationError, setReportLocationError] = useState<string | null>(null);
   const [reportPhotos, setReportPhotos] = useState<File[]>([]);
   const [reportPhotoUrls, setReportPhotoUrls] = useState<string[]>([]);
   useEffect(() => {
@@ -19394,6 +19276,10 @@ const ProjectsHub = ({
   const [claimSubmitting, setClaimSubmitting] = useState(false);
   const [claimMessage, setClaimMessage] = useState<string | null>(null);
   const [selectedVendorPaymentClaim, setSelectedVendorPaymentClaim] = useState<PaymentClaim | null>(null);
+  const [resubmitNotes, setResubmitNotes] = useState("");
+  const [correctingInstallation, setCorrectingInstallation] = useState<InstallationReport | null>(null);
+  const [claimResubmitting, setClaimResubmitting] = useState(false);
+  const [claimResubmitError, setClaimResubmitError] = useState<string | null>(null);
   const [prospectSyncSubmitting, setProspectSyncSubmitting] = useState<string | null>(null);
   const [prospectSyncMessage, setProspectSyncMessage] = useState<string | null>(null);
 
@@ -19809,11 +19695,11 @@ const ProjectsHub = ({
   const milestoneProgress = (milestone: Milestone) => Math.min(100, Math.max(0, Number(milestone.progressPercentage ?? 0)));
   const milestoneCompleted = (milestone: Milestone) => milestoneProgress(milestone) >= 100 || Boolean(milestone.completedDate);
   const nextOpenMilestoneForProject = (projectId: string) => {
-    // Zero-value milestones are skipped, so they must not be offered as "the next
-    // milestone" — the vendor would be pointed at a 0% milestone they can never claim.
+    // A 0% milestone has nothing to claim but is still the vendor's next step until RMT
+    // records its completion decision.
     const openMilestones = milestonesForProject(projectId)
       .filter(m => !milestoneCompleted(m))
-      .filter(m => (m.disbursementPct ?? m.percentage ?? 0) > 0 || (m.amountLsl ?? m.amount ?? 0) > 0);
+      .filter(m => (m.disbursementPct ?? m.percentage ?? 0) > 0 || (m.amountLsl ?? m.amount ?? 0) > 0 || m.completionReview?.status !== "decided");
     if (openMilestones.length === 0) return undefined;
     return openMilestones
       .slice()
@@ -19916,8 +19802,28 @@ const ProjectsHub = ({
     return `LSL ${Number(value).toLocaleString()}`;
   };
   const displayClaimStatus = (claim: PaymentClaim) => {
-    if (claim.status === "Completed" || claim.status === "Paid") return "Paid";
+    if (claim.status === "Completed" || claim.status === "Paid") return claim.isPartial ? "Paid (partial)" : "Paid";
+    if (claim.status === "Returned") return "Returned for completion";
     return claim.status;
+  };
+  const openVendorPaymentClaim = (claim: PaymentClaim) => {
+    setSelectedVendorPaymentClaim(claim);
+    setResubmitNotes(claim.implementationNotes || "");
+    setClaimResubmitError(null);
+  };
+  const handleResubmitClaim = async (claim: PaymentClaim) => {
+    setClaimResubmitting(true);
+    setClaimResubmitError(null);
+    try {
+      const updated = await resubmitPaymentClaim(claim.id, { implementationNotes: resubmitNotes.trim() });
+      setClaims((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
+      setSelectedVendorPaymentClaim(updated);
+      if (selectedProject) await refreshProjectUpdates(selectedProject.id);
+    } catch (err: any) {
+      setClaimResubmitError(toFriendlyApiMessage(String(err?.message || "")) || "Failed to resubmit the claim.");
+    } finally {
+      setClaimResubmitting(false);
+    }
   };
   const formatDuration = (start?: string, end?: string) => {
     if (!start || !end) return "N/A";
@@ -19934,14 +19840,19 @@ const ProjectsHub = ({
   const getMilestoneDisplayName = (milestone: Milestone, index: number) =>
     `Milestone ${index + 1} - ${milestone.percentage}%${milestone.name ? ` (${milestone.name})` : ""}`;
   // Mirrors is_zero_value_milestone in backend/rbf/projects/milestone_reviews.py: a
-  // milestone set to 0% has no amount, so it can never be claimed. It is skipped, and the
-  // following milestone unlocks without it.
+  // milestone set to 0% has no amount, so it can never be claimed. Once its conditions are
+  // met RMT verifies it directly and decides whether the vendor proceeds.
   const isZeroValueMilestone = (milestone: Milestone) =>
     !((milestone.disbursementPct ?? milestone.percentage ?? 0) > 0) ||
     !((milestone.amountLsl ?? milestone.amount ?? 0) > 0);
 
   const getMilestoneStateLabel = (milestone: Milestone, projectId: string) => {
-    if (isZeroValueMilestone(milestone)) return "SKIPPED";
+    if (isZeroValueMilestone(milestone)) {
+      if (milestone.status === "cancelled") return "CANCELLED";
+      if (milestone.completionReview?.status === "decided") return "VERIFIED";
+      if (milestone.completionReview?.status === "pending") return "AWAITING VERIFICATION";
+      return milestone.status === "locked" ? "LOCKED" : "PENDING";
+    }
     if (milestone.status === "paid" || milestone.status === "Paid") return "PAID";
     if (milestone.status === "cancelled") return "CANCELLED";
     const relatedClaim = claimsForProject(projectId).find(claim => claim.milestoneId === milestone.id);
@@ -19956,8 +19867,7 @@ const ProjectsHub = ({
   const getMilestoneStateTone = (label: string) => {
     if (label === "PAID") return "text-emerald-700";
     if (label === "CLAIMABLE" || label === "APPROVED" || label === "VERIFIED") return "text-sky-700";
-    if (label === "UNDER REVIEW" || label === "PENDING") return "text-amber-700";
-    if (label === "SKIPPED") return "text-slate-400";
+    if (label === "UNDER REVIEW" || label === "PENDING" || label === "AWAITING VERIFICATION") return "text-amber-700";
     return "text-slate-500";
   };
   const getSetupStatusLabel = (project: Project) => {
@@ -20006,7 +19916,7 @@ const ProjectsHub = ({
   const getMilestoneStateBadgeClass = (label: string) => {
     if (label === "PAID") return "border-emerald-200 bg-emerald-50 text-emerald-700";
     if (label === "CLAIMABLE" || label === "APPROVED" || label === "VERIFIED") return "border-sky-200 bg-sky-50 text-sky-700";
-    if (label === "UNDER REVIEW" || label === "PENDING") return "border-amber-200 bg-amber-50 text-amber-700";
+    if (label === "UNDER REVIEW" || label === "PENDING" || label === "AWAITING VERIFICATION") return "border-amber-200 bg-amber-50 text-amber-700";
     return "border-slate-200 bg-slate-100 text-slate-600";
   };
   const getConditionRowClass = (met: boolean) =>
@@ -20334,6 +20244,37 @@ const ProjectsHub = ({
       errors.householdType = "Select a household type. This drives the gender/inclusion KPIs for your project.";
     }
 
+    // Household composition is optional, but an answered field must add up: the API rejects
+    // men + women exceeding the household total.
+    const countField = (raw: string): number | null => {
+      const trimmed = raw.trim();
+      if (!trimmed) return null;
+      const parsed = Number(trimmed);
+      return Number.isInteger(parsed) ? parsed : NaN;
+    };
+    const membersRaw = countField(reportDraft.householdMembers);
+    const menRaw = countField(reportDraft.maleMembers);
+    const womenRaw = countField(reportDraft.femaleMembers);
+    if (membersRaw !== null && (Number.isNaN(membersRaw) || membersRaw < 1)) {
+      errors.householdMembers = "Enter the number of people living in the household (1 or more).";
+    }
+    if (menRaw !== null && (Number.isNaN(menRaw) || menRaw < 0)) {
+      errors.maleMembers = "Enter how many men live in the household as a whole number (0 is allowed).";
+    }
+    if (womenRaw !== null && (Number.isNaN(womenRaw) || womenRaw < 0)) {
+      errors.femaleMembers = "Enter how many women live in the household as a whole number (0 is allowed).";
+    }
+    const countsAreNumeric =
+      (membersRaw === null || !Number.isNaN(membersRaw)) &&
+      (menRaw === null || !Number.isNaN(menRaw)) &&
+      (womenRaw === null || !Number.isNaN(womenRaw));
+    if (membersRaw !== null && countsAreNumeric && (menRaw ?? 0) + (womenRaw ?? 0) > membersRaw) {
+      errors.maleMembers = `${menRaw ?? 0} men + ${womenRaw ?? 0} women is more than the ${membersRaw} people in the household.`;
+    }
+    if (reportDraft.householdEmployment.length > 128) {
+      errors.householdEmployment = "Keep the description under 128 characters.";
+    }
+
     if (!gpsLatRaw) {
       errors.gpsLat = "GPS Latitude is required. Capture it on-site (e.g., long-press in Google Maps to copy the coordinates).";
     } else {
@@ -20384,6 +20325,36 @@ const ProjectsHub = ({
     }
 
     return errors;
+  };
+
+  // Fill GPS from the device instead of copying coordinates off a map. The coordinates are
+  // only a starting point: the server still rejects anything outside Lesotho or outside the
+  // project's assigned district, which is what catches a stale device location.
+  const useCurrentLocationForReport = () => {
+    if (typeof navigator === "undefined" || !navigator.geolocation) {
+      setReportLocationError("This browser cannot share its location. Enter the coordinates manually.");
+      return;
+    }
+    setReportLocating(true);
+    setReportLocationNote(null);
+    setReportLocationError(null);
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const lat = position.coords.latitude.toFixed(6);
+        const lng = position.coords.longitude.toFixed(6);
+        setReportDraft((prev) => ({ ...prev, gpsLat: lat, gpsLng: lng }));
+        setReportLocationNote(`Filled from your device (±${Math.round(position.coords.accuracy)} m). Stand at the installation site before submitting.`);
+        clearReportError("gpsLat");
+        clearReportError("gpsLng");
+        setReportLocating(false);
+      },
+      (error) => {
+        setReportLocationError(reportGeolocationError(error));
+        setReportLocationNote(null);
+        setReportLocating(false);
+      },
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 }
+    );
   };
 
   const addReportPhotos = (files: File[]) => {
@@ -20440,6 +20411,11 @@ const ProjectsHub = ({
         beneficiaryId,
         beneficiaryPhone: reportDraft.beneficiaryPhone.trim() || undefined,
         householdType: reportDraft.householdType || undefined,
+        householdMembers: reportDraft.householdMembers.trim() ? Number(reportDraft.householdMembers) : undefined,
+        maleMembers: reportDraft.maleMembers.trim() ? Number(reportDraft.maleMembers) : undefined,
+        femaleMembers: reportDraft.femaleMembers.trim() ? Number(reportDraft.femaleMembers) : undefined,
+        householdIncomeLevel: reportDraft.householdIncomeLevel || undefined,
+        householdEmployment: reportDraft.householdEmployment.trim() || undefined,
         meterId: reportDraft.meterId.trim() || undefined,
         kwhReading: reportDraft.kwhReading ? Number(reportDraft.kwhReading) : undefined,
         receiptFile: reportReceipt,
@@ -20447,7 +20423,9 @@ const ProjectsHub = ({
       });
       setInstallationReports(prev => [created.report, ...prev]);
       await refreshProjectUpdates(selectedProject.id);
-      setReportDraft({ serialNumber: "", beneficiaryId: "", beneficiaryPhone: "", householdType: "", gpsLat: "", gpsLng: "", meterId: "", kwhReading: "" });
+      setReportDraft({ serialNumber: "", beneficiaryId: "", beneficiaryPhone: "", householdType: "", householdMembers: "", maleMembers: "", femaleMembers: "", householdIncomeLevel: "", householdEmployment: "", gpsLat: "", gpsLng: "", meterId: "", kwhReading: "" });
+      setReportLocationNote(null);
+      setReportLocationError(null);
       setReportPhotos([]);
       setReportReceipt(null);
       setReportMessageTone(created.warning ? "info" : "success");
@@ -20469,6 +20447,11 @@ const ProjectsHub = ({
             key === "serial_number" ? "serialNumber" :
             key === "beneficiary_id" ? "beneficiaryId" :
             key === "household_type" ? "householdType" :
+            key === "household_members" ? "householdMembers" :
+            key === "male_members" ? "maleMembers" :
+            key === "female_members" ? "femaleMembers" :
+            key === "household_income_level" ? "householdIncomeLevel" :
+            key === "household_employment" ? "householdEmployment" :
             key === "meter_id" ? "meterId" :
             key === "kwh_reading" ? "kwhReading" :
             key === "photos" ? "photos" :
@@ -20803,7 +20786,7 @@ const ProjectsHub = ({
     const kpiSummary = currentProjectKpiSummary(project.id);
     const paidAmount = projectClaims
       .filter(claim => claim.status === "Completed" || claim.status === "Paid")
-      .reduce((sum, claim) => sum + Number(claim.claimAmount || 0), 0);
+      .reduce((sum, claim) => sum + Number(claim.payableAmount || 0), 0);
     const totalContractAmount = Number(budgetForProject(project) || 0);
     const remainingAmount = Math.max(0, totalContractAmount - paidAmount);
     const projectContractFile = contract?.generatedFile || project.contractSignedFile;
@@ -21045,10 +21028,10 @@ const ProjectsHub = ({
     const contractValue = Number(project.contractValue ?? budgetForProject(project) ?? 0);
     const paidAmount = projectClaims
       .filter(claim => claim.status === "Completed" || claim.status === "Paid")
-      .reduce((sum, claim) => sum + Number(claim.claimAmount || 0), 0);
+      .reduce((sum, claim) => sum + Number(claim.payableAmount || 0), 0);
     const pendingAmount = projectClaims
       .filter(claim => !["Completed", "Paid", "Rejected"].includes(claim.status))
-      .reduce((sum, claim) => sum + Number(claim.claimAmount || 0), 0);
+      .reduce((sum, claim) => sum + Number(claim.payableAmount || 0), 0);
     const nextMilestone = nextOpenMilestoneForProject(project.id);
     const latestAudit = latestAuditForProject(project.id) || project.latestAuditEntry;
     const canSeeFinancials = !(isTacPortal || isDoePortal || isUndpPortal);
@@ -22278,6 +22261,14 @@ const ProjectsHub = ({
                     <div className="mt-5 rounded-xl border border-amber-100 bg-amber-50 p-4 text-sm text-amber-900">
                       <p className="font-semibold">Finding · {anomalyFindingTitle(selectedAnomalyFlag.flagType)}</p>
                       <p className="mt-1">{selectedAnomalyFlag.description || "No description provided."}</p>
+                      {selectedAnomalyFlag.vendorResponse && (
+                        <div className="mt-3 rounded-lg border border-purple-200 bg-white px-3 py-2 text-purple-900">
+                          <p className="text-xs font-bold uppercase text-purple-700">
+                            Vendor response{selectedAnomalyFlag.vendorRespondedAt ? ` · ${new Date(selectedAnomalyFlag.vendorRespondedAt).toLocaleString()}` : ""}
+                          </p>
+                          <p className="mt-1">{selectedAnomalyFlag.vendorResponse}</p>
+                        </div>
+                      )}
                       <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-amber-800 md:grid-cols-4">
                         <div><span className="font-semibold">Installation:</span> {selectedAnomalyFlag.installation || "N/A"}</div>
                         <div><span className="font-semibold">Raised:</span> {selectedAnomalyFlag.createdAt ? new Date(selectedAnomalyFlag.createdAt).toLocaleDateString() : "N/A"}</div>
@@ -22639,10 +22630,10 @@ const ProjectsHub = ({
     const kpiSummary = currentProjectKpiSummary(project.id);
     const paidAmount = projectClaims
       .filter(claim => claim.status === "Completed" || claim.status === "Paid")
-      .reduce((sum, claim) => sum + Number(claim.claimAmount || 0), 0);
+      .reduce((sum, claim) => sum + Number(claim.payableAmount || 0), 0);
     const pendingAmount = projectClaims
       .filter(claim => !["Completed", "Paid", "Rejected"].includes(claim.status))
-      .reduce((sum, claim) => sum + Number(claim.claimAmount || 0), 0);
+      .reduce((sum, claim) => sum + Number(claim.payableAmount || 0), 0);
     const claimableMilestones = projectMilestones.filter((milestone) => {
       const alreadyClaimed = projectClaims.some((claim) => claim.milestoneId === milestone.id && claim.status !== "Rejected");
       const label = getMilestoneStateLabel(milestone, project.id);
@@ -22834,7 +22825,10 @@ const ProjectsHub = ({
                     : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"
                 }`}
               >
-                {tab === "fieldwork" ? "Field Work" : tab === "device_readings" ? "Device Readings" : tab === "map" ? "Map View" : tab === "planning" ? "Planning" : tab.charAt(0).toUpperCase() + tab.slice(1)}
+                {tab === "fieldwork" ? "Field Work" : tab === "device_readings" ? "Device Readings" : tab === "anomaly_flags" ? "Anomaly Flags" : tab === "map" ? "Map View" : tab === "planning" ? "Planning" : tab.charAt(0).toUpperCase() + tab.slice(1)}
+                {tab === "anomaly_flags" && anomalyFlagsForProject(project.id).some(flag => ["correction_requested", "awaiting_evidence"].includes(flag.status)) && (
+                  <span className="ml-1.5 inline-block h-2 w-2 rounded-full bg-rose-500 align-middle" aria-label="Response needed" />
+                )}
               </button>
             ))}
           </div>
@@ -23240,14 +23234,14 @@ const ProjectsHub = ({
                           <p className="mt-1 text-sm text-slate-500">{milestone.description?.trim() || "Milestone progress unlocks based on project KPIs and verification conditions."}</p>
                         </div>
                         <div className="text-right">
-                          <span className={`rounded-full px-3 py-1 text-xs font-semibold ${stateLabel === "PAID" ? "bg-emerald-100 text-emerald-700" : stateLabel === "CLAIMABLE" ? "bg-sky-100 text-sky-700" : stateLabel === "UNDER REVIEW" ? "bg-amber-100 text-amber-700" : stateLabel === "SKIPPED" ? "bg-slate-100 text-slate-500" : "bg-slate-100 text-slate-700"}`}>{stateLabel}</span>
+                          <span className={`rounded-full px-3 py-1 text-xs font-semibold ${stateLabel === "PAID" ? "bg-emerald-100 text-emerald-700" : stateLabel === "CLAIMABLE" ? "bg-sky-100 text-sky-700" : stateLabel === "UNDER REVIEW" || stateLabel === "AWAITING VERIFICATION" ? "bg-amber-100 text-amber-700" : stateLabel === "VERIFIED" ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-700"}`}>{stateLabel}</span>
                           <p className="mt-2 text-sm font-semibold text-slate-900">{formatCurrency((milestone.amountLsl ?? milestone.amount) || 0)}</p>
                         </div>
                       </div>
-                      {stateLabel === "SKIPPED" && (
+                      {isZeroValueMilestone(milestone) && (
                         <p className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-500">
-                          This milestone is set to 0% disbursement, so there is no amount to claim.
-                          It has been skipped automatically — continue with the next milestone.
+                          This milestone is set to 0% disbursement, so there is no payment claim.
+                          Once its conditions are met, the RBF Management Team verifies it and decides whether you proceed to the next milestone.
                         </p>
                       )}
                       <div className="grid gap-3 md:grid-cols-3">
@@ -23295,6 +23289,16 @@ const ProjectsHub = ({
 
           {projectTab === "fieldwork" && (
             <div className="space-y-6">
+              {correctingInstallation && (
+                <InstallationCorrectionModal
+                  report={correctingInstallation}
+                  onClose={() => setCorrectingInstallation(null)}
+                  onResubmitted={(updated) => {
+                    setInstallationReports((prev) => prev.map((item) => (item.id === updated.id ? { ...item, ...updated, verificationStatus: "Reverification Required" } : item)));
+                    setCorrectingInstallation(null);
+                  }}
+                />
+              )}
               <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                 <div>
                   <h4 className="text-sm font-semibold text-slate-800">Field Work</h4>
@@ -23337,19 +23341,30 @@ const ProjectsHub = ({
                       <th className="px-4 py-3">Submitted</th>
                       <th className="px-4 py-3">Verified By</th>
                       <th className="px-4 py-3">Status</th>
+                      {canVendorManage && <th className="px-4 py-3">Action</th>}
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 bg-white">
                     {paginatedReports.length === 0 && (
                       <tr>
-                        <td colSpan={9} className="px-4 py-6 text-center text-sm text-slate-500">No installations submitted yet.</td>
+                        <td colSpan={canVendorManage ? 10 : 9} className="px-4 py-6 text-center text-sm text-slate-500">No installations submitted yet.</td>
                       </tr>
                     )}
                     {paginatedReports.map(report => (
                       <tr key={report.id}>
                         <td className="px-4 py-3 text-slate-700">{report.id}</td>
                         <td className="px-4 py-3 text-slate-700">{report.beneficiaryName || report.beneficiaryId || "N/A"}</td>
-                        <td className="px-4 py-3 text-slate-700">{report.householdType || "—"}</td>
+                        <td className="px-4 py-3 text-slate-700">
+                          {report.householdType || "—"}
+                          {report.householdMembers != null && (
+                            <p className="mt-0.5 text-[11px] text-slate-500">
+                              {report.householdMembers} members
+                              {(report.maleMembers != null || report.femaleMembers != null) &&
+                                ` (${report.maleMembers ?? 0} men / ${report.femaleMembers ?? 0} women)`}
+                              {report.householdIncomeLevel && ` · ${HOUSEHOLD_INCOME_LABELS[report.householdIncomeLevel] ?? report.householdIncomeLevel}`}
+                            </p>
+                          )}
+                        </td>
                         <td className="px-4 py-3 text-slate-700">{report.serialNumber || "—"}</td>
                         <td className="px-4 py-3 text-slate-700">{report.meterId || "—"}</td>
                         <td className="px-4 py-3">
@@ -23359,7 +23374,28 @@ const ProjectsHub = ({
                         </td>
                         <td className="px-4 py-3 text-slate-700">{report.submittedAt ? new Date(report.submittedAt).toLocaleString() : "N/A"}</td>
                         <td className="px-4 py-3 text-slate-700">{report.verifiedBy || "—"}</td>
-                        <td className="px-4 py-3"><span className={`rounded-full px-3 py-1 text-xs font-semibold ${installationBadge(report)}`}>{report.verificationStatus || report.status}</span></td>
+                        <td className="px-4 py-3">
+                          <span className={`rounded-full px-3 py-1 text-xs font-semibold ${installationBadge(report)}`}>{report.verificationStatus || report.status}</span>
+                          {report.status === "Flagged" && report.latestFlagReason && (
+                            <p className="mt-1 max-w-[220px] text-[11px] text-rose-700">{report.latestFlagReason}</p>
+                          )}
+                          {report.resubmissionCount > 0 && report.status !== "Flagged" && (
+                            <p className="mt-1 text-[11px] text-slate-500">Corrected {report.resubmissionCount}x</p>
+                          )}
+                        </td>
+                        {canVendorManage && (
+                          <td className="px-4 py-3">
+                            {report.canResubmit ? (
+                              <button onClick={() => setCorrectingInstallation(report)} className="font-medium text-rose-600 hover:text-rose-700">
+                                Fix &amp; Resubmit
+                              </button>
+                            ) : report.status === "Flagged" ? (
+                              <span className="text-xs text-slate-500">No resubmissions left — contact RMT</span>
+                            ) : (
+                              "—"
+                            )}
+                          </td>
+                        )}
                       </tr>
                     ))}
                   </tbody>
@@ -23383,7 +23419,8 @@ const ProjectsHub = ({
                     <li><strong>Serial number</strong> &mdash; the device&rsquo;s unique serial number (as printed on the unit). Required for identification.</li>
                     <li><strong>Beneficiary ID (NID)</strong> &mdash; the national ID of the household that received the installation.</li>
                     <li><strong>Household type</strong> &mdash; choose the correct category (Standard, Female Headed, Vulnerable, Low Income). This drives the gender/inclusion KPIs.</li>
-                    <li><strong>GPS Latitude / Longitude</strong> &mdash; capture the location on-site (e.g., Google Maps). Coordinates must be within Lesotho &mdash; wrong or missing coordinates will be rejected during verification.</li>
+                    <li><strong>GPS Latitude / Longitude</strong> &mdash; tap <strong>Use My Location</strong> while standing at the site, or copy the coordinates from Google Maps. Coordinates must be inside Lesotho <em>and</em> inside the project&rsquo;s assigned district &mdash; wrong or missing coordinates will be rejected during verification.</li>
+                    <li><strong>Household details (optional)</strong> &mdash; record how many people live in the household, how many men and women, the income level and the household&rsquo;s main source of work. Men + women cannot exceed the total. These back up the gender and inclusion KPIs with evidence from the field.</li>
                     <li><strong>Smart meter ID</strong> &mdash; enter the meter ID exactly as shown on the physical meter. This is <strong>critical if you plan to upload meter data via CSV later</strong>: the CSV rows are matched to this installation using this meter ID.</li>
                     <li><strong>kWh reading (optional)</strong> &mdash; the meter&rsquo;s current reading at installation time, if available.</li>
                     <li><strong>Photos &amp; receipt</strong> &mdash; attach at least one site photo (max 5) and the proof-of-sale receipt.</li>
@@ -23438,6 +23475,90 @@ const ProjectsHub = ({
                       <option value="low_income">Low Income</option>
                     </select>
                     {reportErrors.householdType && <p className="mt-1 text-xs font-medium text-rose-600">{reportErrors.householdType}</p>}
+                  </div>
+                  <div>
+                    <input
+                      type="number"
+                      inputMode="numeric"
+                      min={1}
+                      className={`input-field ${reportErrors.householdMembers ? "border-rose-400 ring-1 ring-rose-200" : ""}`}
+                      placeholder="Household family members (optional)"
+                      value={reportDraft.householdMembers}
+                      onChange={(e) => { setReportDraft(prev => ({ ...prev, householdMembers: e.target.value })); clearReportError("householdMembers"); }}
+                    />
+                    {reportErrors.householdMembers
+                      ? <p className="mt-1 text-xs font-medium text-rose-600">{reportErrors.householdMembers}</p>
+                      : <p className="mt-1 text-[11px] text-slate-400">Total people living in the household, including children.</p>}
+                  </div>
+                  <div>
+                    <input
+                      type="number"
+                      inputMode="numeric"
+                      min={0}
+                      className={`input-field ${reportErrors.maleMembers ? "border-rose-400 ring-1 ring-rose-200" : ""}`}
+                      placeholder="How many men in the house (optional)"
+                      value={reportDraft.maleMembers}
+                      onChange={(e) => { setReportDraft(prev => ({ ...prev, maleMembers: e.target.value })); clearReportError("maleMembers"); }}
+                    />
+                    {reportErrors.maleMembers
+                      ? <p className="mt-1 text-xs font-medium text-rose-600">{reportErrors.maleMembers}</p>
+                      : <p className="mt-1 text-[11px] text-slate-400">Male members aged 15 and above.</p>}
+                  </div>
+                  <div>
+                    <input
+                      type="number"
+                      inputMode="numeric"
+                      min={0}
+                      className={`input-field ${reportErrors.femaleMembers ? "border-rose-400 ring-1 ring-rose-200" : ""}`}
+                      placeholder="How many women in the house (optional)"
+                      value={reportDraft.femaleMembers}
+                      onChange={(e) => { setReportDraft(prev => ({ ...prev, femaleMembers: e.target.value })); clearReportError("femaleMembers"); }}
+                    />
+                    {reportErrors.femaleMembers
+                      ? <p className="mt-1 text-xs font-medium text-rose-600">{reportErrors.femaleMembers}</p>
+                      : <p className="mt-1 text-[11px] text-slate-400">Female members aged 15 and above.</p>}
+                  </div>
+                  <div>
+                    <select
+                      className={`input-field ${reportErrors.householdIncomeLevel ? "border-rose-400 ring-1 ring-rose-200" : ""}`}
+                      value={reportDraft.householdIncomeLevel}
+                      onChange={(e) => { setReportDraft(prev => ({ ...prev, householdIncomeLevel: e.target.value as HouseholdIncomeLevel | "" })); clearReportError("householdIncomeLevel"); }}
+                    >
+                      <option value="">Income level (optional)</option>
+                      <option value="no_income">No regular income</option>
+                      <option value="low_income">Low income</option>
+                      <option value="medium_income">Medium income</option>
+                      <option value="high_income">High income</option>
+                    </select>
+                    {reportErrors.householdIncomeLevel
+                      ? <p className="mt-1 text-xs font-medium text-rose-600">{reportErrors.householdIncomeLevel}</p>
+                      : <p className="mt-1 text-[11px] text-slate-400">Assess against the household&rsquo;s own circumstances, not the lot budget. Withheld from DOE and UNDP.</p>}
+                  </div>
+                  <div className="md:col-span-2">
+                    <input
+                      className={`input-field ${reportErrors.householdEmployment ? "border-rose-400 ring-1 ring-rose-200" : ""}`}
+                      placeholder="Income source / work (optional) — e.g. subsistence farming, formal employment, informal trading, not working"
+                      value={reportDraft.householdEmployment}
+                      onChange={(e) => { setReportDraft(prev => ({ ...prev, householdEmployment: e.target.value })); clearReportError("householdEmployment"); }}
+                    />
+                    {reportErrors.householdEmployment && <p className="mt-1 text-xs font-medium text-rose-600">{reportErrors.householdEmployment}</p>}
+                  </div>
+                  <div className="md:col-span-2">
+                    <button
+                      type="button"
+                      onClick={useCurrentLocationForReport}
+                      disabled={reportLocating}
+                      className="btn-secondary inline-flex items-center gap-2 disabled:opacity-60"
+                    >
+                      <MapPin size={14} />
+                      {reportLocating ? "Getting your location..." : "Use My Location"}
+                    </button>
+                    <p className="mt-1 text-[11px] text-slate-400">
+                      Fills GPS Latitude / Longitude from this device. Stand at the installation site first &mdash; the coordinates are
+                      checked against Lesotho&rsquo;s boundary and the project&rsquo;s assigned district when you submit.
+                    </p>
+                    {reportLocationNote && <p className="mt-1 text-[11px] font-medium text-emerald-700">{reportLocationNote}</p>}
+                    {reportLocationError && <p className="mt-1 text-[11px] font-medium text-rose-600">{reportLocationError}</p>}
                   </div>
                   <div>
                     <input
@@ -23664,6 +23785,81 @@ const ProjectsHub = ({
               </div>}
             </div>
           )}
+
+          {projectTab === "anomaly_flags" && (() => {
+            const vendorFlags = anomalyFlagsForProject(project.id);
+            const needsResponse = (flag: AnomalyFlag) => ["correction_requested", "awaiting_evidence"].includes(flag.status);
+            const statusLabel: Record<string, string> = {
+              open: "Open", under_investigation: "Under investigation", correction_requested: "Correction requested",
+              awaiting_evidence: "Evidence requested", resolved: "Resolved", false_positive: "Closed (false positive)",
+              escalated: "Escalated", reopened: "Reopened",
+            };
+            return (
+              <div className="space-y-4">
+                {respondingAnomalyFlag && (
+                  <AnomalyResponseModal
+                    flag={respondingAnomalyFlag}
+                    onClose={() => setRespondingAnomalyFlag(null)}
+                    onResponded={(updated) => {
+                      setProjectAnomalyFlags(prev => prev.map(flag => (flag.id === updated.id ? updated : flag)));
+                      setRespondingAnomalyFlag(null);
+                    }}
+                  />
+                )}
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">
+                  The platform raises anomaly flags automatically from meter data and field verification. The RBF Management Team
+                  investigates them. When it asks you for a correction or evidence, answer with <strong>Respond</strong> before the due
+                  date: a missed due date escalates the flag and holds your milestone payments.
+                </div>
+                {vendorFlags.length === 0 ? (
+                  <p className="rounded-2xl border border-dashed border-slate-200 p-8 text-center text-sm text-slate-500">No anomaly flags on this project.</p>
+                ) : (
+                  <div className="space-y-3">
+                    {vendorFlags.map(flag => {
+                      const overdue = !flag.isResolved && Boolean(flag.dueDate) && new Date(flag.dueDate as string).getTime() < Date.now();
+                      return (
+                        <div key={flag.id} className={`rounded-2xl border p-4 ${needsResponse(flag) ? "border-purple-200 bg-purple-50/40" : "border-slate-200 bg-white"}`}>
+                          <div className="flex flex-wrap items-start justify-between gap-3">
+                            <div>
+                              <p className="font-semibold text-slate-900">Flag #{flag.id} &middot; {(flag.flagType || "anomaly").replace(/_/g, " ")}</p>
+                              <p className="text-xs text-slate-500">Installation {flag.installation || "—"} &middot; raised {flag.createdAt ? new Date(flag.createdAt).toLocaleDateString() : "—"}</p>
+                            </div>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-700">{statusLabel[flag.status] || flag.status}</span>
+                              {flag.dueDate && !flag.isResolved && (
+                                <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${overdue ? "bg-red-100 text-red-700" : "bg-amber-100 text-amber-800"}`}>
+                                  {overdue ? "Overdue" : "Due"} {new Date(flag.dueDate).toLocaleDateString()}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                          {flag.description && <p className="mt-2 text-sm text-slate-700">{flag.description}</p>}
+                          {needsResponse(flag) && (flag.correctiveAction || flag.investigationNotes) && (
+                            <div className="mt-3 rounded-xl bg-white px-3 py-2 text-sm text-purple-900">
+                              <p className="text-xs font-bold uppercase text-purple-700">The RMT asks</p>
+                              {flag.correctiveAction && <p>{flag.correctiveAction}</p>}
+                              {flag.investigationNotes && <p className="text-purple-800">{flag.investigationNotes}</p>}
+                            </div>
+                          )}
+                          {flag.vendorResponse && (
+                            <p className="mt-2 text-xs text-slate-600"><span className="font-semibold">Your last response{flag.vendorRespondedAt ? ` (${new Date(flag.vendorRespondedAt).toLocaleDateString()})` : ""}:</span> {flag.vendorResponse}</p>
+                          )}
+                          {flag.isResolved && flag.resolutionReason && (
+                            <p className="mt-2 text-xs text-emerald-700"><span className="font-semibold">Decision:</span> {flag.resolutionReason}</p>
+                          )}
+                          {needsResponse(flag) && (
+                            <div className="mt-3">
+                              <button onClick={() => setRespondingAnomalyFlag(flag)} className="rounded-lg bg-purple-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-purple-700">Respond</button>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
 
           {projectTab === "device_readings" && (
             <div className="space-y-6">
@@ -24169,6 +24365,13 @@ const ProjectsHub = ({
                       <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
                         <p className="text-sm font-semibold text-emerald-900">{selectedClaimMilestone.name}</p>
                         <p className="mt-1 text-xs text-emerald-700">Claim amount: {formatCurrency(selectedClaimMilestone.amount)}</p>
+                        {selectedClaimMilestone.pendingCarryIn && (
+                          <p className="mt-1 text-xs text-amber-800">
+                            Plus {formatCurrency(selectedClaimMilestone.pendingCarryIn.amount)} carried over from Milestone{" "}
+                            {selectedClaimMilestone.pendingCarryIn.fromMilestones.join(", ")} ({selectedClaimMilestone.pendingCarryIn.units} unit(s) still owed).
+                            It is paid with this claim once those items are delivered and verified.
+                          </p>
+                        )}
                       </div>
                       <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                         <div className="space-y-1">
@@ -24255,9 +24458,14 @@ const ProjectsHub = ({
                     {projectClaims.map(claim => (
                       <tr key={claim.id}>
                         <td className="px-4 py-3 text-slate-700">{projectMilestones.find(m => m.id === claim.milestoneId)?.name || claim.milestoneId || "Milestone"}</td>
-                        <td className="px-4 py-3 text-slate-700">{formatCurrency(claim.claimAmount || 0)}</td>
+                        <td className="px-4 py-3 text-slate-700">
+                          {formatCurrency(claim.payableAmount || 0)}
+                          {claim.isPartial && (
+                            <span className="block text-xs text-amber-700">of {formatCurrency(claim.claimAmount || 0)} ({claim.completionPct}% delivered)</span>
+                          )}
+                        </td>
                         <td className="px-4 py-3 text-slate-700">{claim.submittedAt ? new Date(claim.submittedAt).toLocaleString() : "N/A"}</td>
-                        <td className="px-4 py-3 text-slate-700">{displayClaimStatus(claim)}</td>
+                        <td className={`px-4 py-3 ${claim.status === "Returned" ? "font-semibold text-amber-700" : "text-slate-700"}`}>{displayClaimStatus(claim)}</td>
                         <td className="px-4 py-3 text-slate-700">
                           {claim.paymentReference || claim.disbursement?.reference ? (
                             <div className="space-y-1">
@@ -24277,10 +24485,10 @@ const ProjectsHub = ({
                         </td>
                         <td className="px-4 py-3 text-slate-700">
                           <button
-                            onClick={() => setSelectedVendorPaymentClaim(claim)}
+                            onClick={() => openVendorPaymentClaim(claim)}
                             className="font-medium text-emerald-600 transition-colors hover:text-emerald-700"
                           >
-                            View Details
+                            {claim.status === "Returned" ? "Review & Resubmit" : "View Details"}
                           </button>
                         </td>
                       </tr>
@@ -24332,7 +24540,10 @@ const ProjectsHub = ({
                           </div>
                           <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                             <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Claim Amount</p>
-                            <p className="mt-1 text-base font-semibold text-slate-900">{formatCurrency(selectedVendorPaymentClaim.claimAmount || 0)}</p>
+                            <p className="mt-1 text-base font-semibold text-slate-900">{formatCurrency(selectedVendorPaymentClaim.payableAmount || 0)}</p>
+                            {selectedVendorPaymentClaim.isPartial && (
+                              <p className="text-xs text-slate-500">of {formatCurrency(selectedVendorPaymentClaim.claimAmount || 0)} claimed</p>
+                            )}
                           </div>
                           <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                             <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Submitted</p>
@@ -24371,6 +24582,28 @@ const ProjectsHub = ({
                             </p>
                           </div>
                         </div>
+
+                        <ClaimPayoutNotice claim={selectedVendorPaymentClaim} />
+
+                        {selectedVendorPaymentClaim.status === "Returned" && (
+                          <div className="space-y-3 rounded-2xl border border-slate-200 p-4">
+                            <p className="text-sm font-semibold text-slate-800">Resubmit after completing the items above</p>
+                            <textarea
+                              className="input-field min-h-[90px]"
+                              placeholder="Describe what you completed (installations added, evidence uploaded, issues fixed)."
+                              value={resubmitNotes}
+                              onChange={(e) => setResubmitNotes(e.target.value)}
+                            />
+                            {claimResubmitError && <p className="text-sm text-rose-600">{claimResubmitError}</p>}
+                            <button
+                              onClick={() => void handleResubmitClaim(selectedVendorPaymentClaim)}
+                              className="btn-primary text-xs"
+                              disabled={claimResubmitting}
+                            >
+                              {claimResubmitting ? "Resubmitting..." : "Resubmit Claim"}
+                            </button>
+                          </div>
+                        )}
 
                         {(selectedVendorPaymentClaim.remarks || selectedVendorPaymentClaim.disbursement?.notes) && (
                           <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
@@ -24540,7 +24773,7 @@ const ProjectsHub = ({
       : isPscPortal
         ? [
             ["Total Projects", String(projects.length)],
-            ["Total Paid Out", formatCurrency(claims.filter(claim => ["Completed", "Paid"].includes(claim.status)).reduce((sum, claim) => sum + Number(claim.claimAmount || 0), 0))],
+            ["Total Paid Out", formatCurrency(claims.filter(claim => ["Completed", "Paid"].includes(claim.status)).reduce((sum, claim) => sum + Number(claim.payableAmount || 0), 0))],
             ["Overall Progress", `${verifiedInstallationsPct}%`],
             ["Pending Approvals", String(claims.filter(claim => claim.status === "TAC Endorsed").length)],
           ]
@@ -24748,7 +24981,7 @@ const ProjectsHub = ({
                     const statusMeta = getPortfolioProjectStatus(project);
                     const projectPaid = claimsForProject(project.id)
                       .filter(claim => ["Completed", "Paid"].includes(claim.status))
-                      .reduce((sum, claim) => sum + Number(claim.claimAmount || 0), 0);
+                      .reduce((sum, claim) => sum + Number(claim.payableAmount || 0), 0);
                     return (
                       <React.Fragment key={project.id}>
                         <tr id={`project-card-${project.id}`} className={`border-t border-slate-100 ${statusMeta.rowClass}`}>
@@ -27891,12 +28124,16 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
       setInspectionStep(saved.step);
       setMessage("Loaded saved draft from offline storage");
     } else {
+      // Blind inspection: nothing from the vendor's submission pre-fills the observation until a
+      // verification has been submitted for this installation (same rule as the inspect branch).
+      const vendorDetailsVisible = Boolean(item?.task.fieldVerifications?.length);
       setInspectionData({
         gpsLat: item?.task.verifierLat != null ? String(item.task.verifierLat) : "",
         gpsLong: item?.task.verifierLng != null ? String(item.task.verifierLng) : "",
-        serialNumber: item?.report?.serialNumber || "",
+        serialNumber: vendorDetailsVisible ? item?.report?.serialNumber || "" : "",
         beneficiaryConfirmed: false,
-        beneficiaryGender: item?.report?.householdType === "female_headed" ? "female" : "unknown",
+        beneficiaryGender:
+          vendorDetailsVisible && item?.report?.householdType === "female_headed" ? "female" : "unknown",
         systemWorking: true,
         serialVisible: true,
         verificationStatus: item?.task.status === "Flagged" ? "flagged" : item?.task.status === "Partial" ? "partial" : "verified",
@@ -28212,6 +28449,10 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
       ({ standard: "Standard", female_headed: "Female-headed", vulnerable: "Vulnerable", low_income: "Low Income" } as Record<string, string>)[selectedReport.householdType || ""] ||
       selectedReport.householdType ||
       "Not provided";
+    // Blind inspection: the vendor's submission stays hidden until this installation has a
+    // submitted field verification, so the observation is made on site rather than copied.
+    // The API withholds the same fields; this only decides what is rendered.
+    const vendorDetailsVisible = Boolean(selectedTask.fieldVerifications?.length);
 
     return (
       <div className="space-y-6 max-w-[90rem] mx-auto pb-20">
@@ -28280,6 +28521,7 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2 card p-8">
             <div className="space-y-8">
+              {vendorDetailsVisible ? (
               <div className="rounded-2xl border border-slate-200 bg-slate-50/60 p-5">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wide">Submitted Installation Details</h3>
@@ -28408,10 +28650,26 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
                   </div>
                 )}
               </div>
+              ) : (
+                <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50/60 p-5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wide">Submitted Installation Details</h3>
+                    <span className={`inline-flex rounded-full px-2.5 py-1 text-[11px] font-bold uppercase ${submittedGisBadge}`}>
+                      GIS {selectedReport.gisStatus || "Pending"}
+                    </span>
+                  </div>
+                  <p className="mt-3 text-sm text-slate-600">
+                    The vendor's submission stays hidden until you submit your verification, so what
+                    you record is what you observed on site. Vendor coordinates stay available on the
+                    queue's GIS map for getting to the site.
+                  </p>
+                </div>
+              )}
 
               {inspectionStep === 1 && (
                 <div className="space-y-6">
                   <h3 className="text-lg font-bold text-slate-900 border-b border-slate-100 pb-2">Verifier Coordinates and Device Check</h3>
+                  {vendorDetailsVisible && (
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
                       <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Reported Serial</p>
@@ -28424,6 +28682,7 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
                       </p>
                     </div>
                   </div>
+                  )}
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                     <div className="space-y-1">
@@ -28554,10 +28813,12 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
                     <p className="text-sm text-blue-800">
                       Confirm the beneficiary identity and whether the installation is present and explained at the site.
                     </p>
+                    {vendorDetailsVisible && (
                     <p className="text-sm font-bold text-slate-700">
                       Beneficiary record: {selectedReport.beneficiaryName || selectedReport.beneficiaryId || "Not captured"}
                       {selectedReport.beneficiaryPhone ? ` • ${selectedReport.beneficiaryPhone}` : ""}
                     </p>
+                    )}
                   </div>
                   <div className="space-y-1">
                     <label className="text-sm font-bold text-slate-700 ml-1">Verifier Notes</label>
@@ -28657,6 +28918,7 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
               <p className="mt-2 text-lg font-bold text-slate-900">{selectedQueueItem?.siteName}</p>
               <p className="mt-1 text-sm text-slate-500">{selectedProject?.projectReference || `Project ${selectedReport.projectId}`}</p>
             </div>
+            {vendorDetailsVisible && (
             <div className="card p-5">
               <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Vendor-Submitted GPS</p>
               <p className="mt-2 text-sm font-semibold text-slate-900">{selectedReport.gpsLat.toFixed(6)}, {selectedReport.gpsLng.toFixed(6)}</p>
@@ -28669,6 +28931,8 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
                 Open map pin
               </a>
             </div>
+            )}
+            {vendorDetailsVisible && (
             <div className="card p-5">
               <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Beneficiary</p>
               <p className="mt-2 text-sm font-semibold text-slate-900">{selectedReport.beneficiaryName || selectedReport.beneficiaryId || "Not captured"}</p>
@@ -28681,6 +28945,7 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
                 </a>
               )}
             </div>
+            )}
             <div className="card p-5">
               <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Vendor</p>
               <p className="mt-2 text-sm font-semibold text-slate-900">{selectedProject?.vendorName || selectedReport.vendorUsername || "N/A"}</p>
@@ -28847,7 +29112,10 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
             </div>
             <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
               <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Beneficiaries</p>
-              <p className="mt-2 text-lg font-bold text-slate-900">{new Set(queue.map(item => item.report?.beneficiaryId).filter(Boolean)).size}</p>
+              {/* Falls back to the installation id: beneficiary ids are withheld from a field
+                  verifier until their verification is submitted, and one installation is one
+                  household, so the distinct count stays right either way. */}
+              <p className="mt-2 text-lg font-bold text-slate-900">{new Set(queue.map(item => item.report?.beneficiaryId || item.report?.id).filter(Boolean)).size}</p>
             </div>
           </div>
         </div>
@@ -32170,6 +32438,11 @@ export default function App() {
   const [showUserManual, setShowUserManual] = useState(false);
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [unreadCount, setUnreadCount] = useState(0);
+  const [highPriorityCount, setHighPriorityCount] = useState(0);
+  const [notificationsLoading, setNotificationsLoading] = useState(false);
+  const [notificationsError, setNotificationsError] = useState<string | null>(null);
+  // Notification opened from the header bell (the Notifications page manages its own).
+  const [openNotificationId, setOpenNotificationId] = useState<string | null>(null);
   const [browserPushEnabled, setBrowserPushEnabled] = useState(false);
   const browserPushEnabledRef = React.useRef(false);
   const seenNotificationIdsRef = React.useRef<Set<string>>(new Set());
@@ -32280,16 +32553,22 @@ export default function App() {
     if (!getStoredUser()) {
       setNotifications([]);
       setUnreadCount(0);
+      setHighPriorityCount(0);
       return;
     }
+    setNotificationsLoading(true);
     try {
-      const data = await fetchNotifications();
+      const [page, summary] = await Promise.all([fetchNotificationPage({}), fetchNotificationSummary()]);
+      const data = page.results;
       setNotifications(data);
+      setUnreadCount(summary.unread);
+      setHighPriorityCount(summary.highPriority);
+      setNotificationsError(null);
       if (!initialNotificationsLoadedRef.current) {
         data.forEach((n) => seenNotificationIdsRef.current.add(n.id));
         initialNotificationsLoadedRef.current = true;
       } else if (browserPushEnabledRef.current) {
-        const newItems = data.filter((n) => !seenNotificationIdsRef.current.has(n.id));
+        const newItems = data.filter((n) => !n.isRead && !seenNotificationIdsRef.current.has(n.id));
         if (newItems.length > 0 && typeof document !== "undefined" && document.visibilityState !== "visible") {
           newItems.slice(0, 5).forEach((n) => {
             if ("Notification" in window && window.Notification.permission === "granted") {
@@ -32303,14 +32582,10 @@ export default function App() {
         }
         data.forEach((n) => seenNotificationIdsRef.current.add(n.id));
       }
-      try {
-        const count = await fetchUnreadNotificationCount();
-        setUnreadCount(count);
-      } catch {
-        setUnreadCount(data.filter((n) => n.status === NotificationStatus.SENT).length);
-      }
     } catch {
-      setNotifications((prev) => prev);
+      setNotificationsError("Notifications could not be refreshed.");
+    } finally {
+      setNotificationsLoading(false);
     }
   }, []);
 
@@ -32628,6 +32903,9 @@ export default function App() {
     setSessionExpiredMessage(null);
     clearSessionExpiredMessage();
     navigateTo("dashboard");
+    initialNotificationsLoadedRef.current = false;
+    seenNotificationIdsRef.current = new Set();
+    void loadNotifications();
   };
 
   const handleLogout = () => {
@@ -32637,6 +32915,12 @@ export default function App() {
     setSessionExpiredMessage(null);
     clearSessionExpiredMessage();
     setShowNotifications(false);
+    setOpenNotificationId(null);
+    setNotifications([]);
+    setUnreadCount(0);
+    setHighPriorityCount(0);
+    initialNotificationsLoadedRef.current = false;
+    seenNotificationIdsRef.current = new Set();
     setShowUserMenu(false);
     setShowUserManual(false);
     setActiveTab("dashboard");
@@ -32699,74 +32983,6 @@ export default function App() {
       setActiveTab("projects");
     }
   }, [role]);
-
-  const resolveNotificationTarget = (note: Notification) => {
-    const event = (note.event || "").toLowerCase();
-    const linkedId = (note.linkedEntityId || "").trim();
-    const linkedUpper = linkedId.toUpperCase();
-    const isTender = linkedUpper.startsWith("T-") || event.includes("tender") || event.includes("bid");
-    const isProject = linkedUpper.startsWith("P-") || event.includes("project") || event.includes("milestone") || event.includes("verification");
-    const isReport = event.includes("briefing") || event.includes("summary") || event.includes("report");
-    const isPrequal = event.includes("pre-qualification") || event.includes("prequalification");
-    const isBidId = linkedUpper.startsWith("BID-") || linkedUpper.startsWith("B-");
-
-    if (role === UserRole.VENDOR) {
-      if (isTender && linkedId && !isBidId) {
-        return { tab: "dashboard", pendingBidTenderId: linkedId };
-      }
-      if (isBidId) {
-        return { tab: "my_bids" };
-      }
-      if (isProject) {
-        return { tab: "projects_hub" };
-      }
-      return { tab: "dashboard" };
-    }
-
-    if (role === UserRole.FIELD_VERIFIER) {
-      if (event.includes("survey") || event.includes("verification")) return { tab: "inspections" };
-      if (event.includes("gis") || event.includes("map")) return { tab: "gis" };
-      return { tab: "dashboard" };
-    }
-
-    if (role === UserRole.RBF_OFFICIAL && (event.startsWith("audit_") || event === "project_oversight_flag")) {
-      return { tab: "audit_oversight" };
-    }
-
-    if (role === UserRole.ADMIN || role === UserRole.RBF_OFFICIAL) {
-      if (isTender && linkedId) return { tab: "tenders", tenderId: linkedId };
-      if (isPrequal) return { tab: "prequal" };
-      if (isProject) return { tab: role === UserRole.RBF_OFFICIAL ? "rbf_projects" : "dashboard" };
-      if (isReport) return { tab: "reports" };
-      return { tab: "dashboard" };
-    }
-
-    if (role === UserRole.DOE_OFFICER) {
-      if (event.includes("blacklist")) return { tab: "blacklisting" };
-      if (event.includes("verification")) return { tab: "doe_verification" };
-      if (event.includes("oversight")) return { tab: "oversight_issues" };
-      if (isProject) return { tab: "projects" };
-      if (isReport) return { tab: "kpis" };
-      return { tab: "dashboard" };
-    }
-
-    if (role === UserRole.UNDP_DONOR) {
-      if (event.startsWith("audit_")) return { tab: "audit_findings" };
-      if (event.includes("oversight")) return { tab: "psc_my_flags" };
-      if (isReport) return { tab: "reports" };
-      if (isProject) return { tab: "payments" };
-      return { tab: "dashboard" };
-    }
-
-    if (role === UserRole.AUDITOR) {
-      if (event.startsWith("audit_")) return { tab: "audit_cases" };
-      if (isProject) return { tab: "verification_audit" };
-      if (isReport) return { tab: "audit_trail" };
-      return { tab: "dashboard" };
-    }
-
-    return { tab: "dashboard" };
-  };
 
   const sidebarPermissionModule: Record<string, string> = {
     dashboard: "dashboard",
@@ -32839,43 +33055,66 @@ export default function App() {
     return currentUser.permissions[module]?.includes("view") ?? false;
   };
 
-  const handleNotificationSelect = (note: Notification) => {
-    const target = resolveNotificationTarget(note);
-    const allowedTabs = new Set(getSidebarItems().filter(item => canViewSidebarItem(item.id)).map(item => item.id));
-    const nextTab = allowedTabs.has(target.tab) ? target.tab : (allowedTabs.has("notifications") ? "notifications" : "dashboard");
+  const canOpenTab = (tab: string) => getSidebarItems().some((item) => item.id === tab && canViewSidebarItem(item.id));
+  const resolveNotificationTarget = (note: Notification) => resolveNotificationTargetForRole(note, role, canOpenTab);
 
+  const openNotificationTarget = (target: NotificationTarget) => {
     setShowNotifications(false);
+    setOpenNotificationId(null);
+    if (target.projectId) {
+      setSelectedProjectId(target.projectId);
+      // Clear first so the project page re-applies the tab even if it is the same as last time.
+      setSelectedProjectTab(undefined);
+      const projectTab = target.projectTab;
+      window.requestAnimationFrame(() => setSelectedProjectTab(projectTab));
+    }
     if (target.tenderId) {
-      navigateTo(nextTab, "details", target.tenderId);
+      navigateTo(target.tab, "details", target.tenderId);
       setTenderView("details");
       setPendingTenderId(target.tenderId);
     } else {
-      navigateTo(nextTab);
+      navigateTo(target.tab);
     }
+  };
 
-    if (target.pendingBidTenderId) {
-      setPendingBidTenderId(target.pendingBidTenderId);
-      setPendingBidId(null);
-    }
+  const applyNotificationChange = React.useCallback((updated: Notification | null, removedId?: string) => {
+    setNotifications((prev) => {
+      if (removedId) return prev.filter((n) => n.id !== removedId);
+      if (!updated) return prev;
+      return updated.archivedAt ? prev.filter((n) => n.id !== updated.id) : prev.map((n) => (n.id === updated.id ? updated : n));
+    });
+    if (removedId || (updated && updated.archivedAt)) setOpenNotificationId(null);
+    void fetchNotificationSummary()
+      .then((summary) => { setUnreadCount(summary.unread); setHighPriorityCount(summary.highPriority); })
+      .catch(() => {});
+  }, []);
+  const bellActions = useNotificationActions(applyNotificationChange);
 
-    if (note.status === NotificationStatus.SENT) {
-      setNotifications((prev) =>
-        prev.map((n) => (n.id === note.id ? { ...n, status: NotificationStatus.READ } : n))
-      );
-      setUnreadCount((prev) => Math.max(0, prev - 1));
-      void markNotificationRead(note.id).catch(() => {});
-    }
+  const handleNotificationSelect = (note: Notification) => {
+    setShowNotifications(false);
+    setOpenNotificationId(note.id);
+    bellActions.clearError();
+    if (!note.isRead) void bellActions.markRead(note);
   };
 
   const handleMarkAllRead = () => {
-    setNotifications((prev) =>
-      prev.map((n) => (n.status === NotificationStatus.SENT ? { ...n, status: NotificationStatus.READ } : n))
-    );
+    setNotifications((prev) => prev.map((n) => ({ ...n, isRead: true, status: NotificationStatus.READ })));
     setUnreadCount(0);
+    setHighPriorityCount(0);
     void markAllNotificationsRead()
       .then(() => void loadNotifications())
-      .catch(() => {});
+      .catch(() => void loadNotifications());
   };
+
+  const renderNotificationsPage = () => (
+    <NotificationsPage
+      role={role}
+      title={role === UserRole.UNDP_DONOR ? "Briefings & Notifications" : "Notifications"}
+      resolveTarget={resolveNotificationTarget}
+      onOpenTarget={openNotificationTarget}
+      onChanged={() => void loadNotifications()}
+    />
+  );
 
   if (showPublicPortal) {
     return <PublicPortal
@@ -32923,7 +33162,7 @@ export default function App() {
     // Shared tabs across roles (if they have them in sidebar)
     if (activeTab === "gis") return <GISMap />;
     if (activeTab === "reports") return <Reports currentUser={currentUser} onNavigate={(action, id) => navigateTo("reports", action, id)} />;
-    if (activeTab === "notifications") return <NotificationLogs logs={notifications} onSelect={handleNotificationSelect} />;
+    if (activeTab === "notifications") return renderNotificationsPage();
 
     // Role-based content filtering
     if (role === UserRole.VENDOR) {
@@ -33026,7 +33265,7 @@ export default function App() {
         case "reports":
           return <ReportsHub currentUser={currentUser} />;
         case "notifications":
-          return <NotificationLogs logs={notifications} onSelect={handleNotificationSelect} />;
+          return renderNotificationsPage();
         case "dashboard":
         default:
           return <EvaluationCommitteeDashboard onNavigate={(action, id) => navigateTo(action, undefined, id)} />;
@@ -33044,7 +33283,7 @@ export default function App() {
         case "reports":
           return <FieldVerifierView mode="reports" onNavigate={(action, id) => navigateTo("inspections", action, id)} />;
         case "notifications":
-          return <NotificationLogs logs={notifications} onSelect={handleNotificationSelect} />;
+          return renderNotificationsPage();
         default:
           return <FieldVerifierView mode="dashboard" />;
       }
@@ -33343,7 +33582,7 @@ case "regional":
         case "reports":
           return <Reports currentUser={currentUser} onNavigate={(action, id) => navigateTo("reports", action, id)} />;
         case "notifications":
-          return <NotificationLogs logs={notifications} onSelect={handleNotificationSelect} />;
+          return renderNotificationsPage();
         case "all_vendors":
           return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={(vendorId) => { setViewingVendorProfile(vendorId); navigateTo("all_vendors", "view", vendorId); }} />;
         default:
@@ -33428,7 +33667,7 @@ case "regional":
         );
       case "payments": return <Disbursements onOpenProjectKpi={openProjectKpiView} onOpenProject={openProjectHubView} />;
       case "all_vendors": return <VendorDirectory viewerRole={currentUser.role} onOpenProfile={(vendorId) => { setViewingVendorProfile(vendorId); navigateTo("all_vendors", "view", vendorId); }} />;
-      case "notifications": return <NotificationLogs logs={notifications} onSelect={handleNotificationSelect} />;
+      case "notifications": return renderNotificationsPage();
       default:
         return (
           <MacroKpiPortal
@@ -33464,6 +33703,7 @@ case "regional":
         { id: "claims", icon: CreditCard, label: "Payment Claims", ...ab("claims") },
         { id: "blacklisting", icon: FileWarning, label: "Blacklisting" },
         { id: "reports", icon: BarChart3, label: "My Reports" },
+        { id: "notifications", icon: Bell, label: "Notifications", badge: unreadCount > 0 ? (unreadCount > 99 ? "99+" : String(unreadCount)) : undefined },
       ];
     }
 
@@ -33475,6 +33715,7 @@ case "regional":
         { id: "payments", icon: CreditCard, label: "Claim Reviews", ...ab("payments") },
         { id: "blacklisting", icon: FileWarning, label: "Blacklisting" },
         { id: "reports", icon: BarChart3, label: "Reports" },
+        { id: "notifications", icon: Bell, label: "Notifications", badge: unreadCount > 0 ? (unreadCount > 99 ? "99+" : String(unreadCount)) : undefined },
       ];
     }
 
@@ -33483,7 +33724,7 @@ case "regional":
         ...common,
         { id: "evaluations", icon: ClipboardCheck, label: "Evaluations", ...ab("evaluations") },
         { id: "reports", icon: FileText, label: "My Reports" },
-        { id: "notifications", icon: Bell, label: "Notifications" },
+        { id: "notifications", icon: Bell, label: "Notifications", badge: unreadCount > 0 ? (unreadCount > 99 ? "99+" : String(unreadCount)) : undefined },
       ];
     }
 
@@ -33499,7 +33740,7 @@ case "regional":
         },
         { id: "gis", icon: MapIcon, label: "Map View" },
         { id: "reports", icon: FileText, label: "My Reports" },
-        { id: "notifications", icon: Bell, label: "Notifications" },
+        { id: "notifications", icon: Bell, label: "Notifications", badge: unreadCount > 0 ? (unreadCount > 99 ? "99+" : String(unreadCount)) : undefined },
       ];
     }
 
@@ -33525,7 +33766,7 @@ case "regional":
         { id: "reports", icon: BarChart3, label: "Reports" },
         { id: "results_framework", icon: Target, label: "Results Framework" },
         { id: "report_schedules", icon: CalendarClock, label: "Report Schedules" },
-        { id: "notifications", icon: Bell, label: "Notifications" },
+        { id: "notifications", icon: Bell, label: "Notifications", badge: unreadCount > 0 ? (unreadCount > 99 ? "99+" : String(unreadCount)) : undefined },
         { id: "system_health", icon: Activity, label: "System Health" },
       ];
     }
@@ -33542,6 +33783,7 @@ case "regional":
         { id: "reports", icon: FileText, label: "Monitoring Reports", group: mv },
         { id: "oversight_issues", icon: AlertTriangle, label: "Verification / Monitoring Issues", group: "Issues" },
         { id: "blacklisting", icon: FileWarning, label: "Blacklisting", group: "Compliance" },
+        { id: "notifications", icon: Bell, label: "Notifications", badge: unreadCount > 0 ? (unreadCount > 99 ? "99+" : String(unreadCount)) : undefined },
       ];
     }
 
@@ -33567,7 +33809,7 @@ case "regional":
         { id: "psc_my_reviews", icon: MessageSquare, label: "My Reviews", group: "PSC Oversight" },
         { id: "psc_my_flags", icon: Flag, label: "My Flagged Issues", group: "PSC Oversight" },
         { id: "psc_review_history", icon: History, label: "Review History", group: "PSC Oversight" },
-        { id: "notifications", icon: Bell, label: "Briefings" },
+        { id: "notifications", icon: Bell, label: "Briefings & Notifications", badge: unreadCount > 0 ? (unreadCount > 99 ? "99+" : String(unreadCount)) : undefined },
       ];
     }
 
@@ -33592,7 +33834,7 @@ case "regional":
         { id: "reports", icon: BarChart3, label: "Compliance Reports", group: "Reports" },
         { id: "evidence_reports", icon: Paperclip, label: "Evidence Reports", group: "Reports" },
         { id: "prospect_sync", icon: History, label: "Prospect Sync Log", group: "Reports" },
-        { id: "notifications", icon: Bell, label: "Notifications" },
+        { id: "notifications", icon: Bell, label: "Notifications", badge: unreadCount > 0 ? (unreadCount > 99 ? "99+" : String(unreadCount)) : undefined },
       ];
     }
 
@@ -33612,7 +33854,7 @@ case "regional":
       { id: "gis", icon: MapIcon, label: "GIS Mapping" },
       { id: "payments", icon: CreditCard, label: "Disbursements", ...ab("payments") },
       { id: "reports", icon: BarChart3, label: "Reports" },
-      { id: "notifications", icon: Bell, label: "Notifications" },
+      { id: "notifications", icon: Bell, label: "Notifications", badge: unreadCount > 0 ? (unreadCount > 99 ? "99+" : String(unreadCount)) : undefined },
     ];
   };
 
@@ -33727,34 +33969,73 @@ case "regional":
 
           <div className="flex items-center gap-4">
             <div className="relative">
-              <button 
-                onClick={() => setShowNotifications(!showNotifications)}
+              <button
+                data-notification-bell
+                onClick={() => {
+                  if (!showNotifications) void loadNotifications();
+                  setShowNotifications(!showNotifications);
+                }}
                 className="p-2 hover:bg-slate-100 rounded-lg text-slate-500 relative"
+                aria-label={unreadCount > 0 ? `Notifications, ${unreadCount} unread` : "Notifications"}
+                aria-haspopup="dialog"
+                aria-expanded={showNotifications}
               >
                 <Bell size={20} />
                 {unreadCount > 0 && (
-                  <span className="absolute top-1.5 right-1.5 min-w-[18px] h-[18px] px-1 rounded-full bg-rose-500 text-white text-[10px] font-bold flex items-center justify-center border-2 border-white">
-                    {unreadCount > 9 ? "9+" : unreadCount}
+                  <span className={`absolute top-1.5 right-1.5 min-w-[18px] h-[18px] px-1 rounded-full text-white text-[10px] font-bold flex items-center justify-center border-2 border-white ${highPriorityCount > 0 ? "bg-rose-500" : "bg-emerald-500"}`} aria-hidden="true">
+                    {unreadCount > 99 ? "99+" : unreadCount}
                   </span>
                 )}
               </button>
-              <AnimatePresence>
-                {showNotifications && (
-                  <NotificationCenter 
-                    notifications={notifications} 
-                    unreadCount={unreadCount}
-                    browserPushEnabled={browserPushEnabled}
-                    onToggleBrowserPush={toggleBrowserPush}
-                    onClose={() => setShowNotifications(false)}
-                    onViewAll={() => {
-                      setShowNotifications(false);
-                      setActiveTab("notifications");
+              {showNotifications && (
+                <NotificationBellPanel
+                  notifications={notifications}
+                  unreadCount={unreadCount}
+                  highPriorityCount={highPriorityCount}
+                  loading={notificationsLoading}
+                  error={notificationsError}
+                  onOpen={handleNotificationSelect}
+                  onMarkAllRead={handleMarkAllRead}
+                  onViewAll={() => {
+                    setShowNotifications(false);
+                    navigateTo("notifications");
+                  }}
+                  onClose={() => setShowNotifications(false)}
+                  browserPushEnabled={browserPushEnabled}
+                  browserPushSupported={typeof window !== "undefined" && "Notification" in window}
+                  onToggleBrowserPush={toggleBrowserPush}
+                />
+              )}
+              {(() => {
+                const openIndex = openNotificationId ? notifications.findIndex((n) => n.id === openNotificationId) : -1;
+                const openNote = openIndex >= 0 ? notifications[openIndex] : null;
+                if (!openNote) return null;
+                const openAt = (index: number) => {
+                  const next = notifications[index];
+                  if (!next) return;
+                  setOpenNotificationId(next.id);
+                  if (!next.isRead) void bellActions.markRead(next);
+                };
+                return (
+                  <NotificationDetailModal
+                    note={openNote}
+                    target={resolveNotificationTarget(openNote)}
+                    busy={bellActions.busy}
+                    error={bellActions.error}
+                    position={{ index: openIndex, total: notifications.length }}
+                    onClose={() => setOpenNotificationId(null)}
+                    onPrev={openIndex > 0 ? () => openAt(openIndex - 1) : undefined}
+                    onNext={openIndex < notifications.length - 1 ? () => openAt(openIndex + 1) : undefined}
+                    onOpenTarget={() => {
+                      const target = resolveNotificationTarget(openNote);
+                      if (target) openNotificationTarget(target);
                     }}
-                    onSelect={handleNotificationSelect}
-                    onMarkAllRead={handleMarkAllRead}
+                    onToggleRead={() => void bellActions.toggleRead(openNote)}
+                    onToggleArchive={() => void bellActions.toggleArchive(openNote)}
+                    onDelete={() => void bellActions.remove(openNote)}
                   />
-                )}
-              </AnimatePresence>
+                );
+              })()}
             </div>
             <button
               onClick={() => setShowUserManual(true)}
@@ -33763,13 +34044,7 @@ case "regional":
             >
               <HelpCircle size={20} />
             </button>
-            <button
-              onClick={() => setActiveTab("notifications")}
-              className="p-2 hover:bg-slate-100 rounded-lg text-slate-500"
-              title="Open Notifications"
-            >
-              <Settings size={20} />
-            </button>
+
           </div>
         </header>
 

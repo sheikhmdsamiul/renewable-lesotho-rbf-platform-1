@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from django.conf import settings
 from django.core.mail import send_mail
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 
 from rbf.notifications.models import Notification, NotificationChannel, NotificationStatus
 from rbf.users.models import User, UserRole
@@ -55,51 +55,39 @@ class NotificationService:
         body: str,
         event: str,
         linked_entity_id: str = '',
-        dedupe: bool = True,
+        dedupe: bool = False,
+        dedupe_key: str = '',
     ) -> Notification | None:
-        """Create a single in-app notification for one user."""
+        """Create a single in-app notification for one user.
+
+        Every call records a new notification unless `dedupe` is set (skip when the user already
+        has this event for this entity) or `dedupe_key` is given (at most one per user and key).
+        """
         user_id = str(getattr(recipient, 'id', None)) if recipient is not None else None
         user_id = user_id or (str(recipient_id) if recipient_id is not None else '')
         if not user_id:
             return None
         name = recipient_name or (cls._recipient_name(recipient) if recipient is not None else str(recipient_id))
         entity_key = str(linked_entity_id or '')
-        if cls.dedupe_exists(
-            recipient_id=user_id,
-            event=event,
-            linked_entity_id=entity_key,
-        ):
-            # The unique (recipient, event, linked_entity) constraint is
-            # authoritative, so an entity-keyed notification can never be
-            # created twice — dedupe regardless of the caller's dedupe flag.
+        if dedupe and cls.dedupe_exists(recipient_id=user_id, event=event, linked_entity_id=entity_key):
             return None
         try:
-            return Notification.objects.create(
-                recipient_id=user_id,
-                recipient_name=name,
-                type=NotificationChannel.IN_APP,
-                event=event,
-                title=title,
-                body=body,
-                status=NotificationStatus.SENT,
-                linked_entity_id=entity_key,
-            )
-        except IntegrityError:
-            # The unique (recipient, event, linked_entity) constraint is
-            # authoritative. A repeated event for the same entity (e.g. a bid
-            # resubmission) should not raise a 500 — treat it as already
-            # notified and return the existing row when possible.
-            if entity_key:
-                return (
-                    Notification.objects.filter(
-                        recipient_id=user_id,
-                        event=event,
-                        linked_entity_id=entity_key,
-                    )
-                    .order_by('-timestamp', '-id')
-                    .first()
+            # Savepoint: a duplicate dedupe_key must not break the caller's transaction.
+            with transaction.atomic():
+                return Notification.objects.create(
+                    recipient_id=user_id,
+                    recipient_name=name,
+                    type=NotificationChannel.IN_APP,
+                    event=event,
+                    title=title[:500],
+                    body=body,
+                    status=NotificationStatus.SENT,
+                    linked_entity_id=entity_key,
+                    dedupe_key=dedupe_key[:191],
                 )
-            return None
+        except IntegrityError:
+            # Only dedupe_key is unique: this user was already notified for that key.
+            return Notification.objects.filter(recipient_id=user_id, dedupe_key=dedupe_key).first()
 
     @classmethod
     def notify_users(
@@ -111,9 +99,14 @@ class NotificationService:
         event: str,
         linked_entity_id: str = '',
         exclude_user_id=None,
+        dedupe: bool = False,
     ) -> list:
-        """Bulk-create in-app notifications for an explicit list of users."""
-        users = [u for u in users if u is not None]
+        """Bulk-create in-app notifications for an explicit list of active users.
+
+        With `dedupe`, users who already have this event for this entity are skipped
+        (used for announcements such as a tender being published).
+        """
+        users = [u for u in users if u is not None and getattr(u, 'is_active', True)]
         if exclude_user_id:
             users = [u for u in users if str(getattr(u, 'id', '')) != str(exclude_user_id)]
         if not users:
@@ -125,14 +118,14 @@ class NotificationService:
                 event=event,
                 linked_entity_id=entity_key,
             ).values_list('recipient_id', flat=True)
-        )
+        ) if dedupe else set()
         notifications = [
             Notification(
                 recipient_id=str(user.id),
                 recipient_name=cls._recipient_name(user),
                 type=NotificationChannel.IN_APP,
                 event=event,
-                title=title,
+                title=title[:500],
                 body=body,
                 status=NotificationStatus.SENT,
                 linked_entity_id=entity_key,
@@ -141,7 +134,7 @@ class NotificationService:
             if str(user.id) not in existing
         ]
         if notifications:
-            Notification.objects.bulk_create(notifications, ignore_conflicts=True)
+            Notification.objects.bulk_create(notifications)
         return users
 
     @classmethod
@@ -154,10 +147,11 @@ class NotificationService:
         event: str,
         linked_entity_id: str = '',
         exclude_user_id=None,
+        dedupe: bool = False,
     ) -> list[User]:
-        """Bulk-create in-app notifications for every user in the given roles."""
+        """Bulk-create in-app notifications for every active user in the given roles."""
         users = list(
-            User.objects.filter(role__in=set(roles))
+            User.objects.filter(role__in=set(roles), is_active=True)
             .distinct()
             .only('id', 'full_name', 'username', 'email')
         )
@@ -168,6 +162,7 @@ class NotificationService:
             event=event,
             linked_entity_id=linked_entity_id,
             exclude_user_id=exclude_user_id,
+            dedupe=dedupe,
         )
 
     @classmethod
@@ -245,6 +240,5 @@ class NotificationService:
             title=title,
             body=body,
             event=f'{module or "general"}_{level}',
-            linked_entity_id=record_id,
-            dedupe=False,
+            linked_entity_id=record_id or '',
         )

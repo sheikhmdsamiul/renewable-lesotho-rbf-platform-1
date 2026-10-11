@@ -16,12 +16,19 @@ from rbf.tenders.models import ContractStatus, TenderContract
 from rbf.users.models import PlatformConfiguration, User, UserRole, inclusion_targets
 
 from .audit import log_audit
-from .milestone_reviews import TERMINAL_PROJECT_STATUSES, is_zero_value_milestone, milestone_cleared_to_proceed
+from .milestone_reviews import (
+    TERMINAL_PROJECT_STATUSES,
+    is_zero_value_milestone,
+    milestone_cleared_to_proceed,
+    open_completion_review,
+)
 from .models import (
     AnomalyFlag,
     InstallationReport,
     InstallationStatus,
     Milestone,
+    MilestoneCompletionReview,
+    MilestoneReviewStatus,
     PaymentClaim,
     PaymentClaimStatus,
     Project,
@@ -343,6 +350,10 @@ class KpiService:
         if self.project.archived_at:
             # Archived projects are read-only; their KPIs are reported, never acted on.
             return False
+        if is_zero_value_milestone(milestone):
+            # Nothing to claim, so the milestone goes straight to RMT verification instead.
+            self._open_zero_value_review(milestone, milestone_number, reason_notes)
+            return False
 
         with transaction.atomic():
             milestone.status = "claimable"
@@ -351,15 +362,17 @@ class KpiService:
                 milestone.save(update_fields=["status", "unlocked_at", "updated_at"])
             else:
                 milestone.save(update_fields=["status", "updated_at"])
-            Notification.objects.update_or_create(
+            # One notice per milestone: Milestone 3 becoming claimable no longer replaces Milestone 2's.
+            Notification.objects.get_or_create(
                 recipient_id=str(self.project.vendor_id),
-                event="milestone_claimable",
-                linked_entity_id=str(self.project.id),
+                dedupe_key=f"milestone_claimable:{milestone.id}",
                 defaults={
+                    "event": "milestone_claimable",
+                    "linked_entity_id": str(self.project.id),
                     "recipient_name": self.project.vendor_name,
                     "type": NotificationChannel.IN_APP,
                     "title": f"Milestone {milestone_number} Claimable",
-                    "body": f"Milestone {milestone_number} for Project {self.project.id} is now claimable. Log in to submit your claim.",
+                    "body": f"Milestone {milestone_number} for project {self.project.project_reference or self.project.id} is now claimable. Open the project's Payments tab to submit your claim.",
                     "status": NotificationStatus.SENT,
                 },
             )
@@ -380,6 +393,58 @@ class KpiService:
                 reason_notes,
             )
         return True
+
+    def _open_zero_value_review(self, milestone: Milestone, milestone_number: int, reason_notes: str) -> None:
+        """A 0% milestone whose conditions are met is verified by RBF / Super Admin, who
+        decide whether the vendor proceeds — the step a paid milestone reaches after payment."""
+        with transaction.atomic():
+            _, created = open_completion_review(milestone)
+            if not created:
+                return
+            if not milestone.unlocked_at:
+                milestone.unlocked_at = timezone.now()
+                milestone.save(update_fields=["unlocked_at", "updated_at"])
+            label = f"Milestone {milestone_number}"
+            project_label = self.project.project_reference or self.project.id
+            reviewers = User.objects.filter(role__in={UserRole.RBF_OFFICIAL, UserRole.ADMIN}, is_active=True).only("id", "full_name", "username")
+            recipients = [(str(user.id), user.full_name or user.username) for user in reviewers]
+            if self.project.vendor_id:
+                recipients.append((str(self.project.vendor_id), self.project.vendor_name))
+            for recipient_id, recipient_name in recipients:
+                is_vendor = recipient_id == str(self.project.vendor_id)
+                Notification.objects.get_or_create(
+                    recipient_id=recipient_id,
+                    dedupe_key=f"milestone_review_due:{milestone.id}",
+                    defaults={
+                        "event": "milestone_review_due",
+                        "linked_entity_id": str(self.project.id),
+                        "recipient_name": recipient_name,
+                        "type": NotificationChannel.IN_APP,
+                        "title": f"{label} Awaiting Verification",
+                        "body": (
+                            f"{label} of project {project_label} has met its conditions. It is set to 0% disbursement, "
+                            "so there is no claim. The RBF Management Team will verify it and decide whether you proceed "
+                            "to the next milestone."
+                            if is_vendor
+                            else f"{label} of project {project_label} is set to 0% disbursement and has met its conditions. "
+                            "Verify it and decide whether the project proceeds, is closed, or is transferred."
+                        ),
+                        "status": NotificationStatus.SENT,
+                    },
+                )
+            log_audit(
+                None,
+                "milestone_review_opened_auto",
+                milestone,
+                {"project_id": str(self.project.id), "milestone_number": milestone_number, "notes": reason_notes},
+            )
+            create_project_activity_update(
+                self.project,
+                None,
+                "Milestone Completion Verification Required",
+                f"{label} (0% disbursement) met its conditions. {reason_notes} RBF / Super Admin must verify it and "
+                "decide whether the project proceeds, is closed, or is transferred to another vendor.",
+            )
 
     @staticmethod
     def _required_installation_pct(milestone: Milestone | None, fallback: int) -> int:
@@ -451,20 +516,20 @@ class KpiService:
             )
         )
         milestone_three_claimable = bool(milestone_three and str(milestone_three.status).strip().lower() in {"claimable", "claimed", "paid"})
-        # A 0% milestone has no amount, so it can never be claimed and is never "paid" in
-        # the usual sense — but it is skipped, so it must not hold up the milestones after
-        # it. Marking it not-claimable keeps the vendor from being offered a claim button
-        # for money that does not exist, and counting it as paid keeps Milestone 3's
-        # "milestone_2_paid" condition satisfiable when M2 was skipped.
-        milestone_one_skipped = is_zero_value_milestone(milestone_one)
-        milestone_two_skipped = is_zero_value_milestone(milestone_two)
-        milestone_three_skipped = is_zero_value_milestone(milestone_three)
-        if milestone_one_skipped:
+        # A 0% milestone has no amount, so it can never be claimed or paid. When its
+        # conditions are met it goes straight to RMT verification (see
+        # _open_zero_value_review), and the next milestone waits for that decision like any
+        # other. It is never offered as claimable, and counts as paid so Milestone 3's
+        # "milestone_2_paid" condition stays satisfiable when M2 is 0%.
+        milestone_one_zero = is_zero_value_milestone(milestone_one)
+        milestone_two_zero = is_zero_value_milestone(milestone_two)
+        milestone_three_zero = is_zero_value_milestone(milestone_three)
+        if milestone_one_zero:
             milestone_one_claimable = False
-        if milestone_two_skipped:
+        if milestone_two_zero:
             milestone_two_claimable = False
             milestone_two_paid = True
-        if milestone_three_skipped:
+        if milestone_three_zero:
             milestone_three_claimable = False
         platform_config = PlatformConfiguration.objects.order_by("id").first() or PlatformConfiguration()
         m2_installation_pct = self._required_installation_pct(milestone_two, platform_config.m2_verification_required_pct or 80)
@@ -480,6 +545,12 @@ class KpiService:
         project_open = self.project.status not in TERMINAL_PROJECT_STATUSES
         milestone_one_verified = milestone_cleared_to_proceed(milestone_one)
         milestone_two_verified = milestone_cleared_to_proceed(milestone_two)
+
+        def zero_value_status(milestone: Milestone | None) -> str:
+            review = MilestoneCompletionReview.objects.filter(milestone=milestone).first()
+            if review is None:
+                return "Pending"
+            return "AWAITING VERIFICATION" if review.status == MilestoneReviewStatus.PENDING else "VERIFIED"
         m1_eligible = project_open and contract_approved and setup_complete
         m2_eligible = (
             project_open
@@ -503,18 +574,18 @@ class KpiService:
         )
         summary = {
             "milestone_1": {
-                "eligible": False if milestone_one_skipped else m1_eligible,
-                "skipped": milestone_one_skipped,
-                "status": "Skipped" if milestone_one_skipped else "PAID" if milestone_one_paid else "CLAIMABLE" if (m1_eligible or milestone_one_claimable) else "Pending",
+                "eligible": False if milestone_one_zero else m1_eligible,
+                "zero_value": milestone_one_zero,
+                "status": zero_value_status(milestone_one) if milestone_one_zero else "PAID" if milestone_one_paid else "CLAIMABLE" if (m1_eligible or milestone_one_claimable) else "Pending",
                 "conditions": {
                     "contract_approved": contract_approved,
                     "setup_complete": setup_complete,
                 },
             },
             "milestone_2": {
-                "eligible": False if milestone_two_skipped else m2_eligible,
-                "skipped": milestone_two_skipped,
-                "status": "Skipped" if milestone_two_skipped else "PAID" if milestone_two_paid else "CLAIMABLE" if (m2_eligible or milestone_two_claimable) else "Pending",
+                "eligible": False if milestone_two_zero else m2_eligible,
+                "zero_value": milestone_two_zero,
+                "status": zero_value_status(milestone_two) if milestone_two_zero else "PAID" if milestone_two_paid else "CLAIMABLE" if (m2_eligible or milestone_two_claimable) else "Pending",
                 "conditions": {
                     "milestone_1_verified": milestone_one_verified,
                     "installations_80_pct": m2_installations_met,
@@ -531,9 +602,9 @@ class KpiService:
                 },
             },
             "milestone_3": {
-                "eligible": False if milestone_three_skipped else m3_eligible,
-                "skipped": milestone_three_skipped,
-                "status": "Skipped" if milestone_three_skipped else "PAID" if milestone_three_paid else "CLAIMABLE" if (m3_eligible or milestone_three_claimable) else "Pending",
+                "eligible": False if milestone_three_zero else m3_eligible,
+                "zero_value": milestone_three_zero,
+                "status": zero_value_status(milestone_three) if milestone_three_zero else "PAID" if milestone_three_paid else "CLAIMABLE" if (m3_eligible or milestone_three_claimable) else "Pending",
                 "conditions": {
                     "installations_100_pct": m3_installations_met,
                     "female_pct_50": female_pct_met,
@@ -557,14 +628,14 @@ class KpiService:
         if self._unlock_milestone_if_eligible(
             milestone=milestone_one,
             milestone_number=1,
-            eligible=summary["milestone_1"]["eligible"],
+            eligible=m1_eligible,
             reason_notes="M1 conditions met automatically: contract approved and project setup complete.",
         ):
             newly_claimable.append(1)
         if self._unlock_milestone_if_eligible(
             milestone=milestone_two,
             milestone_number=2,
-            eligible=summary["milestone_2"]["eligible"],
+            eligible=m2_eligible,
             reason_notes=(
                 f"M2 conditions met automatically: verified={installation['verified']}/{installation['target']}, "
                 f"female={gender['female_headed']['percentage']}%."
@@ -574,7 +645,7 @@ class KpiService:
         if self._unlock_milestone_if_eligible(
             milestone=milestone_three,
             milestone_number=3,
-            eligible=summary["milestone_3"]["eligible"],
+            eligible=m3_eligible,
             reason_notes=(
                 f"M3 conditions met automatically: at least {m3_installation_pct}% verified, all KPIs met, "
                 "all anomaly flags resolved, and M2 paid."
@@ -718,7 +789,7 @@ class KpiService:
             uptime_weighted += float(uptime["average_uptime_pct"]) * max(1, int(uptime["total_devices_monitored"] or 0))
             uptime_devices += max(1, int(uptime["total_devices_monitored"] or 0))
             total_paid_amount += sum(
-                float(claim.claim_amount or 0)
+                float(claim.payable_amount or 0)
                 for claim in project.payment_claims.filter(status__in=[PaymentClaimStatus.COMPLETED, PaymentClaimStatus.LEGACY_PAID])
             )
             pending_claims += project.payment_claims.exclude(

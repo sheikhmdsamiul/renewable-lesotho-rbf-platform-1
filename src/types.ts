@@ -827,7 +827,7 @@ export interface ProjectKpiSummary {
     total_verified: number;
     target: number;
   };
-  milestone_eligibility: Record<string, { eligible: boolean; status?: string; skipped?: boolean; conditions: Record<string, boolean>; thresholds?: MilestoneConditionThresholds }>;
+  milestone_eligibility: Record<string, { eligible: boolean; status?: string; zero_value?: boolean; conditions: Record<string, boolean>; thresholds?: MilestoneConditionThresholds }>;
   generated_at: string;
 }
 
@@ -926,6 +926,7 @@ export interface PlatformConfiguration {
   gpsVerificationMaxDistanceM: number;
   m2VerificationRequiredPct: number;
   m3VerificationRequiredPct: number;
+  partialPaymentMinPct: number;
   emailNotificationsEnabled: boolean;
   smsNotificationsEnabled: boolean;
   emailHost: string;
@@ -1448,6 +1449,8 @@ export interface Milestone {
   amountLsl?: number;
   requiredInstallationPct?: number;
   completionReview?: MilestoneCompletionReview | null;
+  // Unpaid shortfall from earlier partially-paid milestones, added to this milestone's claim.
+  pendingCarryIn?: { amount: number; units: number; fromMilestones: number[] } | null;
 }
 
 export type MilestoneReviewDecision = "proceed" | "close" | "transfer" | "complete";
@@ -1490,6 +1493,7 @@ export interface ProjectDocument {
 }
 
 export type InstallationStatus = "Submitted" | "Verified" | "Flagged";
+export type HouseholdIncomeLevel = "no_income" | "low_income" | "medium_income" | "high_income";
 export type VerificationStatus = "Pending" | "Paused" | "Partial" | "Verified" | "Flagged" | "Terminated" | "Reverification Required";
 
 export interface InstallationReport {
@@ -1515,10 +1519,37 @@ export interface InstallationReport {
   /** Masked for TAC/Auditor and withheld from DOE Officer / UNDP Donor by the API. */
   beneficiaryPhone?: string;
   householdType?: string;
+  /** Total people living in the household. Absent means "not recorded", which is distinct from a recorded 0. */
+  householdMembers?: number;
+  maleMembers?: number;
+  femaleMembers?: number;
+  /** Withheld from DOE Officer / UNDP Donor by the API. */
+  householdIncomeLevel?: HouseholdIncomeLevel | "";
+  householdEmployment?: string;
   installationDate?: string;
   verificationStatus?: string;
   verifiedBy?: string;
   gisStatus?: "green" | "yellow" | "red";
+  /** Vendor correction loop for flagged installations. */
+  resubmissionCount: number;
+  resubmissionsLeft: number;
+  canResubmit: boolean;
+  correctionNote?: string;
+  resubmittedAt?: string;
+  /** Why the latest field-verification round flagged this installation. */
+  latestFlagReason?: string;
+}
+
+export interface InstallationCorrection {
+  correctionNote: string;
+  serialNumber?: string;
+  beneficiaryId?: string;
+  beneficiaryName?: string;
+  beneficiaryPhone?: string;
+  meterId?: string;
+  gpsLat?: number;
+  gpsLng?: number;
+  photoFiles?: File[];
 }
 
 export interface SmartMeterReading {
@@ -1690,6 +1721,21 @@ export enum NotificationStatus {
   FAILED = "Failed",
 }
 
+export type NotificationCategory =
+  | "payments" | "verification" | "data" | "oversight" | "projects" | "reports"
+  | "procurement" | "compliance" | "notices" | "general";
+
+// The record a notification is about, resolved by the backend (see rbf/notifications/catalog.py).
+export interface NotificationRelated {
+  type: string;
+  id: string;
+  label: string;
+  projectId: string;
+  projectLabel: string;
+  tenderId: string;
+  tenderLabel: string;
+}
+
 export interface Notification {
   id: string;
   recipientId: string;
@@ -1699,8 +1745,27 @@ export interface Notification {
   title: string;
   body: string;
   status: NotificationStatus;
-   timestamp: string;
-   linkedEntityId?: string; // Tender ID, Bid ID, etc.
+  timestamp: string;
+  linkedEntityId?: string; // Meaning depends on the event; use `related` instead.
+  isRead: boolean;
+  readAt?: string | null;
+  archivedAt?: string | null;
+  category: NotificationCategory;
+  categoryLabel: string;
+  priority: "high" | "normal";
+  related: NotificationRelated;
+}
+
+export interface NotificationPage {
+  results: Notification[];
+  count: number;
+  hasMore: boolean;
+}
+
+export interface NotificationSummary {
+  unread: number;
+  highPriority: number;
+  total: number;
 }
 
 export enum NoticeCategory {
@@ -2062,7 +2127,8 @@ export type PaymentClaimStatus =
   | "Verified"
   | "Approved"
   | "Paid"
-  | "Rejected";
+  | "Rejected"
+  | "Returned";
 export type DisbursementStatus = "Initiated" | "Completed" | "Failed";
 
 export interface Disbursement {
@@ -2110,6 +2176,59 @@ export interface PaymentClaim {
   disbursement?: Disbursement;
   paymentLocked?: boolean;
   paymentLockReason?: string;
+  // Partial payment / return-for-completion (recorded by RMT at verification).
+  carryInAmount: number;
+  carryInUnits: number;
+  approvedAmount?: number;
+  payableAmount: number;
+  shortfallAmount: number;
+  completionPct?: number;
+  expectedUnits?: number;
+  verifiedUnits?: number;
+  isPartial: boolean;
+  deficiencies: ClaimDeficiency[];
+  returnedAt?: string;
+  resubmissionCount: number;
+  carryOver?: {
+    toMilestoneNumber: number;
+    shortfallUnits: number;
+    shortfallAmount: number;
+    status: "pending" | "settled" | "forfeited";
+  } | null;
+}
+
+export interface ClaimDeficiency {
+  description: string;
+  requiredAction?: string;
+  installationIds?: number[];
+}
+
+export type RmtClaimDecision = "full" | "partial";
+
+// What RMT sees before deciding a claim: verified delivery against the milestone's units.
+export interface ClaimAssessment {
+  expectedUnits: number;
+  verifiedUnits: number;
+  completionPct: number | null;
+  carryInUnits: number;
+  claimAmount: number;
+  carryInAmount: number;
+  partialPaymentMinPct: number;
+  isFinalMilestone: boolean;
+  partialAllowed: boolean;
+  partialAmount: number | null;
+  paymentBlockers: PaymentBlocker[];
+}
+
+// An open finding that stops a claim from being approved or paid (see backend payment_holds.py).
+export interface PaymentBlocker {
+  source: "anomaly" | "oversight" | "audit" | "site_visit";
+  id: string;
+  title: string;
+  status: string;
+  owner: "vendor" | "rmt" | "auditor";
+  dueDate: string | null;
+  overdue: boolean;
 }
 
 export interface PaymentClaimSubmission {
@@ -2190,6 +2309,9 @@ export interface AnomalyFlag {
   resolutionReason?: string;
   evidenceReference?: string;
   dueDate?: string;
+  vendorResponse?: string;
+  vendorRespondedAt?: string;
+  escalatedAt?: string;
   createdAt: string;
   resolvedAt?: string;
   reviewEvents?: AnomalyReviewEvent[];
@@ -2312,6 +2434,7 @@ export interface OversightReview {
   actionRequired: string;
   followUpStatus: OversightFollowUpStatus;
   followUpDate?: string | null;
+  holdsPayment: boolean;
   resolvedByUsername?: string | null;
   resolvedAt?: string | null;
   resolutionNote: string;

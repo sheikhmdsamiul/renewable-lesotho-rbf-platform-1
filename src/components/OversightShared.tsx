@@ -256,6 +256,9 @@ export function OversightReviewModal({
   const [issueCategory, setIssueCategory] = useState("");
   const [actionRequired, setActionRequired] = useState("");
   const [followUpDate, setFollowUpDate] = useState("");
+  // A flag on a claim or disbursement always holds payment (the backend enforces this too).
+  const holdForced = Boolean(links.paymentClaimId) || subjectType === "disbursement";
+  const [holdsPayment, setHoldsPayment] = useState(false);
   const [projectId, setProjectId] = useState(links.projectId || (projectOptions?.length === 1 ? projectOptions[0].id : ""));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -275,6 +278,7 @@ export function OversightReviewModal({
         issueCategory,
         actionRequired: actionRequired.trim(),
         followUpDate,
+        holdsPayment: reviewStatus === "flagged" && Boolean(projectId || links.projectId) && (holdForced || holdsPayment),
         ...links,
         projectId: projectId || links.projectId,
       });
@@ -352,6 +356,25 @@ export function OversightReviewModal({
           <textarea className="input-field min-h-[70px]" value={actionRequired} onChange={(e) => setActionRequired(e.target.value)} placeholder="What should RMT or the vendor do?" />
         </label>
 
+        {reviewStatus === "flagged" && Boolean(projectId || links.projectId) && (
+          <label className="flex items-start gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-900">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={holdForced || holdsPayment}
+              disabled={holdForced}
+              onChange={(e) => setHoldsPayment(e.target.checked)}
+            />
+            <span>
+              <span className="font-semibold">Hold milestone payments</span>
+              <span className="block text-xs text-rose-800">
+                {holdForced
+                  ? "Flags on a claim or disbursement always hold the project's payments until the follow-up is resolved."
+                  : "The project's claims cannot be approved or paid until RMT resolves this follow-up. Use it for serious issues only."}
+              </span>
+            </span>
+          </label>
+        )}
         {(reviewStatus === "flagged" || reviewStatus === "delayed") && (
           <p className="text-xs text-amber-700">Flagged and delayed reviews open a follow-up for the RBF Management Team and notify RMT and PSC.</p>
         )}
@@ -417,6 +440,9 @@ function ReviewCard({
         {review.issueCategory && <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold text-slate-600">{review.issueCategory}</span>}
         {review.followUpStatus !== "none" && (
           <span className={`rounded-full px-2.5 py-1 text-[11px] font-bold ${FOLLOW_UP_META[review.followUpStatus].badge}`}>Follow-up: {FOLLOW_UP_META[review.followUpStatus].label}</span>
+        )}
+        {review.holdsPayment && review.followUpStatus !== "resolved" && (
+          <span className="rounded-full bg-rose-100 px-2.5 py-1 text-[11px] font-bold text-rose-700">Holding payments</span>
         )}
         <span className="ml-auto text-xs text-slate-400">{formatDateTime(review.createdAt)}</span>
       </div>
@@ -685,7 +711,8 @@ function VerificationDetail({
           </p>
         )}
         <div className="mt-4 flex flex-wrap gap-2">
-          {canDecide && completed && !alreadyAcknowledged && (
+          {/* The backend acknowledges only Verified or Flagged rounds; a Partial one needs re-verification or a flag. */}
+          {canDecide && ["Verified", "Flagged"].includes(task.status) && !alreadyAcknowledged && (
             <button type="button" className="btn-primary inline-flex items-center gap-2" onClick={() => setMode("ack")}><CheckCircle2 size={16} /> Accept / Acknowledge</button>
           )}
           {canDecide && completed && (
