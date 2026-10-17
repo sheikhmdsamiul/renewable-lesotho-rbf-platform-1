@@ -1618,7 +1618,7 @@ export function AuditorClaimsAudit() {
     const inPipeline = claims.filter(c => ["RMT Approved", "TAC Endorsed", "PSC Approved"].includes(c.status)).length;
     const paid = claims.filter(c => isPaidClaim(c.status)).length;
     const totalClaimed = claims.reduce((acc, c) => acc + (c.claimAmount || 0), 0);
-    const totalPaid = claims.filter(c => isPaidClaim(c.status)).reduce((acc, c) => acc + (c.claimAmount || 0), 0);
+    const totalPaid = claims.filter(c => isPaidClaim(c.status)).reduce((acc, c) => acc + (c.payableAmount || 0), 0);
     const flaggedCount = claims.filter(c => (anomalyCountByProject[c.projectId] || 0) > 0).length;
     return { totalClaims, pendingReview, inPipeline, paid, totalClaimed, totalPaid, flaggedCount };
   }, [claims, anomalyCountByProject]);

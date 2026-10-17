@@ -67,8 +67,8 @@ def measure(measure: str, projects, date_from=None, date_to=None, technology: st
         in_period = _window(readings, 'recorded_at', start, end).aggregate(v=Avg('uptime_pct'))['v']
         return (round(to_date, 1) if to_date is not None else None), (round(in_period, 1) if in_period is not None else None)
     if measure == M.AMOUNT_DISBURSED:
-        to_date = _upto(paid_claims, 'paid_at', end).aggregate(n=Sum('claim_amount'))['n'] or 0
-        in_period = _window(paid_claims, 'paid_at', start, end).aggregate(n=Sum('claim_amount'))['n'] or 0
+        to_date = _upto(paid_claims, 'paid_at', end).aggregate(n=Sum(claim_status.payable_amount()))['n'] or 0
+        in_period = _window(paid_claims, 'paid_at', start, end).aggregate(n=Sum(claim_status.payable_amount()))['n'] or 0
         return float(to_date), float(in_period)
     if measure == M.PROJECTS_COMPLETED:
         done = projects.filter(status__in=[ProjectStatus.COMPLETED, ProjectStatus.LEGACY_COMPLETED])

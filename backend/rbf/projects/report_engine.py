@@ -426,8 +426,9 @@ def _scoped_claims(ctx: ReportContext):
 def _claim_totals(claims) -> dict:
     totals = {'claimed': 0.0, 'paid': 0.0, 'awaiting': 0.0, 'review': 0.0, 'held': 0.0, 'rejected': 0.0}
     for claim in claims:
-        amount = float(claim.claim_amount or 0)
-        totals['claimed'] += amount
+        totals['claimed'] += float(claim.claim_amount or 0)
+        # Partially-approved claims pay less than they claimed.
+        amount = float(claim.payable_amount or 0)
         if claim.status in claim_status.PAID:
             totals['paid'] += amount
         elif claim.status in claim_status.APPROVED_AWAITING_PAYMENT:
@@ -474,9 +475,9 @@ def build_financial_disbursement(ctx: ReportContext) -> ReportData:
         entry = by_project.setdefault(claim.project_id, [claim.project.project_reference or claim.project_id, claim.project.vendor_name, float(claim.project.budget or 0), 0.0, 0.0, 0.0])
         entry[3] += float(claim.claim_amount or 0)
         if claim.status in claim_status.PAID:
-            entry[4] += float(claim.claim_amount or 0)
+            entry[4] += float(claim.payable_amount or 0)
         elif claim.status in claim_status.APPROVED_AWAITING_PAYMENT:
-            entry[5] += float(claim.claim_amount or 0)
+            entry[5] += float(claim.payable_amount or 0)
     data.tables.append(Table('By project', ['Project', 'Vendor', 'Budget (LSL)', 'Claimed (LSL)', 'Paid (LSL)', 'Awaiting payment (LSL)'], list(by_project.values()), chart=(0, 4)))
     data.tables.append(Table('Payment claims', CLAIM_COLUMNS, _claim_rows(claims)))
     return data
@@ -493,7 +494,7 @@ def build_vendor_payment_trail(ctx: ReportContext) -> ReportData:
             entry[2] += 1
         if claim.status in claim_status.PAID:
             entry[3] += 1
-            entry[5] += float(claim.claim_amount or 0)
+            entry[5] += float(claim.payable_amount or 0)
         entry[4] += float(claim.claim_amount or 0)
     data = ReportData(title='Vendor Payment Trail')
     totals = _claim_totals(claims)

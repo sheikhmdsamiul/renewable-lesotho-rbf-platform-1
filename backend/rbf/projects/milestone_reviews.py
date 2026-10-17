@@ -1,6 +1,6 @@
-"""Milestone completion reviews: after each milestone is paid, RBF / Super Admin
-verifies it and decides whether the project proceeds to the next milestone, is
-closed, or is transferred to another vendor."""
+"""Milestone completion reviews: after each milestone is paid — or, for a 0% milestone,
+once its conditions are met — RBF / Super Admin verifies it and decides whether the
+project proceeds to the next milestone, is closed, or is transferred to another vendor."""
 
 from .models import (
     Milestone,
@@ -39,10 +39,9 @@ def is_zero_value_milestone(milestone: Milestone | None) -> bool:
     RMT may set a milestone's share to 0% (e.g. a Mobilization milestone paid entirely on
     delivery and performance — see ProjectAssignmentSerializer, where only M2 and M3 carry
     a 1% floor). Such a milestone has no amount, so it can never be claimed and no claim can
-    ever be raised against it. Without special handling it would also deadlock the project:
-    the next milestone is gated on this one being verified, and a review can only follow a
-    claim. So a zero-value milestone is skipped — not claimable, and treated as already
-    cleared so the following milestone unlocks normally.
+    ever be raised against it. Instead, once its conditions are met its completion review is
+    opened directly (see KpiService), and RMT decides whether the vendor proceeds — the same
+    gate a paid milestone goes through.
     """
     if milestone is None:
         return False
@@ -54,12 +53,10 @@ def is_zero_value_milestone(milestone: Milestone | None) -> bool:
 
 def milestone_cleared_to_proceed(milestone: Milestone | None) -> bool:
     """True when `milestone` has been verified with a decision that lets the
-    project move on to the next milestone. A zero-value milestone is skipped, so it counts
-    as cleared without ever needing a claim or a review."""
+    project move on to the next milestone. A zero-value milestone needs this decision too;
+    its review opens when its conditions are met rather than after a payment."""
     if milestone is None:
         return False
-    if is_zero_value_milestone(milestone):
-        return True
     review = MilestoneCompletionReview.objects.filter(milestone=milestone).first()
     return bool(review and review.status == MilestoneReviewStatus.DECIDED and review.decision in ADVANCING_DECISIONS)
 
@@ -73,10 +70,11 @@ def next_milestone_blocker(milestone: Milestone) -> str:
         return 'This milestone was cancelled when the project was closed.'
     if is_zero_value_milestone(milestone):
         # Nothing was allocated to this milestone, so there is no amount to claim against.
-        # It is skipped automatically — the next milestone is already unlocked.
+        # RMT verifies it directly once its conditions are met.
         return (
             f'Milestone {milestone.milestone_number} is set to 0% disbursement, so there is '
-            f'nothing to claim. It has been skipped — continue with the next milestone.'
+            f'nothing to claim. Once its conditions are met, the {REVIEW_ROLES_LABEL} verifies it '
+            f'and decides whether the project proceeds to the next milestone.'
         )
     prior = previous_milestone(milestone)
     if prior is not None and not milestone_cleared_to_proceed(prior):

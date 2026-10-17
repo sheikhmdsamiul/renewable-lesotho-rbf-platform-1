@@ -70,7 +70,7 @@ export function PscDashboard({ currentUser, onNavigate }: { currentUser?: any; o
     const pendingApprovals = claims.filter((c) => c.status === "TAC Endorsed");
     const totalPaid = claims
       .filter((c) => c.status === "Completed" || c.status === "Paid")
-      .reduce((sum, c) => sum + (c.claimAmount || 0), 0);
+      .reduce((sum, c) => sum + (c.payableAmount || 0), 0);
     return {
       totalProjects: portfolio?.total_projects ?? projects.length,
       pendingApprovalsCount: pendingApprovals.length,

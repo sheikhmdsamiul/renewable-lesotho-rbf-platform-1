@@ -1871,6 +1871,11 @@ export default function SuperAdminPortal({ section, notifications, onNotificatio
                   <input className="input-field" type="number" min="0" max="100" value={configuration.m3VerificationRequiredPct} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, m3VerificationRequiredPct: Number(e.target.value || 0) } : prev)} />
                   <p className="text-xs text-slate-500 mt-1">Percentage of M3 submissions requiring verification</p>
                 </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Partial Payment Minimum (%)</label>
+                  <input className="input-field" type="number" min="1" max="100" value={configuration.partialPaymentMinPct} onChange={(e) => setConfiguration((prev) => prev ? { ...prev, partialPaymentMinPct: Number(e.target.value || 0) } : prev)} />
+                  <p className="text-xs text-slate-500 mt-1">Share of a milestone that must be verified before RMT can pay it partially; the rest carries over to the next milestone</p>
+                </div>
               </div>
             </div>
           </div>

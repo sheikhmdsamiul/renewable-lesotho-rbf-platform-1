@@ -7,7 +7,7 @@ from django.db.models import Count, Q
 from django.utils import timezone
 
 from . import claim_status
-from .milestone_reviews import ADVANCING_DECISIONS, is_zero_value_milestone, previous_milestone
+from .milestone_reviews import ADVANCING_DECISIONS, previous_milestone
 from .models import (
     AnomalyFlag,
     AuditCase,
@@ -116,12 +116,15 @@ def build_reconciliation(ctx: ReportContext) -> ReportData:
         disb = disbursements.get(claim.id)
         paid = disb.amount if disb else None
         issues = []
-        if milestone_amount is not None and abs(claimed - milestone_amount) > 0.5:
-            issues.append(f'Claim differs from milestone amount by {_money(claimed - milestone_amount)}')
+        # A claim may carry an earlier milestone's unpaid shortfall on top of its own amount.
+        own_claimed = claimed - float(claim.carry_in_amount or 0)
+        if milestone_amount is not None and abs(own_claimed - milestone_amount) > 0.5:
+            issues.append(f'Claim differs from milestone amount by {_money(own_claimed - milestone_amount)}')
         if claim.status in claim_status.PAID and disb is None:
             issues.append('Marked paid with no disbursement record')
-        if disb is not None and abs(float(paid) - claimed) > 0.5:
-            issues.append(f'Disbursed amount differs from claim by {_money(float(paid) - claimed)}')
+        payable = float(claim.payable_amount or 0)
+        if disb is not None and abs(float(paid) - payable) > 0.5:
+            issues.append(f'Disbursed amount differs from approved amount by {_money(float(paid) - payable)}')
         if disb is not None and claim.status not in claim_status.PAID | claim_status.APPROVED_AWAITING_PAYMENT | claim_status.HELD:
             issues.append(f'Disbursement exists while claim is "{claim.status}"')
         if disb is not None and claim.payment_reference and disb.reference and disb.reference != claim.payment_reference:
@@ -161,7 +164,7 @@ def build_kpi_compliance(ctx: ReportContext) -> ReportData:
         if milestone.required_installation_pct and (share is None or share < milestone.required_installation_pct):
             issues.append(f'Verified installations {share if share is not None else 0:.1f}% at claim, {milestone.required_installation_pct}% required')
         prior = previous_milestone(milestone)
-        if prior is not None and not is_zero_value_milestone(prior):
+        if prior is not None:
             review = getattr(prior, 'completion_review', None)
             if review is None or review.decision not in ADVANCING_DECISIONS or (review.reviewed_at and review.reviewed_at > claim.submitted_at):
                 issues.append(f'Milestone {prior.milestone_number} was not cleared before this claim')

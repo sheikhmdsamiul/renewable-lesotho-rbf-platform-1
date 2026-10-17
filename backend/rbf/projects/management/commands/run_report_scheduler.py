@@ -9,8 +9,8 @@ from django.utils import timezone
 
 class Command(BaseCommand):
     help = (
-        "Run the report scheduler: generates queued platform reports every few seconds, and dispatches the "
-        "monthly and quarterly Prospect reports."
+        "Run the report scheduler: generates queued platform reports every few seconds, dispatches the "
+        "monthly and quarterly Prospect reports, and runs the daily overdue-findings sweep."
     )
 
     def add_arguments(self, parser):
@@ -20,6 +20,10 @@ class Command(BaseCommand):
 
     def _run_tick(self) -> None:
         now = timezone.localtime()
+        # Once per local day, on the first tick of that day.
+        if cache.add(f"findings:overdue-sweep:{now.date().isoformat()}", "1", timeout=60 * 60 * 26):
+            call_command("escalate_overdue_findings")
+
         # Trigger window: first day of month between 00:01 and 00:09 local time.
         in_window = now.day == 1 and now.hour == 0 and 1 <= now.minute <= 9
         if not in_window:

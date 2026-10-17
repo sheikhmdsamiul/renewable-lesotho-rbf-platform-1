@@ -1,6 +1,6 @@
 import { Tender, TenderStatus, Project, ProjectStatus, UserRole, Notification, NotificationChannel, NotificationStatus } from "./types";
 
-export const MOCK_NOTIFICATIONS: Notification[] = [
+export const MOCK_NOTIFICATIONS: Array<Omit<Notification, "isRead" | "category" | "categoryLabel" | "priority" | "related">> = [
   {
     id: "N-001",
     recipientId: "USR-001",

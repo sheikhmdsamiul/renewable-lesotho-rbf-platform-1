@@ -770,12 +770,16 @@ class ProjectApiTests(APITestCase):
             uptime=97.0,
             gender_impact=55.0,
         )
+        milestone = project.milestones.create(
+            name="Mobilization", milestone_number=1, percentage=20, amount=15000, status="claimable",
+        )
 
         self.client.force_authenticate(vendor)
         create_response = self.client.post(
             "/api/projects/claims/",
             {
                 "project": project.id,
+                "milestone": milestone.id,
                 "vendor": vendor.id,
                 "claim_amount": "15000.00",
                 "actual_beneficiaries": 50,
@@ -1389,7 +1393,7 @@ class ProjectApiTests(APITestCase):
             uptime=1,
             gender_impact=0,
         )
-        milestone = project.milestones.create(name="Mobilization", percentage=20, amount=1000)
+        milestone = project.milestones.create(name="Mobilization", percentage=20, amount=1000, status="claimable")
 
         self.client.force_authenticate(vendor)
         first = self.client.post(
@@ -1736,6 +1740,186 @@ class ProjectApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertTrue(InstallationReport.objects.filter(project=project, serial_number="SERIAL-HYPHEN-1").exists())
 
+    def _household_report_setup(self, username, mobile_number):
+        User = get_user_model()
+        vendor = User.objects.create_user(
+            username=username,
+            password="securePass123",
+            role="Vendor",
+            status="Active",
+            region="Maseru",
+            gender="Male",
+            mobile_number=mobile_number,
+        )
+        project = Project.objects.create(
+            vendor_id=str(vendor.id),
+            vendor_name=vendor.username,
+            tech_type="SHS",
+            region="Maseru",
+            district="Maseru",
+            status=ProjectStatus.INSTALLATION,
+            progress=0,
+            energy_output=0,
+            uptime=0,
+            gender_impact=0,
+        )
+        self._create_completed_setup(project, vendor)
+        self.client.force_authenticate(vendor)
+        return vendor, project
+
+    def _household_report_payload(self, project, **overrides):
+        payload = {
+            "project": project.id,
+            "gps_lat": -29.31,
+            "gps_lng": 27.48,
+            "serial_number": "SERIAL-HOUSEHOLD-1",
+            "beneficiary_id": "BEN-HOUSEHOLD-1",
+            "household_members": 5,
+            "male_members": 2,
+            "female_members": 3,
+            "household_income_level": "low_income",
+            "household_employment": "Subsistence farming",
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_installation_report_stores_household_profile_fields(self):
+        _, project = self._household_report_setup("household_vendor", "26650000021")
+
+        response = self.client.post(
+            "/api/projects/installations/",
+            self._household_report_payload(project),
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        report = InstallationReport.objects.get(project=project, serial_number="SERIAL-HOUSEHOLD-1")
+        self.assertEqual(report.household_members, 5)
+        self.assertEqual(report.male_members, 2)
+        self.assertEqual(report.female_members, 3)
+        self.assertEqual(report.household_income_level, "low_income")
+        self.assertEqual(report.household_employment, "Subsistence farming")
+
+    def test_installation_report_treats_blank_household_fields_as_unrecorded(self):
+        # The vendor form posts every field, blanks included; a blank count has to land as
+        # NULL so that "nobody answered" stays distinguishable from a recorded zero.
+        _, project = self._household_report_setup("blank_household_vendor", "26650000022")
+        payload = self._household_report_payload(
+            project,
+            household_members="",
+            male_members="",
+            female_members="",
+            household_income_level="",
+            household_employment="",
+        )
+
+        response = self.client.post("/api/projects/installations/", payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        report = InstallationReport.objects.get(project=project, serial_number="SERIAL-HOUSEHOLD-1")
+        self.assertIsNone(report.household_members)
+        self.assertIsNone(report.male_members)
+        self.assertIsNone(report.female_members)
+        self.assertEqual(report.household_income_level, "")
+        self.assertEqual(report.household_employment, "")
+
+    def test_installation_report_keeps_household_profile_optional(self):
+        _, project = self._household_report_setup("optional_household_vendor", "26650000023")
+        payload = self._household_report_payload(project)
+        for field in (
+            "household_members",
+            "male_members",
+            "female_members",
+            "household_income_level",
+            "household_employment",
+        ):
+            payload.pop(field)
+
+        response = self.client.post("/api/projects/installations/", payload)
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        report = InstallationReport.objects.get(project=project, serial_number="SERIAL-HOUSEHOLD-1")
+        self.assertIsNone(report.household_members)
+        self.assertIsNone(report.male_members)
+        self.assertIsNone(report.female_members)
+        self.assertEqual(report.household_income_level, "")
+        self.assertEqual(report.household_employment, "")
+
+    def test_installation_report_rejects_gender_counts_above_the_household_total(self):
+        _, project = self._household_report_setup("oversize_vendor", "26650000024")
+
+        response = self.client.post(
+            "/api/projects/installations/",
+            self._household_report_payload(project, male_members=4, female_members=4),
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_422_UNPROCESSABLE_ENTITY)
+        self.assertIn("male_members", response.data["errors"])
+        self.assertFalse(InstallationReport.objects.filter(project=project).exists())
+
+    def test_installation_report_rejects_a_household_with_no_members(self):
+        _, project = self._household_report_setup("zero_member_vendor", "26650000025")
+
+        response = self.client.post(
+            "/api/projects/installations/",
+            self._household_report_payload(project, household_members=0, male_members=0, female_members=0),
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_422_UNPROCESSABLE_ENTITY)
+        self.assertIn("household_members", response.data["errors"])
+        self.assertFalse(InstallationReport.objects.filter(project=project).exists())
+
+    def test_installation_report_rejects_a_gender_count_higher_than_the_total(self):
+        # A single recorded count is checked too, even when the other one was left blank.
+        _, project = self._household_report_setup("partial_count_vendor", "26650000026")
+        payload = self._household_report_payload(project, male_members=6)
+        payload.pop("female_members")
+
+        response = self.client.post("/api/projects/installations/", payload)
+
+        self.assertEqual(response.status_code, status.HTTP_422_UNPROCESSABLE_ENTITY)
+        self.assertIn("male_members", response.data["errors"])
+        self.assertFalse(InstallationReport.objects.filter(project=project).exists())
+
+    def test_household_profile_is_withheld_from_doe_and_undp(self):
+        """Household composition and income are socioeconomic detail about a named
+        household, so the donor and regulator read aggregate views without them."""
+        from rbf.projects.serializers import InstallationReportSerializer
+        from rbf.users.models import UserRole
+
+        vendor, project = self._household_report_setup("household_pii_vendor", "26650000027")
+        installation = InstallationReport.objects.create(
+            project=project,
+            vendor=vendor,
+            gps_lat=-29.31,
+            gps_lng=27.48,
+            serial_number="SERIAL-HOUSEHOLD-PII-1",
+            beneficiary_id="1234567890",
+            household_members=5,
+            male_members=2,
+            female_members=3,
+            household_income_level="low_income",
+            household_employment="Subsistence farming",
+        )
+
+        def render_for(role):
+            request = type("R", (), {"user": type("U", (), {"role": role})()})()
+            return InstallationReportSerializer(installation, context={"request": request}).data
+
+        for role in (UserRole.DOE_OFFICER, UserRole.UNDP_DONOR):
+            data = render_for(role)
+            self.assertIsNone(data["household_members"])
+            self.assertIsNone(data["male_members"])
+            self.assertIsNone(data["female_members"])
+            self.assertEqual(data["household_income_level"], "")
+            self.assertEqual(data["household_employment"], "")
+
+        vendor_view = render_for(UserRole.VENDOR)
+        self.assertEqual(vendor_view["household_members"], 5)
+        self.assertEqual(vendor_view["male_members"], 2)
+        self.assertEqual(vendor_view["female_members"], 3)
+        self.assertEqual(vendor_view["household_income_level"], "low_income")
+        self.assertEqual(vendor_view["household_employment"], "Subsistence farming")
+
     def test_map_installations_endpoint_returns_summary_and_vendor_scope(self):
         User = get_user_model()
         vendor = User.objects.create_user(
@@ -1874,7 +2058,12 @@ class ProjectApiTests(APITestCase):
         item = response.data["data"]["installations"][0]
         self.assertEqual(item["latitude"], -29.3142)
         self.assertEqual(item["longitude"], 27.4869)
-        self.assertEqual(item["beneficiary_name"], "Jane Mokoena")
+        # Blind inspection reaches the map too: the shape is unchanged, but a field verifier
+        # whose verification is still pending does not read the vendor's claims off the popup.
+        self.assertEqual(item["beneficiary_name"], "")
+        self.assertEqual(item["serial_number"], "")
+        self.assertEqual(item["household_type"], "")
+        self.assertIsNone(item["installation_date"])
         self.assertEqual(item["verification_status"], "Pending")
         self.assertEqual(item["district"], "Maseru")
 
@@ -2433,6 +2622,135 @@ class ProjectApiTests(APITestCase):
         task.refresh_from_db()
         self.assertEqual(task.status, VerificationStatus.VERIFIED)
 
+    def test_field_verifier_reads_no_vendor_submission_until_their_verification_is_in(self):
+        """Blind inspection: until a field verification exists the verifier reads none of what
+        the vendor claimed - device, beneficiary identity, household profile, evidence - on any
+        endpoint they use. Coordinates stay, so the GIS map still routes them to the site."""
+        User = get_user_model()
+        vendor = User.objects.create_user(
+            username="blind_vendor",
+            password="securePass123",
+            role="Vendor",
+            status="Active",
+        )
+        verifier = User.objects.create_user(
+            username="blind_verifier",
+            password="securePass123",
+            role="Field Verifier",
+            status="Active",
+            verification_zone="Maseru",
+        )
+        project = Project.objects.create(
+            vendor_id=str(vendor.id),
+            vendor_name=vendor.username,
+            tech_type="SHS",
+            region="Maseru",
+            district="Maseru",
+            status=ProjectStatus.VERIFICATION,
+            progress=20,
+            energy_output=10,
+            uptime=96,
+            gender_impact=50,
+        )
+        report = InstallationReport.objects.create(
+            project=project,
+            vendor=vendor,
+            gps_lat=-29.3142,
+            gps_lng=27.4869,
+            serial_number="SERIAL-BLIND-1",
+            beneficiary_id="BEN-BLIND-1",
+            beneficiary_name="Ralia Mokoena",
+            beneficiary_phone="+26650111222",
+            meter_id="METER-BLIND-1",
+            kwh_reading=4.5,
+            household_type="female_headed",
+            household_members=5,
+            male_members=2,
+            female_members=3,
+            household_income_level="low_income",
+            household_employment="Subsistence farming",
+            installation_date="2025-03-04",
+            photo_files=["/media/site-1.jpg", "/media/site-2.jpg"],
+            status=InstallationStatus.SUBMITTED,
+        )
+        task = VerificationTask.objects.create(
+            report=report,
+            assigned_verifier=verifier,
+            vendor_lat=report.gps_lat,
+            vendor_lng=report.gps_lng,
+            status=VerificationStatus.PENDING,
+        )
+
+        self.client.force_authenticate(verifier)
+        blind_report = self.client.get("/api/projects/installations/").data["results"][0]
+        for field in (
+            "serial_number",
+            "meter_id",
+            "beneficiary_id",
+            "beneficiary_name",
+            "beneficiary_phone",
+            "household_type",
+            "household_income_level",
+            "household_employment",
+        ):
+            self.assertEqual(blind_report[field], "", f"{field} is readable before verification")
+        for field in (
+            "household_members",
+            "male_members",
+            "female_members",
+            "kwh_reading",
+            "installation_date",
+        ):
+            self.assertIsNone(blind_report[field], f"{field} is readable before verification")
+        self.assertEqual(blind_report["photo_files"], [])
+        self.assertEqual(float(blind_report["gps_lat"]), -29.3142)
+        self.assertEqual(float(blind_report["gps_lng"]), 27.4869)
+
+        blind_task = self.client.get("/api/projects/verification-tasks/").data["results"][0]
+        self.assertEqual(blind_task["installation"]["serial_number"], "")
+        self.assertEqual(blind_task["installation"]["household_type"], "")
+        self.assertEqual(blind_task["installation"]["photo_urls"], [])
+        self.assertEqual(float(blind_task["installation"]["gps_lat"]), -29.3142)
+
+        blind_map = self.client.get("/api/map/installations").data["data"]["installations"][0]
+        self.assertEqual(blind_map["serial_number"], "")
+        self.assertEqual(blind_map["beneficiary_name"], "")
+        self.assertEqual(blind_map["household_type"], "")
+        self.assertIsNone(blind_map["installation_date"])
+        self.assertEqual(float(blind_map["latitude"]), -29.3142)
+        self.assertEqual(float(blind_map["longitude"]), 27.4869)
+
+        # The vendor's own view of the same record is untouched: this is about the role.
+        self.client.force_authenticate(vendor)
+        own_view = self.client.get("/api/projects/installations/").data["results"][0]
+        self.assertEqual(own_view["serial_number"], "SERIAL-BLIND-1")
+        self.assertEqual(own_view["beneficiary_name"], "Ralia Mokoena")
+        self.assertEqual(own_view["household_members"], 5)
+        self.assertEqual(len(own_view["photo_files"]), 2)
+
+        self.client.force_authenticate(verifier)
+        verify_response = self.client.post(
+            f"/api/projects/verification-tasks/{task.id}/verify/",
+            {
+                "verifier_lat": -29.3142,
+                "verifier_lng": 27.4869,
+                "verification_status": "verified",
+            },
+            format="json",
+        )
+        self.assertEqual(verify_response.status_code, status.HTTP_200_OK, verify_response.data)
+
+        verified_report = self.client.get("/api/projects/installations/").data["results"][0]
+        self.assertEqual(verified_report["serial_number"], "SERIAL-BLIND-1")
+        self.assertEqual(verified_report["beneficiary_name"], "Ralia Mokoena")
+        self.assertEqual(verified_report["household_members"], 5)
+        self.assertEqual(verified_report["photo_files"], report.photo_files)
+        verified_task = self.client.get("/api/projects/verification-tasks/").data["results"][0]
+        self.assertEqual(verified_task["installation"]["serial_number"], "SERIAL-BLIND-1")
+        verified_map = self.client.get("/api/map/installations").data["data"]["installations"][0]
+        self.assertEqual(verified_map["serial_number"], "SERIAL-BLIND-1")
+        self.assertEqual(verified_map["beneficiary_name"], "Ralia Mokoena")
+
     def _create_lot_project(self, vendor, districts):
         tender = Tender.objects.create(
             reference_number=f"REF-LOTSCOPE-{vendor.username}",
@@ -2739,39 +3057,79 @@ class ProjectKpiTests(APITestCase):
         milestone1 = self.project_refresh().milestones.order_by("created_at", "id").first()
         self.assertEqual(milestone1.status, "claimable")
 
-    def test_zero_pct_milestone_is_skipped_and_does_not_block_the_next(self):
-        """A 0% milestone has no amount, so it can never be claimed and no claim can be
-        raised against it. It used to deadlock the project: the next milestone is gated on
-        this one being verified, and a verification review can only follow a claim — so a
-        Mobilization milestone paid entirely on performance left M2 locked forever."""
+    def _make_milestone_one_zero_pct(self):
         milestone1 = self.project.milestones.get(milestone_number=1)
+        PaymentClaim.objects.filter(milestone=milestone1).delete()
+        self.milestone1_review.delete()
         milestone1.disbursement_pct = 0
         milestone1.percentage = 0
         milestone1.amount = 0
         milestone1.amount_lsl = 0
         milestone1.status = "pending"
         milestone1.save()
-        milestone2 = self.project.milestones.get(milestone_number=2)
-        milestone2.status = "locked"
-        milestone2.save()
+        # 2 of 10 verified meets a 20% requirement, so only the M1 decision gates M2.
+        self.project.milestones.filter(milestone_number=2).update(status="locked", required_installation_pct=20)
         cache.clear()
+        return milestone1
 
-        self.assertTrue(milestone_cleared_to_proceed(milestone1))
+    def test_zero_pct_milestone_goes_to_rmt_verification_instead_of_being_claimable(self):
+        """A 0% milestone has nothing to claim. Once its conditions are met it goes straight
+        to RMT verification, and the next milestone waits for a proceed decision exactly as
+        it would after a paid milestone."""
+        milestone1 = self._make_milestone_one_zero_pct()
+
+        self.assertFalse(milestone_cleared_to_proceed(milestone1))
         self.assertIn("0% disbursement", next_milestone_blocker(milestone1))
 
         summary = KpiService.for_project(str(self.project.id)).getFullKpiSummary()
 
         m1 = summary["milestone_eligibility"]["milestone_1"]
-        self.assertTrue(m1["skipped"])
-        self.assertEqual(m1["status"], "Skipped")
+        self.assertTrue(m1["zero_value"])
         self.assertFalse(m1["eligible"])
-        # M2 is unlocked by the skipped M1 rather than waiting on a review that can never come.
-        self.assertTrue(summary["milestone_eligibility"]["milestone_2"]["conditions"]["milestone_1_verified"])
+        self.assertEqual(m1["status"], "AWAITING VERIFICATION")
+        milestone1.refresh_from_db()
+        self.assertEqual(milestone1.status, "pending")
+        self.assertEqual(milestone1.completion_review.status, "pending")
+        self.assertFalse(summary["milestone_eligibility"]["milestone_2"]["conditions"]["milestone_1_verified"])
+        self.assertEqual(self.project_refresh().milestones.get(milestone_number=2).status, "locked")
+        for recipient in (self.rbf_user, self.vendor):
+            self.assertTrue(
+                Notification.objects.filter(
+                    recipient_id=str(recipient.id), title="Milestone 1 Awaiting Verification"
+                ).exists()
+            )
+
+    def test_zero_pct_milestone_is_not_sent_for_verification_before_conditions_are_met(self):
+        milestone1 = self._make_milestone_one_zero_pct()
+        self.project.setup_completed_at = None
+        self.project.save(update_fields=["setup_completed_at"])
+        cache.clear()
+
+        summary = KpiService.for_project(str(self.project.id)).getFullKpiSummary()
+
+        self.assertEqual(summary["milestone_eligibility"]["milestone_1"]["status"], "Pending")
+        self.assertFalse(MilestoneCompletionReview.objects.filter(milestone=milestone1).exists())
+
+    def test_rmt_proceed_on_zero_pct_milestone_unlocks_the_next(self):
+        milestone1 = self._make_milestone_one_zero_pct()
+        KpiService.for_project(str(self.project.id)).getFullKpiSummary()
+        self.client.force_authenticate(self.rbf_user)
+
+        response = self.client.post(
+            f"/api/projects/milestones/{milestone1.id}/completion-review/",
+            {"decision": "proceed", "verification_notes": "Mobilization confirmed on site."},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertTrue(milestone_cleared_to_proceed(milestone1))
         self.assertEqual(self.project_refresh().milestones.get(milestone_number=2).status, "claimable")
+        summary = KpiService.for_project(str(self.project.id)).getFullKpiSummary()
+        self.assertEqual(summary["milestone_eligibility"]["milestone_1"]["status"], "VERIFIED")
 
     def test_zero_pct_milestone_two_does_not_block_milestone_three(self):
-        """M3 requires M2 to be paid. A skipped 0% M2 can never be paid, so it has to count
-        as satisfied or Milestone 3 would be unreachable."""
+        """M3 requires M2 to be paid. A 0% M2 can never be paid, so that condition counts
+        as satisfied; M2 still needs RMT's proceed decision once its conditions are met."""
         milestone2 = self.project.milestones.get(milestone_number=2)
         milestone2.disbursement_pct = 0
         milestone2.percentage = 0
@@ -2783,9 +3141,10 @@ class ProjectKpiTests(APITestCase):
         summary = KpiService.for_project(str(self.project.id)).getFullKpiSummary()
 
         m2 = summary["milestone_eligibility"]["milestone_2"]
-        self.assertTrue(m2["skipped"])
-        self.assertEqual(m2["status"], "Skipped")
+        self.assertTrue(m2["zero_value"])
+        self.assertFalse(m2["eligible"])
         self.assertTrue(summary["milestone_eligibility"]["milestone_3"]["conditions"]["milestone_2_paid"])
+        self.assertFalse(summary["milestone_eligibility"]["milestone_3"]["conditions"]["milestone_2_verified"])
 
     def test_kpi_summary_syncs_project_snapshot_fields(self):
         summary = KpiService.for_project(str(self.project.id)).getFullKpiSummary()
@@ -3540,7 +3899,8 @@ class MilestoneCompletionReviewTests(APITestCase):
             project_reference="PRJ-REVIEW-001",
         )
         self.m1 = self.project.milestones.create(name="M1", milestone_number=1, percentage=20, amount=1000, status="paid")
-        self.m2 = self.project.milestones.create(name="M2", milestone_number=2, percentage=50, amount=2000, status="locked")
+        # M2's KPI conditions are taken as met; these tests are about the review gate.
+        self.m2 = self.project.milestones.create(name="M2", milestone_number=2, percentage=50, amount=2000, status="claimable")
         self.m3 = self.project.milestones.create(name="M3", milestone_number=3, percentage=30, amount=3000, status="locked")
         self.review = MilestoneCompletionReview.objects.create(
             milestone=self.m1, project=self.project, vendor_id=self.project.vendor_id, vendor_name=self.project.vendor_name,

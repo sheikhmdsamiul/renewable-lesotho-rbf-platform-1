@@ -582,6 +582,11 @@ class PlatformConfigurationSerializer(serializers.ModelSerializer):
         fields = '__all__'
         read_only_fields = ['id', 'created_at', 'updated_at']
 
+    def validate_partial_payment_min_pct(self, value):
+        if not 1 <= value <= 100:
+            raise serializers.ValidationError('Must be between 1 and 100.')
+        return value
+
     def validate_technical_scoring_criteria(self, value):
         if not isinstance(value, list):
             raise serializers.ValidationError('Must be a list of scoring criteria.')
@@ -1536,13 +1541,14 @@ class VendorProfileSerializer(serializers.ModelSerializer):
         if not self._can_view_payments():
             return None
         from django.db.models import Sum
+        from rbf.projects.claim_status import payable_amount
         from rbf.projects.models import PaymentClaim, PaymentClaimStatus
         from rbf.projects.serializers import PaymentClaimSerializer
 
         claims = PaymentClaim.objects.filter(vendor=obj).select_related('project', 'vendor', 'milestone', 'reviewed_by', 'disbursement').order_by('-submitted_at')
         claim_rows = PaymentClaimSerializer(claims, many=True, context=self.context).data
-        total_disbursed = claims.filter(status__in={PaymentClaimStatus.COMPLETED, PaymentClaimStatus.LEGACY_PAID}).aggregate(total=Sum('claim_amount'))['total'] or 0
-        total_pending = claims.exclude(status__in={PaymentClaimStatus.COMPLETED, PaymentClaimStatus.LEGACY_PAID, PaymentClaimStatus.REJECTED}).aggregate(total=Sum('claim_amount'))['total'] or 0
+        total_disbursed = claims.filter(status__in={PaymentClaimStatus.COMPLETED, PaymentClaimStatus.LEGACY_PAID}).aggregate(total=Sum(payable_amount()))['total'] or 0
+        total_pending = claims.exclude(status__in={PaymentClaimStatus.COMPLETED, PaymentClaimStatus.LEGACY_PAID, PaymentClaimStatus.REJECTED}).aggregate(total=Sum(payable_amount()))['total'] or 0
 
         return {
             'summary': {

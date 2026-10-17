@@ -191,7 +191,7 @@ def build_financial_delivery(ctx: ReportContext) -> ReportData:
         e = by_tender.setdefault(tender, [tender, committed_by_tender.get(tender, 0.0), 0.0, 0.0])
         e[2] += float(claim.claim_amount or 0)
         if claim.status in claim_status.PAID:
-            e[3] += float(claim.claim_amount or 0)
+            e[3] += float(claim.payable_amount or 0)
     for tender, value in committed_by_tender.items():
         by_tender.setdefault(tender, [tender, value, 0.0, 0.0])
     tech: dict = {}
@@ -199,7 +199,7 @@ def build_financial_delivery(ctx: ReportContext) -> ReportData:
         e = tech.setdefault(claim.project.tech_type or 'Unknown', [claim.project.tech_type or 'Unknown', 0.0, 0.0])
         e[1] += float(claim.claim_amount or 0)
         if claim.status in claim_status.PAID:
-            e[2] += float(claim.claim_amount or 0)
+            e[2] += float(claim.payable_amount or 0)
     data = ReportData(title='Financial Delivery Report')
     data.summary = [
         ('Programme budget', _money(budget) if budget else 'Not set'),
@@ -239,13 +239,13 @@ def build_psc_briefing(ctx: ReportContext) -> ReportData:
         ('Verified installations to date', inclusion[1]),
         ('Female-headed share', f'{inclusion[2]:.1f}%'),
         ('Paid in period', _money(totals['paid'])),
-        ('Claims awaiting PSC approval', f'{len(awaiting_psc)} ({_money(sum(float(c.claim_amount or 0) for c in awaiting_psc))})'),
+        ('Claims awaiting PSC approval', f'{len(awaiting_psc)} ({_money(sum(float(c.payable_amount or 0) for c in awaiting_psc))})'),
         ('Open flagged or delayed issues', open_issues.count()),
         ('Open major or critical audit findings', findings.count()),
     ]
     data.tables.append(Table('Decisions needed: claims awaiting PSC approval', ['Claim', 'Project', 'Vendor', 'Milestone', 'Amount (LSL)', 'TAC endorsed'], [
         [c.id, c.project.project_reference or c.project_id, c.project.vendor_name, f'M{c.milestone.milestone_number}' if c.milestone_id else '',
-         float(c.claim_amount or 0), _d(c.approved_at)] for c in awaiting_psc
+         float(c.payable_amount or 0), _d(c.approved_at)] for c in awaiting_psc
     ]))
     rows, configured = results_rows(ctx)
     data.tables.append(Table('Results against targets', RESULTS_COLUMNS, rows))

@@ -5,6 +5,8 @@ import {
   Project,
   ProjectSetup,
   Notification,
+  NotificationPage,
+  NotificationSummary,
   User,
   UserRole,
   Milestone,
@@ -13,6 +15,8 @@ import {
   ProjectUpdate,
   ProjectDocument,
   InstallationReport,
+  InstallationCorrection,
+  HouseholdIncomeLevel,
   SmartMeterReading,
   MeterDataBatch,
   VerificationTask,
@@ -25,6 +29,10 @@ import {
   DisbursementSheet,
   PaymentClaim,
   PaymentClaimSubmission,
+  ClaimAssessment,
+  PaymentBlocker,
+  ClaimDeficiency,
+  RmtClaimDecision,
   Disbursement,
   AuditLog,
   AnomalyFlag,
@@ -839,6 +847,7 @@ function mapPlatformConfigurationFromApi(api: any): PlatformConfiguration {
     gpsVerificationMaxDistanceM: Number(api.gps_verification_max_distance_m ?? 0),
     m2VerificationRequiredPct: Number(api.m2_verification_required_pct ?? 0),
     m3VerificationRequiredPct: Number(api.m3_verification_required_pct ?? 0),
+    partialPaymentMinPct: Number(api.partial_payment_min_pct ?? 70),
     emailNotificationsEnabled: Boolean(api.email_notifications_enabled),
     smsNotificationsEnabled: Boolean(api.sms_notifications_enabled),
     emailHost: api.email_host ?? "",
@@ -1216,6 +1225,13 @@ function mapMilestoneFromApi(api: any): Milestone {
     unlockedAt: api.unlocked_at ?? undefined,
     requiredInstallationPct: api.required_installation_pct != null ? Number(api.required_installation_pct) : undefined,
     completionReview: api.completion_review ? mapMilestoneCompletionReviewFromApi(api.completion_review) : null,
+    pendingCarryIn: api.pending_carry_in
+      ? {
+          amount: Number(api.pending_carry_in.amount ?? 0),
+          units: Number(api.pending_carry_in.units ?? 0),
+          fromMilestones: Array.isArray(api.pending_carry_in.from_milestones) ? api.pending_carry_in.from_milestones.map(Number) : [],
+        }
+      : null,
   };
 }
 
@@ -1298,11 +1314,44 @@ function mapInstallationReportFromApi(api: any): InstallationReport {
     submittedAt: api.submitted_at ?? "",
     beneficiaryName: api.beneficiary_name ?? undefined,
     householdType: api.household_type ?? undefined,
+    householdMembers: api.household_members != null ? Number(api.household_members) : undefined,
+    maleMembers: api.male_members != null ? Number(api.male_members) : undefined,
+    femaleMembers: api.female_members != null ? Number(api.female_members) : undefined,
+    householdIncomeLevel: api.household_income_level ?? "",
+    householdEmployment: api.household_employment || undefined,
     installationDate: api.installation_date ?? undefined,
     verificationStatus: api.verification_status ?? undefined,
     verifiedBy: api.verified_by_username ?? api.verified_by ?? undefined,
     gisStatus: api.gis_status ?? undefined,
+    resubmissionCount: Number(api.resubmission_count ?? 0),
+    resubmissionsLeft: Number(api.resubmissions_left ?? 0),
+    canResubmit: Boolean(api.can_resubmit),
+    correctionNote: api.correction_note || undefined,
+    resubmittedAt: api.resubmitted_at ?? undefined,
+    latestFlagReason: api.latest_flag_reason || undefined,
   };
+}
+
+export async function resubmitInstallationReport(id: string, correction: InstallationCorrection): Promise<InstallationReport> {
+  const form = new FormData();
+  form.append("correction_note", correction.correctionNote);
+  const optional: [string, string | undefined][] = [
+    ["serial_number", correction.serialNumber],
+    ["beneficiary_id", correction.beneficiaryId],
+    ["beneficiary_name", correction.beneficiaryName],
+    ["beneficiary_phone", correction.beneficiaryPhone],
+    ["meter_id", correction.meterId],
+  ];
+  optional.forEach(([key, value]) => {
+    if (value != null && value.trim() !== "") form.append(key, value.trim());
+  });
+  if (correction.gpsLat != null && correction.gpsLng != null) {
+    form.append("gps_lat", String(correction.gpsLat));
+    form.append("gps_lng", String(correction.gpsLng));
+  }
+  (correction.photoFiles || []).forEach((file) => form.append("photos", file));
+  const data = await http<any>(`/api/projects/installations/${id}/resubmit/`, { method: "POST", body: form });
+  return mapInstallationReportFromApi(data?.data ?? data);
 }
 
 function mapMapInstallationFromApi(api: any): MapInstallationRecord {
@@ -1472,6 +1521,21 @@ function mapNotificationFromApi(api: any): Notification {
     status: api.status ?? "Sent",
     timestamp: api.timestamp ?? new Date().toISOString(),
     linkedEntityId: api.linked_entity_id ?? undefined,
+    isRead: api.is_read != null ? Boolean(api.is_read) : api.status === "Read",
+    readAt: api.read_at ?? null,
+    archivedAt: api.archived_at ?? null,
+    category: api.category ?? "general",
+    categoryLabel: api.category_label ?? "General",
+    priority: api.priority === "high" ? "high" : "normal",
+    related: {
+      type: api.related?.type ?? "",
+      id: String(api.related?.id ?? ""),
+      label: api.related?.label ?? "",
+      projectId: String(api.related?.project_id ?? ""),
+      projectLabel: api.related?.project_label ?? "",
+      tenderId: String(api.related?.tender_id ?? ""),
+      tenderLabel: api.related?.tender_label ?? "",
+    },
   };
 }
 
@@ -1785,6 +1849,32 @@ function mapPaymentClaimFromApi(api: any): PaymentClaim {
     disbursement: api.disbursement ? mapDisbursementFromApi(api.disbursement) : undefined,
     paymentLocked: Boolean(api.payment_locked),
     paymentLockReason: api.payment_lock_reason ?? undefined,
+    carryInAmount: Number(api.carry_in_amount ?? 0),
+    carryInUnits: Number(api.carry_in_units ?? 0),
+    approvedAmount: api.approved_amount != null ? Number(api.approved_amount) : undefined,
+    payableAmount: Number(api.payable_amount ?? api.claim_amount ?? 0),
+    shortfallAmount: Number(api.shortfall_amount ?? 0),
+    completionPct: api.completion_pct != null ? Number(api.completion_pct) : undefined,
+    expectedUnits: api.expected_units != null ? Number(api.expected_units) : undefined,
+    verifiedUnits: api.verified_units != null ? Number(api.verified_units) : undefined,
+    isPartial: Boolean(api.is_partial),
+    deficiencies: Array.isArray(api.deficiencies)
+      ? api.deficiencies.map((d: any) => ({
+          description: String(d?.description ?? ""),
+          requiredAction: d?.required_action || undefined,
+          installationIds: Array.isArray(d?.installation_ids) ? d.installation_ids.map(Number) : [],
+        }))
+      : [],
+    returnedAt: api.returned_at ?? undefined,
+    resubmissionCount: Number(api.resubmission_count ?? 0),
+    carryOver: api.carry_over
+      ? {
+          toMilestoneNumber: Number(api.carry_over.to_milestone_number ?? 0),
+          shortfallUnits: Number(api.carry_over.shortfall_units ?? 0),
+          shortfallAmount: Number(api.carry_over.shortfall_amount ?? 0),
+          status: api.carry_over.status ?? "pending",
+        }
+      : null,
   };
 }
 
@@ -1912,6 +2002,9 @@ function mapAnomalyFlagFromApi(api: any): AnomalyFlag {
     resolutionReason: api.resolution_reason ?? undefined,
     evidenceReference: api.evidence_reference ?? undefined,
     dueDate: api.due_date ?? undefined,
+    vendorResponse: api.vendor_response || undefined,
+    vendorRespondedAt: api.vendor_responded_at ?? undefined,
+    escalatedAt: api.escalated_at ?? undefined,
     createdAt: api.created_at ?? "",
     resolvedAt: api.resolved_at ?? undefined,
     reviewEvents: Array.isArray(api.review_events) ? api.review_events.map(mapAnomalyReviewEventFromApi) : [],
@@ -3695,6 +3788,11 @@ export async function createInstallationReport(payload: {
   meterId?: string;
   kwhReading?: number;
   householdType?: string;
+  householdMembers?: number;
+  maleMembers?: number;
+  femaleMembers?: number;
+  householdIncomeLevel?: HouseholdIncomeLevel;
+  householdEmployment?: string;
   confirmOutsideDistrict?: boolean;
 }): Promise<{ report: InstallationReport; warning?: string; requiresConfirmation?: string }> {
   const form = new FormData();
@@ -3708,6 +3806,11 @@ export async function createInstallationReport(payload: {
   if (payload.meterId) form.append("meter_id", payload.meterId);
   if (payload.kwhReading != null) form.append("kwh_reading", String(payload.kwhReading));
   if (payload.householdType) form.append("household_type", payload.householdType);
+  if (payload.householdMembers != null) form.append("household_members", String(payload.householdMembers));
+  if (payload.maleMembers != null) form.append("male_members", String(payload.maleMembers));
+  if (payload.femaleMembers != null) form.append("female_members", String(payload.femaleMembers));
+  if (payload.householdIncomeLevel) form.append("household_income_level", payload.householdIncomeLevel);
+  if (payload.householdEmployment) form.append("household_employment", payload.householdEmployment);
   if (payload.confirmOutsideDistrict) form.append("confirm_outside_district", "true");
   if (payload.receiptFile instanceof File) {
     form.append("receipt_file", payload.receiptFile);
@@ -3783,17 +3886,81 @@ export async function verifyVerificationTask(
 }
 
 export async function fetchNotifications(): Promise<Notification[]> {
-  const data = await http<any>(`/api/notifications/`);
-  return unwrapListResponse<any>(data).map(mapNotificationFromApi);
+  return (await fetchNotificationPage({})).results;
+}
+
+export interface NotificationQuery {
+  page?: number;
+  unread?: boolean;
+  archived?: boolean;
+  category?: string;
+  highPriority?: boolean;
+  search?: string;
+  /** Platform Administrator only: every user's notifications (delivery log). */
+  allUsers?: boolean;
+}
+
+export async function fetchNotificationPage(query: NotificationQuery): Promise<NotificationPage> {
+  const params = new URLSearchParams();
+  if (query.page && query.page > 1) params.set("page", String(query.page));
+  if (query.unread) params.set("unread", "1");
+  if (query.archived) params.set("archived", "1");
+  if (query.category) params.set("category", query.category);
+  if (query.highPriority) params.set("priority", "high");
+  if (query.search?.trim()) params.set("search", query.search.trim());
+  if (query.allUsers) params.set("scope", "all");
+  const qs = params.toString();
+  const data = await http<any>(`/api/notifications/${qs ? `?${qs}` : ""}`);
+  const rows = unwrapListResponse<any>(data).map(mapNotificationFromApi);
+  return {
+    results: rows,
+    count: Number(data?.count ?? rows.length),
+    hasMore: Boolean(data?.next),
+  };
+}
+
+export async function fetchNotificationSummary(): Promise<NotificationSummary> {
+  const data = await http<any>(`/api/notifications/unread_count/`);
+  return {
+    unread: Number(data?.count ?? 0),
+    highPriority: Number(data?.high_priority ?? 0),
+    total: Number(data?.total ?? 0),
+  };
 }
 
 export async function fetchUnreadNotificationCount(): Promise<number> {
-  const data = await http<any>(`/api/notifications/unread_count/`);
-  return Number(data?.count ?? 0);
+  return (await fetchNotificationSummary()).unread;
 }
 
-export async function markNotificationRead(id: string): Promise<void> {
-  await http<any>(`/api/notifications/${id}/mark_read/`, { method: "POST" });
+export async function markNotificationRead(id: string): Promise<Notification> {
+  return mapNotificationFromApi(await http<any>(`/api/notifications/${id}/mark_read/`, { method: "POST" }));
+}
+
+export async function markNotificationUnread(id: string): Promise<Notification> {
+  return mapNotificationFromApi(await http<any>(`/api/notifications/${id}/mark_unread/`, { method: "POST" }));
+}
+
+export async function archiveNotification(id: string): Promise<Notification> {
+  return mapNotificationFromApi(await http<any>(`/api/notifications/${id}/archive/`, { method: "POST" }));
+}
+
+export async function unarchiveNotification(id: string): Promise<Notification> {
+  return mapNotificationFromApi(await http<any>(`/api/notifications/${id}/unarchive/`, { method: "POST" }));
+}
+
+export async function deleteNotification(id: string): Promise<void> {
+  await http<any>(`/api/notifications/${id}/`, { method: "DELETE" });
+}
+
+export async function bulkNotificationAction(
+  ids: string[],
+  action: "read" | "unread" | "archive" | "unarchive" | "delete",
+): Promise<number> {
+  const data = await http<any>(`/api/notifications/bulk/`, {
+    method: "POST",
+    body: JSON.stringify({ ids: ids.map(Number), action }),
+  });
+  return Number(data?.updated ?? 0);
 }
 
 export async function markAllNotificationsRead(): Promise<number> {
@@ -4092,8 +4259,77 @@ async function reviewPaymentClaim(
   return mapPaymentClaimFromApi(data);
 }
 
-export async function verifyPaymentClaim(id: string, remarks?: string): Promise<PaymentClaim> {
-  return reviewPaymentClaim(id, "verify", { remarks: remarks ?? "" });
+export async function verifyPaymentClaim(
+  id: string,
+  remarks?: string,
+  options?: { decision?: RmtClaimDecision; assessedPct?: number | null; deficiencies?: ClaimDeficiency[] }
+): Promise<PaymentClaim> {
+  return reviewPaymentClaim(id, "verify", {
+    remarks: remarks ?? "",
+    decision: options?.decision ?? "full",
+    ...(options?.assessedPct != null ? { assessed_pct: options.assessedPct } : {}),
+    deficiencies: (options?.deficiencies ?? []).map(toDeficiencyPayload),
+  });
+}
+
+function toDeficiencyPayload(d: ClaimDeficiency) {
+  return { description: d.description, required_action: d.requiredAction ?? "", installation_ids: d.installationIds ?? [] };
+}
+
+export async function fetchClaimAssessment(id: string): Promise<ClaimAssessment> {
+  const data = await http<any>(`/api/projects/claims/${id}/assessment/`);
+  return {
+    expectedUnits: Number(data.expected_units ?? 0),
+    verifiedUnits: Number(data.verified_units ?? 0),
+    completionPct: data.completion_pct != null ? Number(data.completion_pct) : null,
+    carryInUnits: Number(data.carry_in_units ?? 0),
+    claimAmount: Number(data.claim_amount ?? 0),
+    carryInAmount: Number(data.carry_in_amount ?? 0),
+    partialPaymentMinPct: Number(data.partial_payment_min_pct ?? 70),
+    isFinalMilestone: Boolean(data.is_final_milestone),
+    partialAllowed: Boolean(data.partial_allowed),
+    partialAmount: data.partial_amount != null ? Number(data.partial_amount) : null,
+    paymentBlockers: mapPaymentBlockers(data.payment_blockers),
+  };
+}
+
+function mapPaymentBlockers(rows: any): PaymentBlocker[] {
+  return (Array.isArray(rows) ? rows : []).map((b: any) => ({
+    source: b.source,
+    id: String(b.id ?? ""),
+    title: b.title ?? "",
+    status: b.status ?? "",
+    owner: b.owner ?? "rmt",
+    dueDate: b.due_date ?? null,
+    overdue: Boolean(b.overdue),
+  }));
+}
+
+export async function fetchClaimPaymentBlockers(id: string): Promise<PaymentBlocker[]> {
+  const data = await http<any>(`/api/projects/claims/${id}/blockers/`);
+  return mapPaymentBlockers(data?.blockers);
+}
+
+export async function returnPaymentClaim(id: string, deficiencies: ClaimDeficiency[], remarks?: string): Promise<PaymentClaim> {
+  const data = await http<any>(`/api/projects/claims/${id}/return/`, {
+    method: "POST",
+    body: JSON.stringify({ remarks: remarks ?? "", deficiencies: deficiencies.map(toDeficiencyPayload) }),
+  });
+  return mapPaymentClaimFromApi(data);
+}
+
+export async function resubmitPaymentClaim(
+  id: string,
+  payload?: { implementationNotes?: string; evidenceFiles?: string[] }
+): Promise<PaymentClaim> {
+  const data = await http<any>(`/api/projects/claims/${id}/resubmit/`, {
+    method: "POST",
+    body: JSON.stringify({
+      ...(payload?.implementationNotes != null ? { implementation_notes: payload.implementationNotes } : {}),
+      ...(payload?.evidenceFiles ? { evidence_files: payload.evidenceFiles } : {}),
+    }),
+  });
+  return mapPaymentClaimFromApi(data);
 }
 
 export async function approvePaymentClaim(id: string, remarks?: string): Promise<PaymentClaim> {
@@ -4388,6 +4624,17 @@ export async function reviewAnomalyFlag(id: string, payload: {
     method: "POST",
     body,
   });
+  return mapAnomalyFlagFromApi(data);
+}
+
+// Vendor answers an RMT correction or evidence request; the flag returns to the RMT for investigation.
+export async function respondToAnomalyFlag(id: string, response: string, evidenceFiles: File[] = []): Promise<AnomalyFlag> {
+  const body = new FormData();
+  body.append("response", response);
+  for (const file of evidenceFiles) {
+    body.append("evidence_files", file);
+  }
+  const data = await http<any>(`/api/projects/anomaly-flags/${id}/respond/`, { method: "POST", body });
   return mapAnomalyFlagFromApi(data);
 }
 
@@ -4920,6 +5167,7 @@ export async function updatePlatformConfiguration(payload: Partial<PlatformConfi
       gps_verification_max_distance_m: payload.gpsVerificationMaxDistanceM,
       m2_verification_required_pct: payload.m2VerificationRequiredPct,
       m3_verification_required_pct: payload.m3VerificationRequiredPct,
+      partial_payment_min_pct: payload.partialPaymentMinPct,
       email_notifications_enabled: payload.emailNotificationsEnabled,
       sms_notifications_enabled: payload.smsNotificationsEnabled,
       email_host: payload.emailHost,
@@ -5519,6 +5767,7 @@ function mapOversightReviewFromApi(api: any): OversightReview {
     actionRequired: api.action_required || "",
     followUpStatus: (api.follow_up_status || "none") as OversightFollowUpStatus,
     followUpDate: api.follow_up_date ?? null,
+    holdsPayment: Boolean(api.holds_payment),
     resolvedByUsername: api.resolved_by_username ?? null,
     resolvedAt: api.resolved_at ?? null,
     resolutionNote: api.resolution_note || "",
@@ -5551,6 +5800,7 @@ export interface OversightReviewInput {
   issueCategory?: string;
   actionRequired?: string;
   followUpDate?: string;
+  holdsPayment?: boolean;
 }
 
 export async function createOversightReview(payload: OversightReviewInput): Promise<OversightReview> {
@@ -5561,6 +5811,7 @@ export async function createOversightReview(payload: OversightReviewInput): Prom
     issue_category: payload.issueCategory || "",
     action_required: payload.actionRequired || "",
     follow_up_date: payload.followUpDate || null,
+    holds_payment: Boolean(payload.holdsPayment),
   };
   const links: [keyof OversightReviewInput, string][] = [
     ["projectId", "project"], ["milestoneId", "milestone"], ["verificationTaskId", "verification_task"],

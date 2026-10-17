@@ -451,7 +451,7 @@ def _normalize_technology_type(value: str) -> str:
     return mapping.get(raw, str(value or '').strip().upper())
 
 
-DEFAULT_MILESTONE_DISBURSEMENT_PCTS = (20, 50, 30)
+DEFAULT_MILESTONE_DISBURSEMENT_PCTS = (0, 50, 50)
 
 
 def _milestone_amounts(contract_value: Decimal, disbursement_pcts) -> list[Decimal]:
@@ -3015,6 +3015,7 @@ class TenderViewSet(viewsets.ModelViewSet):
             body=f"{body}View details: {vendor_link}\n",
             event='tender_published',
             linked_entity_id=tender.id,
+            dedupe=True,
         )
         NotificationService.notify_users(
             users=stakeholders,
@@ -3022,6 +3023,7 @@ class TenderViewSet(viewsets.ModelViewSet):
             body=f"{body}View details: {official_link}\n",
             event='tender_published',
             linked_entity_id=tender.id,
+            dedupe=True,
         )
 
         email_enabled = send_email and email_configured()
@@ -6391,6 +6393,7 @@ class NoticeViewSet(viewsets.ModelViewSet):
             body=f"{body}View notices: {notice_link}\n",
             event='notice_published',
             linked_entity_id=notice.id,
+            dedupe=True,
         )
 
         email_enabled = email_configured()
