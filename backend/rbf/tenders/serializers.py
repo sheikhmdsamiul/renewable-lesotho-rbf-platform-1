@@ -742,6 +742,31 @@ class TenderBidSerializer(serializers.ModelSerializer):
         is_financial = stage_key == BidStage.FINANCIAL
         is_lot_wise = bool(tender and tender.lots.exists())
 
+        # A tender linked to an EOI Invite already declared (and locked in) its inclusion
+        # commitments at the EOI stage on that linked EOI tender. Carry those forward onto
+        # this tender's Technical/Combined/Financial bid so the Impact section and
+        # downstream evaluation/reporting reflect the Stage 1 declaration instead of a
+        # blank default or an unconfirmed flag. The vendor has no re-declare control past
+        # EOI, so the linked EOI bid is authoritative here.
+        if tender is not None and getattr(tender, 'linked_eoi_tender_id', None) and not is_eoi:
+            vendor_id = attrs.get('vendor_id') or (getattr(instance, 'vendor_id', None) if instance else None)
+            if vendor_id:
+                linked_eoi_bid = (
+                    TenderBid.objects.filter(
+                        tender_id=tender.linked_eoi_tender_id,
+                        vendor_id=vendor_id,
+                        bid_stage=BidStage.EOI,
+                    )
+                    .exclude(status=BidStatus.DRAFT)
+                    .order_by('-version_number', '-created_at')
+                    .first()
+                )
+                if linked_eoi_bid is not None:
+                    for field, _key, _label in INCLUSION_FIELDS:
+                        attrs[field] = getattr(linked_eoi_bid, field)
+                    if linked_eoi_bid.inclusion_commitment_confirmed:
+                        attrs['inclusion_commitment_confirmed'] = True
+
         declared_lots = attrs.get('declared_lots', instance.declared_lots if instance else [])
         declared_lots = declared_lots if isinstance(declared_lots, list) else []
         declared_lot_ids = set()
@@ -2210,6 +2235,20 @@ class TenderSerializer(serializers.ModelSerializer):
             # workflow a linked tender's Restricted-Tendering shortlist makes sense under.
             workflow = ProcurementWorkflow.EOI_COMBINED
             attrs['procurement_workflow'] = workflow
+        # A standalone 'EOI → Combined' tender (i.e. not the EOI Invite that actually runs
+        # the EOI itself) must be linked to an existing EOI Invite. EOIs are only collected
+        # through the dedicated EOI Invite flow, so a tender may not spin up its own fresh
+        # EOI stage — choose the single-stage Combined workflow when no EOI is needed.
+        if (
+            workflow == ProcurementWorkflow.EOI_COMBINED
+            and not is_eoi_invite_only
+            and linked_eoi_tender is None
+            and 'linked_eoi_tender' not in errors
+        ):
+            errors['linked_eoi_tender'] = (
+                'An EOI → Combined tender must be linked to an existing EOI Invite. '
+                'Create an EOI Invite first, or choose the Combined workflow.'
+            )
         eoi_deadline = attrs.get('eoi_deadline', instance.eoi_deadline if instance else None)
         technical_deadline = attrs.get('technical_deadline', instance.technical_deadline if instance else None)
         financial_deadline = attrs.get('financial_deadline', instance.financial_deadline if instance else None)

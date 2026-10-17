@@ -4416,8 +4416,8 @@ class ProcurementWorkflowTests(APITestCase):
         tech.refresh_from_db()
         self.assertTrue(tech.financial_stage_unlocked)
 
-    def test_eoi_combined_tender_forces_restricted_method_on_create(self):
-        from .models import ProcurementMethod, ProcurementWorkflow
+    def test_eoi_combined_tender_requires_linked_eoi_invite(self):
+        from .models import ProcurementMethod
 
         self.client.force_authenticate(self.rmt_user)
         response = self.client.post(
@@ -4447,6 +4447,27 @@ class ProcurementWorkflowTests(APITestCase):
                 "technical_deadline": (timezone.now() + timedelta(days=20)).isoformat(),
                 "financial_deadline": (timezone.now() + timedelta(days=20)).isoformat(),
             },
+            format="json",
+        )
+        # An EOI → Combined tender may not run its own EOI stage: it must be linked to
+        # an existing EOI Invite (or use the single-stage Combined workflow instead).
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST, response.data)
+        self.assertIn("linked_eoi_tender", response.data)
+
+    def test_linked_eoi_combined_tender_locks_restricted_method(self):
+        from .models import ProcurementMethod
+
+        eoi_tender = self._create_shortlisted_eoi_invite_tender()
+        self.client.force_authenticate(self.rmt_user)
+        response = self.client.post(
+            "/api/tenders/",
+            self._standard_tender_payload(
+                name="Linked EOI Combined Tender",
+                procurement_workflow="eoi_combined",
+                procurement_method="National",
+                linked_eoi_tender=str(eoi_tender.id),
+                technical_deadline=(timezone.now() + timedelta(days=20)).isoformat(),
+            ),
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
@@ -4894,6 +4915,67 @@ class ProcurementWorkflowTests(APITestCase):
         )
         self.assertEqual(rejected_resp.status_code, status.HTTP_400_BAD_REQUEST, rejected_resp.data)
         self.assertIn("only specifically invited vendors can bid", str(rejected_resp.data))
+
+    def test_combined_bid_on_linked_tender_inherits_eoi_inclusion_commitment(self):
+        """Inclusion commitments declared at the EOI stage on the EOI Invite tender must
+        carry forward to the Combined bid on the tender linked to it — the vendor has no
+        way to re-confirm them on the Combined screen, so they must not read as
+        'not yet confirmed' (and default targets must not silently replace the EOI ones).
+        """
+        eoi_tender = self._create_shortlisted_eoi_invite_tender()
+
+        self.client.force_authenticate(self.rmt_user)
+        create_resp = self.client.post(
+            "/api/tenders/",
+            self._standard_tender_payload(
+                name="Linked Combined Tender Inclusion",
+                procurement_workflow="eoi_combined",
+                linked_eoi_tender=str(eoi_tender.id),
+                technical_deadline=(timezone.now() + timedelta(days=20)).isoformat(),
+            ),
+            format="json",
+        )
+        self.assertEqual(create_resp.status_code, status.HTTP_201_CREATED, create_resp.data)
+        linked_tender_id = create_resp.data["id"]
+        Tender.objects.filter(id=linked_tender_id).update(status=TenderStatus.PUBLISHED, published_at=timezone.now())
+
+        self.client.force_authenticate(self.vendor)
+        bid_resp = self.client.post(
+            "/api/tender-bids/",
+            {
+                "tender": str(linked_tender_id),
+                "bid_stage": "combined",
+                "technical_proposal": "Tech design summary. " * 20,
+                "system_configuration": json.dumps({
+                    "technology_type": "SHS",
+                    "rated_power_w": 250,
+                    "battery_capacity_wh": 1200,
+                    "pv_panel_size_w": 300,
+                    "inverter_type": "Hybrid",
+                }),
+                "boq_items": json.dumps([
+                    {"item_number": 1, "description": "Solar kit", "qty": 100, "unit": "set", "unit_price": 1800, "total": 180000},
+                ]),
+                "om_strategy_summary": "O&M strategy covering preventative maintenance and local technicians. " * 6,
+                "sites": json.dumps([
+                    {
+                        "site_name": "Roma Cluster",
+                        "district": "Maseru",
+                        "latitude": -29.45,
+                        "longitude": 27.74,
+                        "number_of_households": 120,
+                        "target_beneficiary_type": "standard",
+                    }
+                ]),
+                "status": "Draft",
+            },
+            format="json",
+        )
+        self.assertEqual(bid_resp.status_code, status.HTTP_201_CREATED, bid_resp.data)
+        self.assertTrue(bid_resp.data["inclusion_commitment_confirmed"])
+        self.assertEqual(bid_resp.data["female_target_pct"], 55)
+        self.assertEqual(bid_resp.data["vulnerable_target_pct"], 35)
+        self.assertEqual(bid_resp.data["low_income_target_pct"], 60)
 
     def test_eoi_invite_candidates_lists_only_shortlisted_eoi_invite_tenders(self):
         eoi_tender = self._create_shortlisted_eoi_invite_tender()

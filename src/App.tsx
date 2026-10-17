@@ -2560,7 +2560,7 @@ const Tenders = ({
     biddingCurrency: defaultCurrency,
     currencyRates: {},
     budget: 0,
-    procurementWorkflow: "eoi_combined",
+    procurementWorkflow: "combined",
     eoiDeadline: getTenderDeadlineDefault(),
     technicalDeadline: "",
     financialDeadline: "",
@@ -3221,6 +3221,10 @@ const Tenders = ({
     }
     const workflow = payload.procurementWorkflow ?? "eoi_combined";
     const isEoiWorkflow = workflow === "eoi_combined" || workflow === "sequential";
+    if (workflow === "eoi_combined" && !payload.isEoiInviteOnly && !payload.linkedEoiTenderId) {
+      setTenderError("Link an existing EOI Invite — an EOI → Combined tender cannot run its own EOI stage. Create an EOI Invite first, or choose the Combined workflow.");
+      return;
+    }
     if (isEoiWorkflow && !payload.linkedEoiTenderId && !payload.eoiDeadline) {
       setTenderError("Provide the EOI (Stage 1) submission deadline.");
       return;
@@ -3780,7 +3784,7 @@ const Tenders = ({
             className="card text-left p-5 hover:bg-slate-50 transition-colors"
           >
             <p className="font-bold text-slate-900 mb-1.5">Start blank</p>
-            <p className="text-sm text-slate-500">Open bidding, or an EOI → Combined tender with its own fresh EOI stage. No prior shortlisting.</p>
+            <p className="text-sm text-slate-500">Open bidding, or a single-stage Combined tender. No prior shortlisting.</p>
           </button>
           <button
             onClick={() => {
@@ -3943,7 +3947,7 @@ const Tenders = ({
                   text: formData.linkedEoiTenderId
                     ? "This tender is linked to an existing EOI Invite, so it can only run as EOI → Combined. Unlink it below (\"Link an existing EOI Invite\") if you want to change this."
                     : formData.procurementWorkflow === "eoi_combined"
-                      ? `Run an open Expression of Interest first; shortlisted vendors are then invited to submit a Combined (Technical & Financial) proposal. Procurement Method is auto-locked to ${restrictedProcurementValue}.`
+                      ? "Restrict bidding to an existing EOI Invite's shortlisted vendors — link one below. This tender does not run its own EOI stage."
                       : "Vendors bid directly with a single Combined (Technical & Financial) submission — no EOI stage, no shortlisting. You may choose either procurement method.",
                 }}
               >
@@ -3976,7 +3980,7 @@ const Tenders = ({
                 </FormKitSelect>
               </Field>
               {formData.procurementWorkflow === "eoi_combined" && (
-                <Field label="Link an existing EOI Invite" accent={TEAL} help={{ text: "Linking skips this tender's own EOI stage — shortlisted vendors from the linked EOI Invite are copied over and can bid directly at the Combined stage. The tender Name will be locked to match." }}>
+                <Field label="Link an existing EOI Invite" required accent={TEAL} help={{ text: "An EOI → Combined tender must link an EOI Invite — it cannot run its own EOI stage. Shortlisted vendors from the linked EOI Invite are copied over and can bid directly at the Combined stage. The tender Name will be locked to match." }}>
                   <FormKitSelect
                     value={formData.linkedEoiTenderId ?? ""}
                     onChange={(e) => {
@@ -3988,7 +3992,7 @@ const Tenders = ({
                       }));
                     }}
                   >
-                    <option value="">None — run a fresh EOI on this tender</option>
+                    <option value="" disabled>Select an EOI Invite to link…</option>
                     {eoiInviteCandidates.map(c => (
                       <option key={c.id} value={c.id}>{c.name} ({c.referenceNumber}) — {c.invitedVendorCount} shortlisted</option>
                     ))}
@@ -13801,6 +13805,28 @@ const VendorDashboard = ({
             total: 0,
           })),
         }));
+      }
+
+      // A tender linked to an EOI Invite already declared (and locked in) its inclusion
+      // commitments when the vendor submitted their EOI on that linked EOI tender. Carry
+      // those commitments onto this tender's Combined bid so the Impact section reflects
+      // the Stage 1 declaration instead of showing "not yet confirmed" — the vendor has
+      // no re-declare control here (the section is read-only past EOI).
+      if (tender.linkedEoiTenderId) {
+        const linkedEoiBids = await fetchTenderBids(tender.linkedEoiTenderId).catch(() => [] as TenderBid[]);
+        const linkedEoiBid = linkedEoiBids
+          .filter(b => String(b.bid_stage || b.stage_key || "").toLowerCase() === "eoi")
+          .sort((a, b) => (b.version_number || 0) - (a.version_number || 0))[0]
+          || linkedEoiBids[0];
+        if (linkedEoiBid) {
+          setBidForm(prev => ({
+            ...prev,
+            femaleTargetPct: linkedEoiBid.female_target_pct != null ? String(linkedEoiBid.female_target_pct) : prev.femaleTargetPct,
+            vulnerableTargetPct: linkedEoiBid.vulnerable_target_pct != null ? String(linkedEoiBid.vulnerable_target_pct) : prev.vulnerableTargetPct,
+            lowIncomeTargetPct: linkedEoiBid.low_income_target_pct != null ? String(linkedEoiBid.low_income_target_pct) : prev.lowIncomeTargetPct,
+            inclusionCommitmentConfirmed: Boolean(linkedEoiBid.inclusion_commitment_confirmed) || prev.inclusionCommitmentConfirmed,
+          }));
+        }
       }
     } catch {
       setBidVersions([]);
