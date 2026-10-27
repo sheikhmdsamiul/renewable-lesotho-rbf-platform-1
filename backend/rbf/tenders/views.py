@@ -3,6 +3,7 @@ from rest_framework.permissions import IsAuthenticated, SAFE_METHODS, BasePermis
 from rbf.common.permissions import has_module_permission
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.decorators import action
+from rest_framework.fields import DateTimeField
 from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
 import json
@@ -204,6 +205,13 @@ def _assert_evaluation_window_open(tender: Tender) -> None:
     if tender.status not in {TenderStatus.PUBLISHED, TenderStatus.CLOSED, TenderStatus.EVALUATION}:
         raise ValidationError(
             {'detail': 'Evaluation requires the tender to be Published, Closed, or in Evaluation.'}
+        )
+    # The staged exemption above only exists for legacy Sequential tenders. A
+    # Combined-style tender has a single sealed submission window: opening and scoring
+    # bids while other vendors can still submit (or edit theirs) breaks bid secrecy.
+    if tender.status == TenderStatus.PUBLISHED and workflow_is_combined_style(tender):
+        raise ValidationError(
+            {'detail': 'Bids cannot be evaluated while the tender is still open for submissions. Close the tender (or wait for the submission deadline) first.'}
         )
     if tender.status == TenderStatus.CLOSED:
         tender.status = TenderStatus.EVALUATION
@@ -1125,6 +1133,57 @@ def _bid_stage_spec(bid: TenderBid | None, tender: Tender):
         deadline = getattr(tender, 'eoi_deadline', None)
     deadline = deadline or tender.master_deadline()
     return {'stage': stage, 'deadline': deadline, 'workflow': workflow}
+
+
+def _resolve_new_bid_stage(tender: Tender, requested) -> str:
+    """The stage a vendor's brand-new bid record is created at — decided server-side.
+
+    A vendor may only ever open a tender at its opening stage (EOI for an EOI Invite or
+    a legacy combined tender with an EOI window; Combined for a single-stage Combined
+    tender or one linked to an EOI Invite). Later-stage records are created by the
+    server when the RBF shortlists (see _unlock_stage_for_bid), never by the vendor, so
+    a client-supplied bid_stage that differs is rejected rather than trusted — trusting
+    it let a vendor skip the EOI/shortlist gate entirely. Legacy 'sequential' tenders
+    keep their historical per-stage create behavior (still gated by
+    _assert_vendor_submission_access).
+    """
+    if not workflow_is_combined_style(tender):
+        return normalize_bid_stage(requested or BidStage.EOI)
+    opening = _bid_stage_spec(None, tender)['stage']
+    if requested and normalize_bid_stage(requested) != opening:
+        raise ValidationError({
+            'bid_stage': f'This tender only accepts new {bid_stage_label(opening)} submissions.',
+        })
+    return opening
+
+
+def _sync_invited_vendors_from_eoi(tender: Tender, actor=None) -> None:
+    """Make a linked tender's invited vendors exactly its EOI Invite's shortlist."""
+    eoi = tender.linked_eoi_tender
+    if eoi is None:
+        return
+    shortlist = list(User.objects.filter(tender_invitations__tender=eoi))
+    tender.invited_vendors.exclude(vendor__in=shortlist).delete()
+    for vendor in shortlist:
+        TenderInvitedVendor.objects.get_or_create(tender=tender, vendor=vendor, defaults={'invited_by': actor})
+
+
+def _eoi_window_closed(tender: Tender) -> bool:
+    """Whether an EOI stage is over: the RBF closed it, or its EOI deadline passed.
+    Shortlisting decisions are only taken after this, so every respondent is judged
+    against the same complete field rather than first-come-first-served."""
+    if tender.status in {TenderStatus.CLOSED, TenderStatus.EVALUATION}:
+        return True
+    return bool(tender.eoi_deadline and timezone.now() >= tender.eoi_deadline)
+
+
+def _eoi_shortlist_vendor_ids(eoi_tender: Tender) -> set:
+    """The shortlist: vendors whose (latest) EOI on this tender the RBF accepted."""
+    return set(
+        TenderBid.objects.filter(
+            tender=eoi_tender, bid_stage=BidStage.EOI, status=BidStatus.ACCEPTED,
+        ).values_list('vendor_id', flat=True)
+    )
 
 
 def _backfill_stage_two_drafts_for_vendor(vendor_id: str):
@@ -2533,7 +2592,14 @@ class TenderViewSet(viewsets.ModelViewSet):
                 # A Restricted-family 'EOI → Combined' tender is still visible to every
                 # approved vendor so they can see and respond to the EOI invite; only the
                 # combined (actual tender) stage is limited to shortlisted/invited vendors.
-                | Q(procurement_method__in=invite_gated_values, procurement_workflow=ProcurementWorkflow.EOI_COMBINED)
+                # (Only the EOI stage itself — an EOI Invite, or a legacy tender running
+                # its own EOI. A tender linked to an EOI Invite is visible to its
+                # shortlisted vendors alone, via invited_vendors above.)
+                | Q(
+                    procurement_method__in=invite_gated_values,
+                    procurement_workflow=ProcurementWorkflow.EOI_COMBINED,
+                    linked_eoi_tender__isnull=True,
+                )
                 | ~Q(procurement_method__in=not_open_values)
                 | framework_q
             ).distinct()
@@ -2660,6 +2726,13 @@ class TenderViewSet(viewsets.ModelViewSet):
     def destroy(self, request, *args, **kwargs):
         self._assert_write_permission()
         self._assert_not_archived()
+        tender = self.get_object()
+        # Deleting cascades to bids, evaluations, contracts and challenges, so only a
+        # tender that never went out (and that no other tender links to) can go.
+        if tender.status != TenderStatus.DRAFT or tender.published_at or tender.bids.exists():
+            raise ValidationError({'detail': 'Only a Draft tender that was never published and has no bids can be deleted. Close it instead.'})
+        if tender.linked_tenders.exists():
+            raise ValidationError({'detail': 'This EOI Invite has a tender linked to it and cannot be deleted.'})
         return super().destroy(request, *args, **kwargs)
 
     @action(detail=True, methods=['post'])
@@ -2737,13 +2810,13 @@ class TenderViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def eoi_invite_candidates(self, request):
         """EOI Invite tenders eligible to be linked from a new EOI → Combined tender:
-        published or closed (so their EOI window is open or has concluded), with at
-        least one shortlisted vendor."""
+        shortlist finalized (so the EOI is over and every response decided), with at
+        least one shortlisted vendor, and not already used by another tender."""
         if getattr(request.user, 'role', None) not in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}:
             raise PermissionDenied('Only the RBF Management Team can view EOI Invite candidates.')
         qs = Tender.objects.filter(
             is_eoi_invite_only=True,
-            status__in=[TenderStatus.PUBLISHED, TenderStatus.CLOSED],
+            shortlist_finalized_at__isnull=False,
         ).annotate(
             invited_count=Count('invited_vendors'),
             linked_count=Count('linked_tenders'),  # reverse FK from Tender.linked_eoi_tender
@@ -2764,6 +2837,88 @@ class TenderViewSet(viewsets.ModelViewSet):
         ], status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'])
+    def finalize_shortlist(self, request, pk=None):
+        """Freeze an EOI Invite's shortlist so the actual tender can be created from it.
+
+        Requires the EOI window to be over and every response decided (accepted or
+        rejected). Enforces max_vendors_to_shortlist unless an override reason is given.
+        Closes the EOI, mirrors the shortlist into invited_vendors exactly, and tells
+        every respondent their outcome."""
+        self._assert_write_permission()
+        tender = self.get_object()
+        if not tender.is_eoi_invite_only:
+            return Response({'detail': 'Only an EOI Invite has a shortlist to finalize.'}, status=status.HTTP_400_BAD_REQUEST)
+        if tender.shortlist_finalized_at:
+            return Response({'detail': 'This shortlist has already been finalized.'}, status=status.HTTP_400_BAD_REQUEST)
+        if tender.status not in {TenderStatus.PUBLISHED, TenderStatus.CLOSED}:
+            return Response({'detail': f'Only a published or closed EOI Invite can be finalized (this one is {tender.status}).'}, status=status.HTTP_400_BAD_REQUEST)
+        if not _eoi_window_closed(tender):
+            return Response({'detail': 'The EOI deadline has not passed yet. Wait for it, or close the EOI first.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        eoi_bids = TenderBid.objects.filter(tender=tender, bid_stage=BidStage.EOI).exclude(
+            status__in={BidStatus.DRAFT, BidStatus.WITHDRAWN},
+        )
+        undecided = sorted({
+            b.vendor_name for b in eoi_bids
+            if b.status in {BidStatus.SUBMITTED, BidStatus.UNDER_REVIEW, BidStatus.REVISION_REQUIRED}
+        })
+        if undecided:
+            return Response(
+                {'detail': 'Every EOI response must be shortlisted or rejected first.', 'pending': undecided},
+                status=status.HTTP_409_CONFLICT,
+            )
+        shortlisted_ids = _eoi_shortlist_vendor_ids(tender)
+        if not shortlisted_ids:
+            return Response({'detail': 'Shortlist at least one vendor before finalizing.'}, status=status.HTTP_400_BAD_REQUEST)
+        override_reason = str(request.data.get('override_reason') or '').strip()
+        cap = tender.max_vendors_to_shortlist
+        if cap and len(shortlisted_ids) > cap and not override_reason:
+            return Response(
+                {'detail': f'{len(shortlisted_ids)} vendors are shortlisted but the cap is {cap}. Reject some, or give an override reason.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        shortlisted = list(User.objects.filter(id__in=[i for i in shortlisted_ids if str(i).isdigit()], role=UserRole.VENDOR))
+        now = timezone.now()
+        with transaction.atomic():
+            tender.invited_vendors.exclude(vendor__in=shortlisted).delete()
+            for vendor in shortlisted:
+                TenderInvitedVendor.objects.get_or_create(tender=tender, vendor=vendor, defaults={'invited_by': request.user})
+            tender.shortlist_finalized_at = now
+            tender.shortlist_finalized_by = self._admin_reference(request.user)
+            update_fields = ['shortlist_finalized_at', 'shortlist_finalized_by', 'updated_at']
+            if tender.status == TenderStatus.PUBLISHED:
+                tender.status = TenderStatus.CLOSED
+                tender.closed_at = tender.closed_at or now
+                update_fields += ['status', 'closed_at']
+            tender.save(update_fields=update_fields)
+        log_audit(request.user, 'eoi_shortlist_finalized', tender, {
+            'reference_number': tender.reference_number,
+            'shortlisted_vendor_ids': sorted(str(v.id) for v in shortlisted),
+            'override_reason': override_reason,
+            'notes': f'EOI shortlist finalized with {len(shortlisted)} vendor(s).'
+                     + (f' Cap of {cap} overridden: {override_reason}' if override_reason and cap and len(shortlisted) > cap else ''),
+        })
+
+        unsuccessful_ids = set(eoi_bids.filter(status=BidStatus.REJECTED).values_list('vendor_id', flat=True)) - shortlisted_ids
+        unsuccessful = list(User.objects.filter(id__in=[i for i in unsuccessful_ids if str(i).isdigit()], role=UserRole.VENDOR))
+        NotificationService.notify_users(
+            users=shortlisted,
+            title=f'Shortlist confirmed: {tender.reference_number}',
+            body=f'You are on the final shortlist for "{tender.name}". You will be invited to bid once the tender is published.',
+            event='eoi_shortlist_confirmed',
+            linked_entity_id=tender.id,
+        )
+        NotificationService.notify_users(
+            users=unsuccessful,
+            title=f'EOI outcome: {tender.reference_number}',
+            body=f'Thank you for your Expression of Interest in "{tender.name}". You have not been shortlisted for the next stage.',
+            event='eoi_not_shortlisted',
+            linked_entity_id=tender.id,
+        )
+        return Response(TenderSerializer(tender, context=self.get_serializer_context()).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
     def request_publish_approval(self, request, pk=None):
         """RBF submits a tender for Super Admin approval before publication."""
         self._assert_write_permission()
@@ -2771,12 +2926,10 @@ class TenderViewSet(viewsets.ModelViewSet):
 
         if not tender.is_verified:
             return Response({'detail': 'Tender must be verified before requesting publish approval.'}, status=status.HTTP_400_BAD_REQUEST)
-        if tender.status == TenderStatus.PUBLISHED:
-            return Response({'detail': 'Tender is already published.'}, status=status.HTTP_400_BAD_REQUEST)
-        if tender.status == TenderStatus.CLOSED:
-            return Response({'detail': 'Closed tender cannot be published.'}, status=status.HTTP_400_BAD_REQUEST)
         if tender.publish_approval_status == PublishApprovalStatus.PENDING:
             return Response({'detail': 'Publish approval has already been requested and is pending review.'}, status=status.HTTP_400_BAD_REQUEST)
+        if tender.status != TenderStatus.DRAFT:
+            return Response({'detail': f'Only a Draft tender can be submitted for publish approval (this one is {tender.status}).'}, status=status.HTTP_400_BAD_REQUEST)
 
         old_status = tender.status
         old_pub_status = tender.publish_approval_status
@@ -2913,8 +3066,16 @@ class TenderViewSet(viewsets.ModelViewSet):
         self._assert_write_permission()
         tender = self.get_object()
 
-        if tender.status == TenderStatus.CLOSED:
-            return Response({'detail': 'Closed tender cannot be published.'}, status=status.HTTP_400_BAD_REQUEST)
+        if tender.status != TenderStatus.DRAFT:
+            return Response({'detail': f'Only a Draft tender can be published (this one is {tender.status}).'}, status=status.HTTP_400_BAD_REQUEST)
+        if tender.linked_eoi_tender_id:
+            eoi = tender.linked_eoi_tender
+            if not eoi.shortlist_finalized_at:
+                return Response({'detail': 'The linked EOI Invite\'s shortlist must be finalized before this tender can be published.'}, status=status.HTTP_400_BAD_REQUEST)
+            _sync_invited_vendors_from_eoi(tender, actor=request.user)
+        opening_deadline = _bid_stage_spec(None, tender)['deadline']
+        if not opening_deadline or opening_deadline <= timezone.now():
+            return Response({'detail': 'The submission deadline must be in the future before the tender can be published.'}, status=status.HTTP_400_BAD_REQUEST)
         # An EOI Invite carries no award/financial risk (see is_eoi_invite_only) — it
         # skips the verification + Super Admin publish-approval pipeline real tenders
         # go through, so RBF Officials can publish one directly.
@@ -2923,6 +3084,18 @@ class TenderViewSet(viewsets.ModelViewSet):
                 return Response({'detail': 'Tender must be verified before publishing.'}, status=status.HTTP_400_BAD_REQUEST)
             if tender.publish_approval_status != PublishApprovalStatus.APPROVED:
                 return Response({'detail': 'This tender must be approved by the Super Admin before it can be published.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Pre-flight the notification requirements BEFORE changing any state, so a
+        # failure never leaves the tender live while the client is told it failed.
+        if not self._publish_recipients(tender)[0]:
+            return Response(
+                {'detail': (
+                    'No invited vendors to notify — this tender is limited to its invited/shortlisted vendors.'
+                    if self._publish_is_invite_only(tender)
+                    else 'No approved pre-qualified vendors found to notify.'
+                )},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         old_status = tender.status
         tender.status = TenderStatus.PUBLISHED
@@ -2953,20 +3126,17 @@ class TenderViewSet(viewsets.ModelViewSet):
         send_email = True
         notify_all = True
 
+        # The tender is published at this point; a delivery failure is reported as a
+        # warning on the (successful) response rather than an error.
         notification_summary = self._notify_vendors_of_publish(tender, send_email, notify_all)
-        if not notification_summary.get('recipient_count'):
-            return Response(
-                {'detail': 'No approved pre-qualified vendors found to notify.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        if send_email and (not notification_summary.get('email_enabled') or notification_summary.get('email_error')):
-            return Response(
-                {'detail': notification_summary.get('email_error') or 'Email is not configured.'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
 
         data = TenderSerializer(tender).data
         data['notification_summary'] = notification_summary
+        if send_email and (not notification_summary.get('email_enabled') or notification_summary.get('email_error')):
+            data['warning'] = (
+                f"Tender published and in-app notifications sent, but email was not delivered: "
+                f"{notification_summary.get('email_error') or 'email is not configured.'}"
+            )
         return Response(data, status=status.HTTP_200_OK)
 
     def _assert_admin_approval_permission(self):
@@ -2978,21 +3148,32 @@ class TenderViewSet(viewsets.ModelViewSet):
         name = (getattr(user, 'full_name', None) or '').strip()
         return name or getattr(user, 'username', None) or str(user.id)
 
-    def _notify_vendors_of_publish(self, tender: Tender, send_email=True, notify_all=True):
-        from rbf.users.models import User, VendorPrequalification, PrequalificationStatus
+    def _publish_is_invite_only(self, tender: Tender) -> bool:
+        """Whether only invited vendors may bid (so only they should hear of it). The
+        exception is a tender's own open EOI stage (an EOI Invite), which every approved
+        vendor may answer."""
+        if tender.procurement_method not in _invite_gated_procurement_values():
+            return False
+        is_open_eoi = tender.procurement_workflow == ProcurementWorkflow.EOI_COMBINED and not tender.linked_eoi_tender_id
+        return not is_open_eoi
 
-        # Always notify approved (pre-qualified) vendors
-        vendors = list(
-            User.objects.filter(role=UserRole.VENDOR)
-            .filter(prequalifications__status=PrequalificationStatus.APPROVED)
-            .distinct()
-            .only('id', 'email', 'full_name', 'username', 'role')
-        )
+    def _publish_recipients(self, tender: Tender):
+        """(vendors, stakeholders) told about a newly published tender: every approved
+        (pre-qualified) vendor — or, for an invite-only tender, just its invited vendors —
+        plus DoE / Project Steering Committee stakeholders."""
+        vendor_qs = User.objects.filter(role=UserRole.VENDOR).filter(prequalifications__status=PrequalificationStatus.APPROVED)
+        if self._publish_is_invite_only(tender):
+            vendor_qs = vendor_qs.filter(tender_invitations__tender=tender)
+        vendors = list(vendor_qs.distinct().only('id', 'email', 'full_name', 'username', 'role'))
         stakeholders = list(
             User.objects.filter(role__in={UserRole.DOE_OFFICER, UserRole.UNDP_DONOR})
             .distinct()
             .only('id', 'email', 'full_name', 'username', 'role')
         )
+        return vendors, stakeholders
+
+    def _notify_vendors_of_publish(self, tender: Tender, send_email=True, notify_all=True):
+        vendors, stakeholders = self._publish_recipients(tender)
         recipients = vendors + stakeholders
         recipient_count = len(recipients)
 
@@ -3865,6 +4046,16 @@ class TenderViewSet(viewsets.ModelViewSet):
             })
 
         self._assert_write_permission()
+        if tender.is_eoi_invite_only or tender.linked_eoi_tender_id:
+            return Response(
+                {'detail': 'This roster is the EOI shortlist and is managed by shortlisting the EOI responses, not edited directly.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if tender.status not in {TenderStatus.DRAFT, TenderStatus.PENDING_PUBLISH_APPROVAL}:
+            return Response(
+                {'detail': 'The invited-vendor list can only be changed before the tender is published.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         vendor_ids = request.data.get('vendor_ids')
         if not isinstance(vendor_ids, list):
             return Response({'detail': 'vendor_ids must be a list of user ids.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -4877,17 +5068,85 @@ class TenderViewSet(viewsets.ModelViewSet):
 
 
     @action(detail=True, methods=['post'])
+    def extend_deadline(self, request, pk=None):
+        """Extend the submission deadline of the stage that is currently open.
+
+        Only a Published tender, only later (never shortened), always in the future, and
+        never past the next stage's deadline. Every vendor with an interest in the
+        tender (bidders, invited/shortlisted vendors, vendors who viewed it) is told."""
+        self._assert_write_permission()
+        self._assert_not_archived()
+        tender = self.get_object()
+        if tender.status != TenderStatus.PUBLISHED:
+            return Response({'detail': 'Only a Published tender\'s deadline can be extended.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        raw_deadline = request.data.get('deadline')
+        try:
+            if not raw_deadline:
+                raise ValidationError('required')
+            new_deadline = DateTimeField().to_internal_value(raw_deadline)
+        except ValidationError:
+            return Response({'deadline': 'A valid new deadline is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        now = timezone.now()
+        stages = [
+            (name, getattr(tender, name))
+            for name in ('eoi_deadline', 'technical_deadline', 'financial_deadline')
+            if getattr(tender, name)
+        ]
+        if not stages:
+            return Response({'detail': 'This tender has no submission deadline to extend.'}, status=status.HTTP_400_BAD_REQUEST)
+        # The open stage is the first one whose deadline is still ahead; if every
+        # deadline has passed (a tender without auto-close), it is the last one.
+        index = next((i for i, (_, value) in enumerate(stages) if value > now), len(stages) - 1)
+        stage_field, current = stages[index]
+        if new_deadline <= now:
+            return Response({'deadline': 'The new deadline must be in the future.'}, status=status.HTTP_400_BAD_REQUEST)
+        if new_deadline <= current:
+            return Response({'deadline': 'A deadline can only be extended, not brought forward.'}, status=status.HTTP_400_BAD_REQUEST)
+        if index + 1 < len(stages) and new_deadline >= stages[index + 1][1]:
+            return Response(
+                {'deadline': f'The new deadline must stay before the {stages[index + 1][0].replace("_", " ")}.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        setattr(tender, stage_field, new_deadline)
+        tender.save()
+        stage_label = {'eoi_deadline': 'EOI', 'technical_deadline': 'submission', 'financial_deadline': 'Financial'}[stage_field]
+        log_audit(request.user, 'tender_deadline_extended', tender, {
+            'reference_number': tender.reference_number,
+            'field': stage_field,
+            'old': current.isoformat(),
+            'new': new_deadline.isoformat(),
+            'notes': f'{stage_label} deadline extended from {timezone.localtime(current):%Y-%m-%d %H:%M} to {timezone.localtime(new_deadline):%Y-%m-%d %H:%M}.',
+        })
+        interested_ids = (
+            set(tender.bids.values_list('vendor_id', flat=True))
+            | {str(v) for v in tender.invited_vendors.values_list('vendor_id', flat=True)}
+            | {str(v) for v in tender.view_logs.values_list('vendor_id', flat=True)}
+        )
+        vendors = list(User.objects.filter(id__in=[i for i in interested_ids if str(i).isdigit()], role=UserRole.VENDOR))
+        NotificationService.notify_users(
+            users=vendors,
+            title=f'Deadline extended: {tender.reference_number}',
+            body=f'The {stage_label} deadline for "{tender.name}" has been extended to {timezone.localtime(new_deadline):%Y-%m-%d %H:%M}.',
+            event='tender_deadline_extended',
+            linked_entity_id=tender.id,
+        )
+        return Response(TenderSerializer(tender, context=self.get_serializer_context()).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
     def close(self, request, pk=None):
         """Close a tender, preventing further bids"""
         self._assert_write_permission()
         tender = self.get_object()
-        
-        if tender.status == TenderStatus.CLOSED:
+
+        if tender.status != TenderStatus.PUBLISHED:
             return Response(
-                {'detail': 'Tender is already closed.'},
+                {'detail': f'Only a Published tender can be closed (this one is {tender.status}).'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        
+
         tender.status = TenderStatus.CLOSED
         tender.closed_at = timezone.now()
         tender.save(update_fields=['status', 'closed_at', 'updated_at'])
@@ -5004,6 +5263,16 @@ class TenderViewSet(viewsets.ModelViewSet):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
+# Bid fields only the server sets — stripped from every vendor create/update payload so
+# a vendor can never re-point a bid at another tender or owner, change its lifecycle
+# status (e.g. self-accept an EOI), or rewrite the review outcome. Status moves only
+# through submission (status=Submitted) and the RMT review actions.
+VENDOR_PROTECTED_BID_FIELDS = frozenset({
+    'tender', 'vendor_id', 'vendor_name', 'vendor_email', 'status', 'version_number',
+    'submitted_at', 'reviewed_at', 'reviewed_by', 'rejection_reason',
+})
+
+
 class TenderBidViewSet(viewsets.ModelViewSet):
     """ViewSet for managing vendor bids/submissions"""
     queryset = TenderBid.objects.all().order_by('-updated_at', '-submitted_at', '-created_at')
@@ -5021,8 +5290,13 @@ class TenderBidViewSet(viewsets.ModelViewSet):
             return TenderBid.objects.filter(vendor_id=str(user.id)).order_by('-updated_at', '-submitted_at', '-created_at')
         if user.role == UserRole.EVALUATION_COMMITTEE:
             assigned_tender_ids = TenderEvaluationCommitteeMember.objects.filter(member=user).values_list('tender_id', flat=True)
-            return TenderBid.objects.filter(tender_id__in=list(assigned_tender_ids)).order_by('-updated_at', '-submitted_at', '-created_at')
-        return TenderBid.objects.all().order_by('-updated_at', '-submitted_at', '-created_at')
+            return TenderBid.objects.filter(tender_id__in=list(assigned_tender_ids)).exclude(status=BidStatus.DRAFT).order_by('-updated_at', '-submitted_at', '-created_at')
+        qs = TenderBid.objects.all().order_by('-updated_at', '-submitted_at', '-created_at')
+        if user.role not in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}:
+            # A vendor's unsubmitted draft is theirs alone; oversight roles (DoE, PSC,
+            # Auditor...) only ever see what was actually submitted.
+            qs = qs.exclude(status=BidStatus.DRAFT)
+        return qs
 
     def _assert_vendor_submission_access(self, request, tender: Tender, bid: TenderBid | None = None):
         if request.user.role != UserRole.VENDOR:
@@ -5103,6 +5377,12 @@ class TenderBidViewSet(viewsets.ModelViewSet):
         if normalize_tender_stage(getattr(bid.tender, 'stage_type', '')) not in {'pre_qualification'} \
                 and normalize_bid_stage(getattr(bid, 'bid_stage', '')) != BidStage.EOI:
             raise ValidationError({'detail': 'EOI review actions only apply to EOI submissions.'})
+        tender = bid.tender
+        if workflow_is_combined_style(tender) and normalize_bid_stage(getattr(bid, 'bid_stage', '')) == BidStage.EOI:
+            if tender.shortlist_finalized_at:
+                raise ValidationError({'detail': 'The shortlist for this EOI has been finalized and can no longer change.'})
+            if not _eoi_window_closed(tender):
+                raise ValidationError({'detail': 'EOI responses can only be decided once the EOI deadline has passed or the EOI has been closed.'})
 
     def create(self, request, *args, **kwargs):
         """Submit a bid for a tender"""
@@ -5128,18 +5408,21 @@ class TenderBidViewSet(viewsets.ModelViewSet):
         )
         next_version = (latest_version or 0) + 1
 
+        new_stage = _resolve_new_bid_stage(tender, request.data.get('bid_stage') or request.data.get('stage'))
+
         payload = request.data.copy()
+        for field in VENDOR_PROTECTED_BID_FIELDS:
+            payload.pop(field, None)
+        payload['tender'] = str(tender.id)
         payload['vendor_id'] = str(request.user.id)
         payload['vendor_name'] = request.user.full_name or request.user.username
         payload['vendor_email'] = request.user.email
         payload['version_number'] = next_version
         payload['status'] = bid_status
-        new_stage = normalize_bid_stage(payload.get('bid_stage') or BidStage.EOI)
-        if not payload.get('bid_stage'):
-            payload['bid_stage'] = new_stage
+        payload['bid_stage'] = new_stage
         payload['stage'] = bid_stage_label(new_stage)
 
-        serializer = self.get_serializer(data=payload)
+        serializer = self.get_serializer(data=payload, context={**self.get_serializer_context(), 'bid_stage': new_stage})
         serializer.is_valid(raise_exception=True)
         self.perform_create(serializer)
         bid = serializer.instance
@@ -5154,23 +5437,31 @@ class TenderBidViewSet(viewsets.ModelViewSet):
             headers=headers,
         )
 
-    def update(self, request, *args, **kwargs):
-        bid = self.get_object()
+    def _assert_bid_owner(self, request, bid: TenderBid, verb='update'):
         if request.user.role != UserRole.VENDOR or bid.vendor_id != str(request.user.id):
-            raise PermissionDenied('Only the submitting vendor can update this bid.')
+            raise PermissionDenied(f'Only the submitting vendor can {verb} this bid.')
+
+    def _vendor_payload(self, data) -> dict:
+        """Vendor-editable bid content from a request, minus every field the server
+        alone controls (owner, tender, lifecycle status, review outcome, version)."""
+        payload = {}
+        for key in data.keys():
+            if key in VENDOR_PROTECTED_BID_FIELDS:
+                continue
+            values = data.getlist(key) if hasattr(data, 'getlist') else [data.get(key)]
+            payload[key] = values if len(values) > 1 else data.get(key)
+        return payload
+
+    def _vendor_update(self, request, bid: TenderBid, payload: dict, *, submitting: bool, partial: bool):
+        """Shared write path for a vendor's own bid: draft saves (PUT/PATCH) and final
+        submission (PATCH with status=Submitted, or POST /submit/) all run the same
+        access checks and serializer validation, so no route can submit a bid that
+        skips the tender-status, invite/shortlist, duplicate or document rules."""
         if bid.status not in {BidStatus.DRAFT, BidStatus.REVISION_REQUIRED, BidStatus.SUBMITTED}:
             raise ValidationError({'detail': 'Submitted bids are locked. Create or edit a draft before final submission.'})
         self._assert_vendor_submission_access(request, bid.tender, bid=bid)
 
-        submitting = self._is_submitting(bid, request)
-        
-        payload = {}
-        for key in request.data.keys():
-            value = request.data.getlist(key) if len(request.data.getlist(key)) > 1 else request.data.get(key)
-            payload[key] = value
-        
         payload['stage'] = bid_stage_label(getattr(bid, 'bid_stage', None) or bid.stage or 'eoi')
-        
         if submitting:
             latest_version = (
                 TenderBid.objects.filter(tender=bid.tender, vendor_id=str(request.user.id))
@@ -5178,11 +5469,10 @@ class TenderBidViewSet(viewsets.ModelViewSet):
                 .values_list('version_number', flat=True)
                 .first()
             )
-            next_version = (latest_version or 0) + 1
-            payload['version_number'] = next_version
+            payload['version_number'] = (latest_version or 0) + 1
             payload['status'] = BidStatus.SUBMITTED
-        
-        serializer = self.get_serializer(bid, data=payload)
+
+        serializer = self.get_serializer(bid, data=payload, partial=partial)
         serializer.is_valid(raise_exception=True)
         self.perform_update(serializer)
         bid.refresh_from_db()
@@ -5192,45 +5482,22 @@ class TenderBidViewSet(viewsets.ModelViewSet):
             bid.save(update_fields=['submitted_at', 'status', 'updated_at'])
             self._record_bid_submission(request, bid)
         return Response(TenderBidSerializer(bid, context=self.get_serializer_context()).data, status=status.HTTP_200_OK)
+
+    def update(self, request, *args, **kwargs):
+        bid = self.get_object()
+        self._assert_bid_owner(request, bid)
+        return self._vendor_update(
+            request, bid, self._vendor_payload(request.data),
+            submitting=self._is_submitting(bid, request), partial=False,
+        )
 
     def partial_update(self, request, *args, **kwargs):
         bid = self.get_object()
-        if request.user.role != UserRole.VENDOR or bid.vendor_id != str(request.user.id):
-            raise PermissionDenied('Only the submitting vendor can update this bid.')
-        if bid.status not in {BidStatus.DRAFT, BidStatus.REVISION_REQUIRED, BidStatus.SUBMITTED}:
-            raise ValidationError({'detail': 'Submitted bids are locked. Create or edit a draft before final submission.'})
-        self._assert_vendor_submission_access(request, bid.tender, bid=bid)
-
-        submitting = self._is_submitting(bid, request)
-        
-        payload = {}
-        for key in request.data.keys():
-            value = request.data.getlist(key) if len(request.data.getlist(key)) > 1 else request.data.get(key)
-            payload[key] = value
-        
-        payload['stage'] = bid_stage_label(getattr(bid, 'bid_stage', None) or bid.stage or 'eoi')
-        
-        if submitting:
-            latest_version = (
-                TenderBid.objects.filter(tender=bid.tender, vendor_id=str(request.user.id))
-                .order_by('-version_number')
-                .values_list('version_number', flat=True)
-                .first()
-            )
-            next_version = (latest_version or 0) + 1
-            payload['version_number'] = next_version
-            payload['status'] = BidStatus.SUBMITTED
-        
-        serializer = self.get_serializer(bid, data=payload, partial=True)
-        serializer.is_valid(raise_exception=True)
-        self.perform_update(serializer)
-        bid.refresh_from_db()
-        if submitting:
-            bid.submitted_at = timezone.now()
-            bid.status = BidStatus.SUBMITTED
-            bid.save(update_fields=['submitted_at', 'status', 'updated_at'])
-            self._record_bid_submission(request, bid)
-        return Response(TenderBidSerializer(bid, context=self.get_serializer_context()).data, status=status.HTTP_200_OK)
+        self._assert_bid_owner(request, bid)
+        return self._vendor_update(
+            request, bid, self._vendor_payload(request.data),
+            submitting=self._is_submitting(bid, request), partial=True,
+        )
 
     def destroy(self, request, *args, **kwargs):
         bid = self.get_object()
@@ -5269,7 +5536,9 @@ class TenderBidViewSet(viewsets.ModelViewSet):
             notes=f'Vendor {bid.vendor_id} submitted version {bid.version_number} for tender {bid.tender.reference_number}.',
         )
         rmt_users = User.objects.filter(role__in={UserRole.RBF_OFFICIAL, UserRole.ADMIN}).only('id', 'full_name', 'username')
-        message = f'New bid submitted by {bid.vendor_name} for {bid.tender.name} — LSL {bid.bid_amount or 0}'
+        # No amount here: bid pricing stays sealed until the financial stage opens, and
+        # this notification goes to every RMT user the moment the vendor submits.
+        message = f'New {bid_stage_label(bid.bid_stage)} submission by {bid.vendor_name} for {bid.tender.name} (version {bid.version_number}).'
         for rmt_user in rmt_users:
             NotificationService.send(
                 recipient_id=str(rmt_user.id),
@@ -5290,8 +5559,13 @@ class TenderBidViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def review(self, request, pk=None):
         """Mark bid as under review"""
+        # The Evaluation Committee marks a bid Under Review as it starts scoring (its
+        # queryset is already limited to its assigned tenders); vendors and oversight
+        # roles never move a bid's status.
+        if request.user.role not in {UserRole.RBF_OFFICIAL, UserRole.ADMIN, UserRole.EVALUATION_COMMITTEE}:
+            raise PermissionDenied('Only the RBF Management Team or Evaluation Committee can mark a bid under review.')
         bid = self.get_object()
-        
+
         if bid.status != BidStatus.SUBMITTED:
             return Response(
                 {'detail': 'Only submitted bids can be reviewed.'},
@@ -5310,62 +5584,14 @@ class TenderBidViewSet(viewsets.ModelViewSet):
     def submit(self, request, pk=None):
         """Submit a draft bid (final submission)"""
         bid = self.get_object()
-
-        if request.user.role != UserRole.VENDOR or bid.vendor_id != str(request.user.id):
-            raise PermissionDenied('Only the submitting vendor can submit this bid.')
+        self._assert_bid_owner(request, bid, verb='submit')
 
         if bid.status not in {BidStatus.DRAFT, BidStatus.REVISION_REQUIRED}:
             return Response(
                 {'detail': 'Only draft or revision-required bids can be submitted.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-
-        spec = _bid_stage_spec(bid, bid.tender)
-        total_deadline = spec['deadline']
-        if _uses_hard_deadline(bid.tender) and total_deadline and timezone.now() >= total_deadline:
-            return Response(
-                {'detail': 'Bidding deadline has passed.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        stage = spec['stage']
-        if stage in (BidStage.TECHNICAL, BidStage.COMBINED):
-            if not bid.technical_proposal_file or not bid.financial_proposal_file:
-                return Response(
-                    {'detail': 'Technical and financial proposal files are required for technical submissions.'},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-            if not bid.boq_file:
-                return Response(
-                    {'detail': 'BOQ file is required for technical submissions.'},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-        elif stage == BidStage.FINANCIAL:
-            if not bid.financial_proposal_file:
-                return Response(
-                    {'detail': 'Financial Proposal file is required for the Financial stage.'},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-            if not bid.boq_file:
-                return Response(
-                    {'detail': 'BOQ file is required for the Financial stage.'},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-        bid.status = BidStatus.SUBMITTED
-        bid.submitted_at = timezone.now()
-        bid.save(update_fields=['status', 'submitted_at', 'updated_at'])
-        log_audit(request.user, 'bid_submitted', bid, {'tender_id': str(bid.tender_id), 'version': bid.version_number})
-        NotificationService.notify_user(
-            recipient_id=bid.vendor_id,
-            recipient_name=bid.vendor_name,
-            title=f'Bid Submitted: {bid.tender.reference_number}',
-            body=f'Your bid was submitted successfully. Ref: {bid.tender.reference_number} • Version {bid.version_number}.',
-            event='bid_submitted',
-            linked_entity_id=str(bid.tender.id),
-        )
-
-        return Response(TenderBidSerializer(bid).data, status=status.HTTP_200_OK)
+        return self._vendor_update(request, bid, {}, submitting=True, partial=True)
 
     @action(detail=True, methods=['post'])
     def accept(self, request, pk=None):
@@ -5389,9 +5615,14 @@ class TenderBidViewSet(viewsets.ModelViewSet):
         is_legacy = normalize_tender_stage(getattr(bid.tender, 'stage_type', '')) == 'pre_qualification'
         if is_eoi_bid or is_legacy:
             workflow = getattr(bid.tender, 'procurement_workflow', ProcurementWorkflow.SEQUENTIAL)
-            draft = _unlock_stage_for_bid(bid, BidStage.TECHNICAL)
-            if workflow_is_combined_style(bid.tender, workflow):
-                _unlock_stage_for_bid(bid, BidStage.FINANCIAL)
+            if bid.tender.is_eoi_invite_only:
+                # An EOI Invite never collects a Combined bid itself: the shortlisted
+                # vendor bids on the tender later linked to it, so no draft is opened here.
+                draft = bid
+            else:
+                draft = _unlock_stage_for_bid(bid, BidStage.TECHNICAL)
+                if workflow_is_combined_style(bid.tender, workflow):
+                    _unlock_stage_for_bid(bid, BidStage.FINANCIAL)
 
             # For a Restricted-family tender the vendor must also be on the invited-vendor
             # list to bid (enforced in _assert_vendor_submission_access). Shortlisting is
@@ -5412,7 +5643,12 @@ class TenderBidViewSet(viewsets.ModelViewSet):
                 type=NotificationChannel.IN_APP,
                 event='stage_one_shortlisted',
                 title=f'Shortlisted: {bid.tender.reference_number}',
-                body='Congratulations! You have been shortlisted. Submit your full proposal to proceed.',
+                body=(
+                    'Congratulations! You have been shortlisted. You will be invited to submit your '
+                    'Technical & Financial proposal once the tender is published.'
+                    if bid.tender.is_eoi_invite_only
+                    else 'Congratulations! You have been shortlisted. Submit your full proposal to proceed.'
+                ),
                 linked_entity_id=str(bid.tender.id),
             )
             log_audit(

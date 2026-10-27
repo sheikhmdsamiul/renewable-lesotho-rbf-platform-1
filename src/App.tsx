@@ -257,6 +257,8 @@ import {
   submitTenderBid,
   updateTenderBid,
   reviewTenderBid,
+  extendTenderDeadline,
+  finalizeEoiShortlist,
   acceptTenderBid,
   rejectTenderBid,
   markTenderBidPartialConformity,
@@ -3322,14 +3324,7 @@ const Tenders = ({
     }
     try {
       setIsExtending(true);
-      const payload = {
-        ...selectedTender,
-        deadline: newDeadline,
-        financialDeadline: newDeadline,
-        technicalDeadline: newDeadline,
-        eoiDeadline: newDeadline,
-      };
-      const updated = await updateTender(selectedTender.id, payload as Partial<Tender> & { scheduleFile?: File | null });
+      const updated = await extendTenderDeadline(selectedTender.id, newDeadline);
       upsertTender(updated);
       setSelectedTender(updated);
       setExtendDeadlineOpen(false);
@@ -27501,14 +27496,21 @@ const EoiInviteDetail = ({
 }) => {
   const [tender, setTender] = useState<Tender | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [isFinalizing, setIsFinalizing] = useState(false);
+  const [finalizeError, setFinalizeError] = useState<string | null>(null);
+  const [overrideReason, setOverrideReason] = useState("");
 
   React.useEffect(() => {
     let cancelled = false;
     setIsLoading(true);
+    setLoadError(null);
     (async () => {
       try {
         const data = await fetchTender(tenderId);
         if (!cancelled) setTender(data);
+      } catch (err: any) {
+        if (!cancelled) setLoadError(err?.message || "Unable to load this EOI Invite.");
       } finally {
         if (!cancelled) setIsLoading(false);
       }
@@ -27516,14 +27518,46 @@ const EoiInviteDetail = ({
     return () => { cancelled = true; };
   }, [tenderId]);
 
-  const shortlistedCount = tender?.invitedVendorCount ?? 0;
   const linkedCount = tender?.linkedTendersSummary?.length ?? 0;
   const isAlreadyLinked = linkedCount > 0;
+  const isFinalized = Boolean(tender?.shortlistFinalizedAt);
+  const eoiWindowOver = Boolean(
+    tender && (tender.status === TenderStatus.CLOSED || (tender.eoiDeadline && new Date(tender.eoiDeadline).getTime() <= Date.now()))
+  );
+  const statusLabel = !tender
+    ? ""
+    : isFinalized
+      ? "Shortlist finalized"
+      : tender.status === TenderStatus.PUBLISHED && !eoiWindowOver
+        ? "Submission open"
+        : tender.status === TenderStatus.PUBLISHED || tender.status === TenderStatus.CLOSED
+          ? "Shortlisting"
+          : tender.status;
+
+  const handleFinalize = async () => {
+    if (!tender) return;
+    if (!window.confirm("Finalize the shortlist? Every respondent is told their outcome and the shortlist can no longer change.")) return;
+    setIsFinalizing(true);
+    setFinalizeError(null);
+    try {
+      const updated = await finalizeEoiShortlist(tender.id, overrideReason.trim() || undefined);
+      setTender(updated);
+    } catch (err: any) {
+      const pending: string[] = err?.detailPayload?.pending || [];
+      setFinalizeError(
+        `${err?.message || "Unable to finalize the shortlist."}${pending.length ? ` Undecided: ${pending.join(", ")}.` : ""}`
+      );
+    } finally {
+      setIsFinalizing(false);
+    }
+  };
 
   return (
     <FormKitShell>
       <Crumb onBack={onBack} trail="EOI Invites" />
-      {isLoading || !tender ? (
+      {loadError ? (
+        <p className="text-sm text-red-600">{loadError}</p>
+      ) : isLoading || !tender ? (
         <p className="text-sm text-slate-500">Loading...</p>
       ) : (
         <>
@@ -27536,15 +27570,18 @@ const EoiInviteDetail = ({
             </div>
             <div className="flex items-center gap-3">
               <StatusChip color={AMBER} bg={AMBER_SOFT}>
-                {tender.status === TenderStatus.PUBLISHED ? "Submission open · shortlisting" : tender.status}
+                {statusLabel}
               </StatusChip>
-              <button onClick={() => onEdit(tenderId)} className="btn-secondary text-sm py-1.5">
-                Edit
-              </button>
+              {tender.status === TenderStatus.DRAFT && (
+                <button onClick={() => onEdit(tenderId)} className="btn-secondary text-sm py-1.5">
+                  Edit
+                </button>
+              )}
             </div>
           </div>
           <p className="text-sm text-slate-500 mb-5">
-            {tender.eoiDeadline ? `Deadline ${new Date(tender.eoiDeadline).toLocaleDateString()}` : "No deadline set"} &middot; {shortlistedCount} shortlisted
+            {tender.eoiDeadline ? `Deadline ${new Date(tender.eoiDeadline).toLocaleString()}` : "No deadline set"}
+            {isFinalized && <> &middot; {tender.invitedVendorCount ?? 0} shortlisted</>}
           </p>
 
           <div className="card p-6 mb-6 space-y-4">
@@ -27606,14 +27643,49 @@ const EoiInviteDetail = ({
             </div>
           )}
 
+          {!eoiWindowOver && (
+            <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600 font-medium">
+              Responses can be shortlisted or rejected once the EOI deadline has passed.
+            </div>
+          )}
+
           <TACView mode="eoi" initialTenderId={tenderId} />
+
+          {!isFinalized && eoiWindowOver && (
+            <div className="card p-4 mt-5 space-y-3">
+              <p className="text-sm text-slate-700">
+                Once every response is shortlisted or rejected, finalize the shortlist. It is then frozen, everyone is told
+                their outcome, and the tender can be created from it.
+              </p>
+              {tender.maxVendorsToShortlist != null && (
+                <input
+                  value={overrideReason}
+                  onChange={(e) => setOverrideReason(e.target.value)}
+                  className="input-field"
+                  placeholder={`Reason (only needed if more than ${tender.maxVendorsToShortlist} vendors are shortlisted)`}
+                />
+              )}
+              {finalizeError && <p className="text-sm text-red-600">{finalizeError}</p>}
+              <div className="flex justify-end">
+                <button onClick={handleFinalize} disabled={isFinalizing} className="btn-secondary disabled:opacity-40">
+                  {isFinalizing ? "Finalizing..." : "Finalize Shortlist"}
+                </button>
+              </div>
+            </div>
+          )}
 
           <div className="flex items-center justify-end mt-5">
             <button
-              disabled={shortlistedCount === 0 || isAlreadyLinked}
+              disabled={!isFinalized || (tender.invitedVendorCount ?? 0) === 0 || isAlreadyLinked}
               onClick={() => onConvertToTender(tenderId)}
               className="btn-primary flex items-center gap-1.5 disabled:opacity-40"
-              title={isAlreadyLinked ? "Already linked to a tender — conversion blocked." : undefined}
+              title={
+                isAlreadyLinked
+                  ? "Already linked to a tender — conversion blocked."
+                  : !isFinalized
+                    ? "Finalize the shortlist first."
+                    : undefined
+              }
             >
               {isAlreadyLinked ? "Already Converted to Tender" : "Convert to Tender"} <ArrowRight size={14} />
             </button>

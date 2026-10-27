@@ -39,6 +39,8 @@ from .models import (
     IntentAwardRequestStatus,
     IntentToAwardRequest,
     EvaluationConflictOfInterest,
+    PublishApprovalStatus,
+    TenderInvitedVendor,
 )
 from .pba_pdf import _annex_section_html, _main_agreement_html, _pdfa_merge, generate_contract_pdf
 from .serializers import IntentToAwardRequestSerializer, TenderBidSiteSerializer, TenderContractSerializer
@@ -1070,7 +1072,9 @@ class TenderBidSubmissionTests(APITestCase):
             procurement_methods=[{"value": "Sole Source", "visibilityMode": "limited"}],
         )
         self.prequal_tender.procurement_method = "Sole Source"
-        self.prequal_tender.save(update_fields=["procurement_method"])
+        # The invite list is set up before publishing.
+        self.prequal_tender.status = TenderStatus.DRAFT
+        self.prequal_tender.save(update_fields=["procurement_method", "status"])
 
         other_vendor = User.objects.create_user(
             username="sole_source_other_vendor",
@@ -1101,6 +1105,7 @@ class TenderBidSubmissionTests(APITestCase):
             format="json",
         )
         self.assertEqual(one_vendor_response.status_code, status.HTTP_200_OK, one_vendor_response.data)
+        Tender.objects.filter(id=self.prequal_tender.id).update(status=TenderStatus.PUBLISHED)
 
         self.client.force_authenticate(self.vendor)
         bid_response = self.client.post(
@@ -2936,6 +2941,13 @@ class TenderBidSubmissionTests(APITestCase):
             bid_amount=Decimal("150000.00"),
             subsidy_requested=Decimal("100000.00"),
             concept_note="Implementation strategy " * 30,
+            # /submit/ runs the same EOI validation as PATCH status=Submitted, so the
+            # draft must be a genuinely complete EOI.
+            eoi_narrative="Expression of interest for community clean energy installations. " * 16,
+            female_target_pct=55,
+            vulnerable_target_pct=35,
+            low_income_target_pct=60,
+            inclusion_commitment_confirmed=True,
             stage="Stage 1: Concept",
             version_number=1,
             status=BidStatus.DRAFT,
@@ -4598,6 +4610,8 @@ class ProcurementWorkflowTests(APITestCase):
         self.assertEqual(eoi.data["tender_procurement_workflow"], "eoi_combined")
 
         # Shortlist -> combined draft unlocked AND the vendor auto-added to the roster.
+        # (Decided only after the EOI window closes.)
+        Tender.objects.filter(id=tender.id).update(eoi_deadline=timezone.now() - timedelta(minutes=1))
         self.client.force_authenticate(self.rmt_user)
         accept = self.client.post(f"/api/tender-bids/{eoi.data['id']}/accept/", {}, format="json")
         self.assertEqual(accept.status_code, status.HTTP_200_OK, accept.data)
@@ -4727,12 +4741,18 @@ class ProcurementWorkflowTests(APITestCase):
             format="multipart",
         )
         self.assertEqual(eoi.status_code, status.HTTP_201_CREATED, eoi.data)
+        # Responses are only decided once the EOI window is over.
+        Tender.objects.filter(id=eoi_tender.id).update(eoi_deadline=timezone.now() - timedelta(minutes=1))
         self.client.force_authenticate(self.rmt_user)
         accept = self.client.post(f"/api/tender-bids/{eoi.data['id']}/accept/", {}, format="json")
         self.assertEqual(accept.status_code, status.HTTP_200_OK, accept.data)
         self.assertTrue(
             TenderInvitedVendor.objects.filter(tender=eoi_tender, vendor_id=str(self.vendor.id)).exists()
         )
+        # Only a finalized shortlist can be linked to the actual tender.
+        finalize = self.client.post(f"/api/tenders/{eoi_tender.id}/finalize_shortlist/", {}, format="json")
+        self.assertEqual(finalize.status_code, status.HTTP_200_OK, finalize.data)
+        eoi_tender.refresh_from_db()
         return eoi_tender
 
     def test_linked_eoi_tender_copies_invited_vendors_and_locks_name(self):
@@ -5207,10 +5227,10 @@ class ProcurementWorkflowTests(APITestCase):
         self.assertNotIn("name", changed_fields)
         self.assertIn("budget", changed_fields)
 
-    def test_max_vendors_to_shortlist_is_advisory_not_enforced(self):
+    def test_shortlisting_beyond_cap_is_allowed_until_finalize(self):
         """An EOI Invite with max_vendors_to_shortlist=1 can still have 2 vendors
-        shortlisted - the cap is advisory (shown to the RBF Official), never enforced
-        server-side."""
+        shortlisted individually - the cap is enforced when the shortlist is finalized
+        (see EoiShortlistWorkflowTests), where it needs an override reason."""
         from .models import TenderInvitedVendor
 
         eoi_tender = Tender.objects.create(
@@ -5266,12 +5286,15 @@ class ProcurementWorkflowTests(APITestCase):
                 format="multipart",
             )
             self.assertEqual(eoi.status_code, status.HTTP_201_CREATED, eoi.data)
-            self.client.force_authenticate(self.rmt_user)
-            accept = self.client.post(f"/api/tender-bids/{eoi.data['id']}/accept/", {}, format="json")
-            self.assertEqual(accept.status_code, status.HTTP_200_OK, accept.data)
+            return eoi.data["id"]
 
-        _submit_and_accept(self.vendor)
-        _submit_and_accept(second_vendor)
+        bid_ids = [_submit_and_accept(self.vendor), _submit_and_accept(second_vendor)]
+        # Responses are decided once the EOI window is over.
+        Tender.objects.filter(id=eoi_tender.id).update(eoi_deadline=timezone.now() - timedelta(minutes=1))
+        self.client.force_authenticate(self.rmt_user)
+        for bid_id in bid_ids:
+            accept = self.client.post(f"/api/tender-bids/{bid_id}/accept/", {}, format="json")
+            self.assertEqual(accept.status_code, status.HTTP_200_OK, accept.data)
 
         self.assertEqual(
             TenderInvitedVendor.objects.filter(tender=eoi_tender).count(), 2
@@ -7895,3 +7918,461 @@ class IntentToAwardApprovalTests(APITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self._assert_no_award_side_effects(bid_status=BidStatus.SUBMITTED)
+
+
+class VendorBidApiLockdownTests(APITestCase):
+    """A vendor's bid payload must never control server-owned state: which tender or
+    owner the bid belongs to, its lifecycle status, or the stage it opens at — and
+    every submission route must run the same access + validation rules."""
+
+    def setUp(self):
+        self.vendor = User.objects.create_user(
+            username="lock_vendor", password="securePass123", role=UserRole.VENDOR,
+            status="Active", full_name="Lock Vendor", email="lock-vendor@example.com",
+        )
+        VendorPrequalification.objects.create(
+            vendor=self.vendor, company_name="Lock Vendor Ltd",
+            status=PrequalificationStatus.APPROVED, tech_tier="Level 3",
+        )
+        self.rmt_user = User.objects.create_user(
+            username="lock_rmt", password="securePass123", role=UserRole.RBF_OFFICIAL,
+            status="Active", full_name="Lock RMT", email="lock-rmt@example.com",
+        )
+        self.eoi_tender = Tender.objects.create(
+            reference_number="LOCK-EOI-001", name="Lockdown EOI Invite",
+            department="Department of Energy", category="SHS", status=TenderStatus.PUBLISHED,
+            deadline=timezone.now() + timedelta(days=10), technology_types=["SHS"],
+            procurement_workflow="eoi_combined", procurement_method="Restricted Tendering",
+            is_eoi_invite_only=True, eoi_deadline=timezone.now() + timedelta(days=10),
+        )
+        self.combined_tender = Tender.objects.create(
+            reference_number="LOCK-CMB-001", name="Lockdown Combined",
+            department="Department of Energy", category="SHS", status=TenderStatus.PUBLISHED,
+            deadline=timezone.now() + timedelta(days=20), technology_types=["SHS"],
+            procurement_workflow="combined", procurement_method="Open Tendering",
+            technical_deadline=timezone.now() + timedelta(days=20),
+        )
+        self.restricted_tender = Tender.objects.create(
+            reference_number="LOCK-RST-001", name="Lockdown Restricted",
+            department="Department of Energy", category="SHS", status=TenderStatus.PUBLISHED,
+            deadline=timezone.now() + timedelta(days=20), technology_types=["SHS"],
+            procurement_workflow="combined", procurement_method="Restricted Tendering",
+            technical_deadline=timezone.now() + timedelta(days=20),
+        )
+        self.client.force_authenticate(self.vendor)
+
+    def _eoi_bid(self, **overrides):
+        fields = {
+            "tender": self.eoi_tender,
+            "vendor_id": str(self.vendor.id),
+            "vendor_name": self.vendor.full_name,
+            "vendor_email": self.vendor.email,
+            "bid_stage": "eoi",
+            "stage": "EOI",
+            "eoi_narrative": "Expression of interest for community clean energy installations. " * 16,
+            "female_target_pct": 55,
+            "vulnerable_target_pct": 35,
+            "low_income_target_pct": 60,
+            "inclusion_commitment_confirmed": True,
+            "version_number": 1,
+            "status": BidStatus.DRAFT,
+        }
+        fields.update(overrides)
+        return TenderBid.objects.create(**fields)
+
+    def test_vendor_cannot_self_accept_eoi_via_patch(self):
+        bid = self._eoi_bid()
+        response = self.client.patch(f"/api/tender-bids/{bid.id}/", {"status": "Accepted"}, format="multipart")
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        bid.refresh_from_db()
+        self.assertEqual(bid.status, BidStatus.DRAFT)
+
+    def test_vendor_cannot_move_bid_to_another_tender_or_owner(self):
+        bid = self._eoi_bid()
+        response = self.client.patch(
+            f"/api/tender-bids/{bid.id}/",
+            {"tender": str(self.restricted_tender.id), "vendor_id": "999999", "reviewed_by": "Me"},
+            format="multipart",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        bid.refresh_from_db()
+        self.assertEqual(bid.tender_id, self.eoi_tender.id)
+        self.assertEqual(bid.vendor_id, str(self.vendor.id))
+        self.assertEqual(bid.reviewed_by, "")
+
+    def test_vendor_cannot_open_eoi_invite_at_combined_stage(self):
+        response = self.client.post(
+            "/api/tender-bids/",
+            {"tender": str(self.eoi_tender.id), "bid_stage": "combined", "status": "Draft"},
+            format="multipart",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST, response.data)
+        self.assertIn("bid_stage", response.data)
+        self.assertFalse(TenderBid.objects.filter(tender=self.eoi_tender).exists())
+
+    def test_vendor_cannot_open_combined_tender_at_eoi_stage(self):
+        response = self.client.post(
+            "/api/tender-bids/",
+            {"tender": str(self.combined_tender.id), "bid_stage": "eoi", "status": "Draft"},
+            format="multipart",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST, response.data)
+        self.assertIn("bid_stage", response.data)
+
+    def test_new_bid_without_stage_opens_at_tender_opening_stage(self):
+        response = self.client.post(
+            "/api/tender-bids/",
+            {"tender": str(self.eoi_tender.id), "status": "Draft"},
+            format="multipart",
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        self.assertEqual(response.data["stage_key"], "eoi")
+
+    def test_submit_action_rejects_when_tender_not_open(self):
+        bid = self._eoi_bid()
+        Tender.objects.filter(id=self.eoi_tender.id).update(status=TenderStatus.CLOSED)
+        response = self.client.post(f"/api/tender-bids/{bid.id}/submit/")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST, response.data)
+        bid.refresh_from_db()
+        self.assertEqual(bid.status, BidStatus.DRAFT)
+
+    def test_submit_action_runs_full_bid_validation(self):
+        bid = self._eoi_bid(eoi_narrative="Too short.")
+        response = self.client.post(f"/api/tender-bids/{bid.id}/submit/")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST, response.data)
+        self.assertIn("eoi_narrative", response.data)
+        bid.refresh_from_db()
+        self.assertEqual(bid.status, BidStatus.DRAFT)
+
+    def test_submit_action_bumps_version_and_notifies_rmt_without_amount(self):
+        bid = self._eoi_bid(bid_amount=Decimal("150000.00"))
+        response = self.client.post(f"/api/tender-bids/{bid.id}/submit/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        bid.refresh_from_db()
+        self.assertEqual(bid.status, BidStatus.SUBMITTED)
+        self.assertEqual(bid.version_number, 2)
+        rmt_notes = Notification.objects.filter(recipient_id=str(self.rmt_user.id))
+        self.assertTrue(rmt_notes.exists())
+        for note in rmt_notes:
+            self.assertNotIn("150000", note.body)
+
+    def test_vendor_cannot_mark_bid_under_review(self):
+        bid = self._eoi_bid(status=BidStatus.SUBMITTED)
+        response = self.client.post(f"/api/tender-bids/{bid.id}/review/")
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN, response.data)
+        bid.refresh_from_db()
+        self.assertEqual(bid.status, BidStatus.SUBMITTED)
+
+
+class TenderLifecycleLockTests(APITestCase):
+    """Tender lifecycle state only moves through the dedicated actions, a tender's terms
+    freeze once it leaves Draft, and Combined bids stay sealed until bidding closes."""
+
+    def setUp(self):
+        self.rmt_user = User.objects.create_user(
+            username="life_rmt", password="securePass123", role=UserRole.RBF_OFFICIAL,
+            status="Active", full_name="Life RMT", email="life-rmt@example.com",
+        )
+        self.admin_user = User.objects.create_user(
+            username="life_admin", password="securePass123", role=UserRole.ADMIN,
+            status="Active", full_name="Life Admin", email="life-admin@example.com",
+        )
+        self.vendor = User.objects.create_user(
+            username="life_vendor", password="securePass123", role=UserRole.VENDOR,
+            status="Active", full_name="Life Vendor", email="life-vendor@example.com",
+        )
+        VendorPrequalification.objects.create(
+            vendor=self.vendor, company_name="Life Vendor Ltd",
+            status=PrequalificationStatus.APPROVED, tech_tier="Level 3",
+        )
+        self.client.force_authenticate(self.rmt_user)
+
+    def _tender(self, ref, **overrides):
+        fields = dict(
+            reference_number=ref, name=f"Tender {ref}", department="Department of Energy",
+            category="SHS", status=TenderStatus.DRAFT, deadline=timezone.now() + timedelta(days=20),
+            technology_types=["SHS"], target_districts=["Maseru"],
+            procurement_workflow="combined", procurement_method="Open Tendering",
+            technical_deadline=timezone.now() + timedelta(days=20),
+            application_type="Application Window", address_for_document="Maseru",
+            place_for_opening="Maseru", bidders_eligibility="Pre-qualified vendors",
+            time_for_completion="12 months", invited_by="RBF", bidding_currency="LSL",
+            instruction="Submit online.", contact_details="rbf@example.com", target_site_type="Rural",
+        )
+        fields.update(overrides)
+        return Tender.objects.create(**fields)
+
+    def test_status_cannot_be_patched_directly(self):
+        tender = self._tender("LIFE-001")
+        response = self.client.patch(f"/api/tenders/{tender.id}/", {"status": "Published", "is_verified": "true"}, format="json")
+        self.assertIn(response.status_code, {status.HTTP_200_OK, status.HTTP_400_BAD_REQUEST}, response.data)
+        tender.refresh_from_db()
+        self.assertEqual(tender.status, TenderStatus.DRAFT)
+        self.assertFalse(tender.is_verified)
+
+    def test_published_tender_rejects_material_changes(self):
+        tender = self._tender("LIFE-002", status=TenderStatus.PUBLISHED, budget=Decimal("50000.00"))
+        response = self.client.patch(f"/api/tenders/{tender.id}/", {"budget": "99999"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST, response.data)
+        self.assertIn("budget", str(response.data["detail"]))
+        tender.refresh_from_db()
+        self.assertEqual(tender.budget, Decimal("50000.00"))
+
+    def test_published_tender_allows_informational_amendments_and_unchanged_resubmits(self):
+        tender = self._tender("LIFE-003", status=TenderStatus.PUBLISHED, contact_details="old@example.com")
+        response = self.client.patch(
+            f"/api/tenders/{tender.id}/",
+            {"contact_details": "new@example.com", "name": tender.name, "department": tender.department},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        tender.refresh_from_db()
+        self.assertEqual(tender.contact_details, "new@example.com")
+
+    def test_editing_an_approved_draft_voids_the_approval(self):
+        tender = self._tender("LIFE-004", is_verified=True, publish_approval_status=PublishApprovalStatus.APPROVED)
+        response = self.client.patch(f"/api/tenders/{tender.id}/", {"budget": "12345"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        tender.refresh_from_db()
+        self.assertEqual(tender.publish_approval_status, PublishApprovalStatus.NOT_REQUESTED)
+
+    def test_only_unpublished_draft_tender_can_be_deleted(self):
+        published = self._tender("LIFE-005", status=TenderStatus.PUBLISHED, published_at=timezone.now())
+        self.assertEqual(self.client.delete(f"/api/tenders/{published.id}/").status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertTrue(Tender.objects.filter(id=published.id).exists())
+        draft = self._tender("LIFE-006")
+        self.assertEqual(self.client.delete(f"/api/tenders/{draft.id}/").status_code, status.HTTP_204_NO_CONTENT)
+
+    def test_close_requires_published_tender(self):
+        tender = self._tender("LIFE-007")
+        response = self.client.post(f"/api/tenders/{tender.id}/close/", {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST, response.data)
+        tender.refresh_from_db()
+        self.assertEqual(tender.status, TenderStatus.DRAFT)
+
+    def test_publish_rejects_non_draft_and_past_deadline(self):
+        published = self._tender("LIFE-008", status=TenderStatus.PUBLISHED)
+        self.assertEqual(self.client.post(f"/api/tenders/{published.id}/publish/", {}, format="json").status_code, status.HTTP_400_BAD_REQUEST)
+        expired = self._tender(
+            "LIFE-009", is_verified=True, publish_approval_status=PublishApprovalStatus.APPROVED,
+            technical_deadline=timezone.now() - timedelta(days=1),
+        )
+        response = self.client.post(f"/api/tenders/{expired.id}/publish/", {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST, response.data)
+        expired.refresh_from_db()
+        self.assertEqual(expired.status, TenderStatus.DRAFT)
+
+    def test_extend_deadline_moves_only_the_open_stage_and_notifies_bidders(self):
+        tender = self._tender("LIFE-010", status=TenderStatus.PUBLISHED)
+        TenderBid.objects.create(
+            tender=tender, vendor_id=str(self.vendor.id), vendor_name=self.vendor.full_name,
+            bid_stage="combined", stage="Technical & Financial", status=BidStatus.DRAFT, version_number=1,
+        )
+        earlier = (tender.technical_deadline - timedelta(days=1)).isoformat()
+        self.assertEqual(
+            self.client.post(f"/api/tenders/{tender.id}/extend_deadline/", {"deadline": earlier}, format="json").status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+        later = tender.technical_deadline + timedelta(days=5)
+        response = self.client.post(f"/api/tenders/{tender.id}/extend_deadline/", {"deadline": later.isoformat()}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        tender.refresh_from_db()
+        self.assertEqual(tender.technical_deadline, later)
+        self.assertIsNone(tender.eoi_deadline)
+        self.assertEqual(tender.deadline, later)
+        self.assertTrue(Notification.objects.filter(recipient_id=str(self.vendor.id), event="tender_deadline_extended").exists())
+
+    def test_extend_deadline_cannot_overlap_next_stage(self):
+        tender = self._tender(
+            "LIFE-011", status=TenderStatus.PUBLISHED,
+            eoi_deadline=timezone.now() + timedelta(days=5), technical_deadline=timezone.now() + timedelta(days=10),
+        )
+        response = self.client.post(
+            f"/api/tenders/{tender.id}/extend_deadline/",
+            {"deadline": (timezone.now() + timedelta(days=12)).isoformat()},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST, response.data)
+
+    def test_combined_bid_cannot_be_scored_while_tender_is_open(self):
+        tender = self._tender("LIFE-012", status=TenderStatus.PUBLISHED)
+        bid = TenderBid.objects.create(
+            tender=tender, vendor_id=str(self.vendor.id), vendor_name=self.vendor.full_name,
+            bid_stage="combined", stage="Technical & Financial", status=BidStatus.SUBMITTED, version_number=1,
+        )
+        self.client.force_authenticate(self.admin_user)
+        response = self.client.post(
+            "/api/tender-bid-evaluations/",
+            {"bid": str(bid.id), "stage": "technical", "technical_score": 20},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST, response.data)
+        self.assertIn("still open", str(response.data))
+
+    def test_oversight_roles_never_see_vendor_drafts(self):
+        tender = self._tender("LIFE-013", status=TenderStatus.PUBLISHED)
+        TenderBid.objects.create(
+            tender=tender, vendor_id=str(self.vendor.id), vendor_name=self.vendor.full_name,
+            bid_stage="combined", stage="Technical & Financial", status=BidStatus.DRAFT, version_number=1,
+        )
+        auditor = User.objects.create_user(
+            username="life_auditor", password="securePass123", role=UserRole.AUDITOR,
+            status="Active", full_name="Life Auditor", email="life-auditor@example.com",
+        )
+        self.client.force_authenticate(auditor)
+        response = self.client.get(f"/api/tender-bids/?tender={tender.id}")
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        rows = response.data["results"] if isinstance(response.data, dict) else response.data
+        self.assertEqual(len(rows), 0)
+
+
+class EoiShortlistWorkflowTests(APITestCase):
+    """EOI Invite -> finalized shortlist -> linked Combined tender, with the shortlist
+    as the single source of truth for who may see and bid on the actual tender."""
+
+    def setUp(self):
+        self.rmt_user = User.objects.create_user(
+            username="sl_rmt", password="securePass123", role=UserRole.RBF_OFFICIAL,
+            status="Active", full_name="SL RMT", email="sl-rmt@example.com",
+        )
+        self.vendors = []
+        for idx in range(3):
+            vendor = User.objects.create_user(
+                username=f"sl_vendor_{idx}", password="securePass123", role=UserRole.VENDOR,
+                status="Active", full_name=f"SL Vendor {idx}", email=f"sl-vendor-{idx}@example.com",
+            )
+            VendorPrequalification.objects.create(
+                vendor=vendor, company_name=f"SL Vendor {idx} Ltd",
+                status=PrequalificationStatus.APPROVED, tech_tier="Level 3",
+            )
+            self.vendors.append(vendor)
+        self.eoi = Tender.objects.create(
+            reference_number="SL-EOI-001", name="Shortlist EOI", department="Department of Energy",
+            category="SHS", status=TenderStatus.PUBLISHED, deadline=timezone.now() - timedelta(hours=1),
+            technology_types=["SHS"], target_districts=["Maseru"],
+            procurement_workflow="eoi_combined", procurement_method="Restricted Tendering",
+            is_eoi_invite_only=True, eoi_deadline=timezone.now() - timedelta(hours=1),
+        )
+        self.client.force_authenticate(self.rmt_user)
+
+    def _eoi_bid(self, vendor, tender=None, bid_status=BidStatus.SUBMITTED):
+        return TenderBid.objects.create(
+            tender=tender or self.eoi, vendor_id=str(vendor.id), vendor_name=vendor.full_name,
+            vendor_email=vendor.email, bid_stage="eoi", stage="EOI", status=bid_status, version_number=1,
+        )
+
+    def _decide(self, bid, accept=True):
+        if accept:
+            return self.client.post(f"/api/tender-bids/{bid.id}/accept/", {}, format="json")
+        return self.client.post(f"/api/tender-bids/{bid.id}/reject/", {"rejection_reason": "Not suitable."}, format="json")
+
+    def _finalized_eoi(self):
+        a, b = self._eoi_bid(self.vendors[0]), self._eoi_bid(self.vendors[1])
+        self.assertEqual(self._decide(a).status_code, status.HTTP_200_OK)
+        self.assertEqual(self._decide(b, accept=False).status_code, status.HTTP_200_OK)
+        response = self.client.post(f"/api/tenders/{self.eoi.id}/finalize_shortlist/", {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.eoi.refresh_from_db()
+        return self.eoi
+
+    def _linked_payload(self, **overrides):
+        payload = {
+            "name": "Ignored - forced to EOI name", "department": "DoE", "category": "SHS",
+            "application_type": "Application Window", "procurement_method": "Restricted Tendering",
+            "address_for_document": "Addr", "place_for_opening": "Maseru", "bidders_eligibility": "Shortlisted",
+            "time_for_completion": "12 months", "invited_by": "RBF", "bidding_currency": "LSL",
+            "instruction": "Read carefully. " * 10, "contact_details": "123", "target_site_type": "Community",
+            "technology_types": ["SHS"], "target_districts": ["Maseru"],
+            "procurement_workflow": "eoi_combined", "linked_eoi_tender": str(self.eoi.id),
+            "technical_deadline": (timezone.now() + timedelta(days=20)).isoformat(),
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_eoi_cannot_be_decided_before_deadline(self):
+        Tender.objects.filter(id=self.eoi.id).update(eoi_deadline=timezone.now() + timedelta(days=3))
+        bid = self._eoi_bid(self.vendors[0])
+        response = self._decide(bid)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST, response.data)
+        bid.refresh_from_db()
+        self.assertEqual(bid.status, BidStatus.SUBMITTED)
+
+    def test_shortlisting_on_eoi_invite_opens_no_combined_draft(self):
+        bid = self._eoi_bid(self.vendors[0])
+        self.assertEqual(self._decide(bid).status_code, status.HTTP_200_OK)
+        self.assertEqual(TenderBid.objects.filter(tender=self.eoi).count(), 1)
+        self.assertTrue(self.eoi.invited_vendors.filter(vendor=self.vendors[0]).exists())
+
+    def test_finalize_requires_every_response_decided(self):
+        self._decide(self._eoi_bid(self.vendors[0]))
+        self._eoi_bid(self.vendors[1])
+        response = self.client.post(f"/api/tenders/{self.eoi.id}/finalize_shortlist/", {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT, response.data)
+        self.assertEqual(response.data["pending"], ["SL Vendor 1"])
+
+    def test_finalize_enforces_shortlist_cap_unless_overridden(self):
+        Tender.objects.filter(id=self.eoi.id).update(max_vendors_to_shortlist=1)
+        self._decide(self._eoi_bid(self.vendors[0]))
+        self._decide(self._eoi_bid(self.vendors[1]))
+        url = f"/api/tenders/{self.eoi.id}/finalize_shortlist/"
+        self.assertEqual(self.client.post(url, {}, format="json").status_code, status.HTTP_400_BAD_REQUEST)
+        response = self.client.post(url, {"override_reason": "Both scored equally."}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+
+    def test_finalize_freezes_shortlist_closes_eoi_and_notifies_everyone(self):
+        # A vendor hand-invited earlier but never shortlisted must not survive finalize.
+        TenderInvitedVendor.objects.create(tender=self.eoi, vendor=self.vendors[2])
+        eoi = self._finalized_eoi()
+        self.assertIsNotNone(eoi.shortlist_finalized_at)
+        self.assertEqual(eoi.status, TenderStatus.CLOSED)
+        self.assertEqual(set(eoi.invited_vendors.values_list("vendor_id", flat=True)), {self.vendors[0].id})
+        self.assertTrue(Notification.objects.filter(recipient_id=str(self.vendors[0].id), event="eoi_shortlist_confirmed").exists())
+        self.assertTrue(Notification.objects.filter(recipient_id=str(self.vendors[1].id), event="eoi_not_shortlisted").exists())
+        late = self._eoi_bid(self.vendors[2])
+        self.assertEqual(self._decide(late).status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_tender_can_only_link_a_finalized_eoi(self):
+        response = self.client.post("/api/tenders/", self._linked_payload(), format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST, response.data)
+        self.assertIn("linked_eoi_tender", response.data)
+        candidates = self.client.get("/api/tenders/eoi_invite_candidates/").data
+        self.assertNotIn(str(self.eoi.id), [c["id"] for c in candidates])
+
+        self._finalized_eoi()
+        candidates = self.client.get("/api/tenders/eoi_invite_candidates/").data
+        self.assertIn(str(self.eoi.id), [c["id"] for c in candidates])
+        response = self.client.post("/api/tenders/", self._linked_payload(), format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        linked = Tender.objects.get(id=response.data["id"])
+        self.assertEqual(set(linked.invited_vendors.values_list("vendor_id", flat=True)), {self.vendors[0].id})
+
+    def test_linked_tender_roster_cannot_be_hand_edited(self):
+        self._finalized_eoi()
+        linked_id = self.client.post("/api/tenders/", self._linked_payload(), format="json").data["id"]
+        for tender_id in (linked_id, self.eoi.id):
+            response = self.client.post(
+                f"/api/tenders/{tender_id}/invited_vendors/", {"vendor_ids": [str(self.vendors[2].id)]}, format="json",
+            )
+            self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST, response.data)
+
+    @patch("rbf.tenders.views.NotificationService.dispatch_email", return_value=1)
+    @patch("rbf.tenders.views.email_configured", return_value=True)
+    def test_linked_tender_is_seen_and_announced_only_to_shortlist(self, _email_configured, _dispatch_email):
+        self._finalized_eoi()
+        linked_id = self.client.post("/api/tenders/", self._linked_payload(), format="json").data["id"]
+        Tender.objects.filter(id=linked_id).update(is_verified=True, publish_approval_status=PublishApprovalStatus.APPROVED)
+        response = self.client.post(f"/api/tenders/{linked_id}/publish/", {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertEqual(response.data["notification_summary"]["vendor_recipient_count"], 1)
+
+        shortlisted, rejected = self.vendors[0], self.vendors[1]
+        self.client.force_authenticate(rejected)
+        listing = self.client.get("/api/tenders/")
+        rows = listing.data["results"] if isinstance(listing.data, dict) else listing.data
+        self.assertNotIn(str(linked_id), [str(r["id"]) for r in rows])
+
+        self.client.force_authenticate(shortlisted)
+        detail = self.client.get(f"/api/tenders/{linked_id}/")
+        self.assertEqual(detail.status_code, status.HTTP_200_OK, detail.data)
+        self.assertNotIn("invited_vendors", detail.data)
+        self.assertNotIn("bid_count", detail.data)

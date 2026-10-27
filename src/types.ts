@@ -263,6 +263,8 @@ export interface Tender {
   digitalSignatureRequired?: boolean;
   // EOI Invite-only, advisory (never enforced against actual shortlist size).
   maxVendorsToShortlist?: number;
+  // Set once an EOI Invite's shortlist is frozen; only then can it be linked to a tender.
+  shortlistFinalizedAt?: string;
   advertisementChannels?: string[];
   contactDetails?: string;
   technologyTypes?: string[];

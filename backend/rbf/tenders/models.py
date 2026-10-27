@@ -176,6 +176,12 @@ class Tender(models.Model):
     # EOI Invite-only concepts. Advisory: never enforced against the actual number of
     # vendors shortlisted during EOI Review.
     max_vendors_to_shortlist = models.PositiveIntegerField(null=True, blank=True)
+    # Set on an EOI Invite by TenderViewSet.finalize_shortlist once the EOI window is
+    # over and every response is decided. From then on the shortlist (its ACCEPTED EOI
+    # bids, mirrored into invited_vendors) is frozen, and only a finalized EOI Invite
+    # can be linked to the actual tender.
+    shortlist_finalized_at = models.DateTimeField(null=True, blank=True)
+    shortlist_finalized_by = models.CharField(max_length=255, blank=True)
     advertisement_channels = models.JSONField(default=list, blank=True)
     contact_details = models.CharField(max_length=255, blank=True)
     governing_documents = models.JSONField(default=list, blank=True)

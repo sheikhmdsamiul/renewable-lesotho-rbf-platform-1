@@ -441,6 +441,7 @@ function mapTenderFromApi(api: any): Tender {
     submissionMethod: api.submission_method ?? undefined,
     digitalSignatureRequired: api.digital_signature_required ?? undefined,
     maxVendorsToShortlist: api.max_vendors_to_shortlist != null ? Number(api.max_vendors_to_shortlist) : undefined,
+    shortlistFinalizedAt: api.shortlist_finalized_at ?? undefined,
     advertisementChannels: Array.isArray(api.advertisement_channels) ? api.advertisement_channels : undefined,
     contactDetails: api.contact_details ?? undefined,
     technologyTypes: api.technology_types ?? undefined,
@@ -2653,6 +2654,27 @@ export async function updateCoolingOff(
   const data = await http<any>(`/api/tenders/${tenderId}/update_cooling_off/`, {
     method: "POST",
     body: JSON.stringify(payload),
+  });
+  return mapTenderFromApi(data);
+}
+
+// Extends the deadline of the stage that is currently open (EOI, or the Combined
+// submission). The backend refuses to shorten it, to overlap the next stage, or to
+// touch any other field, and notifies the vendors following the tender.
+export async function extendTenderDeadline(tenderId: string, deadline: string): Promise<Tender> {
+  const data = await http<any>(`/api/tenders/${tenderId}/extend_deadline/`, {
+    method: "POST",
+    body: JSON.stringify({ deadline }),
+  });
+  return mapTenderFromApi(data);
+}
+
+// Freezes an EOI Invite's shortlist (EOI deadline passed, every response decided).
+// overrideReason is required only when more vendors are shortlisted than the cap.
+export async function finalizeEoiShortlist(tenderId: string, overrideReason?: string): Promise<Tender> {
+  const data = await http<any>(`/api/tenders/${tenderId}/finalize_shortlist/`, {
+    method: "POST",
+    body: JSON.stringify(overrideReason ? { override_reason: overrideReason } : {}),
   });
   return mapTenderFromApi(data);
 }
