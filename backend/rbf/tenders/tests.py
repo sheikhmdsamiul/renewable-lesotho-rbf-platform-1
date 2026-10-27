@@ -8474,3 +8474,23 @@ class BidDeadlineAndWithdrawalTests(APITestCase):
             Notification.objects.filter(recipient_id=str(self.vendor.id), event="tender_deadline_reminder", linked_entity_id=str(soon.id)).count(),
             1,
         )
+
+
+class PublicTenderDisclosureTests(APITestCase):
+    """Anonymous public-portal visitors see only what a vendor would: no confidential
+    budget and no competition counts."""
+
+    def test_anonymous_listing_hides_confidential_budget_and_counts(self):
+        Tender.objects.create(
+            reference_number="PUB-001", name="Public Tender", department="Department of Energy",
+            category="SHS", status=TenderStatus.PUBLISHED, deadline=timezone.now() + timedelta(days=10),
+            technology_types=["SHS"], procurement_workflow="combined", procurement_method="Open Tendering",
+            technical_deadline=timezone.now() + timedelta(days=10), budget=Decimal("500000.00"),
+            budget_disclosure="confidential",
+        )
+        response = self.client.get("/api/tenders/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        rows = response.data["results"] if isinstance(response.data, dict) else response.data
+        row = next(r for r in rows if r["reference_number"] == "PUB-001")
+        self.assertNotIn("budget", row)
+        self.assertNotIn("bid_count", row)

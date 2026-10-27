@@ -399,18 +399,22 @@ import { toCsv } from "./csv";
 import { ResultsFramework } from "./components/ResultsFramework";
 import { ReportSchedules } from "./components/ReportSchedules";
 
-const getTenderDeadlineDefault = () => {
-  const deadline = new Date();
-  deadline.setDate(deadline.getDate() + 14);
+// <input type="datetime-local"> works in the browser's local time without a zone;
+// tender dates are stored as full ISO timestamps so the time of day is never lost.
+const toDateTimeLocalValue = (iso?: string | null): string => {
+  if (!iso) return "";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
   const pad = (value: number) => String(value).padStart(2, "0");
-  return `${deadline.getFullYear()}-${pad(deadline.getMonth() + 1)}-${pad(deadline.getDate())}`;
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 };
+const fromDateTimeLocalValue = (value: string): string => (value ? new Date(value).toISOString() : "");
 
-const summarizeLotOffers = (bid?: { lot_offers?: TenderBidLotOffer[] } | null): string | null => {
+const summarizeLotOffers = (bid?: { lot_offers?: TenderBidLotOffer[]; bid_currency?: string } | null): string | null => {
   const offers = bid?.lot_offers;
   if (!Array.isArray(offers) || offers.length === 0) return null;
   const total = offers.reduce((sum, o) => sum + Number(o.bid_amount || 0), 0);
-  return `${offers.length} lot${offers.length === 1 ? "" : "s"} • M ${total.toLocaleString()}`;
+  return `${offers.length} lot${offers.length === 1 ? "" : "s"} • ${bid?.bid_currency || "LSL"} ${total.toLocaleString()}`;
 };
 
 // --- Components ---
@@ -2564,7 +2568,9 @@ const Tenders = ({
     currencyRates: {},
     budget: 0,
     procurementWorkflow: "combined",
-    eoiDeadline: getTenderDeadlineDefault(),
+    // No EOI deadline by default: single-stage Combined has no EOI stage, and an
+    // invisible default would silently turn it into a two-stage tender.
+    eoiDeadline: "",
     technicalDeadline: "",
     financialDeadline: "",
     technologyTypes: [],
@@ -2606,6 +2612,7 @@ const Tenders = ({
   };
   const [formData, setFormData] = useState<Partial<Tender>>(defaultFormData);
   const [eoiInviteCandidates, setEoiInviteCandidates] = useState<EoiInviteCandidate[]>([]);
+  const [eoiInviteCandidatesError, setEoiInviteCandidatesError] = useState<string | null>(null);
   // The Start screen sets this just before navigating to "create" when the user picks
   // "From an EOI Invite" — the initialView sync effect below (which resets formData
   // whenever the URL-driven view becomes "create") reads it once and clears it, so it
@@ -2618,9 +2625,15 @@ const Tenders = ({
     (async () => {
       try {
         const candidates = await fetchEoiInviteCandidates();
-        if (!cancelled) setEoiInviteCandidates(candidates);
-      } catch {
-        if (!cancelled) setEoiInviteCandidates([]);
+        if (!cancelled) {
+          setEoiInviteCandidates(candidates);
+          setEoiInviteCandidatesError(null);
+        }
+      } catch (err: any) {
+        if (!cancelled) {
+          setEoiInviteCandidates([]);
+          setEoiInviteCandidatesError(err?.message || "Could not load EOI Invites.");
+        }
       }
     })();
     return () => { cancelled = true; };
@@ -2706,7 +2719,7 @@ const Tenders = ({
     currencyRates: tender.currencyRates ?? {},
     budget: tender.budget ?? 0,
     procurementWorkflow: tender.procurementWorkflow ?? "eoi_combined",
-    eoiDeadline: tender.eoiDeadline ?? tender.deadline ?? getTenderDeadlineDefault(),
+    eoiDeadline: tender.eoiDeadline ?? "",
     technicalDeadline: tender.technicalDeadline ?? "",
     financialDeadline: tender.financialDeadline ?? "",
     technologyTypes: tender.technologyTypes ?? [],
@@ -3238,6 +3251,28 @@ const Tenders = ({
     }
     if (workflow === "combined" || workflow === "eoi_combined") {
       payload.financialDeadline = "";
+    }
+    // Single-stage Combined and tenders linked to an EOI Invite have no EOI stage of
+    // their own, so never send an EOI deadline for them.
+    if (workflow === "combined" || payload.linkedEoiTenderId) {
+      payload.eoiDeadline = "";
+    }
+    const now = Date.now();
+    const eoiTime = payload.eoiDeadline ? new Date(payload.eoiDeadline).getTime() : null;
+    const combinedTime = payload.technicalDeadline ? new Date(payload.technicalDeadline).getTime() : null;
+    if ((eoiTime !== null && eoiTime <= now) || (combinedTime !== null && combinedTime <= now)) {
+      setTenderError("Submission deadlines must be in the future.");
+      return;
+    }
+    if (eoiTime !== null && combinedTime !== null && combinedTime <= eoiTime) {
+      setTenderError("The Combined submission deadline must be after the EOI deadline.");
+      return;
+    }
+    const lastSubmissionTime = combinedTime ?? eoiTime;
+    const clarificationTime = payload.clarificationDeadline ? new Date(payload.clarificationDeadline).getTime() : null;
+    if (clarificationTime !== null && lastSubmissionTime !== null && clarificationTime >= lastSubmissionTime) {
+      setTenderError("The clarification deadline must be before the submission deadline.");
+      return;
     }
     try {
       setTenderError(null);
@@ -3784,7 +3819,9 @@ const Tenders = ({
           </button>
           <button
             onClick={() => {
-              if (!eoiInviteCandidates.length) return;
+              // With several finalized EOI Invites the user must pick one from the list
+              // below; only an unambiguous single candidate is chosen from the card.
+              if (eoiInviteCandidates.length !== 1) return;
               const candidate = eoiInviteCandidates[0];
               pendingCreateSeedRef.current = { linkedEoiTenderId: candidate.id, name: candidate.name };
               navigateView("create");
@@ -3799,8 +3836,10 @@ const Tenders = ({
               )}
             </div>
             <p className="text-sm text-slate-500 mb-2">Restrict bidding to an already-shortlisted vendor pool.</p>
-            {eoiInviteCandidates.length === 0 ? (
-              <p className="text-xs text-slate-400">No shortlisted EOI Invites available yet.</p>
+            {eoiInviteCandidatesError ? (
+              <p className="text-xs text-red-600">{eoiInviteCandidatesError}</p>
+            ) : eoiInviteCandidates.length === 0 ? (
+              <p className="text-xs text-slate-400">No EOI Invites with a finalized shortlist yet.</p>
             ) : (
               <div className="space-y-1.5">
                 {eoiInviteCandidates.map((c) => (
@@ -4176,9 +4215,9 @@ const Tenders = ({
                   {formData.procurementWorkflow !== "combined" && !formData.linkedEoiTenderId && (
                     <Field label="Stage 1: EOI Deadline" required accent={TEAL}>
                       <TextInput
-                        type="date"
-                        value={formData.eoiDeadline ? formData.eoiDeadline.split('T')[0] : ""}
-                        onChange={(e) => setFormData(prev => ({ ...prev, eoiDeadline: e.target.value }))}
+                        type="datetime-local"
+                        value={toDateTimeLocalValue(formData.eoiDeadline)}
+                        onChange={(e) => setFormData(prev => ({ ...prev, eoiDeadline: fromDateTimeLocalValue(e.target.value) }))}
                       />
                     </Field>
                   )}
@@ -4190,9 +4229,9 @@ const Tenders = ({
                   )}
                   <Field label={formData.procurementWorkflow === "sequential" ? "Stage 2: Technical Deadline" : "Combined Submission Deadline"} required accent={TEAL}>
                     <TextInput
-                      type="date"
-                      value={formData.technicalDeadline ? formData.technicalDeadline.split('T')[0] : ""}
-                      onChange={(e) => setFormData(prev => ({ ...prev, technicalDeadline: e.target.value }))}
+                      type="datetime-local"
+                      value={toDateTimeLocalValue(formData.technicalDeadline)}
+                      onChange={(e) => setFormData(prev => ({ ...prev, technicalDeadline: fromDateTimeLocalValue(e.target.value) }))}
                     />
                   </Field>
                 </div>
@@ -4203,16 +4242,16 @@ const Tenders = ({
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-2">
                   <Field label="Clarification / Query Deadline" accent={TEAL} help={{ text: "Last date bidders may submit written questions." }}>
                     <TextInput
-                      type="date"
-                      value={formData.clarificationDeadline ? formData.clarificationDeadline.split('T')[0] : ""}
-                      onChange={(e) => setFormData(prev => ({ ...prev, clarificationDeadline: e.target.value }))}
+                      type="datetime-local"
+                      value={toDateTimeLocalValue(formData.clarificationDeadline)}
+                      onChange={(e) => setFormData(prev => ({ ...prev, clarificationDeadline: fromDateTimeLocalValue(e.target.value) }))}
                     />
                   </Field>
                   <Field label="Site Visit Date" accent={TEAL}>
                     <TextInput
-                      type="date"
-                      value={formData.siteVisitDate ? formData.siteVisitDate.split('T')[0] : ""}
-                      onChange={(e) => setFormData(prev => ({ ...prev, siteVisitDate: e.target.value }))}
+                      type="datetime-local"
+                      value={toDateTimeLocalValue(formData.siteVisitDate)}
+                      onChange={(e) => setFormData(prev => ({ ...prev, siteVisitDate: fromDateTimeLocalValue(e.target.value) }))}
                     />
                   </Field>
                   <Field label="Bid Validity Period (Days)" accent={TEAL} help={{ text: "How long bidders' prices stay binding, counted from the submission deadline." }}>
@@ -7046,7 +7085,7 @@ const Tenders = ({
                               <div className="flex items-center justify-between gap-3">
                                 <div>
                                   <p className="font-semibold text-slate-900">{row.vendor_name}</p>
-                                  <p className="text-slate-500">Bid Amount: {row.bid_amount ? `LSL ${Number(row.bid_amount).toLocaleString()}` : "N/A"}</p>
+                                  <p className="text-slate-500">Bid Amount: {row.bid_amount ? `${row.bid_currency || selectedTender.biddingCurrency || "LSL"} ${Number(row.bid_amount).toLocaleString()}` : "N/A"}</p>
                                 </div>
                                 <div className="text-right">
                                   <p className="font-semibold text-slate-900">Rank {row.rank}</p>
@@ -11032,11 +11071,25 @@ const VendorTenders = ({ onSubmitTender, onNavigate }: { onSubmitTender?: (tende
               <Download size={15} />
               Download PDF
             </button>
-            {onSubmitTender && (
-              <button onClick={() => onSubmitTender(selectedTender.id)} className="btn-primary">
-                Submit Proposal
-              </button>
-            )}
+            {onSubmitTender && (() => {
+              // The vendor can only open the tender's current stage: the EOI on an EOI
+              // Invite, otherwise the Combined submission (falling back to the overall deadline).
+              const openStageDeadline = selectedTender.isEoiInviteOnly
+                ? selectedTender.eoiDeadline
+                : selectedTender.technicalDeadline || selectedTender.deadline;
+              const closed = selectedTender.status !== TenderStatus.PUBLISHED
+                || Boolean(openStageDeadline && new Date(openStageDeadline).getTime() <= Date.now());
+              return (
+                <button
+                  onClick={() => onSubmitTender(selectedTender.id)}
+                  disabled={closed}
+                  className="btn-primary disabled:opacity-40"
+                  title={closed ? "The submission deadline has passed." : undefined}
+                >
+                  {closed ? "Submissions closed" : "Submit Proposal"}
+                </button>
+              );
+            })()}
           </div>
         </div>
 
@@ -11584,14 +11637,21 @@ const VendorEoiInvites = ({ onSubmitEoi }: { onSubmitEoi: (tenderId: string) => 
   const [selected, setSelected] = useState<Tender | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [alreadySubmitted, setAlreadySubmitted] = useState(false);
+  // The vendor's own EOI outcome on the selected invite (Submitted / Accepted = shortlisted
+  // / Rejected / Revision Required), so they are never left guessing.
+  const [ownEoiStatus, setOwnEoiStatus] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const perPage = 10;
 
   const loadInvites = React.useCallback(async () => {
     setIsLoading(true);
+    setLoadError(null);
     try {
       const rows = await fetchTenders();
       setInvites(rows.filter(t => t.isEoiInviteOnly && t.status === TenderStatus.PUBLISHED));
+    } catch (err: any) {
+      setLoadError(err?.message || "Could not load EOI Invites.");
     } finally {
       setIsLoading(false);
     }
@@ -11602,13 +11662,18 @@ const VendorEoiInvites = ({ onSubmitEoi }: { onSubmitEoi: (tenderId: string) => 
   const openDetail = async (tender: Tender) => {
     setSelected(tender);
     setAlreadySubmitted(false);
+    setOwnEoiStatus(null);
     // The list endpoint (TenderListSerializer) omits instruction/biddersEligibility/
     // contactDetails/approximateInstallationTarget — fetch the full detail so this
     // screen has everything it needs to show.
     fetchTender(tender.id).then(full => setSelected(full)).catch(() => {});
     try {
       const bids = await fetchTenderBids(tender.id);
-      setAlreadySubmitted(bids.some(b => (b.bid_stage || "eoi") === "eoi" && b.status !== BidStatus.DRAFT));
+      const ownEoi = bids
+        .filter(b => (b.bid_stage || "eoi") === "eoi" && b.status !== BidStatus.DRAFT && b.status !== BidStatus.WITHDRAWN)
+        .sort((a, b) => (b.version_number || 0) - (a.version_number || 0))[0];
+      setAlreadySubmitted(Boolean(ownEoi) && ownEoi.status !== BidStatus.REVISION_REQUIRED);
+      setOwnEoiStatus(ownEoi?.status ?? null);
     } catch {
       // If this fails, the "Submit" button just stays enabled — the backend still
       // enforces the one-submission-per-tender rule at creation time regardless.
@@ -11620,6 +11685,13 @@ const VendorEoiInvites = ({ onSubmitEoi }: { onSubmitEoi: (tenderId: string) => 
 
   if (selected) {
     const daysLeft = selected.eoiDeadline ? Math.ceil((new Date(selected.eoiDeadline).getTime() - Date.now()) / (1000 * 60 * 60 * 24)) : null;
+    const windowClosed = Boolean(selected.eoiDeadline && new Date(selected.eoiDeadline).getTime() <= Date.now());
+    const ownStatusLabel =
+      ownEoiStatus === BidStatus.ACCEPTED ? "You have been shortlisted"
+      : ownEoiStatus === BidStatus.REJECTED ? "Not shortlisted"
+      : ownEoiStatus === BidStatus.REVISION_REQUIRED ? "Revision requested — please resubmit"
+      : ownEoiStatus ? "EOI submitted — awaiting shortlisting"
+      : null;
     return (
       <FormKitShell>
         <Crumb onBack={() => setSelected(null)} trail="EOI Invites" />
@@ -11628,11 +11700,14 @@ const VendorEoiInvites = ({ onSubmitEoi }: { onSubmitEoi: (tenderId: string) => 
             <h1 className="text-2xl font-bold text-slate-900">{selected.name}</h1>
             <span className="font-mono text-xs text-slate-500 bg-slate-100 rounded px-1.5 py-0.5">{selected.referenceNumber}</span>
           </div>
-          <StatusChip color={AMBER} bg={AMBER_SOFT}>Open for submissions</StatusChip>
+          <StatusChip color={AMBER} bg={AMBER_SOFT}>{windowClosed ? "Submissions closed" : "Open for submissions"}</StatusChip>
         </div>
         <p className="text-sm text-slate-500 mb-5">
-          {selected.eoiDeadline ? `Deadline ${new Date(selected.eoiDeadline).toLocaleDateString()}${daysLeft !== null && daysLeft >= 0 ? ` · ${daysLeft} day${daysLeft === 1 ? "" : "s"} left` : ""}` : "No deadline set"}
+          {selected.eoiDeadline ? `Deadline ${new Date(selected.eoiDeadline).toLocaleString()}${!windowClosed && daysLeft !== null ? ` · ${daysLeft} day${daysLeft === 1 ? "" : "s"} left` : ""}` : "No deadline set"}
         </p>
+        {ownStatusLabel && (
+          <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-700 mb-5">{ownStatusLabel}</div>
+        )}
 
         <div className="card p-6 md:p-8 space-y-6">
           <div>
@@ -11670,11 +11745,11 @@ const VendorEoiInvites = ({ onSubmitEoi }: { onSubmitEoi: (tenderId: string) => 
 
           <div className="flex justify-end">
             <button
-              disabled={alreadySubmitted}
+              disabled={alreadySubmitted || windowClosed}
               onClick={() => onSubmitEoi(selected.id)}
               className="btn-primary disabled:opacity-50"
             >
-              {alreadySubmitted ? "Already Submitted" : "Submit Expression of Interest"}
+              {alreadySubmitted ? "Already Submitted" : windowClosed ? "Submissions closed" : "Submit Expression of Interest"}
             </button>
           </div>
         </div>
@@ -11688,7 +11763,8 @@ const VendorEoiInvites = ({ onSubmitEoi }: { onSubmitEoi: (tenderId: string) => 
       <p className="text-sm text-slate-500 mb-6">Open calls for Expression of Interest — respond to be considered for a future tender's shortlisted vendor pool.</p>
 
       {isLoading && <p className="text-sm text-slate-500">Loading EOI Invites...</p>}
-      {!isLoading && invites.length === 0 && (
+      {loadError && <p className="text-sm text-red-600 mb-3">{loadError}</p>}
+      {!isLoading && !loadError && invites.length === 0 && (
         <div className="card p-6 text-center text-sm text-slate-500">No EOI Invites are open right now. Check back later.</div>
       )}
 
@@ -14177,12 +14253,24 @@ const VendorDashboard = ({
     const normalized = String(tech || "").toLowerCase();
     return normalized === "gmg" || normalized.includes("mini-grid") || normalized.includes("mini grid");
   }) || String(bidTender?.category || "").toLowerCase().includes("mini-grid") || String(bidTender?.category || "").toLowerCase().includes("mini grid");
-  const bidDeadlineLabel = bidTender?.deadline || "";
+  // The deadline that binds the stage being worked on (the overall tender deadline is the
+  // latest of all stages, so it would overstate the time left during the EOI stage).
+  const bidDeadlineLabel = (
+    currentBidStage === "eoi" ? bidTender?.eoiDeadline
+      : currentBidStage === "financial" ? bidTender?.financialDeadline
+      : bidTender?.technicalDeadline
+  ) || bidTender?.deadline || "";
+  const [deadlineClock, setDeadlineClock] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setDeadlineClock(Date.now()), 30000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const bidDeadlinePassed = Boolean(bidDeadlineLabel) && Date.parse(bidDeadlineLabel) <= deadlineClock;
   const bidDeadlineCountdown = useMemo(() => {
     if (!bidDeadlineLabel) return "Deadline unavailable";
     const deadlineMs = Date.parse(bidDeadlineLabel);
     if (Number.isNaN(deadlineMs)) return "Deadline unavailable";
-    const diffMs = deadlineMs - Date.now();
+    const diffMs = deadlineMs - deadlineClock;
     if (diffMs <= 0) return "Deadline passed";
     const totalMinutes = Math.floor(diffMs / 60000);
     const days = Math.floor(totalMinutes / (60 * 24));
@@ -14191,7 +14279,7 @@ const VendorDashboard = ({
     if (days > 0) return `${days}d ${hours}h ${minutes}m remaining`;
     if (hours > 0) return `${hours}h ${minutes}m remaining`;
     return `${minutes}m remaining`;
-  }, [bidDeadlineLabel]);
+  }, [bidDeadlineLabel, deadlineClock]);
    // Required documents are no longer a fixed, hardcoded checklist per stage — they come
    // entirely from what the RBF Admin configured for this tender (TenderRequiredDocument).
    // A document with a field_key binds to one of TenderBid's structured file fields (so
@@ -14920,6 +15008,16 @@ const VendorDashboard = ({
     }
     if (vendorRestricted) {
       setBidMessage(vendorRestrictionMessage);
+      return;
+    }
+    if (bidDeadlinePassed) {
+      setBidMessage("The submission deadline for this stage has passed. No further changes can be submitted.");
+      return;
+    }
+    if (status === BidStatus.DRAFT && editingBidStatus === BidStatus.SUBMITTED) {
+      // Any change to a submitted bid is a new submitted version on the server; there is
+      // no "save as draft" for it (withdraw it from My Bids instead).
+      setBidMessage("This bid is already submitted. Use Submit to send a revised version, or withdraw it from My Bids.");
       return;
     }
     if (status === BidStatus.SUBMITTED) {
@@ -26218,7 +26316,7 @@ export const TACView = ({ mode, onNavigate, initialTenderId }: { mode: "technica
 
               <div className="space-y-6">
                 <div className="card p-5">
-                  <h3 className="text-base font-bold text-slate-900">Financial Summary</h3>
+                  <h3 className="text-base font-bold text-slate-900">Indicative Pricing</h3>
                   <p className="text-xs text-slate-500 mb-4">Indicative only — not binding. The final price is locked in at the Financial stage.</p>
                   {Array.isArray(selectedEval.bid.lot_offers) && selectedEval.bid.lot_offers.length > 0 ? (
                     <div className="space-y-3 text-sm">
@@ -26229,22 +26327,22 @@ export const TACView = ({ mode, onNavigate, initialTenderId }: { mode: "technica
                         return (
                           <div key={offer.lot ?? i} className="rounded-lg border border-slate-100 bg-slate-50 p-3 space-y-1">
                             <p className="font-semibold text-slate-900">{offer.lot_name || `Lot ${i + 1}`}</p>
-                            <div className="flex justify-between"><span className="text-slate-500">Indicative Bid Amount</span><span className="font-medium text-slate-900">LSL {offerAmount.toLocaleString()}</span></div>
-                            <div className="flex justify-between"><span className="text-slate-500">Indicative Subsidy Requested</span><span className="font-medium text-slate-900">LSL {offerSubsidy.toLocaleString()}</span></div>
+                            <div className="flex justify-between"><span className="text-slate-500">Indicative Bid Amount</span><span className="font-medium text-slate-900">{selectedEval.bid.bid_currency || "LSL"} {offerAmount.toLocaleString()}</span></div>
+                            <div className="flex justify-between"><span className="text-slate-500">Indicative Subsidy Requested</span><span className="font-medium text-slate-900">{selectedEval.bid.bid_currency || "LSL"} {offerSubsidy.toLocaleString()}</span></div>
                           </div>
                         );
                       })}
                       <div className="flex justify-between border-t border-slate-100 pt-2 font-bold text-slate-900">
                         <span>Total ({selectedEval.bid.lot_offers.length} lots)</span>
-                        <span>LSL {selectedEval.bid.lot_offers.reduce((sum, o) => sum + Number(o.bid_amount || 0), 0).toLocaleString()}</span>
+                        <span>{selectedEval.bid.bid_currency || "LSL"} {selectedEval.bid.lot_offers.reduce((sum, o) => sum + Number(o.bid_amount || 0), 0).toLocaleString()}</span>
                       </div>
                     </div>
                   ) : (
                     <div className="space-y-2 text-sm">
-                      <div className="flex justify-between"><span className="text-slate-500">Indicative Bid Amount</span><span className="font-semibold text-slate-900">LSL {proposedBudget.toLocaleString()}</span></div>
-                      <div className="flex justify-between"><span className="text-slate-500">Indicative Subsidy Requested</span><span className="font-semibold text-slate-900">LSL {subsidyRequested.toLocaleString()}</span></div>
-                      <div className="flex justify-between"><span className="text-slate-500">Co-financing</span><span className="font-semibold text-slate-900">LSL {coFinancing.toLocaleString()}</span></div>
-                      {totalHouseholds > 0 && <div className="flex justify-between"><span className="text-slate-500">Cost/connection</span><span className="font-semibold text-slate-900">LSL {subsidyRequested > 0 ? Math.round(subsidyRequested / totalHouseholds).toLocaleString() : "—"}</span></div>}
+                      <div className="flex justify-between"><span className="text-slate-500">Indicative Bid Amount</span><span className="font-semibold text-slate-900">{selectedEval.bid.bid_currency || "LSL"} {proposedBudget.toLocaleString()}</span></div>
+                      <div className="flex justify-between"><span className="text-slate-500">Indicative Subsidy Requested</span><span className="font-semibold text-slate-900">{selectedEval.bid.bid_currency || "LSL"} {subsidyRequested.toLocaleString()}</span></div>
+                      <div className="flex justify-between"><span className="text-slate-500">Co-financing</span><span className="font-semibold text-slate-900">{selectedEval.bid.bid_currency || "LSL"} {coFinancing.toLocaleString()}</span></div>
+                      {totalHouseholds > 0 && <div className="flex justify-between"><span className="text-slate-500">Cost/connection</span><span className="font-semibold text-slate-900">{selectedEval.bid.bid_currency || "LSL"} {subsidyRequested > 0 ? Math.round(subsidyRequested / totalHouseholds).toLocaleString() : "—"}</span></div>}
                     </div>
                   )}
                 </div>
@@ -30371,10 +30469,8 @@ const NoticeBoardSection = ({ tenders }: { tenders: Tender[] }) => {
     general: { dot: "#888780", badgeBg: "#F1EFE8", badgeText: "#444441" },
   };
 
-  const mockNotices = React.useMemo<any[]>(() => [], [effectiveTenders]);
-
   const allNotices = React.useMemo(() => {
-    const merged = [...mockNotices, ...apiNotices];
+    const merged = [...apiNotices];
     const unique = merged.reduce((acc: any[], notice) => {
       if (!acc.find(n => n.id === notice.id)) {
         acc.push(notice);
@@ -30382,7 +30478,7 @@ const NoticeBoardSection = ({ tenders }: { tenders: Tender[] }) => {
       return acc;
     }, []);
     return unique.sort((a, b) => new Date(b.posted).getTime() - new Date(a.posted).getTime());
-  }, [mockNotices, apiNotices]);
+  }, [apiNotices]);
 
   const categories = ["all", "tender", "deadline", "award", "clarification", "training", "general"];
 
@@ -30669,15 +30765,16 @@ const PublicPortal = ({ onBack, onRegisterClick, publicSubView, publicTenderId, 
       const openEois = d.filter(t => t.status === "Published" && t.isEoiInviteOnly);
       openEois.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
       setEoiInvites(openEois);
-    }).catch(() => {})
+    }).catch((err) => {
+      // The public portal stays usable (empty lists) but the failure is not silent.
+      console.error("Failed to load public tenders:", err);
+    })
   }, []);
 
   React.useEffect(() => {
     const loadKpi = async () => {
       try {
-        console.log("Loading public portfolio KPI...");
         const data = await fetchPublicPortfolioKpi();
-        console.log("Public portfolio KPI data:", data);
         setKpiData(data);
       } catch (e) { console.error("Failed to load KPI:", e); }
       finally { setKpiLoading(false); }
@@ -30948,7 +31045,7 @@ const PublicPortal = ({ onBack, onRegisterClick, publicSubView, publicTenderId, 
                       {t.budget ? (
                         <div>
                           <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Budget</p>
-                          <p className="text-sm font-bold text-slate-900 mt-0.5">LSL {(t.budget / 1000).toFixed(0)}K</p>
+                          <p className="text-sm font-bold text-slate-900 mt-0.5">{t.biddingCurrency || "LSL"} {(t.budget / 1000).toFixed(0)}K</p>
                         </div>
                       ) : t.targetDistricts && t.targetDistricts.length > 0 ? (
                         <div>
@@ -31298,7 +31395,7 @@ const PublicPortal = ({ onBack, onRegisterClick, publicSubView, publicTenderId, 
                                 <span>{lot.targetDistricts.join(", ")}</span>
                               )}
                               {lot.budget != null && (
-                                <span className="font-semibold text-slate-700">LSL {Number(lot.budget).toLocaleString()}</span>
+                                <span className="font-semibold text-slate-700">{selected.biddingCurrency || "LSL"} {Number(lot.budget).toLocaleString()}</span>
                               )}
                             </div>
                           </div>
@@ -31313,7 +31410,7 @@ const PublicPortal = ({ onBack, onRegisterClick, publicSubView, publicTenderId, 
                       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                         <div className="text-center p-3 bg-white rounded-xl border border-emerald-100">
                           <p className="text-[10px] font-bold text-emerald-500 uppercase tracking-wider mb-1">Estimated Budget</p>
-                          <p className="text-lg font-black text-emerald-700">LSL {selected.budget.toLocaleString()}</p>
+                          <p className="text-lg font-black text-emerald-700">{selected.biddingCurrency || "LSL"} {selected.budget.toLocaleString()}</p>
                         </div>
                         {selected.biddingCurrency && (
                           <div className="text-center p-3 bg-white rounded-xl border border-emerald-100">
@@ -31324,7 +31421,7 @@ const PublicPortal = ({ onBack, onRegisterClick, publicSubView, publicTenderId, 
                         {selected.approximateInstallationTarget && selected.budget && (
                           <div className="text-center p-3 bg-white rounded-xl border border-emerald-100">
                             <p className="text-[10px] font-bold text-emerald-500 uppercase tracking-wider mb-1">Per Unit (Est.)</p>
-                            <p className="text-lg font-black text-emerald-700">LSL {Math.round(selected.budget / selected.approximateInstallationTarget).toLocaleString()}</p>
+                            <p className="text-lg font-black text-emerald-700">{selected.biddingCurrency || "LSL"} {Math.round(selected.budget / selected.approximateInstallationTarget).toLocaleString()}</p>
                           </div>
                         )}
                       </div>

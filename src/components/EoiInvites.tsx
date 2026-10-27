@@ -117,6 +117,8 @@ export const EoiInvites = ({
   const [existingSupportingDocName, setExistingSupportingDocName] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [editLoadFailed, setEditLoadFailed] = useState(false);
   // Super-Admin-configurable default currency, silently applied below (this
   // lightweight form has no currency picker of its own) — falls back to the
   // platform's historical default while loading / on failure.
@@ -134,9 +136,12 @@ export const EoiInvites = ({
 
   const loadTenders = React.useCallback(async () => {
     setIsLoading(true);
+    setLoadError(null);
     try {
       const all = await fetchTenders();
       setTenders(all.filter((t) => t.isEoiInviteOnly));
+    } catch (err: any) {
+      setLoadError(err?.message || "Could not load EOI Invites.");
     } finally {
       setIsLoading(false);
     }
@@ -153,6 +158,7 @@ export const EoiInvites = ({
   useEffect(() => {
     if (view !== "edit" || !initialTenderId) return;
     let cancelled = false;
+    setEditLoadFailed(false);
     (async () => {
       try {
         const tender = await fetchTender(initialTenderId);
@@ -161,8 +167,12 @@ export const EoiInvites = ({
         setExistingSupportingDocName(
           tender.governingDocuments?.find((d) => d.label === "Supporting Document")?.file_name || null
         );
-      } catch {
-        // leave the form blank; the save action will surface any real problem
+      } catch (err: any) {
+        // Never let a blank form be saved over the real EOI Invite.
+        if (!cancelled) {
+          setEditLoadFailed(true);
+          setFormError(err?.message || "Could not load this EOI Invite for editing.");
+        }
       }
     })();
     return () => {
@@ -216,6 +226,10 @@ export const EoiInvites = ({
     }
     if (!formData.eoiDeadline) {
       setFormError("Provide the Submission Deadline.");
+      return;
+    }
+    if (new Date(formData.eoiDeadline).getTime() <= Date.now()) {
+      setFormError("The Submission Deadline must be in the future.");
       return;
     }
     if (!formData.contactDetails.trim()) {
@@ -291,8 +305,9 @@ export const EoiInvites = ({
         </div>
 
         {isLoading && <p className="text-sm text-slate-500">Loading EOI Invites...</p>}
+        {loadError && <p className="text-sm text-red-600">{loadError}</p>}
 
-        {!isLoading && tenders.length === 0 && (
+        {!isLoading && !loadError && tenders.length === 0 && (
           <div className="card p-6 text-center text-sm text-slate-500">
             No EOI Invites yet. Create one to start collecting Expressions of Interest.
           </div>
@@ -300,8 +315,13 @@ export const EoiInvites = ({
 
         <div className="space-y-3">
           {paginatedTenders.map((tender) => {
+            const windowOver = Boolean(tender.eoiDeadline && new Date(tender.eoiDeadline).getTime() <= Date.now());
             const statusTone =
-              tender.status === TenderStatus.PUBLISHED
+              tender.shortlistFinalizedAt
+                ? { color: INK_SUB, bg: LOCK_BG, label: "Shortlist finalized" }
+                : tender.status === TenderStatus.PUBLISHED
+                ? { color: AMBER, bg: AMBER_SOFT, label: windowOver ? "Shortlisting" : "Open for EOIs" }
+                : tender.status === TenderStatus.CLOSED
                 ? { color: AMBER, bg: AMBER_SOFT, label: "Shortlisting" }
                 : tender.status === TenderStatus.DRAFT
                 ? { color: INK_SUB, bg: LOCK_BG, label: "Draft" }
@@ -312,13 +332,8 @@ export const EoiInvites = ({
               <button
                 key={tender.id}
                 onClick={() => onNavigate?.("details", tender.id)}
-                disabled={isAlreadyLinked}
-                title={isAlreadyLinked ? "This EOI Invite has already been used to create a tender and can no longer be converted or edited." : "Open details"}
-                className={`card w-full text-left p-4 transition-colors ${
-                  isAlreadyLinked
-                    ? "opacity-50 blur-[1px] cursor-not-allowed select-none"
-                    : "hover:bg-slate-50"
-                }`}
+                title={isAlreadyLinked ? "This EOI Invite has already been used to create a tender — open it to review the shortlist." : "Open details"}
+                className={`card w-full text-left p-4 transition-colors hover:bg-slate-50 ${isAlreadyLinked ? "opacity-70" : ""}`}
               >
                 <div className="flex items-center justify-between mb-1.5">
                   <span className="font-mono text-xs text-slate-500">{tender.referenceNumber}</span>
@@ -451,7 +466,7 @@ export const EoiInvites = ({
               onChange={(e) => setFormData((prev) => ({ ...prev, eoiDeadline: e.target.value }))}
             />
           </Field>
-          <Field label="Max Vendors to Shortlist" accent={AMBER} help={{ text: "Optional cap on how many respondents can be invited into the tender. Advisory only — never enforced." }}>
+          <Field label="Max Vendors to Shortlist" accent={AMBER} help={{ text: "Optional cap on how many respondents can be invited into the tender. Enforced when the shortlist is finalized — exceeding it needs a recorded reason." }}>
             <TextInput
               type="number"
               min={1}
@@ -490,10 +505,10 @@ export const EoiInvites = ({
 
         <div className="flex items-center justify-end gap-3 pt-4 mt-2 border-t border-slate-100">
           {view === "edit" && formData.status !== TenderStatus.DRAFT ? (
-            <button disabled={isSaving} onClick={() => save(false)} className="btn-primary disabled:opacity-50">
-              {isSaving ? "Saving..." : "Save Changes"}
-            </button>
-          ) : (
+            <p className="text-sm text-slate-500">
+              This EOI Invite has been published and its terms are locked, so every respondent is judged against the same call.
+            </p>
+          ) : editLoadFailed ? null : (
             <>
               <button disabled={isSaving} onClick={() => save(false)} className="btn-secondary disabled:opacity-50">
                 {isSaving ? "Saving..." : "Save Draft"}

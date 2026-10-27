@@ -1834,9 +1834,14 @@ class TenderListSerializer(serializers.ModelSerializer):
     def to_representation(self, instance):
         data = super().to_representation(instance)
         request = self.context.get('request')
-        if request and getattr(request.user, 'role', None) == UserRole.VENDOR:
-            if instance.budget_disclosure != BudgetDisclosure.PUBLISHED:
-                data.pop('budget', None)
+        # Vendors and anonymous public-portal visitors (internal callers pass no request
+        # and see everything).
+        is_public_viewer = request is not None and (
+            not request.user.is_authenticated or getattr(request.user, 'role', None) == UserRole.VENDOR
+        )
+        if is_public_viewer and instance.budget_disclosure != BudgetDisclosure.PUBLISHED:
+            data.pop('budget', None)
+        if is_public_viewer:
             # How many others bid or were invited is competitive information.
             data.pop('bid_count', None)
             data.pop('invited_vendor_count', None)
@@ -2404,11 +2409,14 @@ class TenderSerializer(serializers.ModelSerializer):
         if requester_role in (UserRole.ADMIN, UserRole.RBF_OFFICIAL):
             invited_vendors_qs = instance.invited_vendors.select_related('vendor', 'invited_by').all()
             data['invited_vendors'] = TenderInvitedVendorSerializer(invited_vendors_qs, many=True, context=self.context).data
-        elif requester_role == UserRole.VENDOR:
-            # Competitive / internal information a bidder must not see.
+        elif requester_role == UserRole.VENDOR or (request is not None and not request.user.is_authenticated):
+            # Competitive / internal information a bidder (or the public) must not see.
             for field in ('invited_vendor_count', 'bid_count', 'evaluation_comment', 'evaluation_comment_author'):
                 data.pop(field, None)
-        if requester_role == UserRole.VENDOR and instance.budget_disclosure != BudgetDisclosure.PUBLISHED:
+        # Vendors and anonymous public-portal visitors only see a budget the RBF chose
+        # to publish.
+        is_public_viewer = request is not None and (requester_role == UserRole.VENDOR or not request.user.is_authenticated)
+        if is_public_viewer and instance.budget_disclosure != BudgetDisclosure.PUBLISHED:
             data.pop('budget', None)
             for lot in data.get('lots') or []:
                 lot.pop('budget', None)
