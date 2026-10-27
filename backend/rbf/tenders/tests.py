@@ -41,6 +41,7 @@ from .models import (
     EvaluationConflictOfInterest,
     PublishApprovalStatus,
     TenderInvitedVendor,
+    TenderBidSubmissionSnapshot,
 )
 from .pba_pdf import _annex_section_html, _main_agreement_html, _pdfa_merge, generate_contract_pdf
 from .serializers import IntentToAwardRequestSerializer, TenderBidSiteSerializer, TenderContractSerializer
@@ -8376,3 +8377,100 @@ class EoiShortlistWorkflowTests(APITestCase):
         self.assertEqual(detail.status_code, status.HTTP_200_OK, detail.data)
         self.assertNotIn("invited_vendors", detail.data)
         self.assertNotIn("bid_count", detail.data)
+
+
+class BidDeadlineAndWithdrawalTests(APITestCase):
+    """Deadlines bind every tender, every submitted version is kept, vendors can
+    withdraw before the deadline, and the scheduler sweep closes and reminds."""
+
+    def setUp(self):
+        self.vendor = User.objects.create_user(
+            username="dl_vendor", password="securePass123", role=UserRole.VENDOR,
+            status="Active", full_name="DL Vendor", email="dl-vendor@example.com",
+        )
+        VendorPrequalification.objects.create(
+            vendor=self.vendor, company_name="DL Vendor Ltd", status=PrequalificationStatus.APPROVED, tech_tier="Level 3",
+        )
+        self.rmt_user = User.objects.create_user(
+            username="dl_rmt", password="securePass123", role=UserRole.RBF_OFFICIAL,
+            status="Active", full_name="DL RMT", email="dl-rmt@example.com",
+        )
+        self.eoi = self._tender("DL-EOI-001")
+        self.client.force_authenticate(self.vendor)
+
+    def _tender(self, ref, deadline_in=timedelta(days=5), **overrides):
+        fields = dict(
+            reference_number=ref, name=f"Tender {ref}", department="Department of Energy", category="SHS",
+            status=TenderStatus.PUBLISHED, deadline=timezone.now() + deadline_in, technology_types=["SHS"],
+            procurement_workflow="eoi_combined", procurement_method="Restricted Tendering",
+            is_eoi_invite_only=True, eoi_deadline=timezone.now() + deadline_in,
+        )
+        fields.update(overrides)
+        return Tender.objects.create(**fields)
+
+    def _eoi_bid(self, tender=None, bid_status=BidStatus.DRAFT):
+        return TenderBid.objects.create(
+            tender=tender or self.eoi, vendor_id=str(self.vendor.id), vendor_name=self.vendor.full_name,
+            vendor_email=self.vendor.email, bid_stage="eoi", stage="EOI",
+            eoi_narrative="Expression of interest for community clean energy installations. " * 16,
+            female_target_pct=55, vulnerable_target_pct=35, low_income_target_pct=60,
+            inclusion_commitment_confirmed=True, version_number=1, status=bid_status,
+        )
+
+    def test_deadline_binds_access_window_tenders_too(self):
+        tender = self._tender("DL-ACC-001", deadline_in=-timedelta(hours=1), application_type="Access Window")
+        bid = self._eoi_bid(tender)
+        response = self.client.post(f"/api/tender-bids/{bid.id}/submit/")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST, response.data)
+        self.assertIn("deadline", str(response.data).lower())
+
+    def test_revising_a_submitted_bid_is_a_new_version_with_history(self):
+        bid = self._eoi_bid()
+        self.assertEqual(self.client.post(f"/api/tender-bids/{bid.id}/submit/").status_code, status.HTTP_200_OK)
+        revised = "Revised expression of interest covering more districts. " * 16
+        response = self.client.patch(f"/api/tender-bids/{bid.id}/", {"eoi_narrative": revised}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        bid.refresh_from_db()
+        self.assertEqual(bid.status, BidStatus.SUBMITTED)
+        self.assertEqual(bid.version_number, 3)
+
+        history = self.client.get(f"/api/tender-bids/{bid.id}/submission_history/")
+        self.assertEqual(history.status_code, status.HTTP_200_OK, history.data)
+        self.assertEqual([h["version_number"] for h in history.data], [3, 2])
+        self.assertEqual(history.data[0]["snapshot"]["eoi_narrative"], revised.strip())
+        self.assertNotEqual(history.data[1]["snapshot"]["eoi_narrative"], revised.strip())
+
+    def test_vendor_can_withdraw_before_deadline_and_record_is_kept(self):
+        bid = self._eoi_bid(bid_status=BidStatus.SUBMITTED)
+        response = self.client.post(f"/api/tender-bids/{bid.id}/withdraw/", {"reason": "Capacity changed."}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        bid.refresh_from_db()
+        self.assertEqual(bid.status, BidStatus.WITHDRAWN)
+        self.assertTrue(Notification.objects.filter(recipient_id=str(self.rmt_user.id), event="bid_withdrawn").exists())
+        self.assertEqual(self.client.delete(f"/api/tender-bids/{bid.id}/").status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertTrue(TenderBid.objects.filter(id=bid.id).exists())
+
+    def test_withdraw_refused_after_deadline(self):
+        tender = self._tender("DL-LATE-001", deadline_in=-timedelta(hours=1))
+        bid = self._eoi_bid(tender, bid_status=BidStatus.SUBMITTED)
+        response = self.client.post(f"/api/tender-bids/{bid.id}/withdraw/", {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST, response.data)
+        bid.refresh_from_db()
+        self.assertEqual(bid.status, BidStatus.SUBMITTED)
+
+    def test_sweep_closes_expired_tenders_and_reminds_once(self):
+        from django.core.management import call_command
+
+        expired = self._tender("DL-SWEEP-001", deadline_in=-timedelta(hours=1), application_type="Application Window")
+        soon = self._tender("DL-SWEEP-002", deadline_in=timedelta(hours=24))
+        self._eoi_bid(soon)
+        call_command("sweep_tender_deadlines")
+        call_command("sweep_tender_deadlines")
+
+        expired.refresh_from_db()
+        self.assertEqual(expired.status, TenderStatus.CLOSED)
+        self.assertTrue(Notification.objects.filter(recipient_id=str(self.rmt_user.id), event="tender_auto_closed").exists())
+        self.assertEqual(
+            Notification.objects.filter(recipient_id=str(self.vendor.id), event="tender_deadline_reminder", linked_entity_id=str(soon.id)).count(),
+            1,
+        )

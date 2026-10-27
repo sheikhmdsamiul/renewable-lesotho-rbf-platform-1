@@ -25,6 +25,7 @@ from django_filters.rest_framework import DjangoFilterBackend
 from django_filters import FilterSet, DateFromToRangeFilter, RangeFilter, CharFilter, ChoiceFilter
 from .models import (
     Tender,
+    TenderBidSubmissionSnapshot,
     TenderViewLog,
     TenderStatus,
     TenderBid,
@@ -71,6 +72,7 @@ from .serializers import (
     bid_stage_label,
     workflow_has_eoi_stage,
     workflow_is_combined_style,
+    financial_bid_is_sealed,
     is_site_specific_stage,
     tender_stage_label,
     NoticeSerializer,
@@ -1224,6 +1226,8 @@ def _technical_passing_bids(tender: Tender):
             tender=tender,
             bid_stage__in=[BidStage.TECHNICAL, BidStage.COMBINED],
         )
+        # Drafts and withdrawn bids are never part of the evaluation.
+        .exclude(status__in={BidStatus.DRAFT, BidStatus.WITHDRAWN})
         .prefetch_related('evaluations')
     )
     for bid in bids:
@@ -5337,8 +5341,11 @@ class TenderBidViewSet(viewsets.ModelViewSet):
         if tender.procurement_method in _framework_procurement_values() and not _vendor_meets_framework_requirements(tender, latest_prequalification):
             raise ValidationError({'detail': 'Your pre-qualification tier or technology types do not meet this tender\'s requirements.'})
 
+        # The submission deadline binds every tender. (Application type only decides
+        # whether the tender then auto-closes on its own, see _auto_close_tender_on_deadline,
+        # or stays Published until the RMT closes it.)
         deadline = spec['deadline']
-        if _uses_hard_deadline(tender) and deadline and timezone.now() >= deadline:
+        if deadline and timezone.now() >= deadline:
             raise ValidationError({'tender': 'Bidding deadline has passed.'})
 
         if stage == BidStage.EOI:
@@ -5483,12 +5490,18 @@ class TenderBidViewSet(viewsets.ModelViewSet):
             self._record_bid_submission(request, bid)
         return Response(TenderBidSerializer(bid, context=self.get_serializer_context()).data, status=status.HTTP_200_OK)
 
+    def _is_resubmission(self, bid: TenderBid, request) -> bool:
+        # Revising an already-submitted bid is always a new submitted version (version
+        # bump + snapshot + notifications) — never a silent in-place edit of what the
+        # RMT has on record, and never a quiet slide back to Draft.
+        return bid.status == BidStatus.SUBMITTED or self._is_submitting(bid, request)
+
     def update(self, request, *args, **kwargs):
         bid = self.get_object()
         self._assert_bid_owner(request, bid)
         return self._vendor_update(
             request, bid, self._vendor_payload(request.data),
-            submitting=self._is_submitting(bid, request), partial=False,
+            submitting=self._is_resubmission(bid, request), partial=False,
         )
 
     def partial_update(self, request, *args, **kwargs):
@@ -5496,16 +5509,19 @@ class TenderBidViewSet(viewsets.ModelViewSet):
         self._assert_bid_owner(request, bid)
         return self._vendor_update(
             request, bid, self._vendor_payload(request.data),
-            submitting=self._is_submitting(bid, request), partial=True,
+            submitting=self._is_resubmission(bid, request), partial=True,
         )
 
     def destroy(self, request, *args, **kwargs):
         bid = self.get_object()
         if request.user.role != UserRole.VENDOR or bid.vendor_id != str(request.user.id):
             raise PermissionDenied('Only the submitting vendor can delete this bid.')
-        if bid.status not in {BidStatus.DRAFT, BidStatus.REVISION_REQUIRED, BidStatus.WITHDRAWN}:
+        # Anything that was ever submitted (including a withdrawn or revision-required
+        # bid) is part of the procurement record and is kept. A submitted bid can never
+        # return to Draft, so Draft means never submitted.
+        if bid.status != BidStatus.DRAFT:
             return Response(
-                {'detail': 'Only draft or withdrawn bids can be deleted. Please contact the RBF Management Team to withdraw a submitted bid.'},
+                {'detail': 'Only a never-submitted draft can be deleted. Withdraw a submitted bid instead.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         return super().destroy(request, *args, **kwargs)
@@ -5515,6 +5531,12 @@ class TenderBidViewSet(viewsets.ModelViewSet):
         return target_status == BidStatus.SUBMITTED and bid.status in {BidStatus.DRAFT, BidStatus.REVISION_REQUIRED, BidStatus.SUBMITTED}
 
     def _record_bid_submission(self, request, bid: TenderBid):
+        TenderBidSubmissionSnapshot.objects.create(
+            bid=bid,
+            version_number=bid.version_number,
+            submitted_at=bid.submitted_at or timezone.now(),
+            snapshot=TenderBidSerializer(bid).data,
+        )
         log_audit(
             request.user,
             'bid_submitted',
@@ -5592,6 +5614,62 @@ class TenderBidViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         return self._vendor_update(request, bid, {}, submitting=True, partial=True)
+
+    @action(detail=True, methods=['post'])
+    def withdraw(self, request, pk=None):
+        """The vendor withdraws their own submitted bid before the deadline.
+
+        The bid is kept (status Withdrawn) as part of the record; the vendor may submit
+        a fresh bid while the tender is still open. Not possible once the RMT or
+        committee has started reviewing it."""
+        bid = self.get_object()
+        self._assert_bid_owner(request, bid, verb='withdraw')
+        if bid.status != BidStatus.SUBMITTED:
+            raise ValidationError({'detail': 'Only a submitted bid that is not yet under review can be withdrawn.'})
+        tender = bid.tender
+        _auto_close_tender_on_deadline(tender)
+        deadline = _bid_stage_spec(bid, tender)['deadline']
+        if tender.status != TenderStatus.PUBLISHED or (deadline and timezone.now() >= deadline):
+            raise ValidationError({'detail': 'Bids can only be withdrawn while the tender is open, before its deadline.'})
+        if bid.evaluations.exists():
+            raise ValidationError({'detail': 'This bid is already being evaluated and can no longer be withdrawn.'})
+
+        reason = str(request.data.get('reason') or '').strip()
+        bid.status = BidStatus.WITHDRAWN
+        bid.save(update_fields=['status', 'updated_at'])
+        log_audit(request.user, 'bid_withdrawn', bid, {
+            'tender_id': str(tender.id), 'version': bid.version_number, 'reason': reason,
+        })
+        NotificationService.notify_roles(
+            roles={UserRole.RBF_OFFICIAL, UserRole.ADMIN},
+            title=f'Bid withdrawn: {tender.reference_number}',
+            body=f'{bid.vendor_name} withdrew their {bid_stage_label(bid.bid_stage)} submission (version {bid.version_number}) for {tender.name}.',
+            event='bid_withdrawn',
+            linked_entity_id=str(tender.id),
+        )
+        return Response(TenderBidSerializer(bid, context=self.get_serializer_context()).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['get'])
+    def submission_history(self, request, pk=None):
+        """Every submitted version of this bid, newest first, exactly as submitted.
+        Visible to the bidding vendor and the RMT; pricing stays sealed for the RMT
+        until the financial stage opens, as on the live bid."""
+        bid = self.get_object()
+        role = request.user.role
+        if role == UserRole.VENDOR:
+            self._assert_bid_owner(request, bid, verb='view the history of')
+        elif role not in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}:
+            raise PermissionDenied('Only the bidding vendor or the RBF Management Team can view submission history.')
+        sealed = financial_bid_is_sealed(bid, request)
+        sealed_fields = ('bid_amount', 'subsidy_requested', 'financial_proposal_file', 'financial_proposal', 'bid_amount_base_currency', 'lot_offers')
+        history = []
+        for snap in bid.submission_snapshots.all():
+            data = dict(snap.snapshot or {})
+            if sealed:
+                for field in sealed_fields:
+                    data[field] = None
+            history.append({'version_number': snap.version_number, 'submitted_at': snap.submitted_at, 'snapshot': data})
+        return Response(history, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'])
     def accept(self, request, pk=None):

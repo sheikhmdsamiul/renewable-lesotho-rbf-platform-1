@@ -2,6 +2,7 @@ from decimal import Decimal
 
 from django.db import models
 from django.conf import settings
+from django.core.serializers.json import DjangoJSONEncoder
 from django.utils import timezone
 
 
@@ -1138,6 +1139,28 @@ class TenderBidSite(models.Model):
 
     def __str__(self):
         return f"{self.site_name} ({self.bid.tender.reference_number})"
+
+
+class TenderBidSubmissionSnapshot(models.Model):
+    """An immutable copy of a bid exactly as it stood at one submission.
+
+    A vendor may revise a submitted bid until the deadline; every (re)submission
+    writes one of these, so what was submitted at each version survives later edits.
+    File fields are stored as their storage paths — replaced uploads are never deleted
+    from storage, so every path stays resolvable. Append-only: never updated."""
+    bid = models.ForeignKey('TenderBid', on_delete=models.CASCADE, related_name='submission_snapshots')
+    version_number = models.PositiveIntegerField()
+    submitted_at = models.DateTimeField()
+    snapshot = models.JSONField(encoder=DjangoJSONEncoder)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-version_number', '-id']
+        verbose_name = 'Tender Bid Submission Snapshot'
+        verbose_name_plural = 'Tender Bid Submission Snapshots'
+
+    def __str__(self):
+        return f"Bid {self.bid_id} v{self.version_number}"
 
 
 class TenderBidLotOffer(models.Model):

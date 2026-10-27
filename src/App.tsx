@@ -259,6 +259,7 @@ import {
   reviewTenderBid,
   extendTenderDeadline,
   finalizeEoiShortlist,
+  withdrawTenderBid,
   acceptTenderBid,
   rejectTenderBid,
   markTenderBidPartialConformity,
@@ -12410,6 +12411,16 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
     </div>
   );
 
+  const handleWithdrawBid = async (bid: TenderBid) => {
+    if (!window.confirm(`Withdraw your submitted bid (v${bid.version_number}) for "${bid.tender_name || bid.tender_reference}"? It stays on record as withdrawn; you can submit a new bid before the deadline.`)) return;
+    try {
+      await withdrawTenderBid(bid.id);
+      await loadBids();
+    } catch (err: any) {
+      window.alert(err?.message || "Unable to withdraw this bid.");
+    }
+  };
+
   const openViewBid = async (bid: TenderBid) => {
     setViewBid(bid);
     setViewBidVersions([]);
@@ -12591,6 +12602,11 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
                       <button onClick={() => openViewBid(display)} className="btn-secondary py-1.5 px-3 text-xs">View Details</button>
+                      {display.status === BidStatus.SUBMITTED && display.tender_status === TenderStatus.PUBLISHED && !display.deadline_passed && (
+                        <button onClick={() => handleWithdrawBid(display)} className="btn-secondary py-1.5 px-3 text-xs text-rose-700">
+                          Withdraw
+                        </button>
+                      )}
                       {progress.canProceed && progress.proceedLabel && (
                         <button onClick={() => onOpenBid(display)} className="btn-primary py-1.5 px-3 text-xs">
                           {progress.proceedLabel}

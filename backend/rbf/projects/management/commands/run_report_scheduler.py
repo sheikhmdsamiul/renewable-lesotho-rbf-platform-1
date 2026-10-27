@@ -20,6 +20,12 @@ class Command(BaseCommand):
 
     def _run_tick(self) -> None:
         now = timezone.localtime()
+        # Every tick: close tenders past their deadline and send deadline reminders.
+        try:
+            call_command("sweep_tender_deadlines")
+        except Exception as exc:  # noqa: BLE001
+            self.stderr.write(self.style.WARNING(f"Tender deadline sweep failed: {exc}"))
+
         # Once per local day, on the first tick of that day.
         if cache.add(f"findings:overdue-sweep:{now.date().isoformat()}", "1", timeout=60 * 60 * 26):
             call_command("escalate_overdue_findings")

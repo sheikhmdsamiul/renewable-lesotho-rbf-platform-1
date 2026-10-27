@@ -2952,6 +2952,15 @@ export async function fetchTenderBids(tenderId?: string, pageSize?: number, vend
   return unwrapListResponse<any>(data).map(mapTenderBidFromApi);
 }
 
+// Vendor withdraws their own submitted bid before the deadline. The bid is kept on
+// record as Withdrawn; a new bid can still be submitted while the tender is open.
+export async function withdrawTenderBid(bidId: string, reason?: string): Promise<TenderBid> {
+  return await http<any>(`/api/tender-bids/${bidId}/withdraw/`, {
+    method: "POST",
+    body: JSON.stringify(reason ? { reason } : {}),
+  });
+}
+
 export async function reviewTenderBid(bidId: string): Promise<TenderBid> {
   const data = await http<any>(`/api/tender-bids/${bidId}/review/`, {
     method: "POST",
