@@ -60,6 +60,7 @@ from .models import (
     IntentToAwardRequest,
     IntentAwardRequestStatus,
 )
+from .file_access import media_url_for
 from .serializers import (
     TenderSerializer,
     TenderBidSerializer,
@@ -5668,6 +5669,13 @@ class TenderBidViewSet(viewsets.ModelViewSet):
             if sealed:
                 for field in sealed_fields:
                     data[field] = None
+            # Snapshots store storage paths; hand out fresh signed links for them.
+            for key, value in list(data.items()):
+                if isinstance(value, str) and value.startswith(('/media/', 'http')) and (key.endswith('_file') or key == 'om_plan_document'):
+                    data[key] = media_url_for(request, value)
+            for doc in data.get('custom_documents') or []:
+                if isinstance(doc, dict) and doc.get('file_url'):
+                    doc['file_url'] = media_url_for(request, doc['file_url'])
             history.append({'version_number': snap.version_number, 'submitted_at': snap.submitted_at, 'snapshot': data})
         return Response(history, status=status.HTTP_200_OK)
 

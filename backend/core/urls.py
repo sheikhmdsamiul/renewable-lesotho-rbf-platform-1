@@ -2,9 +2,9 @@ from django.contrib import admin
 from django.urls import path, include
 from django.conf import settings
 from django.urls import re_path
-from django.views.static import serve
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 from .views import HealthCheckView
+from rbf.tenders.file_access import protected_media_download, public_media_serve
 from rbf.projects.views import (
     MapBoundaryView,
     MapInstallationView,
@@ -33,5 +33,8 @@ urlpatterns = [
 ]
 
 urlpatterns += [
-    re_path(r'^media/(?P<path>.*)$', serve, {'document_root': settings.MEDIA_ROOT}),
+    # Confidential procurement files (bids, challenges, contracts) are only reachable
+    # through short-lived signed links issued by the API; see rbf.tenders.file_access.
+    path('api/protected-media/<str:token>/', protected_media_download, name='protected-media'),
+    re_path(r'^media/(?P<path>.*)$', public_media_serve),
 ]

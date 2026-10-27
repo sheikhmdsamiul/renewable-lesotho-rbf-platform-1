@@ -35,6 +35,7 @@ from .models import (
     AnomalyReviewEvent,
     AnomalyEvidenceFile,
 )
+from rbf.tenders.file_access import media_url_for
 from rbf.tenders.models import TenderContract
 from django.conf import settings
 from rbf.users.models import UserRole
@@ -188,7 +189,9 @@ class ProjectSerializer(serializers.ModelSerializer):
 
     def get_contract_signed_file(self, obj: Project):
         contract = self._get_contract(obj)
-        return contract.signed_file.url if contract and contract.signed_file else None
+        if not (contract and contract.signed_file):
+            return None
+        return media_url_for(self.context.get('request'), contract.signed_file)
 
     def get_milestone_total_amount(self, obj: Project):
         milestones = list(obj.milestones.all())

@@ -3226,11 +3226,20 @@ class TenderContractPdfTests(APITestCase):
                 request = type("RequestStub", (), {"build_absolute_uri": lambda self, url: f"http://testserver{url}"})()
                 data = TenderContractSerializer(self.contract, context={"request": request}).data
 
-                self.assertTrue(data["annex_a_file"].endswith("gender-plan.pdf"))
-                self.assertTrue(data["annex_b_file"].endswith("implementation-plan.pdf"))
-                self.assertTrue(data["annex_c_file"].endswith("payment-terms.pdf"))
-                self.assertTrue(data["annex_d_file"].endswith("reporting-templates.pdf"))
-                self.assertTrue(data["annex_e_file"].endswith("technical-standards.pdf"))
+                # Annexes are confidential, so each is a signed link; it must point at
+                # the right awarded-bid document.
+                from django.core import signing
+
+                def linked_path(url):
+                    self.assertIn("/api/protected-media/", url)
+                    token = url.rstrip("/").split("/")[-1]
+                    return signing.loads(token, salt="rbf.tenders.protected-media")["p"]
+
+                self.assertTrue(linked_path(data["annex_a_file"]).endswith("gender-plan.pdf"))
+                self.assertTrue(linked_path(data["annex_b_file"]).endswith("implementation-plan.pdf"))
+                self.assertTrue(linked_path(data["annex_c_file"]).endswith("payment-terms.pdf"))
+                self.assertTrue(linked_path(data["annex_d_file"]).endswith("reporting-templates.pdf"))
+                self.assertTrue(linked_path(data["annex_e_file"]).endswith("technical-standards.pdf"))
 
     def test_generate_contract_pdf_merges_generated_pages_and_source_annex_pdfs(self):
         with TemporaryDirectory() as media_root:
@@ -8494,3 +8503,74 @@ class PublicTenderDisclosureTests(APITestCase):
         row = next(r for r in rows if r["reference_number"] == "PUB-001")
         self.assertNotIn("budget", row)
         self.assertNotIn("bid_count", row)
+
+
+class ProtectedBidFileTests(APITestCase):
+    """Confidential procurement files are only reachable through short-lived signed
+    links handed out by the API, never through their raw /media path."""
+
+    def setUp(self):
+        self._media = TemporaryDirectory()
+        self._override = override_settings(MEDIA_ROOT=self._media.name)
+        self._override.enable()
+        self.vendor = User.objects.create_user(
+            username="pf_vendor", password="securePass123", role=UserRole.VENDOR,
+            status="Active", full_name="PF Vendor", email="pf-vendor@example.com",
+        )
+        self.tender = Tender.objects.create(
+            reference_number="PF-001", name="Protected Files", department="Department of Energy",
+            category="SHS", status=TenderStatus.PUBLISHED, deadline=timezone.now() + timedelta(days=10),
+            technology_types=["SHS"], procurement_workflow="combined", procurement_method="Open Tendering",
+            technical_deadline=timezone.now() + timedelta(days=10),
+        )
+        self.bid = TenderBid.objects.create(
+            tender=self.tender, vendor_id=str(self.vendor.id), vendor_name=self.vendor.full_name,
+            bid_stage="combined", stage="Technical & Financial", status=BidStatus.SUBMITTED, version_number=1,
+        )
+        self.bid.technical_proposal_file.save("tech.pdf", SimpleUploadedFile("tech.pdf", b"%PDF-1.4 tech"), save=False)
+        self.bid.financial_proposal_file.save("fin.pdf", SimpleUploadedFile("fin.pdf", b"%PDF-1.4 fin"), save=False)
+        self.bid.save()
+        self.client.force_authenticate(self.vendor)
+
+    def tearDown(self):
+        self._override.disable()
+        self._media.cleanup()
+
+    def test_raw_media_path_for_bid_file_is_refused(self):
+        self.client.force_authenticate(None)
+        response = self.client.get(f"/media/{self.bid.technical_proposal_file.name}")
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_public_tender_documents_are_still_served(self):
+        self.tender.rfp_documents_file.save("rfp.pdf", SimpleUploadedFile("rfp.pdf", b"%PDF-1.4 rfp"), save=True)
+        self.client.force_authenticate(None)
+        response = self.client.get(f"/media/{self.tender.rfp_documents_file.name}")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_owner_gets_working_signed_link(self):
+        data = self.client.get(f"/api/tender-bids/{self.bid.id}/").data
+        url = data["technical_proposal_file"]
+        self.assertIn("/api/protected-media/", url)
+        self.assertNotIn("/media/tender_bids", url)
+        self.client.force_authenticate(None)  # a plain browser link carries no token
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(b"".join(response.streaming_content), b"%PDF-1.4 tech")
+
+    def test_tampered_or_expired_link_is_refused(self):
+        url = self.client.get(f"/api/tender-bids/{self.bid.id}/").data["technical_proposal_file"]
+        self.client.force_authenticate(None)
+        self.assertEqual(self.client.get(url.rstrip("/") + "x/").status_code, status.HTTP_404_NOT_FOUND)
+        from rbf.tenders import file_access
+        with patch.object(file_access, "SIGNED_URL_MAX_AGE_SECONDS", -1):
+            self.assertEqual(self.client.get(url).status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_sealed_financial_file_gets_no_link_for_oversight_roles(self):
+        auditor = User.objects.create_user(
+            username="pf_auditor", password="securePass123", role=UserRole.AUDITOR,
+            status="Active", full_name="PF Auditor", email="pf-auditor@example.com",
+        )
+        self.client.force_authenticate(auditor)
+        data = self.client.get(f"/api/tender-bids/{self.bid.id}/").data
+        self.assertIsNone(data["financial_proposal_file"])
+        self.assertIn("/api/protected-media/", data["technical_proposal_file"])

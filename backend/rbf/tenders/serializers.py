@@ -12,6 +12,8 @@ from django.db import models
 from django.core.files.storage import default_storage
 from django.utils import timezone
 from rest_framework import serializers
+
+from .file_access import media_url_for
 from .models import (
     Tender,
     TenderBid,
@@ -1210,16 +1212,19 @@ class TenderBidSerializer(serializers.ModelSerializer):
                 'financial_standing_file',
                 'technical_experience_file',
                 'track_record_file',
+                'tender_security_file',
             ]
+            # Bid files are confidential: clients get short-lived signed links, never a
+            # public /media path (see rbf.tenders.file_access).
             for field in file_fields:
                 if data.get(field):
-                    data[field] = request.build_absolute_uri(data[field])
+                    data[field] = media_url_for(request, data[field])
             if data.get('om_plan_document'):
-                data['om_plan_document'] = request.build_absolute_uri(data['om_plan_document'])
+                data['om_plan_document'] = media_url_for(request, data['om_plan_document'])
             if data.get('custom_documents'):
                 for _cd in data['custom_documents']:
                     if _cd.get('file_url'):
-                        _cd['file_url'] = request.build_absolute_uri(_cd['file_url'])
+                        _cd['file_url'] = media_url_for(request, _cd['file_url'])
 
         # Seal financial pricing for evaluators until technical clearance passes.
         if financial_bid_is_sealed(instance, request):
@@ -1675,16 +1680,15 @@ class TenderContractSerializer(serializers.ModelSerializer):
     def to_representation(self, instance):
         data = super().to_representation(instance)
         request = self.context.get('request')
-        if request and data.get('signed_file'):
-            data['signed_file'] = request.build_absolute_uri(data['signed_file'])
-        if request and data.get('generated_file'):
-            data['generated_file'] = request.build_absolute_uri(data['generated_file'])
+        # Contracts and their annexes (which include the winning bid's documents) are
+        # confidential: signed, expiring links only.
+        if data.get('signed_file'):
+            data['signed_file'] = media_url_for(request, data['signed_file'])
+        if data.get('generated_file'):
+            data['generated_file'] = media_url_for(request, data['generated_file'])
         for annex_field in ('annex_a_file', 'annex_b_file', 'annex_c_file', 'annex_d_file', 'annex_e_file'):
             resolved_value = self._resolve_annex_value(instance, annex_field)
-            if request and resolved_value:
-                data[annex_field] = request.build_absolute_uri(resolved_value)
-            else:
-                data[annex_field] = resolved_value
+            data[annex_field] = media_url_for(request, resolved_value) if resolved_value else resolved_value
         return data
 
 
@@ -2801,10 +2805,7 @@ class ChallengeDocumentSerializer(serializers.ModelSerializer):
 
     def get_file_url(self, obj):
         if obj.document:
-            request = self.context.get('request')
-            if request:
-                return request.build_absolute_uri(obj.document.url)
-            return obj.document.url
+            return media_url_for(self.context.get('request'), obj.document)
         return None
 
     class Meta:
