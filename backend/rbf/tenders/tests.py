@@ -125,10 +125,8 @@ class TenderApiTests(APITestCase):
             "is_verified": None,
             "technology_types": ["SHS"],
             "target_districts": ["Maseru"],
-            "procurement_workflow": "sequential",
-            "eoi_deadline": (timezone.now() + timedelta(days=3)).isoformat(),
+            "procurement_workflow": "combined",
             "technical_deadline": (timezone.now() + timedelta(days=6)).isoformat(),
-            "financial_deadline": (timezone.now() + timedelta(days=9)).isoformat(),
         }
 
         response = self.client.post("/api/tenders/", payload, format="json")
@@ -140,7 +138,7 @@ class TenderApiTests(APITestCase):
         self.assertFalse(response.data["tender_security_required"])
         self.assertFalse(response.data["is_verified"])
         self.assertEqual(response.data["technology_types"], ["SHS"])
-        self.assertIsNotNone(response.data["eoi_deadline"])
+        self.assertIsNotNone(response.data["technical_deadline"])
         self.assertIsNotNone(response.data["deadline"])
 
     @override_settings(API_REQUIRE_AUTH=True)
@@ -4342,7 +4340,7 @@ class ProcurementWorkflowTests(APITestCase):
         self.assertIsNotNone(technical_draft)
         self.assertTrue(technical_draft.technical_stage_unlocked)
 
-    def test_tender_workflow_validation_requires_staged_deadlines(self):
+    def test_new_sequential_tenders_are_rejected(self):
         self.client.force_authenticate(self.rmt_user)
         response = self.client.post(
             "/api/tenders/",
@@ -4370,9 +4368,9 @@ class ProcurementWorkflowTests(APITestCase):
             },
             format="json",
         )
+        # Sequential is retired for new tenders.
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("technical_deadline", response.data)
-        self.assertIn("financial_deadline", response.data)
+        self.assertIn("procurement_workflow", response.data)
 
     def test_open_financial_stage_unlocks_technical_passing_bidders(self):
         tender = Tender.objects.create(
@@ -5766,10 +5764,8 @@ class LotWiseTenderTests(APITestCase):
                 "target_site_type": "Community",
                 "technology_types": ["GMG"],
                 "target_districts": ["Maseru"],
-                "procurement_workflow": "sequential",
-                "eoi_deadline": (timezone.now() + timedelta(days=3)).isoformat(),
+                "procurement_workflow": "combined",
                 "technical_deadline": (timezone.now() + timedelta(days=6)).isoformat(),
-                "financial_deadline": (timezone.now() + timedelta(days=9)).isoformat(),
                 "max_lots_per_bidder": 1,
                 "lots": json.dumps([
                     {"name": "Lot A", "description": "Northern region", "position": 0},
@@ -8574,3 +8570,104 @@ class ProtectedBidFileTests(APITestCase):
         data = self.client.get(f"/api/tender-bids/{self.bid.id}/").data
         self.assertIsNone(data["financial_proposal_file"])
         self.assertIn("/api/protected-media/", data["technical_proposal_file"])
+
+
+class TenderClarificationAddendaOpeningTests(APITestCase):
+    """Clarification Q&A (answers shared anonymously with every bidder), numbered
+    addenda, and the one-time bid-opening record."""
+
+    def setUp(self):
+        self.rmt_user = User.objects.create_user(
+            username="qa_rmt", password="securePass123", role=UserRole.RBF_OFFICIAL,
+            status="Active", full_name="QA RMT", email="qa-rmt@example.com",
+        )
+        self.vendors = []
+        for idx in range(2):
+            vendor = User.objects.create_user(
+                username=f"qa_vendor_{idx}", password="securePass123", role=UserRole.VENDOR,
+                status="Active", full_name=f"QA Vendor {idx}", email=f"qa-vendor-{idx}@example.com",
+            )
+            VendorPrequalification.objects.create(
+                vendor=vendor, company_name=f"QA Vendor {idx} Ltd", status=PrequalificationStatus.APPROVED, tech_tier="Level 3",
+            )
+            self.vendors.append(vendor)
+        self.tender = Tender.objects.create(
+            reference_number="QA-001", name="Q&A Tender", department="Department of Energy", category="SHS",
+            status=TenderStatus.PUBLISHED, deadline=timezone.now() + timedelta(days=10), technology_types=["SHS"],
+            procurement_workflow="combined", procurement_method="Open Tendering",
+            technical_deadline=timezone.now() + timedelta(days=10),
+            clarification_deadline=timezone.now() + timedelta(days=5),
+        )
+        self.url = f"/api/tenders/{self.tender.id}"
+
+    def _ask(self, vendor, question="Is a 12-month warranty acceptable?"):
+        self.client.force_authenticate(vendor)
+        return self.client.post(f"{self.url}/clarifications/", {"question": question}, format="json")
+
+    def test_answer_is_shared_with_every_vendor_without_the_askers_identity(self):
+        asker, other = self.vendors
+        self.client.force_authenticate(other)
+        self.client.get(f"{self.url}/")  # the other vendor follows the tender
+        asked = self._ask(asker)
+        self.assertEqual(asked.status_code, status.HTTP_201_CREATED, asked.data)
+        self.assertTrue(Notification.objects.filter(recipient_id=str(self.rmt_user.id), event="tender_clarification_asked").exists())
+
+        self.client.force_authenticate(other)
+        self.assertEqual(self.client.get(f"{self.url}/clarifications/").data, [])
+
+        self.client.force_authenticate(self.rmt_user)
+        answered = self.client.post(
+            f"{self.url}/answer_clarification/", {"clarification_id": asked.data["id"], "answer": "Minimum is 24 months."}, format="json",
+        )
+        self.assertEqual(answered.status_code, status.HTTP_200_OK, answered.data)
+        again = self.client.post(
+            f"{self.url}/answer_clarification/", {"clarification_id": asked.data["id"], "answer": "Changed."}, format="json",
+        )
+        self.assertEqual(again.status_code, status.HTTP_400_BAD_REQUEST)
+
+        self.client.force_authenticate(other)
+        rows = self.client.get(f"{self.url}/clarifications/").data
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["answer"], "Minimum is 24 months.")
+        self.assertNotIn("asked_by", rows[0])
+        self.assertFalse(rows[0]["asked_by_me"])
+        self.assertTrue(Notification.objects.filter(recipient_id=str(other.id), event="tender_clarification_answered").exists())
+
+    def test_questions_close_at_the_clarification_deadline(self):
+        Tender.objects.filter(id=self.tender.id).update(clarification_deadline=timezone.now() - timedelta(minutes=1))
+        self.assertEqual(self._ask(self.vendors[0]).status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_addenda_are_numbered_and_only_issued_by_the_rbf(self):
+        self.client.force_authenticate(self.vendors[0])
+        self.assertEqual(
+            self.client.post(f"{self.url}/addenda/", {"title": "X", "description": "Y"}, format="json").status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+        self.client.force_authenticate(self.rmt_user)
+        for title in ("Revised BOQ", "Site list corrected"):
+            response = self.client.post(f"{self.url}/addenda/", {"title": title, "description": "Details."}, format="multipart")
+            self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        self.client.force_authenticate(self.vendors[0])
+        rows = self.client.get(f"{self.url}/addenda/").data
+        self.assertEqual([(r["number"], r["title"]) for r in rows], [(1, "Revised BOQ"), (2, "Site list corrected")])
+
+    def test_bid_opening_records_received_submissions_once_without_prices(self):
+        def bid(vendor, bid_status):
+            return TenderBid.objects.create(
+                tender=self.tender, vendor_id=str(vendor.id), vendor_name=vendor.full_name, bid_stage="combined",
+                stage="Technical & Financial", status=bid_status, version_number=2, bid_amount=Decimal("123456.00"),
+            )
+        bid(self.vendors[0], BidStatus.SUBMITTED)
+        bid(self.vendors[1], BidStatus.WITHDRAWN)
+
+        self.client.force_authenticate(self.rmt_user)
+        self.assertEqual(self.client.post(f"{self.url}/bid_opening/", {}, format="json").status_code, status.HTTP_400_BAD_REQUEST)
+        Tender.objects.filter(id=self.tender.id).update(status=TenderStatus.CLOSED)
+        response = self.client.post(f"{self.url}/bid_opening/", {"attendees": "RMT, PSC observer"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        self.assertEqual([s["vendor_name"] for s in response.data["submissions"]], ["QA Vendor 0"])
+        self.assertNotIn("123456", json.dumps(response.data, default=str))
+        self.assertEqual(self.client.post(f"{self.url}/bid_opening/", {}, format="json").status_code, status.HTTP_400_BAD_REQUEST)
+
+        self.client.force_authenticate(self.vendors[0])
+        self.assertIn(self.client.get(f"{self.url}/bid_opening/").status_code, {status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND})

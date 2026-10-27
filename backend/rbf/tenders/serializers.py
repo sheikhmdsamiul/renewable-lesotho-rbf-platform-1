@@ -47,6 +47,9 @@ from .models import (
     IntentToAwardRequest,
     IntentAwardRequestStatus,
     PublishApprovalStatus,
+    TenderClarification,
+    TenderAddendum,
+    TenderBidOpening,
 )
 from rbf.users.models import UserRole, VendorPrequalification, PrequalificationStatus
 from rbf.projects.models import TechnologyType, VerificationMethod
@@ -2243,7 +2246,15 @@ class TenderSerializer(serializers.ModelSerializer):
                 attrs['name'] = linked_eoi_tender.name
 
         # Procurement workflow + staged deadlines
-        workflow = attrs.get('procurement_workflow') or (instance.procurement_workflow if instance else ProcurementWorkflow.SEQUENTIAL)
+        # Sequential (EOI -> Technical -> Financial) is retired: existing tenders keep
+        # running on it, but no new tender may be created with it, and a new tender that
+        # doesn't name a workflow gets single-stage Combined.
+        if instance is None and not attrs.get('procurement_workflow'):
+            attrs['procurement_workflow'] = ProcurementWorkflow.COMBINED
+        workflow = attrs.get('procurement_workflow') or instance.procurement_workflow
+        if instance is None and workflow == ProcurementWorkflow.SEQUENTIAL and not is_eoi_invite_only:
+            errors['procurement_workflow'] = 'The Sequential workflow is retired. Choose Combined, or EOI → Combined with an EOI Invite.'
+
         if is_eoi_invite_only or (linked_eoi_tender is not None and 'linked_eoi_tender' not in errors):
             # Both an EOI Invite and a tender linked to one always run the EOI → Combined
             # workflow — the former to collect EOIs, the latter because that's the only
@@ -2891,3 +2902,45 @@ class ChallengeCreateSerializer(serializers.Serializer):
         child=serializers.DictField(child=serializers.CharField()),
         required=False
     )
+
+
+class TenderClarificationSerializer(serializers.ModelSerializer):
+    """The asker is identified only to the RBF and to the asker themselves — published
+    answers reach every bidder anonymously."""
+    asked_by_me = serializers.SerializerMethodField()
+
+    class Meta:
+        model = TenderClarification
+        fields = ['id', 'tender', 'question', 'asked_at', 'answer', 'answered_by', 'answered_at', 'asked_by', 'asked_by_me']
+        read_only_fields = ['id', 'tender', 'asked_at', 'answer', 'answered_by', 'answered_at', 'asked_by', 'asked_by_me']
+
+    def get_asked_by_me(self, obj):
+        request = self.context.get('request')
+        return bool(request and obj.asked_by_id == getattr(request.user, 'id', None))
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        request = self.context.get('request')
+        if not (request and getattr(request.user, 'role', None) in (UserRole.RBF_OFFICIAL, UserRole.ADMIN)):
+            data.pop('asked_by', None)
+        return data
+
+
+class TenderAddendumSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TenderAddendum
+        fields = ['id', 'tender', 'number', 'title', 'description', 'document', 'issued_by', 'issued_at']
+        read_only_fields = ['id', 'tender', 'number', 'issued_by', 'issued_at']
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if instance.document:
+            data['document'] = media_url_for(self.context.get('request'), instance.document)
+        return data
+
+
+class TenderBidOpeningSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TenderBidOpening
+        fields = ['id', 'tender', 'opened_by', 'opened_at', 'attendees', 'notes', 'submissions']
+        read_only_fields = fields

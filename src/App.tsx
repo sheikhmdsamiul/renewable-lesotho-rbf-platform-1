@@ -397,6 +397,7 @@ import { AuditCasesView, SystemAccessAuditView } from "./components/AuditWorkspa
 import { ArchivedProjectBanner, ProjectLifecycleArchive } from "./components/ProjectLifecycleArchive";
 import { toCsv } from "./csv";
 import { ResultsFramework } from "./components/ResultsFramework";
+import { TenderClarifications, TenderBidOpeningPanel } from "./components/TenderClarifications";
 import { ReportSchedules } from "./components/ReportSchedules";
 
 // <input type="datetime-local"> works in the browser's local time without a zone;
@@ -5207,6 +5208,13 @@ const Tenders = ({
               )}
             </div>
           </div>
+        )}
+
+        {selectedTender.status !== TenderStatus.DRAFT && selectedTender.status !== TenderStatus.PENDING_PUBLISH_APPROVAL && (
+          <>
+            <TenderBidOpeningPanel tender={selectedTender} />
+            <TenderClarifications tender={selectedTender} mode="staff" />
+          </>
         )}
 
         {/* Key facts strip */}
@@ -11092,6 +11100,10 @@ const VendorTenders = ({ onSubmitTender, onNavigate }: { onSubmitTender?: (tende
             })()}
           </div>
         </div>
+
+        {selectedTender.status === TenderStatus.PUBLISHED && (
+          <TenderClarifications tender={selectedTender} mode="vendor" />
+        )}
 
         {/* Key facts strip */}
         <div className="grid grid-cols-2 gap-4 md:grid-cols-4">

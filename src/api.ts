@@ -2679,6 +2679,82 @@ export async function finalizeEoiShortlist(tenderId: string, overrideReason?: st
   return mapTenderFromApi(data);
 }
 
+export interface TenderClarification {
+  id: number;
+  question: string;
+  asked_at: string;
+  answer: string;
+  answered_by: string;
+  answered_at: string | null;
+  asked_by_me: boolean;
+  asked_by?: number | null;
+}
+
+export interface TenderAddendum {
+  id: number;
+  number: number;
+  title: string;
+  description: string;
+  document: string | null;
+  issued_by: string;
+  issued_at: string;
+}
+
+export interface TenderBidOpeningRecord {
+  opened_by: string;
+  opened_at: string;
+  attendees: string;
+  notes: string;
+  submissions: { bid_id: string; vendor_name: string; stage: string; version_number: number; submitted_at: string; lots: string[] }[];
+}
+
+export async function fetchTenderClarifications(tenderId: string): Promise<TenderClarification[]> {
+  return await http<TenderClarification[]>(`/api/tenders/${tenderId}/clarifications/`);
+}
+
+export async function askTenderClarification(tenderId: string, question: string): Promise<TenderClarification> {
+  return await http<TenderClarification>(`/api/tenders/${tenderId}/clarifications/`, {
+    method: "POST",
+    body: JSON.stringify({ question }),
+  });
+}
+
+export async function answerTenderClarification(tenderId: string, clarificationId: number, answer: string): Promise<TenderClarification> {
+  return await http<TenderClarification>(`/api/tenders/${tenderId}/answer_clarification/`, {
+    method: "POST",
+    body: JSON.stringify({ clarification_id: clarificationId, answer }),
+  });
+}
+
+export async function fetchTenderAddenda(tenderId: string): Promise<TenderAddendum[]> {
+  return await http<TenderAddendum[]>(`/api/tenders/${tenderId}/addenda/`);
+}
+
+export async function issueTenderAddendum(tenderId: string, payload: { title: string; description: string; document?: File | null }): Promise<TenderAddendum> {
+  const form = new FormData();
+  form.append("title", payload.title);
+  form.append("description", payload.description);
+  if (payload.document) form.append("document", payload.document);
+  return await http<TenderAddendum>(`/api/tenders/${tenderId}/addenda/`, { method: "POST", body: form });
+}
+
+// Resolves to null when the bids have not been opened yet.
+export async function fetchTenderBidOpening(tenderId: string): Promise<TenderBidOpeningRecord | null> {
+  try {
+    return await http<TenderBidOpeningRecord>(`/api/tenders/${tenderId}/bid_opening/`);
+  } catch (err: any) {
+    if (err?.status === 404) return null;
+    throw err;
+  }
+}
+
+export async function recordTenderBidOpening(tenderId: string, payload: { attendees: string; notes: string }): Promise<TenderBidOpeningRecord> {
+  return await http<TenderBidOpeningRecord>(`/api/tenders/${tenderId}/bid_opening/`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function closeTender(tenderId: string): Promise<Tender> {
   const data = await http<any>(`/api/tenders/${tenderId}/close/`, {
     method: "POST",

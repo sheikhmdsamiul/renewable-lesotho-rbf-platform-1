@@ -7,6 +7,7 @@ from rest_framework.fields import DateTimeField
 from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
 import json
+import os
 import re
 from django.utils import timezone
 from datetime import date, timedelta
@@ -25,6 +26,9 @@ from django_filters.rest_framework import DjangoFilterBackend
 from django_filters import FilterSet, DateFromToRangeFilter, RangeFilter, CharFilter, ChoiceFilter
 from .models import (
     Tender,
+    TenderClarification,
+    TenderAddendum,
+    TenderBidOpening,
     TenderBidSubmissionSnapshot,
     TenderViewLog,
     TenderStatus,
@@ -63,6 +67,9 @@ from .models import (
 from .file_access import media_url_for
 from .serializers import (
     TenderSerializer,
+    TenderClarificationSerializer,
+    TenderAddendumSerializer,
+    TenderBidOpeningSerializer,
     TenderBidSerializer,
     TenderListSerializer,
     TenderBidEvaluationSerializer,
@@ -1169,6 +1176,18 @@ def _sync_invited_vendors_from_eoi(tender: Tender, actor=None) -> None:
     tender.invited_vendors.exclude(vendor__in=shortlist).delete()
     for vendor in shortlist:
         TenderInvitedVendor.objects.get_or_create(tender=tender, vendor=vendor, defaults={'invited_by': actor})
+
+
+def _interested_vendor_users(tender: Tender) -> list:
+    """Vendors following a tender — anyone who bid (any status), was invited or
+    shortlisted, or viewed it — who must hear about deadline changes, clarification
+    answers and addenda."""
+    interested_ids = (
+        set(tender.bids.values_list('vendor_id', flat=True))
+        | {str(v) for v in tender.invited_vendors.values_list('vendor_id', flat=True)}
+        | {str(v) for v in tender.view_logs.values_list('vendor_id', flat=True)}
+    )
+    return list(User.objects.filter(id__in=[i for i in interested_ids if str(i).isdigit()], role=UserRole.VENDOR))
 
 
 def _eoi_window_closed(tender: Tender) -> bool:
@@ -2666,7 +2685,7 @@ class TenderViewSet(viewsets.ModelViewSet):
     def check_permissions(self, request):
         super().check_permissions(request)
         if request.method not in SAFE_METHODS and getattr(request.user, 'role', None) not in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}:
-            if self.action not in {'create_challenge', 'attest_coi', 'declare_coi'}:
+            if self.action not in {'create_challenge', 'attest_coi', 'declare_coi', 'clarifications'}:
                 self.permission_denied(request, message='Only the RBF Management Team can create or modify tenders.')
 
     def create(self, request, *args, **kwargs):
@@ -5072,6 +5091,179 @@ class TenderViewSet(viewsets.ModelViewSet):
         return contract
 
 
+    def _clarification_deadline(self, tender: Tender):
+        return tender.clarification_deadline or _bid_stage_spec(None, tender)['deadline']
+
+    @action(detail=True, methods=['get', 'post'], url_path='clarifications')
+    def clarifications(self, request, pk=None):
+        """GET: the RBF sees every question; anyone else sees answered questions plus
+        (for a vendor) their own unanswered ones. POST: a vendor asks a question while
+        the tender is published and before its clarification deadline."""
+        tender = self.get_object()
+        role = getattr(request.user, 'role', None)
+        is_staff = role in {UserRole.RBF_OFFICIAL, UserRole.ADMIN}
+        if request.method == 'GET':
+            qs = tender.clarifications.all()
+            if not is_staff:
+                qs = qs.filter(Q(answered_at__isnull=False) | Q(asked_by=request.user))
+            return Response(TenderClarificationSerializer(qs, many=True, context={'request': request}).data)
+
+        if role != UserRole.VENDOR:
+            raise PermissionDenied('Only vendors can ask clarification questions.')
+        if tender.status != TenderStatus.PUBLISHED:
+            raise ValidationError({'detail': 'Questions can only be asked while the tender is published.'})
+        deadline = self._clarification_deadline(tender)
+        if deadline and timezone.now() >= deadline:
+            raise ValidationError({'detail': 'The clarification deadline for this tender has passed.'})
+        question = str(request.data.get('question') or '').strip()
+        if not question:
+            raise ValidationError({'question': 'Enter your question.'})
+        if len(question) > 4000:
+            raise ValidationError({'question': 'Keep the question under 4000 characters.'})
+        clarification = TenderClarification.objects.create(tender=tender, asked_by=request.user, question=question)
+        log_audit(request.user, 'tender_clarification_asked', tender, {
+            'reference_number': tender.reference_number, 'clarification_id': clarification.id,
+        })
+        NotificationService.notify_roles(
+            roles={UserRole.RBF_OFFICIAL, UserRole.ADMIN},
+            title=f'Clarification requested: {tender.reference_number}',
+            body=f'A vendor asked a question about "{tender.name}". Answer it so every bidder sees the response.',
+            event='tender_clarification_asked',
+            linked_entity_id=str(tender.id),
+        )
+        return Response(TenderClarificationSerializer(clarification, context={'request': request}).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'])
+    def answer_clarification(self, request, pk=None):
+        """The RBF answers a question; the answer is published (anonymously) to every
+        vendor following the tender. Answers are final once published."""
+        self._assert_write_permission()
+        self._assert_not_archived()
+        tender = self.get_object()
+        clarification = tender.clarifications.filter(id=request.data.get('clarification_id')).first()
+        if clarification is None:
+            raise ValidationError({'clarification_id': 'Clarification not found for this tender.'})
+        if clarification.answered_at:
+            raise ValidationError({'detail': 'This question has already been answered.'})
+        answer = str(request.data.get('answer') or '').strip()
+        if not answer:
+            raise ValidationError({'answer': 'Enter the answer.'})
+        clarification.answer = answer
+        clarification.answered_by = self._admin_reference(request.user)
+        clarification.answered_at = timezone.now()
+        clarification.save(update_fields=['answer', 'answered_by', 'answered_at'])
+        log_audit(request.user, 'tender_clarification_answered', tender, {
+            'reference_number': tender.reference_number, 'clarification_id': clarification.id,
+        })
+        NotificationService.notify_users(
+            users=_interested_vendor_users(tender),
+            title=f'Clarification published: {tender.reference_number}',
+            body=f'A new clarification answer has been published for "{tender.name}". Review it before submitting.',
+            event='tender_clarification_answered',
+            linked_entity_id=str(tender.id),
+        )
+        return Response(TenderClarificationSerializer(clarification, context={'request': request}).data)
+
+    @action(detail=True, methods=['get', 'post'], url_path='addenda')
+    def addenda(self, request, pk=None):
+        """GET: every issued addendum (anyone who can see the tender). POST: the RBF
+        issues the next numbered addendum on a published tender and every interested
+        vendor is notified."""
+        tender = self.get_object()
+        if request.method == 'GET':
+            return Response(TenderAddendumSerializer(tender.addenda.all(), many=True, context={'request': request}).data)
+        self._assert_write_permission()
+        self._assert_not_archived()
+        if tender.status != TenderStatus.PUBLISHED:
+            raise ValidationError({'detail': 'Addenda can only be issued while the tender is published.'})
+        title = str(request.data.get('title') or '').strip()
+        description = str(request.data.get('description') or '').strip()
+        errors = {}
+        if not title:
+            errors['title'] = 'Enter a title.'
+        if not description:
+            errors['description'] = 'Describe what this addendum changes.'
+        document = request.FILES.get('document')
+        if document is not None:
+            ext = os.path.splitext(document.name)[1].lower()
+            if ext not in {'.pdf', '.doc', '.docx', '.xls', '.xlsx'}:
+                errors['document'] = 'Allowed: PDF, DOC, DOCX, XLS, XLSX.'
+            elif document.size > 10 * 1024 * 1024:
+                errors['document'] = 'File too large (max 10MB).'
+        if errors:
+            raise ValidationError(errors)
+        with transaction.atomic():
+            last = tender.addenda.select_for_update().order_by('-number').values_list('number', flat=True).first()
+            addendum = TenderAddendum.objects.create(
+                tender=tender, number=(last or 0) + 1, title=title, description=description,
+                issued_by=self._admin_reference(request.user),
+                **({'document': document} if document is not None else {}),
+            )
+        log_audit(request.user, 'tender_addendum_issued', tender, {
+            'reference_number': tender.reference_number, 'addendum_number': addendum.number, 'title': title,
+        })
+        NotificationService.notify_users(
+            users=_interested_vendor_users(tender),
+            title=f'Addendum {addendum.number} issued: {tender.reference_number}',
+            body=f'Addendum {addendum.number} ("{title}") has been issued for "{tender.name}". Review it before submitting.',
+            event='tender_addendum_issued',
+            linked_entity_id=str(tender.id),
+        )
+        return Response(TenderAddendumSerializer(addendum, context={'request': request}).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['get', 'post'], url_path='bid_opening')
+    def bid_opening(self, request, pk=None):
+        """The formal bid-opening record. POST (RBF, once, after submissions close)
+        freezes exactly which submissions were received — vendor, version, time; never
+        prices. GET is for staff and oversight; bidders don't see who else bid."""
+        tender = self.get_object()
+        role = getattr(request.user, 'role', None)
+        if role == UserRole.VENDOR:
+            raise PermissionDenied('The bid-opening record is not available to bidders.')
+        if request.method == 'GET':
+            record = TenderBidOpening.objects.filter(tender=tender).first()
+            if record is None:
+                return Response({'detail': 'Bids have not been opened yet.'}, status=status.HTTP_404_NOT_FOUND)
+            return Response(TenderBidOpeningSerializer(record).data)
+        self._assert_write_permission()
+        if tender.is_eoi_invite_only:
+            raise ValidationError({'detail': 'An EOI Invite has no bids to open — its responses are shortlisted instead.'})
+        _auto_close_tender_on_deadline(tender)
+        if tender.status not in {TenderStatus.CLOSED, TenderStatus.EVALUATION}:
+            raise ValidationError({'detail': 'Bids can only be opened once submissions have closed.'})
+        if TenderBidOpening.objects.filter(tender=tender).exists():
+            raise ValidationError({'detail': 'The bids for this tender have already been opened.'})
+        received = (
+            tender.bids.exclude(status__in={BidStatus.DRAFT, BidStatus.WITHDRAWN})
+            .exclude(bid_stage=BidStage.EOI)
+            .order_by('submitted_at', 'id')
+        )
+        submissions = [
+            {
+                'bid_id': str(bid.id),
+                'vendor_id': str(bid.vendor_id),
+                'vendor_name': bid.vendor_name,
+                'stage': bid_stage_label(bid.bid_stage),
+                'version_number': bid.version_number,
+                'submitted_at': bid.submitted_at,
+                'lots': sorted({str(lot) for lot in (bid.declared_lots or [])}),
+            }
+            for bid in received
+        ]
+        record = TenderBidOpening.objects.create(
+            tender=tender,
+            opened_by=self._admin_reference(request.user),
+            attendees=str(request.data.get('attendees') or '').strip(),
+            notes=str(request.data.get('notes') or '').strip(),
+            submissions=submissions,
+        )
+        log_audit(request.user, 'tender_bids_opened', tender, {
+            'reference_number': tender.reference_number,
+            'submission_count': len(submissions),
+            'notes': f'Bids opened: {len(submissions)} submission(s) received.',
+        })
+        return Response(TenderBidOpeningSerializer(record).data, status=status.HTTP_201_CREATED)
+
     @action(detail=True, methods=['post'])
     def extend_deadline(self, request, pk=None):
         """Extend the submission deadline of the stage that is currently open.
@@ -5125,14 +5317,8 @@ class TenderViewSet(viewsets.ModelViewSet):
             'new': new_deadline.isoformat(),
             'notes': f'{stage_label} deadline extended from {timezone.localtime(current):%Y-%m-%d %H:%M} to {timezone.localtime(new_deadline):%Y-%m-%d %H:%M}.',
         })
-        interested_ids = (
-            set(tender.bids.values_list('vendor_id', flat=True))
-            | {str(v) for v in tender.invited_vendors.values_list('vendor_id', flat=True)}
-            | {str(v) for v in tender.view_logs.values_list('vendor_id', flat=True)}
-        )
-        vendors = list(User.objects.filter(id__in=[i for i in interested_ids if str(i).isdigit()], role=UserRole.VENDOR))
         NotificationService.notify_users(
-            users=vendors,
+            users=_interested_vendor_users(tender),
             title=f'Deadline extended: {tender.reference_number}',
             body=f'The {stage_label} deadline for "{tender.name}" has been extended to {timezone.localtime(new_deadline):%Y-%m-%d %H:%M}.',
             event='tender_deadline_extended',
