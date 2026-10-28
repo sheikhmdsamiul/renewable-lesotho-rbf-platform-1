@@ -4009,6 +4009,12 @@ const Tenders = ({
                       if (e.target.value === "eoi_combined") {
                         next.procurementMethod = restrictedProcurementValue;
                       } else {
+                        // Leaving EOI → Combined: undo the Restricted method it forced, so
+                        // a Combined tender is open to every eligible vendor unless the
+                        // official deliberately picks Restricted (and invites vendors).
+                        if (prev.procurementWorkflow === "eoi_combined" && prev.procurementMethod === restrictedProcurementValue) {
+                          next.procurementMethod = defaultFormData.procurementMethod;
+                        }
                         next.linkedEoiTenderId = undefined;
                         // "Combined" is always a single Technical & Financial stage —
                         // no EOI step — so it must never carry an EOI deadline forward.

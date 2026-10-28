@@ -8708,3 +8708,21 @@ class CombinedTenderRequiredDocumentStageTests(APITestCase):
         response = self.client.post("/api/tenders/", self._payload([{"name": "BOQ"}]), format="json")
         self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
         self.assertEqual([d["bid_stage"] for d in response.data["required_documents"]], ["combined"])
+
+    def test_restricted_combined_tender_needs_invites_before_approval_request(self):
+        tender = Tender.objects.create(
+            reference_number="RD-RST-001", name="Restricted Combined", department="Department of Energy",
+            category="SHS", status=TenderStatus.DRAFT, deadline=timezone.now() + timedelta(days=20),
+            technology_types=["SHS"], procurement_workflow="combined", procurement_method="Restricted Tendering",
+            technical_deadline=timezone.now() + timedelta(days=20), is_verified=True,
+        )
+        response = self.client.post(f"/api/tenders/{tender.id}/request_publish_approval/", {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST, response.data)
+        self.assertIn("Invite at least one vendor", str(response.data["detail"]))
+        vendor = User.objects.create_user(
+            username="rd_vendor", password="securePass123", role=UserRole.VENDOR,
+            status="Active", full_name="RD Vendor", email="rd-vendor@example.com",
+        )
+        TenderInvitedVendor.objects.create(tender=tender, vendor=vendor)
+        response = self.client.post(f"/api/tenders/{tender.id}/request_publish_approval/", {}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)

@@ -2954,6 +2954,13 @@ class TenderViewSet(viewsets.ModelViewSet):
             return Response({'detail': 'Publish approval has already been requested and is pending review.'}, status=status.HTTP_400_BAD_REQUEST)
         if tender.status != TenderStatus.DRAFT:
             return Response({'detail': f'Only a Draft tender can be submitted for publish approval (this one is {tender.status}).'}, status=status.HTTP_400_BAD_REQUEST)
+        # Catch an empty invite list now, not after the Super Admin has approved: an
+        # invite-only tender with nobody invited could never be published.
+        if self._publish_is_invite_only(tender) and not tender.linked_eoi_tender_id and not tender.invited_vendors.exists():
+            return Response(
+                {'detail': f'This tender uses {tender.procurement_method}, so only invited vendors can bid. Invite at least one vendor first, or switch the procurement method to Open Tendering.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         old_status = tender.status
         old_pub_status = tender.publish_approval_status
@@ -3114,7 +3121,8 @@ class TenderViewSet(viewsets.ModelViewSet):
         if not self._publish_recipients(tender)[0]:
             return Response(
                 {'detail': (
-                    'No invited vendors to notify — this tender is limited to its invited/shortlisted vendors.'
+                    f'No vendors have been invited. This tender uses {tender.procurement_method}, so only invited vendors can bid — '
+                    'invite vendors from the tender\'s "Invite Vendors" section, or switch the procurement method to Open Tendering.'
                     if self._publish_is_invite_only(tender)
                     else 'No approved pre-qualified vendors found to notify.'
                 )},
