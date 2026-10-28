@@ -11769,6 +11769,8 @@ const VendorEoiInvites = ({ onSubmitEoi }: { onSubmitEoi: (tenderId: string) => 
             </div>
           </div>
 
+          {!windowClosed && <TenderClarifications tender={selected} mode="vendor" />}
+
           <InfoBanner color={AMBER} bg={AMBER_SOFT}>
             Submitting an Expression of Interest does not commit you to a bid. If shortlisted, you'll be notified and invited to submit a full proposal once the actual tender is published.
           </InfoBanner>
@@ -13787,7 +13789,8 @@ const VendorDashboard = ({
       systemCapacity: "",
       systemCapacityUnit: isMiniGridTender ? "kW" : "Wh",
       systemConfiguration: {
-        technologyType: Array.isArray(bidTender?.technologyTypes) ? (bidTender?.technologyTypes?.[0] || "") : "",
+        // Nothing pre-selected: the vendor must consciously choose the technology they bid.
+        technologyType: "",
         ratedPowerW: "",
         batteryCapacityWh: "",
         pvPanelSizeW: "",
@@ -14000,7 +14003,7 @@ const VendorDashboard = ({
       systemCapacity: version.system_configuration?.system_capacity != null ? String(version.system_configuration.system_capacity) : "",
       systemCapacityUnit: version.system_configuration?.system_capacity_unit || (isMiniGridTender ? "kW" : "Wh"),
       systemConfiguration: {
-        technologyType: version.system_configuration?.technology_type || version.technology_type || bidTender?.technologyTypes?.[0] || "",
+        technologyType: version.system_configuration?.technology_type || version.technology_type || "",
         ratedPowerW: version.system_configuration?.rated_power_w != null ? String(version.system_configuration.rated_power_w) : "",
         batteryCapacityWh: version.system_configuration?.battery_capacity_wh != null ? String(version.system_configuration.battery_capacity_wh) : "",
         pvPanelSizeW: version.system_configuration?.pv_panel_size_w != null ? String(version.system_configuration.pv_panel_size_w) : "",
@@ -14452,6 +14455,10 @@ const VendorDashboard = ({
     && bidForm.techTier
     && (!approvedTierLevel || !selectedTierLevel || selectedTierLevel <= approvedTierLevel)
   );
+  // Inclusion commitments are declared once, at the first stage the vendor reaches:
+  // the EOI — or, on a single-stage Combined tender (no EOI at all), the Combined
+  // submission itself. A tender linked to an EOI Invite carries them over locked.
+  const declaresInclusionAtThisStage = isEoiStage || (isCombinedStage && isSingleStageCombinedWorkflow);
   const inclusionSectionComplete =
     Number(bidForm.femaleTargetPct || 0) >= requiredFemaleTarget
     && Number(bidForm.vulnerableTargetPct || 0) >= requiredVulnerableTarget
@@ -14803,6 +14810,8 @@ const VendorDashboard = ({
       if (eoiNarrativeCharCount < 200) {
         fields.eoiNarrative = `EOI narrative must contain at least 200 characters before submission (currently ${eoiNarrativeCharCount}).`;
       }
+    }
+    if (declaresInclusionAtThisStage) {
       // Inclusion commitment is declared once, here, and carried forward to later stages.
       if (Number(bidForm.femaleTargetPct || 0) < requiredFemaleTarget) {
         fields.femaleTargetPct = `Female-headed household target must be at least ${requiredFemaleTarget}%.`;
@@ -14816,6 +14825,8 @@ const VendorDashboard = ({
       if (!bidForm.inclusionCommitmentConfirmed) {
         fields.inclusionCommitmentConfirmed = "You must confirm the inclusion commitment before submitting.";
       }
+    }
+    if (isEoiStage) {
       if (isLotWise) {
         if (declaredLots.length === 0) {
           fields.declaredLots = "Select at least one lot to bid on.";
@@ -15196,7 +15207,7 @@ const VendorDashboard = ({
         tech_tier: bidForm.techTier as TenderBid["tech_tier"],
         energy_target: bidForm.energyTarget ? Number(bidForm.energyTarget) : undefined,
         system_configuration: {
-          technology_type: bidForm.systemConfiguration.technologyType || bidTender.technologyTypes?.[0] || "",
+          technology_type: bidForm.systemConfiguration.technologyType || "",
           co_financing_amount_lsl: bidForm.coFinancingAmount ? Number(bidForm.coFinancingAmount) : undefined,
           device_brand: bidForm.deviceBrand,
           device_model: bidForm.deviceModel,
@@ -16714,7 +16725,7 @@ const VendorDashboard = ({
                     <label className="text-sm font-bold text-slate-700 ml-1">Technology Type *</label>
                     <select
                       className="input-field"
-                      value={bidForm.systemConfiguration.technologyType || bidTechnologyTypeOptions[0] || ""}
+                      value={bidForm.systemConfiguration.technologyType || ""}
                       onChange={(e) => {
                         setBidForm(prev => ({
                           ...prev,
@@ -16726,9 +16737,12 @@ const VendorDashboard = ({
                       {bidTechnologyTypeOptions.length === 0 ? (
                         <option value="">No technology type configured in this tender</option>
                       ) : (
-                        bidTechnologyTypeOptions.map((tech) => (
-                          <option key={tech} value={tech}>{tech}</option>
-                        ))
+                        <>
+                          <option value="" disabled>Select technology type</option>
+                          {bidTechnologyTypeOptions.map((tech) => (
+                            <option key={tech} value={tech}>{tech}</option>
+                          ))}
+                        </>
                       )}
                     </select>
                     <BidFieldError message={bidFieldErrors["technologyType"]} />
@@ -16953,7 +16967,7 @@ const VendorDashboard = ({
               id="inclusion"
               number={nextBidStep()}
               title="Social Inclusion Commitments (Impact)"
-              description={isEoiStage ? "Minimum shares of households you commit to reaching within each group — these become the targets your milestone payments are measured against." : "Declared at Stage 1 (EOI) and locked in — shown here for reference, not editable at this stage."}
+              description={declaresInclusionAtThisStage ? "Minimum shares of households you commit to reaching within each group — these become the targets your milestone payments are measured against." : "Declared at Stage 1 (EOI) and locked in — shown here for reference, not editable at this stage."}
               complete={inclusionSectionReady}
               contentClassName="space-y-5 p-6"
             >
@@ -16962,7 +16976,7 @@ const VendorDashboard = ({
                     {bidSectionErrors["inclusion"]}
                   </div>
                 )}
-                {isEoiStage ? (
+                {declaresInclusionAtThisStage ? (
                 <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
                   <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
                     <label className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Female-Headed Household Target *</label>
@@ -17023,7 +17037,7 @@ const VendorDashboard = ({
                     {bidFileErrors["genderActionPlan"] && <p className="mt-2 text-xs font-semibold text-rose-600">{bidFileErrors["genderActionPlan"]}</p>}
                   </div>
                 )}
-                {isEoiStage ? (
+                {declaresInclusionAtThisStage ? (
                   <>
                     <label className="flex items-start gap-3 rounded-3xl border border-slate-200 bg-slate-50 p-4">
                       <input type="checkbox" checked={bidForm.inclusionCommitmentConfirmed} onChange={(e) => { setBidForm(prev => ({ ...prev, inclusionCommitmentConfirmed: e.target.checked })); clearBidFieldError("inclusionCommitmentConfirmed"); }} className="mt-1" />
@@ -27696,6 +27710,46 @@ const EoiInviteDetail = ({
     }
   };
 
+  // ---- Quick actions: publish a draft, extend the EOI deadline, close the EOI early.
+  const [quickBusy, setQuickBusy] = useState(false);
+  const [quickError, setQuickError] = useState<string | null>(null);
+  const [quickMessage, setQuickMessage] = useState<string | null>(null);
+  const [newEoiDeadline, setNewEoiDeadline] = useState("");
+
+  const runQuickAction = async (action: () => Promise<unknown>, successMessage: string) => {
+    if (!tender) return;
+    setQuickBusy(true);
+    setQuickError(null);
+    setQuickMessage(null);
+    try {
+      await action();
+      setTender(await fetchTender(tender.id));
+      setQuickMessage(successMessage);
+    } catch (err: any) {
+      setQuickError(err?.message || "That action could not be completed.");
+    } finally {
+      setQuickBusy(false);
+    }
+  };
+
+  const handlePublishDraft = () => runQuickAction(async () => {
+    const result = await publishTender(tenderId);
+    if (result.summary?.email_error) setQuickError(`Published, but email was not delivered: ${result.summary.email_error}`);
+  }, "EOI Invite published — approved vendors have been notified.");
+
+  const handleExtendEoiDeadline = () => {
+    if (!newEoiDeadline) return;
+    return runQuickAction(async () => {
+      await extendTenderDeadline(tenderId, fromDateTimeLocalValue(newEoiDeadline));
+      setNewEoiDeadline("");
+    }, "EOI deadline extended — vendors following this invite have been notified.");
+  };
+
+  const handleCloseEoi = () => {
+    if (!window.confirm("Close this EOI now? No further Expressions of Interest will be accepted, and you can start shortlisting.")) return;
+    return runQuickAction(() => closeTender(tenderId), "EOI closed — you can now shortlist the responses.");
+  };
+
   return (
     <FormKitShell>
       <Crumb onBack={onBack} trail="EOI Invites" />
@@ -27764,20 +27818,69 @@ const EoiInviteDetail = ({
                 <p className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-1">Contact Details</p>
                 <p className="text-sm text-slate-700">{tender.contactDetails || "—"}</p>
               </div>
-              {(tender.advertisementChannels || []).length > 0 && (
-                <div className="md:col-span-2">
-                  <p className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-1">Advertisement Channels</p>
-                  <div className="flex flex-wrap gap-1.5">
-                    {(tender.advertisementChannels || []).map(c => <span key={c} className="badge bg-slate-100 text-slate-600">{c}</span>)}
-                  </div>
-                </div>
-              )}
             </div>
           </div>
 
           <InfoBanner color={AMBER} bg={AMBER_SOFT}>
             Select which respondents move forward. Only shortlisted vendors will be automatically invited once this is converted into a tender — everyone else is notified of closure.
           </InfoBanner>
+
+          {!isFinalized && (tender.status === TenderStatus.DRAFT || tender.status === TenderStatus.PUBLISHED) && (
+            <div className="card p-5 mb-6 space-y-4">
+              <p className="text-xs font-bold uppercase tracking-widest text-slate-400">Quick Actions</p>
+              {tender.status === TenderStatus.DRAFT ? (
+                <div className="flex flex-wrap items-center gap-3">
+                  <button onClick={handlePublishDraft} disabled={quickBusy} className="btn-primary text-sm disabled:opacity-40">
+                    {quickBusy ? "Working..." : "Publish EOI Invite"}
+                  </button>
+                  <button onClick={() => onEdit(tenderId)} disabled={quickBusy} className="btn-secondary text-sm">Edit details</button>
+                  <p className="text-xs text-slate-500">Publishing opens the invite to every approved vendor. Its terms are locked afterwards.</p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <p className="text-sm font-semibold text-slate-800">Extend the EOI deadline</p>
+                    <p className="text-xs text-slate-500">
+                      Currently {tender.eoiDeadline ? new Date(tender.eoiDeadline).toLocaleString() : "not set"}. It can only move later.
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      <input
+                        type="datetime-local"
+                        className="input-field flex-1 min-w-[12rem]"
+                        value={newEoiDeadline}
+                        min={toDateTimeLocalValue(tender.eoiDeadline || new Date().toISOString())}
+                        onChange={(e) => setNewEoiDeadline(e.target.value)}
+                      />
+                      <button onClick={handleExtendEoiDeadline} disabled={quickBusy || !newEoiDeadline} className="btn-secondary text-sm disabled:opacity-40">
+                        Extend
+                      </button>
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <p className="text-sm font-semibold text-slate-800">Close the EOI now</p>
+                    <p className="text-xs text-slate-500">Stops new responses before the deadline so shortlisting can start straight away.</p>
+                    <button onClick={handleCloseEoi} disabled={quickBusy} className="btn-secondary text-sm text-rose-700 disabled:opacity-40">
+                      Close EOI
+                    </button>
+                  </div>
+                </div>
+              )}
+              {quickMessage && <p className="text-sm text-emerald-700">{quickMessage}</p>}
+              {quickError && <p className="text-sm text-red-600">{quickError}</p>}
+            </div>
+          )}
+
+          {tender.status === TenderStatus.CLOSED && !isFinalized && (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 font-medium mb-6">
+              The EOI is closed. Shortlist or reject every response below, then finalize the shortlist.
+            </div>
+          )}
+
+          {tender.status !== TenderStatus.DRAFT && (
+            <div className="mb-6">
+              <TenderClarifications tender={tender} mode="staff" />
+            </div>
+          )}
 
           {isAlreadyLinked && (
             <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600 font-medium">
@@ -27793,7 +27896,11 @@ const EoiInviteDetail = ({
             </div>
           )}
 
-          <TACView mode="eoi" initialTenderId={tenderId} />
+          {/* Re-mounted when the status changes (e.g. after Close EOI) so the review
+              list picks up that responses can now be decided. */}
+          <React.Fragment key={tender.status}>
+            <TACView mode="eoi" initialTenderId={tenderId} />
+          </React.Fragment>
 
           {!isFinalized && eoiWindowOver && (
             <div className="card p-4 mt-5 space-y-3">

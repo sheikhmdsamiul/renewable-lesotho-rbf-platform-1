@@ -8726,3 +8726,70 @@ class CombinedTenderRequiredDocumentStageTests(APITestCase):
         TenderInvitedVendor.objects.create(tender=tender, vendor=vendor)
         response = self.client.post(f"/api/tenders/{tender.id}/request_publish_approval/", {}, format="json")
         self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+
+
+class SingleStageCombinedInclusionTests(APITestCase):
+    """With no EOI stage, a single-stage Combined bid must declare and confirm the
+    inclusion commitments itself before it can be submitted."""
+
+    def test_combined_submission_requires_inclusion_commitment(self):
+        vendor = User.objects.create_user(
+            username="inc_vendor", password="securePass123", role=UserRole.VENDOR,
+            status="Active", full_name="Inc Vendor", email="inc-vendor@example.com",
+        )
+        VendorPrequalification.objects.create(
+            vendor=vendor, company_name="Inc Vendor Ltd", status=PrequalificationStatus.APPROVED, tech_tier="Level 3",
+        )
+        tender = Tender.objects.create(
+            reference_number="INC-001", name="Inclusion Combined", department="Department of Energy", category="SHS",
+            status=TenderStatus.PUBLISHED, deadline=timezone.now() + timedelta(days=10), technology_types=["SHS"],
+            procurement_workflow="combined", procurement_method="Open Tendering",
+            technical_deadline=timezone.now() + timedelta(days=10),
+        )
+        bid = TenderBid.objects.create(
+            tender=tender, vendor_id=str(vendor.id), vendor_name=vendor.full_name, bid_stage="combined",
+            stage="Technical & Financial", status=BidStatus.DRAFT, version_number=1,
+        )
+        self.client.force_authenticate(vendor)
+        response = self.client.post(f"/api/tender-bids/{bid.id}/submit/")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST, response.data)
+        self.assertIn("inclusion_commitment_confirmed", response.data)
+
+
+class EoiInviteQuickActionTests(APITestCase):
+    """The EOI Invite detail page's quick actions: extending the EOI deadline moves only
+    the EOI deadline, and closing early lets shortlisting start before the deadline."""
+
+    def setUp(self):
+        self.rmt_user = User.objects.create_user(
+            username="qa_eoi_rmt", password="securePass123", role=UserRole.RBF_OFFICIAL,
+            status="Active", full_name="QA EOI RMT", email="qa-eoi-rmt@example.com",
+        )
+        self.vendor = User.objects.create_user(
+            username="qa_eoi_vendor", password="securePass123", role=UserRole.VENDOR,
+            status="Active", full_name="QA EOI Vendor", email="qa-eoi-vendor@example.com",
+        )
+        self.eoi = Tender.objects.create(
+            reference_number="QA-EOI-001", name="Quick Action EOI", department="Department of Energy", category="SHS",
+            status=TenderStatus.PUBLISHED, deadline=timezone.now() + timedelta(days=5), technology_types=["SHS"],
+            procurement_workflow="eoi_combined", procurement_method="Restricted Tendering",
+            is_eoi_invite_only=True, eoi_deadline=timezone.now() + timedelta(days=5),
+        )
+        self.client.force_authenticate(self.rmt_user)
+
+    def test_extend_moves_the_eoi_deadline(self):
+        later = self.eoi.eoi_deadline + timedelta(days=3)
+        response = self.client.post(f"/api/tenders/{self.eoi.id}/extend_deadline/", {"deadline": later.isoformat()}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.eoi.refresh_from_db()
+        self.assertEqual(self.eoi.eoi_deadline, later)
+        self.assertIsNone(self.eoi.technical_deadline)
+
+    def test_closing_early_allows_shortlisting(self):
+        bid = TenderBid.objects.create(
+            tender=self.eoi, vendor_id=str(self.vendor.id), vendor_name=self.vendor.full_name,
+            bid_stage="eoi", stage="EOI", status=BidStatus.SUBMITTED, version_number=1,
+        )
+        self.assertEqual(self.client.post(f"/api/tender-bids/{bid.id}/accept/", {}, format="json").status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(self.client.post(f"/api/tenders/{self.eoi.id}/close/", {}, format="json").status_code, status.HTTP_200_OK)
+        self.assertEqual(self.client.post(f"/api/tender-bids/{bid.id}/accept/", {}, format="json").status_code, status.HTTP_200_OK)

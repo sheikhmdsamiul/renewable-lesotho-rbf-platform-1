@@ -30,7 +30,6 @@ import {
 
 const DISTRICTS = ["Berea", "Butha-Buthe", "Leribe", "Mafeteng", "Maseru", "Mohale's Hoek", "Mokhotlong", "Qacha's Nek", "Quthing", "Thaba-Tseka"];
 const TECH_TYPES = ["SHS", "ICS", "GMG", "SWP", "PUE"];
-const CHANNELS = ["Platform Notice Board", "National Gazette", "Local Newspaper", "UNGM"];
 // Kept in sync with TARGET_SITE_TYPE_HELP in App.tsx — duplicated rather than imported
 // to avoid a circular import between this file and App.tsx (see note above).
 const TARGET_SITE_TYPE_HELP: Record<string, string> = {
@@ -54,7 +53,6 @@ interface EoiFormData {
   purposeAndScope: string;
   eoiDeadline: string;
   maxVendorsToShortlist?: number;
-  advertisementChannels: string[];
   contactDetails: string;
 }
 
@@ -69,7 +67,6 @@ const defaultEoiFormData: EoiFormData = {
   purposeAndScope: "",
   eoiDeadline: "",
   maxVendorsToShortlist: undefined,
-  advertisementChannels: [],
   contactDetails: "",
 };
 
@@ -91,7 +88,6 @@ function toEoiFormData(tender: Tender): EoiFormData {
     purposeAndScope: tender.instruction ?? tender.biddersEligibility ?? "",
     eoiDeadline: tender.eoiDeadline ? tender.eoiDeadline.slice(0, 16) : "",
     maxVendorsToShortlist: tender.maxVendorsToShortlist ?? undefined,
-    advertisementChannels: tender.advertisementChannels ?? [],
     contactDetails: tender.contactDetails ?? "",
   };
 }
@@ -196,7 +192,7 @@ export const EoiInvites = ({
     navigateView("edit", tender.id);
   };
 
-  const toggleListItem = (key: "technologyTypes" | "targetDistricts" | "advertisementChannels", item: string) => {
+  const toggleListItem = (key: "technologyTypes" | "targetDistricts", item: string) => {
     setFormData((prev) => {
       const current = prev[key];
       return {
@@ -257,7 +253,6 @@ export const EoiInvites = ({
       biddersEligibility: formData.purposeAndScope,
       eoiDeadline: formData.eoiDeadline,
       maxVendorsToShortlist: formData.maxVendorsToShortlist,
-      advertisementChannels: formData.advertisementChannels,
       contactDetails: formData.contactDetails,
       addressForDocument: formData.contactDetails,
       invitedBy: formData.contactDetails,
@@ -476,9 +471,6 @@ export const EoiInvites = ({
             />
           </Field>
         </div>
-        <Field label="Advertisement Channels" accent={AMBER}>
-          <Chips items={CHANNELS} selected={formData.advertisementChannels} onToggle={(item) => toggleListItem("advertisementChannels", item)} accent={AMBER} />
-        </Field>
 
         <p className="text-xs font-bold uppercase tracking-widest mb-4 mt-2" style={{ color: AMBER }}>Publish</p>
         <Field label="Contact Details" required accent={AMBER}>

@@ -813,6 +813,22 @@ class TenderBidSerializer(serializers.ModelSerializer):
                 if not attrs.get('inclusion_commitment_confirmed', instance.inclusion_commitment_confirmed if instance else False):
                     errors['inclusion_commitment_confirmed'] = 'You must confirm the inclusion commitment before submitting.'
 
+        # A single-stage Combined tender has no EOI, so its Combined submission is where
+        # the inclusion commitment is declared — validated exactly as at an EOI. (A tender
+        # linked to an EOI Invite inherits it from the linked EOI bid above instead.)
+        declares_inclusion_here = (
+            stage_key == BidStage.COMBINED
+            and tender is not None
+            and not workflow_has_eoi_stage(tender)
+            and not getattr(tender, 'linked_eoi_tender_id', None)
+        )
+        if declares_inclusion_here and bid_status == BidStatus.SUBMITTED:
+            errors.update(inclusion_target_errors({
+                field: attrs.get(field, getattr(instance, field) if instance else 0) for field, _, _ in INCLUSION_FIELDS
+            }))
+            if not attrs.get('inclusion_commitment_confirmed', instance.inclusion_commitment_confirmed if instance else False):
+                errors['inclusion_commitment_confirmed'] = 'You must confirm the inclusion commitment before submitting.'
+
         # ---- Financial pricing (Financial stage, or Combined which bundles both) ----
         collects_final_pricing = is_financial or (is_detailed and stage_key == BidStage.COMBINED)
         if collects_final_pricing and bid_status == BidStatus.SUBMITTED:
