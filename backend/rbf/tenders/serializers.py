@@ -7,9 +7,13 @@ from functools import lru_cache
 from pathlib import Path
 
 from django.conf import settings
+from django.core.files.uploadedfile import UploadedFile
+from django.db import models
 from django.core.files.storage import default_storage
 from django.utils import timezone
 from rest_framework import serializers
+
+from .file_access import media_url_for
 from .models import (
     Tender,
     TenderBid,
@@ -42,6 +46,10 @@ from .models import (
     TenderAwardRecommendation,
     IntentToAwardRequest,
     IntentAwardRequestStatus,
+    PublishApprovalStatus,
+    TenderClarification,
+    TenderAddendum,
+    TenderBidOpening,
 )
 from rbf.users.models import UserRole, VendorPrequalification, PrequalificationStatus
 from rbf.projects.models import TechnologyType, VerificationMethod
@@ -655,16 +663,10 @@ class TenderBidSerializer(serializers.ModelSerializer):
         instance = getattr(self, 'instance', None)
         if instance is not None:
             return self._resolved_stage(instance)
-        # Creating a new record: use the provided bid_stage or the tender's opening stage.
-        bid_stage = attrs.get('bid_stage')
-        if not bid_stage:
-            # bid_stage is exposed read-only, so it is not in validated_data; fall back to
-            # the raw request payload so the client's intended stage is honored on create.
-            request = self.context.get('request')
-            if request is not None:
-                raw = request.data.get('bid_stage') or request.data.get('stage') or ''
-                if raw:
-                    bid_stage = normalize_bid_stage(raw)
+        # Creating a new record: bid_stage is read-only, so the view resolves it
+        # server-side (views._resolve_new_bid_stage) and passes it in the
+        # context — the raw client payload is never trusted for it.
+        bid_stage = self.context.get('bid_stage')
         if bid_stage:
             return normalize_bid_stage(bid_stage)
         tender = attrs.get('tender')
@@ -687,6 +689,8 @@ class TenderBidSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
         instance = getattr(self, 'instance', None)
         tender = attrs.get('tender') or getattr(instance, 'tender', None)
+        if instance is not None and 'tender' in attrs and attrs['tender'].pk != instance.tender_id:
+            raise serializers.ValidationError({'tender': 'A bid cannot be moved to another tender.'})
         stage_key = self._effective_stage_key(attrs)
         stage_key = normalize_bid_stage(stage_key)
         attrs['stage'] = self._effective_stage_label(attrs)
@@ -1211,16 +1215,19 @@ class TenderBidSerializer(serializers.ModelSerializer):
                 'financial_standing_file',
                 'technical_experience_file',
                 'track_record_file',
+                'tender_security_file',
             ]
+            # Bid files are confidential: clients get short-lived signed links, never a
+            # public /media path (see rbf.tenders.file_access).
             for field in file_fields:
                 if data.get(field):
-                    data[field] = request.build_absolute_uri(data[field])
+                    data[field] = media_url_for(request, data[field])
             if data.get('om_plan_document'):
-                data['om_plan_document'] = request.build_absolute_uri(data['om_plan_document'])
+                data['om_plan_document'] = media_url_for(request, data['om_plan_document'])
             if data.get('custom_documents'):
                 for _cd in data['custom_documents']:
                     if _cd.get('file_url'):
-                        _cd['file_url'] = request.build_absolute_uri(_cd['file_url'])
+                        _cd['file_url'] = media_url_for(request, _cd['file_url'])
 
         # Seal financial pricing for evaluators until technical clearance passes.
         if financial_bid_is_sealed(instance, request):
@@ -1676,16 +1683,15 @@ class TenderContractSerializer(serializers.ModelSerializer):
     def to_representation(self, instance):
         data = super().to_representation(instance)
         request = self.context.get('request')
-        if request and data.get('signed_file'):
-            data['signed_file'] = request.build_absolute_uri(data['signed_file'])
-        if request and data.get('generated_file'):
-            data['generated_file'] = request.build_absolute_uri(data['generated_file'])
+        # Contracts and their annexes (which include the winning bid's documents) are
+        # confidential: signed, expiring links only.
+        if data.get('signed_file'):
+            data['signed_file'] = media_url_for(request, data['signed_file'])
+        if data.get('generated_file'):
+            data['generated_file'] = media_url_for(request, data['generated_file'])
         for annex_field in ('annex_a_file', 'annex_b_file', 'annex_c_file', 'annex_d_file', 'annex_e_file'):
             resolved_value = self._resolve_annex_value(instance, annex_field)
-            if request and resolved_value:
-                data[annex_field] = request.build_absolute_uri(resolved_value)
-            else:
-                data[annex_field] = resolved_value
+            data[annex_field] = media_url_for(request, resolved_value) if resolved_value else resolved_value
         return data
 
 
@@ -1835,8 +1841,17 @@ class TenderListSerializer(serializers.ModelSerializer):
     def to_representation(self, instance):
         data = super().to_representation(instance)
         request = self.context.get('request')
-        if request and getattr(request.user, 'role', None) == UserRole.VENDOR and instance.budget_disclosure != BudgetDisclosure.PUBLISHED:
+        # Vendors and anonymous public-portal visitors (internal callers pass no request
+        # and see everything).
+        is_public_viewer = request is not None and (
+            not request.user.is_authenticated or getattr(request.user, 'role', None) == UserRole.VENDOR
+        )
+        if is_public_viewer and instance.budget_disclosure != BudgetDisclosure.PUBLISHED:
             data.pop('budget', None)
+        if is_public_viewer:
+            # How many others bid or were invited is competitive information.
+            data.pop('bid_count', None)
+            data.pop('invited_vendor_count', None)
         return data
 
     class Meta:
@@ -1853,6 +1868,7 @@ class TenderListSerializer(serializers.ModelSerializer):
             'publish_approval_reviewed_at', 'publish_approval_reviewed_by', 'publish_approval_notes',
             'evaluation_comment', 'evaluation_comment_author', 'evaluation_comment_updated_at',
             'is_eoi_invite_only', 'linked_eoi_tender', 'skips_eoi_stage', 'invited_vendor_count',
+            'shortlist_finalized_at',
             'linked_tender_count', 'lot_count', 'awarded_lot_count', 'lot_statuses',
         ]
 
@@ -2090,18 +2106,18 @@ class TenderSerializer(serializers.ModelSerializer):
             if (not self.partial or field in payload) and payload.get(field) in ('', None):
                 payload[field] = None
 
-        for field in self.OPTIONAL_BOOLEAN_FIELDS:
-            if payload.get(field) is None:
-                payload[field] = False
+        # Defaults fill in blanks on a full create/PUT, or for a field a partial update
+        # actually sent as null. A field a PATCH simply omits must keep its stored value.
+        def _fill_blank(field, default):
+            if (not self.partial or field in payload) and payload.get(field) is None:
+                payload[field] = default
 
-        if payload.get('technology_types') is None:
-            payload['technology_types'] = []
-        if payload.get('target_districts') is None:
-            payload['target_districts'] = []
-        if payload.get('currency_rates') is None:
-            payload['currency_rates'] = {}
-        if payload.get('advertisement_channels') is None:
-            payload['advertisement_channels'] = []
+        for field in self.OPTIONAL_BOOLEAN_FIELDS:
+            _fill_blank(field, False)
+        _fill_blank('technology_types', [])
+        _fill_blank('target_districts', [])
+        _fill_blank('currency_rates', {})
+        _fill_blank('advertisement_channels', [])
 
         for _jf in ('technology_types', 'target_districts', 'governing_documents', 'required_documents', 'lots', 'boq_items', 'currency_rates', 'advertisement_channels'):
             _v = payload.get(_jf)
@@ -2110,7 +2126,7 @@ class TenderSerializer(serializers.ModelSerializer):
                     payload[_jf] = json.loads(_v)
                 except Exception:
                     pass
-        if payload.get('approximate_installation_target') in ('', None):
+        if (not self.partial or 'approximate_installation_target' in payload) and payload.get('approximate_installation_target') in ('', None):
             payload['approximate_installation_target'] = None
 
         return super().to_internal_value(payload)
@@ -2223,12 +2239,22 @@ class TenderSerializer(serializers.ModelSerializer):
                 errors['linked_eoi_tender'] = 'A tender cannot link to itself.'
             elif Tender.objects.filter(linked_eoi_tender=linked_eoi_tender).exclude(pk=getattr(instance, 'pk', None)).exists():
                 errors['linked_eoi_tender'] = 'This EOI Invite has already been used to create another tender.'
+            elif not linked_eoi_tender.shortlist_finalized_at:
+                errors['linked_eoi_tender'] = 'The EOI Invite\'s shortlist must be finalized before a tender can be created from it.'
             else:
                 # The tender name always matches the EOI Invite it's linked to.
                 attrs['name'] = linked_eoi_tender.name
 
         # Procurement workflow + staged deadlines
-        workflow = attrs.get('procurement_workflow') or (instance.procurement_workflow if instance else ProcurementWorkflow.SEQUENTIAL)
+        # Sequential (EOI -> Technical -> Financial) is retired: existing tenders keep
+        # running on it, but no new tender may be created with it, and a new tender that
+        # doesn't name a workflow gets single-stage Combined.
+        if instance is None and not attrs.get('procurement_workflow'):
+            attrs['procurement_workflow'] = ProcurementWorkflow.COMBINED
+        workflow = attrs.get('procurement_workflow') or instance.procurement_workflow
+        if instance is None and workflow == ProcurementWorkflow.SEQUENTIAL and not is_eoi_invite_only:
+            errors['procurement_workflow'] = 'The Sequential workflow is retired. Choose Combined, or EOI → Combined with an EOI Invite.'
+
         if is_eoi_invite_only or (linked_eoi_tender is not None and 'linked_eoi_tender' not in errors):
             # Both an EOI Invite and a tender linked to one always run the EOI → Combined
             # workflow — the former to collect EOIs, the latter because that's the only
@@ -2302,10 +2328,77 @@ class TenderSerializer(serializers.ModelSerializer):
                 errors['technical_deadline'] = 'Combined submission deadline must be after the EOI deadline.'
             # no separate financial deadline in combined mode
 
+        if instance is not None and not errors:
+            self._apply_status_edit_lock(instance, attrs, errors)
+
         if errors:
             raise serializers.ValidationError(errors)
 
         return attrs
+
+    # Once a tender leaves Draft its terms are what vendors are bidding against (and
+    # what the Super Admin approved), so generic edits are locked. A Published tender
+    # may only amend these informational fields here; its submission deadlines move
+    # only through the dedicated extend_deadline action, which validates the extension
+    # and notifies bidders. Every other status is fully read-only.
+    PUBLISHED_AMENDABLE_FIELDS = frozenset({
+        'clarification_deadline', 'site_visit_date', 'pre_tender_meeting_info', 'contact_details',
+    })
+    # Collections saved outside the model's own columns (see create/update). They
+    # can't be cheaply diffed against the instance, so outside Draft they are ignored
+    # (the frontend resubmits them unchanged with every save).
+    NESTED_WRITE_FIELDS = ('required_documents', 'lots', 'boq_items', 'governing_documents')
+
+    @staticmethod
+    def _tender_field_changed(instance, field, new_value) -> bool:
+        if isinstance(new_value, UploadedFile):
+            return True
+        old_value = getattr(instance, field, None)
+        try:
+            model_field = instance._meta.get_field(field)
+        except Exception:
+            return old_value != new_value
+        if isinstance(model_field, models.FileField):
+            return bool(new_value) or bool(old_value) != bool(new_value)
+        if model_field.is_relation:
+            return getattr(instance, f'{field}_id') != getattr(new_value, 'pk', new_value)
+        if isinstance(old_value, Decimal) or isinstance(new_value, Decimal):
+            if old_value is None or new_value is None:
+                return old_value is not new_value
+            return Decimal(str(old_value)) != Decimal(str(new_value))
+        return old_value != new_value
+
+    def _apply_status_edit_lock(self, instance, attrs, errors):
+        """Drop resubmitted-but-unchanged fields and reject real changes the tender's
+        status no longer allows. In Draft everything stays editable, but any change
+        after Super Admin approval voids that approval (see update())."""
+        self._invalidates_publish_approval = False
+        if instance.status == TenderStatus.DRAFT:
+            if instance.publish_approval_status == PublishApprovalStatus.APPROVED:
+                self._invalidates_publish_approval = any(
+                    field in self.NESTED_WRITE_FIELDS or self._tender_field_changed(instance, field, value)
+                    for field, value in attrs.items()
+                    if field != 'deadline'
+                )
+            return
+        amendable = self.PUBLISHED_AMENDABLE_FIELDS if instance.status == TenderStatus.PUBLISHED else frozenset()
+        blocked = []
+        for field in list(attrs.keys()):
+            if field == 'deadline' or field in self.NESTED_WRITE_FIELDS:
+                attrs.pop(field)
+            elif not self._tender_field_changed(instance, field, attrs[field]):
+                attrs.pop(field)
+            elif field not in amendable:
+                blocked.append(field)
+        if blocked:
+            hint = (
+                ' Use "Extend Deadline" to move a submission deadline.'
+                if instance.status == TenderStatus.PUBLISHED else ''
+            )
+            errors['detail'] = (
+                f'This tender is {instance.status} and these fields can no longer be changed: '
+                f'{", ".join(sorted(blocked))}.{hint}'
+            )
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
@@ -2326,11 +2419,19 @@ class TenderSerializer(serializers.ModelSerializer):
         is_committee_member = any(str(m.member_id) == requester_id for m in committee_qs)
         if requester_role == UserRole.ADMIN or is_committee_member:
             data['evaluation_committee_members'] = TenderEvaluationCommitteeMemberSerializer(committee_qs, many=True, context=self.context).data
-        invited_vendors_qs = instance.invited_vendors.select_related('vendor', 'invited_by').all()
-        is_invited_vendor = any(str(v.vendor_id) == requester_id for v in invited_vendors_qs)
-        if requester_role in (UserRole.ADMIN, UserRole.RBF_OFFICIAL) or is_invited_vendor:
+        # The roster is staff-only: showing it to an invited vendor would tell every
+        # bidder exactly who they are competing against.
+        if requester_role in (UserRole.ADMIN, UserRole.RBF_OFFICIAL):
+            invited_vendors_qs = instance.invited_vendors.select_related('vendor', 'invited_by').all()
             data['invited_vendors'] = TenderInvitedVendorSerializer(invited_vendors_qs, many=True, context=self.context).data
-        if requester_role == UserRole.VENDOR and instance.budget_disclosure != BudgetDisclosure.PUBLISHED:
+        elif requester_role == UserRole.VENDOR or (request is not None and not request.user.is_authenticated):
+            # Competitive / internal information a bidder (or the public) must not see.
+            for field in ('invited_vendor_count', 'bid_count', 'evaluation_comment', 'evaluation_comment_author'):
+                data.pop(field, None)
+        # Vendors and anonymous public-portal visitors only see a budget the RBF chose
+        # to publish.
+        is_public_viewer = request is not None and (requester_role == UserRole.VENDOR or not request.user.is_authenticated)
+        if is_public_viewer and instance.budget_disclosure != BudgetDisclosure.PUBLISHED:
             data.pop('budget', None)
             for lot in data.get('lots') or []:
                 lot.pop('budget', None)
@@ -2546,6 +2647,14 @@ class TenderSerializer(serializers.ModelSerializer):
         gov_docs = validated_data.pop('governing_documents', None)
         lots = validated_data.pop('lots', None)
         boq_items = validated_data.pop('boq_items', None)
+        if getattr(self, '_invalidates_publish_approval', False):
+            # The approved version is no longer what would be published.
+            validated_data.update({
+                'publish_approval_status': PublishApprovalStatus.NOT_REQUESTED,
+                'publish_approval_reviewed_at': None,
+                'publish_approval_reviewed_by': '',
+                'publish_approval_notes': '',
+            })
         tender = super().update(instance, validated_data)
         self._save_required_documents(tender, docs)
         self._save_governing_documents(tender, gov_docs, gov_provided)
@@ -2555,27 +2664,29 @@ class TenderSerializer(serializers.ModelSerializer):
         return tender
 
     def _sync_linked_eoi_vendors(self, tender):
-        """Copy the linked EOI Invite tender's shortlisted vendors onto this tender.
-
-        Runs on every save while linked (additive/idempotent via get_or_create) so
-        vendors shortlisted on the EOI Invite tender *after* linking are still picked
-        up the next time this tender is saved — it never removes anyone.
-        """
+        """Mirror the linked EOI Invite's (finalized, hence frozen) shortlist onto this
+        tender's invited vendors — exactly, never a hand-edited superset. Re-run at
+        publish time too (see TenderViewSet.publish)."""
         if not tender.linked_eoi_tender_id:
             return
         request = self.context.get('request')
         actor = getattr(request, 'user', None) if request else None
-        for invite in tender.linked_eoi_tender.invited_vendors.all():
+        shortlist = [invite.vendor for invite in tender.linked_eoi_tender.invited_vendors.select_related('vendor')]
+        tender.invited_vendors.exclude(vendor__in=shortlist).delete()
+        for vendor in shortlist:
             TenderInvitedVendor.objects.get_or_create(
                 tender=tender,
-                vendor=invite.vendor,
+                vendor=vendor,
                 defaults={'invited_by': actor},
             )
 
     class Meta:
         model = Tender
         fields = '__all__'
-        read_only_fields = ['id', 'created_at', 'updated_at', 'verified_at', 'published_at', 'awarded_at', 'closed_at', 'dispute_started_at', 'security_deposit_verified_at', 'bid_count', 'publish_approval_status', 'publish_approval_requested_at', 'publish_approval_reviewed_at', 'publish_approval_reviewed_by', 'publish_approval_notes', 'evaluation_comment', 'evaluation_comment_author', 'evaluation_comment_updated_at']
+        # Lifecycle/award state only ever moves through the dedicated actions (verify,
+        # publish, close, award...), never a generic edit — otherwise an RBF Official
+        # could PATCH status=Published and skip Super Admin approval.
+        read_only_fields = ['id', 'created_at', 'updated_at', 'status', 'is_verified', 'verified_at', 'published_at', 'awarded_at', 'closed_at', 'archived_at', 'dispute_started_at', 'security_deposit_verified', 'security_deposit_verified_at', 'shortlist_finalized_at', 'shortlist_finalized_by', 'awarded_vendor_id', 'awarded_vendor_name', 'intent_to_award_bid', 'intent_to_award_at', 'cooling_off_until', 'bid_count', 'publish_approval_status', 'publish_approval_requested_at', 'publish_approval_reviewed_at', 'publish_approval_reviewed_by', 'publish_approval_notes', 'evaluation_comment', 'evaluation_comment_author', 'evaluation_comment_updated_at']
         extra_kwargs = {
             'deadline': {'required': False, 'allow_null': True},
             # category is derived from technology_types in validate() rather than
@@ -2705,10 +2816,7 @@ class ChallengeDocumentSerializer(serializers.ModelSerializer):
 
     def get_file_url(self, obj):
         if obj.document:
-            request = self.context.get('request')
-            if request:
-                return request.build_absolute_uri(obj.document.url)
-            return obj.document.url
+            return media_url_for(self.context.get('request'), obj.document)
         return None
 
     class Meta:
@@ -2794,3 +2902,45 @@ class ChallengeCreateSerializer(serializers.Serializer):
         child=serializers.DictField(child=serializers.CharField()),
         required=False
     )
+
+
+class TenderClarificationSerializer(serializers.ModelSerializer):
+    """The asker is identified only to the RBF and to the asker themselves — published
+    answers reach every bidder anonymously."""
+    asked_by_me = serializers.SerializerMethodField()
+
+    class Meta:
+        model = TenderClarification
+        fields = ['id', 'tender', 'question', 'asked_at', 'answer', 'answered_by', 'answered_at', 'asked_by', 'asked_by_me']
+        read_only_fields = ['id', 'tender', 'asked_at', 'answer', 'answered_by', 'answered_at', 'asked_by', 'asked_by_me']
+
+    def get_asked_by_me(self, obj):
+        request = self.context.get('request')
+        return bool(request and obj.asked_by_id == getattr(request.user, 'id', None))
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        request = self.context.get('request')
+        if not (request and getattr(request.user, 'role', None) in (UserRole.RBF_OFFICIAL, UserRole.ADMIN)):
+            data.pop('asked_by', None)
+        return data
+
+
+class TenderAddendumSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TenderAddendum
+        fields = ['id', 'tender', 'number', 'title', 'description', 'document', 'issued_by', 'issued_at']
+        read_only_fields = ['id', 'tender', 'number', 'issued_by', 'issued_at']
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if instance.document:
+            data['document'] = media_url_for(self.context.get('request'), instance.document)
+        return data
+
+
+class TenderBidOpeningSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TenderBidOpening
+        fields = ['id', 'tender', 'opened_by', 'opened_at', 'attendees', 'notes', 'submissions']
+        read_only_fields = fields

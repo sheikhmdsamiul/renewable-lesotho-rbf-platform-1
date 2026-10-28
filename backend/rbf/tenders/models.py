@@ -2,6 +2,7 @@ from decimal import Decimal
 
 from django.db import models
 from django.conf import settings
+from django.core.serializers.json import DjangoJSONEncoder
 from django.utils import timezone
 
 
@@ -176,6 +177,12 @@ class Tender(models.Model):
     # EOI Invite-only concepts. Advisory: never enforced against the actual number of
     # vendors shortlisted during EOI Review.
     max_vendors_to_shortlist = models.PositiveIntegerField(null=True, blank=True)
+    # Set on an EOI Invite by TenderViewSet.finalize_shortlist once the EOI window is
+    # over and every response is decided. From then on the shortlist (its ACCEPTED EOI
+    # bids, mirrored into invited_vendors) is frozen, and only a finalized EOI Invite
+    # can be linked to the actual tender.
+    shortlist_finalized_at = models.DateTimeField(null=True, blank=True)
+    shortlist_finalized_by = models.CharField(max_length=255, blank=True)
     advertisement_channels = models.JSONField(default=list, blank=True)
     contact_details = models.CharField(max_length=255, blank=True)
     governing_documents = models.JSONField(default=list, blank=True)
@@ -1134,6 +1141,28 @@ class TenderBidSite(models.Model):
         return f"{self.site_name} ({self.bid.tender.reference_number})"
 
 
+class TenderBidSubmissionSnapshot(models.Model):
+    """An immutable copy of a bid exactly as it stood at one submission.
+
+    A vendor may revise a submitted bid until the deadline; every (re)submission
+    writes one of these, so what was submitted at each version survives later edits.
+    File fields are stored as their storage paths — replaced uploads are never deleted
+    from storage, so every path stays resolvable. Append-only: never updated."""
+    bid = models.ForeignKey('TenderBid', on_delete=models.CASCADE, related_name='submission_snapshots')
+    version_number = models.PositiveIntegerField()
+    submitted_at = models.DateTimeField()
+    snapshot = models.JSONField(encoder=DjangoJSONEncoder)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-version_number', '-id']
+        verbose_name = 'Tender Bid Submission Snapshot'
+        verbose_name_plural = 'Tender Bid Submission Snapshots'
+
+    def __str__(self):
+        return f"Bid {self.bid_id} v{self.version_number}"
+
+
 class TenderBidLotOffer(models.Model):
     """A vendor's price for one lot of a lot-wise tender, within their single bid.
 
@@ -1243,3 +1272,68 @@ class TenderRequiredDocument(models.Model):
 
     def __str__(self):
         return f"{self.name} ({self.get_bid_stage_display()})"
+
+
+class TenderClarification(models.Model):
+    """A vendor's written question about a published tender, and the RBF's answer.
+
+    Questions are private to the asker until answered; an answer is published to every
+    vendor following the tender, always without the asker's identity, so no bidder
+    gains information the others don't have."""
+    tender = models.ForeignKey(Tender, on_delete=models.CASCADE, related_name='clarifications')
+    asked_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL, related_name='+')
+    question = models.TextField()
+    asked_at = models.DateTimeField(auto_now_add=True)
+    answer = models.TextField(blank=True)
+    answered_by = models.CharField(max_length=255, blank=True)
+    answered_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['asked_at', 'id']
+        verbose_name = 'Tender Clarification'
+        verbose_name_plural = 'Tender Clarifications'
+
+    def __str__(self):
+        return f"Clarification {self.id} on {self.tender.reference_number}"
+
+
+class TenderAddendum(models.Model):
+    """A formal, numbered amendment notice the RBF issues to all vendors following a
+    published tender (corrections, clarified requirements, revised documents).
+    Append-only: an addendum is never edited once issued."""
+    tender = models.ForeignKey(Tender, on_delete=models.CASCADE, related_name='addenda')
+    number = models.PositiveIntegerField()
+    title = models.CharField(max_length=255)
+    description = models.TextField()
+    document = models.FileField(upload_to='tender_documents/addenda/', blank=True)
+    issued_by = models.CharField(max_length=255, blank=True)
+    issued_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['number']
+        unique_together = ('tender', 'number')
+        verbose_name = 'Tender Addendum'
+        verbose_name_plural = 'Tender Addenda'
+
+    def __str__(self):
+        return f"Addendum {self.number} to {self.tender.reference_number}"
+
+
+class TenderBidOpening(models.Model):
+    """The formal record of opening a tender's bids once submissions closed: who
+    opened them, when, who attended, and exactly which submissions were received
+    (vendor, version, submission time). Prices are never part of it — financial
+    content stays sealed until the financial stage. One per tender, immutable."""
+    tender = models.OneToOneField(Tender, on_delete=models.CASCADE, related_name='bid_opening')
+    opened_by = models.CharField(max_length=255)
+    opened_at = models.DateTimeField(auto_now_add=True)
+    attendees = models.TextField(blank=True)
+    notes = models.TextField(blank=True)
+    submissions = models.JSONField(default=list, encoder=DjangoJSONEncoder)
+
+    class Meta:
+        verbose_name = 'Tender Bid Opening'
+        verbose_name_plural = 'Tender Bid Openings'
+
+    def __str__(self):
+        return f"Bid opening for {self.tender.reference_number}"

@@ -441,6 +441,7 @@ function mapTenderFromApi(api: any): Tender {
     submissionMethod: api.submission_method ?? undefined,
     digitalSignatureRequired: api.digital_signature_required ?? undefined,
     maxVendorsToShortlist: api.max_vendors_to_shortlist != null ? Number(api.max_vendors_to_shortlist) : undefined,
+    shortlistFinalizedAt: api.shortlist_finalized_at ?? undefined,
     advertisementChannels: Array.isArray(api.advertisement_channels) ? api.advertisement_channels : undefined,
     contactDetails: api.contact_details ?? undefined,
     technologyTypes: api.technology_types ?? undefined,
@@ -2657,6 +2658,103 @@ export async function updateCoolingOff(
   return mapTenderFromApi(data);
 }
 
+// Extends the deadline of the stage that is currently open (EOI, or the Combined
+// submission). The backend refuses to shorten it, to overlap the next stage, or to
+// touch any other field, and notifies the vendors following the tender.
+export async function extendTenderDeadline(tenderId: string, deadline: string): Promise<Tender> {
+  const data = await http<any>(`/api/tenders/${tenderId}/extend_deadline/`, {
+    method: "POST",
+    body: JSON.stringify({ deadline }),
+  });
+  return mapTenderFromApi(data);
+}
+
+// Freezes an EOI Invite's shortlist (EOI deadline passed, every response decided).
+// overrideReason is required only when more vendors are shortlisted than the cap.
+export async function finalizeEoiShortlist(tenderId: string, overrideReason?: string): Promise<Tender> {
+  const data = await http<any>(`/api/tenders/${tenderId}/finalize_shortlist/`, {
+    method: "POST",
+    body: JSON.stringify(overrideReason ? { override_reason: overrideReason } : {}),
+  });
+  return mapTenderFromApi(data);
+}
+
+export interface TenderClarification {
+  id: number;
+  question: string;
+  asked_at: string;
+  answer: string;
+  answered_by: string;
+  answered_at: string | null;
+  asked_by_me: boolean;
+  asked_by?: number | null;
+}
+
+export interface TenderAddendum {
+  id: number;
+  number: number;
+  title: string;
+  description: string;
+  document: string | null;
+  issued_by: string;
+  issued_at: string;
+}
+
+export interface TenderBidOpeningRecord {
+  opened_by: string;
+  opened_at: string;
+  attendees: string;
+  notes: string;
+  submissions: { bid_id: string; vendor_name: string; stage: string; version_number: number; submitted_at: string; lots: string[] }[];
+}
+
+export async function fetchTenderClarifications(tenderId: string): Promise<TenderClarification[]> {
+  return await http<TenderClarification[]>(`/api/tenders/${tenderId}/clarifications/`);
+}
+
+export async function askTenderClarification(tenderId: string, question: string): Promise<TenderClarification> {
+  return await http<TenderClarification>(`/api/tenders/${tenderId}/clarifications/`, {
+    method: "POST",
+    body: JSON.stringify({ question }),
+  });
+}
+
+export async function answerTenderClarification(tenderId: string, clarificationId: number, answer: string): Promise<TenderClarification> {
+  return await http<TenderClarification>(`/api/tenders/${tenderId}/answer_clarification/`, {
+    method: "POST",
+    body: JSON.stringify({ clarification_id: clarificationId, answer }),
+  });
+}
+
+export async function fetchTenderAddenda(tenderId: string): Promise<TenderAddendum[]> {
+  return await http<TenderAddendum[]>(`/api/tenders/${tenderId}/addenda/`);
+}
+
+export async function issueTenderAddendum(tenderId: string, payload: { title: string; description: string; document?: File | null }): Promise<TenderAddendum> {
+  const form = new FormData();
+  form.append("title", payload.title);
+  form.append("description", payload.description);
+  if (payload.document) form.append("document", payload.document);
+  return await http<TenderAddendum>(`/api/tenders/${tenderId}/addenda/`, { method: "POST", body: form });
+}
+
+// Resolves to null when the bids have not been opened yet.
+export async function fetchTenderBidOpening(tenderId: string): Promise<TenderBidOpeningRecord | null> {
+  try {
+    return await http<TenderBidOpeningRecord>(`/api/tenders/${tenderId}/bid_opening/`);
+  } catch (err: any) {
+    if (err?.status === 404) return null;
+    throw err;
+  }
+}
+
+export async function recordTenderBidOpening(tenderId: string, payload: { attendees: string; notes: string }): Promise<TenderBidOpeningRecord> {
+  return await http<TenderBidOpeningRecord>(`/api/tenders/${tenderId}/bid_opening/`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function closeTender(tenderId: string): Promise<Tender> {
   const data = await http<any>(`/api/tenders/${tenderId}/close/`, {
     method: "POST",
@@ -2928,6 +3026,15 @@ export async function fetchTenderBids(tenderId?: string, pageSize?: number, vend
   const url = `/api/tender-bids/${query.toString() ? `?${query.toString()}` : ""}`;
   const data = await http<any>(url);
   return unwrapListResponse<any>(data).map(mapTenderBidFromApi);
+}
+
+// Vendor withdraws their own submitted bid before the deadline. The bid is kept on
+// record as Withdrawn; a new bid can still be submitted while the tender is open.
+export async function withdrawTenderBid(bidId: string, reason?: string): Promise<TenderBid> {
+  return await http<any>(`/api/tender-bids/${bidId}/withdraw/`, {
+    method: "POST",
+    body: JSON.stringify(reason ? { reason } : {}),
+  });
 }
 
 export async function reviewTenderBid(bidId: string): Promise<TenderBid> {
