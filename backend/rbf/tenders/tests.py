@@ -8671,3 +8671,40 @@ class TenderClarificationAddendaOpeningTests(APITestCase):
 
         self.client.force_authenticate(self.vendors[0])
         self.assertIn(self.client.get(f"{self.url}/bid_opening/").status_code, {status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND})
+
+
+class CombinedTenderRequiredDocumentStageTests(APITestCase):
+    """A single-stage Combined tender has no EOI stage, so its required documents can
+    only belong to the Combined submission."""
+
+    def setUp(self):
+        self.rmt_user = User.objects.create_user(
+            username="rd_rmt", password="securePass123", role=UserRole.RBF_OFFICIAL,
+            status="Active", full_name="RD RMT", email="rd-rmt@example.com",
+        )
+        self.client.force_authenticate(self.rmt_user)
+
+    def _payload(self, docs):
+        return {
+            "name": "Combined Docs Tender", "department": "DoE", "category": "SHS",
+            "application_type": "Application Window", "procurement_method": "Open Tendering",
+            "address_for_document": "Addr", "place_for_opening": "Maseru", "bidders_eligibility": "All",
+            "time_for_completion": "12 months", "invited_by": "RBF", "bidding_currency": "LSL",
+            "instruction": "Read carefully. " * 10, "contact_details": "123", "target_site_type": "Community",
+            "technology_types": ["SHS"], "target_districts": ["Maseru"],
+            "procurement_workflow": "combined",
+            "technical_deadline": (timezone.now() + timedelta(days=20)).isoformat(),
+            "required_documents": docs,
+        }
+
+    def test_eoi_stage_document_is_rejected_on_combined_tender(self):
+        response = self.client.post(
+            "/api/tenders/", self._payload([{"name": "Company Credentials", "bid_stage": "eoi"}]), format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST, response.data)
+        self.assertIn("required_documents", response.data)
+
+    def test_document_without_stage_defaults_to_combined(self):
+        response = self.client.post("/api/tenders/", self._payload([{"name": "BOQ"}]), format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        self.assertEqual([d["bid_stage"] for d in response.data["required_documents"]], ["combined"])

@@ -2640,6 +2640,18 @@ const Tenders = ({
     return () => { cancelled = true; };
   }, [view]);
   const [requiredDocs, setRequiredDocs] = useState<{ id?: string; name: string; expected_type?: string; bid_stage?: string; field_key?: string; position?: number }[]>([]);
+  // Single-stage Combined, and a tender linked to an EOI Invite, have no EOI stage of
+  // their own — every required document belongs to the Combined submission.
+  const tenderHasOwnEoiStage = formData.procurementWorkflow !== "combined" && !formData.linkedEoiTenderId;
+  const defaultRequiredDocStage = tenderHasOwnEoiStage ? "eoi" : "combined";
+  React.useEffect(() => {
+    if (tenderHasOwnEoiStage) return;
+    // Documents added while the form was on a workflow with an EOI stage would
+    // otherwise stay attached to a stage vendors never reach on this tender.
+    setRequiredDocs(prev => prev.some(d => !d.bid_stage || d.bid_stage === "eoi")
+      ? prev.map(d => (!d.bid_stage || d.bid_stage === "eoi") ? { ...d, bid_stage: "combined" } : d)
+      : prev);
+  }, [tenderHasOwnEoiStage]);
   const [governingDocs, setGoverningDocs] = useState<{ label: string; expected_type?: string; file_name?: string; file_url?: string; field_key?: string }[]>([]);
   const [governingDocsFiles, setGoverningDocsFiles] = useState<Record<number, File | null>>({});
   const [governingDocsErrors, setGoverningDocsErrors] = useState<Record<string, string>>({});
@@ -2949,7 +2961,7 @@ const Tenders = ({
             id: d.id,
             name: d.name,
             expected_type: d.expected_type || "",
-            bid_stage: d.bid_stage || "eoi",
+            bid_stage: d.bid_stage || (full.procurementWorkflow === "combined" || full.linkedEoiTenderId ? "combined" : "eoi"),
             field_key: d.field_key || "",
             position: d.position,
           }))
@@ -4856,7 +4868,7 @@ const Tenders = ({
                   </div>
                   <button
                     type="button"
-                    onClick={() => setRequiredDocs(prev => [...prev, { name: "", expected_type: "PDF", bid_stage: formData.linkedEoiTenderId ? "combined" : "eoi" }])}
+                    onClick={() => setRequiredDocs(prev => [...prev, { name: "", expected_type: "PDF", bid_stage: defaultRequiredDocStage }])}
                     className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-emerald-200 text-emerald-700 text-xs font-semibold hover:bg-emerald-50"
                   >
                     <Plus size={14} /> Add Document
@@ -4867,10 +4879,10 @@ const Tenders = ({
                   <p className="text-xs text-emerald-700 mb-2">Click a suggestion to add it — you can still edit or remove it afterward. Nothing is required unless it's added here. Hover a suggestion to see why vendors are typically asked for it.</p>
                   <div className="space-y-2">
                     {Object.entries(SUGGESTED_REQUIRED_DOCUMENTS).filter(([stage]) => {
-                      // A tender linked to an EOI Invite never collects its own EOI —
-                      // that already happened on the linked EOI Invite tender.
-                      if (formData.linkedEoiTenderId) return stage !== "eoi";
-                      return true;
+                      // No EOI suggestions for a tender without its own EOI stage
+                      // (single-stage Combined, or linked to an EOI Invite whose EOI
+                      // already happened).
+                      return tenderHasOwnEoiStage || stage !== "eoi";
                     }).map(([stage, suggestions]) => (
                       <div key={stage} className="flex flex-wrap items-center gap-1.5">
                         <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-700 w-28 shrink-0">{REQUIRED_DOCUMENT_STAGE_LABELS[stage] || stage}</span>
@@ -4931,12 +4943,12 @@ const Tenders = ({
                           <option value="Other">Other</option>
                         </select>
                         <select
-                          value={doc.bid_stage || (formData.procurementWorkflow === "combined" || formData.linkedEoiTenderId ? "combined" : "eoi")}
+                          value={doc.bid_stage || defaultRequiredDocStage}
                           onChange={(e) => setRequiredDocs(prev => prev.map((d, i) => i === idx ? { ...d, bid_stage: e.target.value } : d))}
                           className="input-field sm:w-48"
                           title="Which bid stage a vendor must upload this document at"
                         >
-                          {formData.procurementWorkflow !== "combined" && !formData.linkedEoiTenderId && <option value="eoi">Stage 1: EOI</option>}
+                          {tenderHasOwnEoiStage && <option value="eoi">Stage 1: EOI</option>}
                           {formData.procurementWorkflow === "sequential" && <option value="technical">Stage 2: Technical</option>}
                           {formData.procurementWorkflow === "sequential" && <option value="financial">Stage 3: Financial</option>}
                           <option value="combined">{formData.procurementWorkflow === "combined" ? "Combined Submission" : "Stage 2: Combined"}</option>

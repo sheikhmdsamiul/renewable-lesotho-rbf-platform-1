@@ -2298,6 +2298,17 @@ class TenderSerializer(serializers.ModelSerializer):
             workflow == ProcurementWorkflow.COMBINED and (eoi_deadline or getattr(instance, 'eoi_deadline', None))
         )
 
+        # A required document attached to the EOI stage of a tender that has no EOI
+        # stage would never be requested from any vendor.
+        required_docs = attrs.get('required_documents')
+        if not has_eoi and isinstance(required_docs, list) and any(
+            isinstance(doc, dict) and normalize_bid_stage(doc.get('bid_stage') or BidStage.COMBINED) == BidStage.EOI
+            for doc in required_docs
+        ):
+            errors['required_documents'] = (
+                'This tender has no EOI stage, so required documents must belong to the Combined submission.'
+            )
+
         if workflow == ProcurementWorkflow.SEQUENTIAL:
             if eoi_deadline is None:
                 errors['eoi_deadline'] = 'EOI deadline is required for a sequential workflow.'
@@ -2460,6 +2471,12 @@ class TenderSerializer(serializers.ModelSerializer):
         tender.required_documents.all().delete()
         if not isinstance(docs, (list, tuple)):
             return
+        # A document sent without a stage belongs to the stage vendors open the tender at.
+        default_stage = (
+            BidStage.EOI
+            if workflow_has_eoi_stage(tender) and not tender.linked_eoi_tender_id
+            else BidStage.COMBINED
+        )
         for idx, doc in enumerate(docs):
             name = str((doc or {}).get('name') or '').strip()
             if not name:
@@ -2468,7 +2485,7 @@ class TenderSerializer(serializers.ModelSerializer):
                 tender=tender,
                 name=name,
                 expected_type=str((doc or {}).get('expected_type') or '').strip(),
-                bid_stage=(doc or {}).get('bid_stage') or BidStage.EOI,
+                bid_stage=(doc or {}).get('bid_stage') or default_stage,
                 field_key=str((doc or {}).get('field_key') or '').strip(),
                 position=int((doc or {}).get('position') if (doc or {}).get('position') not in (None, '') else idx),
             )
