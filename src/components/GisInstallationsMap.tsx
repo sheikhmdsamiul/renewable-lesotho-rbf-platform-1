@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Circle } from "lucide-react";
-import { fetchMapBoundaryGeoJson, fetchMapInstallations } from "../api";
-import { MapInstallationsResponse } from "../types";
+import { fetchInstallationReport, fetchMapBoundaryGeoJson, fetchMapInstallations } from "../api";
+import { InstallationReport, MapInstallationsResponse } from "../types";
 
 declare global {
   interface Window {
@@ -115,6 +115,28 @@ export function GisInstallationsMap({
   const [leafletReady, setLeafletReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  // Installation opened from a map popup's "View Details".
+  const [detailId, setDetailId] = useState<string | null>(null);
+  const [detail, setDetail] = useState<InstallationReport | null>(null);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!detailId) return;
+    let cancelled = false;
+    setDetail(null);
+    setDetailError(null);
+    fetchInstallationReport(detailId)
+      .then((row) => { if (!cancelled) setDetail(row); })
+      .catch((err: any) => {
+        if (cancelled) return;
+        const status = err?.status;
+        setDetailError(
+          status === 403 || status === 404
+            ? "You don't have access to this installation's full record."
+            : "Could not load this installation. Check your connection and try again."
+        );
+      });
+    return () => { cancelled = true; };
+  }, [detailId]);
   const [mapData, setMapData] = useState<MapInstallationsResponse>({
     installations: [],
     summary: { total: 0, verified: 0, pending: 0, flagged: 0 },
@@ -275,9 +297,13 @@ export function GisInstallationsMap({
           <div><strong>Uptime:</strong> ${escapeHtml(formatUptime(installation.uptimePct))}</div>
         </div>
         <div style="margin-top:10px;">
-          <a href="/api/projects/installations/${encodeURIComponent(installation.id)}/" target="_blank" rel="noreferrer">View Details</a>
+          <button type="button" data-view-installation style="color:#047857;font-weight:600;text-decoration:underline;background:none;border:0;padding:0;cursor:pointer;">View Details</button>
         </div>
       `;
+      // Opens the details inside the app (authenticated), not the raw API URL.
+      popupContent.querySelector("[data-view-installation]")?.addEventListener("click", () => {
+        setDetailId(String(installation.id));
+      });
 
       marker.bindPopup(popupContent);
       marker.addTo(targetLayer);
@@ -442,6 +468,68 @@ export function GisInstallationsMap({
           </div>
         )}
       </div>
+      {detailId && (
+        <div className="fixed inset-0 z-[1100] flex items-center justify-center bg-black/40 p-4" onClick={() => setDetailId(null)}>
+          <div className="w-full max-w-2xl overflow-hidden rounded-2xl bg-white shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between border-b border-slate-100 px-6 py-4">
+              <div>
+                <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Installation</p>
+                <p className="text-lg font-bold text-slate-900">
+                  {detail?.serialNumber || `INS-${String(detailId).padStart(3, "0")}`}
+                </p>
+              </div>
+              <button type="button" onClick={() => setDetailId(null)} className="rounded-lg px-3 py-1.5 text-sm font-semibold text-slate-600 hover:bg-slate-100">Close</button>
+            </div>
+            <div className="max-h-[70vh] overflow-y-auto px-6 py-5">
+              {!detail && !detailError && <p className="text-sm text-slate-500">Loading…</p>}
+              {detailError && <p className="text-sm text-rose-700">{detailError}</p>}
+              {detail && (() => {
+                const fmtDate = (iso?: string) => (iso ? new Date(iso).toLocaleString() : "Not recorded");
+                const gis = detail.gisStatus === "green" ? "Verified on site" : detail.gisStatus === "red" ? "Flagged" : "Awaiting verification";
+                const rows: Array<[string, string]> = [
+                  ["Installation status", String(detail.status || "—")],
+                  ["Field verification", detail.verificationStatus ? formatTitleCase(detail.verificationStatus) : gis],
+                  ["Vendor", detail.vendorUsername || "—"],
+                  ["District", detail.district || "—"],
+                  ["Installed on", fmtDate(detail.installationDate)],
+                  ["Reported", fmtDate(detail.submittedAt)],
+                  ["Beneficiary", detail.beneficiaryName || "Not shown for your role"],
+                  ["Household type", detail.householdType ? formatTitleCase(detail.householdType) : "Not recorded"],
+                  ["Household members", detail.householdMembers != null ? String(detail.householdMembers) : "Not recorded"],
+                  ["Meter", detail.meterId ? `${detail.meterId}${detail.kwhReading != null ? ` · ${detail.kwhReading} kWh` : ""}` : "No meter"],
+                  ["Reported GPS", `${Number(detail.gpsLat).toFixed(6)}, ${Number(detail.gpsLng).toFixed(6)}`],
+                  ["Photos", String((detail.photoFiles || []).length)],
+                ];
+                return (
+                  <div className="space-y-4">
+                    <dl className="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2">
+                      {rows.map(([label, value]) => (
+                        <div key={label}>
+                          <dt className="text-[10px] font-bold uppercase tracking-widest text-slate-400">{label}</dt>
+                          <dd className="text-sm font-semibold text-slate-800">{value}</dd>
+                        </div>
+                      ))}
+                    </dl>
+                    {detail.latestFlagReason && (
+                      <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">
+                        <span className="font-semibold">Flag reason: </span>{detail.latestFlagReason}
+                      </div>
+                    )}
+                    <a
+                      href={`https://www.google.com/maps?q=${detail.gpsLat},${detail.gpsLng}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex text-sm font-semibold text-blue-600 hover:text-blue-700"
+                    >
+                      Open location in Google Maps
+                    </a>
+                  </div>
+                );
+              })()}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

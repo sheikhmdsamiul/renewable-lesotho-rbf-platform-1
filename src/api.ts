@@ -3900,6 +3900,13 @@ export async function deleteProjectDocument(id: string): Promise<void> {
   await http<any>(`/api/projects/documents/${id}/`, { method: "DELETE" });
 }
 
+// One installation, through the authenticated client (a plain browser link to the API
+// carries no token and is refused). The API itself decides which fields this role sees.
+export async function fetchInstallationReport(id: string): Promise<InstallationReport> {
+  const data = await http<any>(`/api/projects/installations/${encodeURIComponent(id)}/`);
+  return mapInstallationReportFromApi(data);
+}
+
 export async function fetchInstallationReports(projectId?: string): Promise<InstallationReport[]> {
   const query = projectId ? `?project=${encodeURIComponent(projectId)}` : "";
   const rows = await fetchAllPages<any>(`/api/projects/installations/${query}`);
