@@ -28913,6 +28913,11 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
   const assignedDistrict = assignedDistricts[0] || "District not assigned";
   const [expandedDistrictGroup, setExpandedDistrictGroup] = useState<string | null>(null);
   const [expandedTenderKeys, setExpandedTenderKeys] = useState<Record<string, boolean>>({});
+  // Queue filter: what the verifier wants to see.
+  const [queueFilter, setQueueFilter] = useState<"all" | "todo" | "reverify" | "done" | "hold">("all");
+  // GPS fix quality from the device (null when coordinates were typed in by hand).
+  const [gpsFix, setGpsFix] = useState<{ accuracy: number; capturedAt: string } | null>(null);
+  const [photoNotice, setPhotoNotice] = useState<string | null>(null);
 
   const formatDateTime = (value?: string | null) => {
     if (!value) return "N/A";
@@ -29082,17 +29087,47 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
           district: taskDistrict || assignedDistrict,
           submittedAt: report?.submittedAt || task.createdAt,
           technology: project?.techType || "Installation",
-          beneficiaryName: report?.beneficiaryName || report?.beneficiaryId || "Beneficiary not named",
+          // Withheld from the verifier until their own observation is submitted (blind check).
+          beneficiaryName: report?.beneficiaryName || report?.beneficiaryId || "shown after your visit",
         };
       })
       .filter((item) => item && item.report)
       .sort((a, b) => (a?.submittedAt || "").localeCompare(b?.submittedAt || ""))
   ), [assignedDistricts, projectsById, reportsById, tasks]);
 
+  const taskBucket = (status: string): "todo" | "reverify" | "done" | "hold" =>
+    status === "Reverification Required" ? "reverify"
+    : status === "Verified" || status === "Flagged" ? "done"
+    : status === "Paused" || status === "Terminated" ? "hold"
+    : "todo";
+  const bucketCounts = useMemo(() => {
+    const counts = { all: queue.length, todo: 0, reverify: 0, done: 0, hold: 0 };
+    queue.forEach(({ task }) => { counts[taskBucket(task.status)] += 1; });
+    return counts;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queue]);
+  // The verifier's most urgent work: re-verifications first, then the longest-waiting.
+  const nextUp = useMemo(() => (
+    queue
+      .filter(({ task }) => ["Pending", "Reverification Required", "Partial"].includes(task.status))
+      .slice()
+      .sort((a, b) => {
+        const rank = (status: string) => (status === "Reverification Required" ? 0 : status === "Partial" ? 1 : 2);
+        return rank(a.task.status) - rank(b.task.status) || (a.submittedAt || "").localeCompare(b.submittedAt || "");
+      })
+      .slice(0, 6)
+  ), [queue]);
+  const waitingLabel = (iso?: string | null) => {
+    if (!iso) return "";
+    const days = Math.floor((Date.now() - new Date(iso).getTime()) / 86400000);
+    return days <= 0 ? "reported today" : days === 1 ? "waiting 1 day" : `waiting ${days} days`;
+  };
+
   const filteredQueue = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    if (!q) return queue;
-    return queue.filter((item) => {
+    const byBucket = queueFilter === "all" ? queue : queue.filter(({ task }) => taskBucket(task.status) === queueFilter);
+    if (!q) return byBucket;
+    return byBucket.filter((item) => {
       const haystack = [
         item.task.id,
         item.siteName,
@@ -29107,7 +29142,8 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
       ].join(" ").toLowerCase();
       return haystack.includes(q);
     });
-  }, [queue, searchQuery]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queue, searchQuery, queueFilter]);
 
   const groupedQueueByDistrict = useMemo(() => {
     type TenderGroup = { tenderKey: string; tenderName: string; tenderReference?: string; items: typeof filteredQueue };
@@ -29172,6 +29208,8 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
     const item = queue.find((entry) => entry.task.id === taskId);
     setSelectedTaskId(taskId);
     setInspectionStep(1);
+    setGpsFix(null);
+    setPhotoNotice(null);
     setMessage(null);
     setError(null);
     
@@ -29244,6 +29282,7 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
           gpsLat: position.coords.latitude.toFixed(6),
           gpsLong: position.coords.longitude.toFixed(6),
         }));
+        setGpsFix({ accuracy: Math.round(position.coords.accuracy), capturedAt: new Date().toISOString() });
         setLocating(false);
       },
       () => {
@@ -29300,6 +29339,12 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
       const lng = Number(inspectionData.gpsLong);
       if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
         setError("Valid verifier GPS coordinates are required before continuing.");
+        return;
+      }
+      // Lesotho lies roughly within 28.5–30.7°S, 27.0–29.5°E. Anything outside is almost
+      // certainly a typo (often a missing minus sign) and would wreck the distance check.
+      if (lat > -28.5 || lat < -30.7 || lng < 27.0 || lng > 29.5) {
+        setError("These coordinates are outside Lesotho. Check them — latitude should be negative (e.g. -29.31) and longitude around 27–29.");
         return;
       }
       if (!inspectionData.serialNumber.trim()) {
@@ -29790,7 +29835,7 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
                         className="input-field"
                         placeholder="-29.XXXXXX"
                         value={inspectionData.gpsLat}
-                        onChange={(e) => setInspectionData((prev) => ({ ...prev, gpsLat: e.target.value }))}
+                        onChange={(e) => { setGpsFix(null); setInspectionData((prev) => ({ ...prev, gpsLat: e.target.value })); }}
                       />
                     </div>
                     <div className="space-y-1">
@@ -29800,14 +29845,26 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
                         className="input-field"
                         placeholder="27.XXXXXX"
                         value={inspectionData.gpsLong}
-                        onChange={(e) => setInspectionData((prev) => ({ ...prev, gpsLong: e.target.value }))}
+                        onChange={(e) => { setGpsFix(null); setInspectionData((prev) => ({ ...prev, gpsLong: e.target.value })); }}
                       />
                     </div>
                   </div>
 
-                  <button type="button" onClick={handleUseCurrentLocation} className="btn-secondary" disabled={locating}>
-                    {locating ? "Capturing GPS..." : "Use Current Location"}
-                  </button>
+                  <div className="flex flex-wrap items-center gap-3">
+                    <button type="button" onClick={handleUseCurrentLocation} className="btn-secondary" disabled={locating}>
+                      {locating ? "Capturing GPS..." : gpsFix ? "Recapture Location" : "Use Current Location"}
+                    </button>
+                    {gpsFix ? (
+                      <span className={`text-xs font-semibold ${gpsFix.accuracy <= 30 ? "text-emerald-700" : "text-amber-700"}`}>
+                        Captured {new Date(gpsFix.capturedAt).toLocaleTimeString()} · accuracy ±{gpsFix.accuracy} m
+                        {gpsFix.accuracy > 30 ? " — weak fix: move into open sky, wait a moment and recapture" : ""}
+                      </span>
+                    ) : inspectionData.gpsLat || inspectionData.gpsLong ? (
+                      <span className="text-xs text-slate-500">Entered by hand — capture from the device at the installation when you can.</span>
+                    ) : (
+                      <span className="text-xs text-slate-500">Stand next to the installation, then capture your location.</span>
+                    )}
+                  </div>
                 </div>
               )}
 
@@ -29932,6 +29989,13 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
                       <option value="partial">Partial</option>
                       <option value="flagged">Flagged</option>
                     </select>
+                    <p className="text-xs text-slate-500">
+                      {inspectionData.verificationStatus === "verified"
+                        ? "Verified: the device is installed at this household, matches the report and works."
+                        : inspectionData.verificationStatus === "partial"
+                          ? "Partial: the installation exists but something doesn't fully match (e.g. not working, details differ). Explain what."
+                          : "Flagged: you could not confirm the installation (missing, wrong household, serial mismatch, suspected fraud). Explain why."}
+                    </p>
                   </div>
                   <div className="space-y-1">
                     <label className="text-sm font-bold text-slate-700 ml-1">Site Photos (minimum 1, maximum 5)</label>
@@ -29941,11 +30005,33 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
                       multiple
                       className="input-field"
                       onChange={(e) => {
-                        const files = Array.from(e.target.files || []).slice(0, 5);
-                        setInspectionData((prev) => ({ ...prev, sitePhotos: files }));
+                        const chosen = Array.from(e.target.files || []);
+                        const combined = [...inspectionData.sitePhotos, ...chosen];
+                        setPhotoNotice(combined.length > 5 ? `Only 5 photos can be attached — ${combined.length - 5} were left out.` : null);
+                        setInspectionData((prev) => ({ ...prev, sitePhotos: combined.slice(0, 5) }));
+                        e.target.value = "";
                       }}
                     />
-                    <p className="text-xs text-slate-500">{inspectionData.sitePhotos.length} photo{inspectionData.sitePhotos.length === 1 ? "" : "s"} selected</p>
+                    <p className="text-xs text-slate-500">
+                      {inspectionData.sitePhotos.length} of 5 photos. Show the installed device, its serial plate and the household.
+                    </p>
+                    {photoNotice && <p className="text-xs font-semibold text-amber-700">{photoNotice}</p>}
+                    {inspectionData.sitePhotos.length > 0 && (
+                      <ul className="mt-2 space-y-1">
+                        {inspectionData.sitePhotos.map((file, idx) => (
+                          <li key={`${file.name}-${idx}`} className="flex items-center justify-between rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs">
+                            <span className="truncate text-slate-700">{file.name} <span className="text-slate-400">({(file.size / 1024 / 1024).toFixed(1)} MB)</span></span>
+                            <button
+                              type="button"
+                              onClick={() => { setPhotoNotice(null); setInspectionData((prev) => ({ ...prev, sitePhotos: prev.sitePhotos.filter((_, i) => i !== idx) })); }}
+                              className="ml-3 shrink-0 font-semibold text-rose-600 hover:text-rose-700"
+                            >
+                              Remove
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
                   </div>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
@@ -29963,10 +30049,23 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
                       <p className="mt-2 text-sm font-semibold text-slate-900">{inspectionData.flagReason || "Not provided"}</p>
                     </div>
                   )}
+                  <div className="rounded-2xl border border-slate-200 bg-white px-4 py-4">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">You are submitting</p>
+                    <dl className="mt-2 grid grid-cols-1 gap-2 text-sm sm:grid-cols-2">
+                      <div><dt className="text-xs text-slate-500">Observed serial</dt><dd className="font-semibold text-slate-900">{inspectionData.serialNumber || "—"}</dd></div>
+                      <div><dt className="text-xs text-slate-500">Household type</dt><dd className="font-semibold text-slate-900">{({ standard: "Standard", female_headed: "Female-headed", vulnerable: "Vulnerable", low_income: "Low income" } as Record<string, string>)[inspectionData.householdType] || "Not recorded"}</dd></div>
+                      <div><dt className="text-xs text-slate-500">Beneficiary present</dt><dd className="font-semibold text-slate-900">{inspectionData.beneficiaryConfirmed ? "Yes" : "No"}</dd></div>
+                      <div><dt className="text-xs text-slate-500">System working</dt><dd className="font-semibold text-slate-900">{inspectionData.systemWorking ? "Yes" : "No"}</dd></div>
+                      <div><dt className="text-xs text-slate-500">Location</dt><dd className="font-semibold text-slate-900">{inspectionData.gpsLat}, {inspectionData.gpsLong}{gpsFix ? ` (±${gpsFix.accuracy} m)` : " (typed in)"}</dd></div>
+                      <div><dt className="text-xs text-slate-500">Photos</dt><dd className="font-semibold text-slate-900">{inspectionData.sitePhotos.length}</dd></div>
+                    </dl>
+                  </div>
                   <div className="p-4 bg-amber-50 border border-amber-100 rounded-xl flex gap-3">
                     <AlertCircle className="text-amber-600 shrink-0" size={20} />
                     <p className="text-xs text-amber-800">
-                      This portal submits the live verification task with verifier GPS, site evidence, and the field officer outcome.
+                      By submitting you confirm you personally visited this installation and that the observations, location and photos are genuine.
+                      Once submitted the verification is locked; it can only be redone if a DoE officer or the RBF requests re-verification.
+                      {!isOnline ? " You're offline — it will be sent automatically when you reconnect." : ""}
                     </p>
                   </div>
                 </div>
@@ -30049,7 +30148,7 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
           <h1 className="text-2xl font-bold text-slate-900">{mode === "inspections" ? "Verification Queue" : "Field Verification Dashboard"}</h1>
           <p className="text-slate-500">
             {mode === "inspections"
-              ? `Pending verifications for ${assignedDistrict}, sorted oldest first.`
+              ? `Installations awaiting a field visit in ${assignedDistricts.length > 0 ? assignedDistricts.join(", ") : assignedDistrict}, oldest first.`
               : "Assigned installation tasks, verifier GPS capture, and live submission status."}
           </p>
         </div>
@@ -30078,7 +30177,40 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
         </div>
       )}
 
-      {mode === "dashboard" && (
+{nextUp.length > 0 && (
+        <div className="card p-6 space-y-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-lg font-bold text-slate-900">Next up</h3>
+              <p className="text-sm text-slate-500">Your most urgent visits: re-verification requests first, then the installations waiting longest.</p>
+            </div>
+            <span className="badge bg-amber-100 text-amber-800">{bucketCounts.todo + bucketCounts.reverify} to visit</span>
+          </div>
+          <div className="divide-y divide-slate-100 rounded-xl border border-slate-200">
+            {nextUp.map((item) => (
+              <div key={item.task.id} className="flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="font-semibold text-slate-900">{item.siteName}</p>
+                    <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-bold ${statusTone(item.task.status)}`}>{item.task.status}</span>
+                  </div>
+                  <p className="text-xs text-slate-500">
+                    {item.district} · {item.technology} · {item.vendorName} · Beneficiary: {item.beneficiaryName}
+                  </p>
+                </div>
+                <div className="flex items-center gap-3 shrink-0">
+                  <span className="text-xs font-semibold text-amber-700">{waitingLabel(item.submittedAt)}</span>
+                  <button onClick={() => openInspection(item.task.id)} className="btn-primary py-1.5 px-4 text-xs">
+                    {item.task.status === "Reverification Required" ? "Re-verify" : item.task.status === "Partial" ? "Resume" : "Verify"}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+            {mode === "dashboard" && (
         <FieldOperationalKpiPanel
           tasks={tasks}
           reports={reports}
@@ -30287,7 +30419,7 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
         <div className="p-6 border-b border-slate-100 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
           <div>
             <h3 className="text-lg font-bold">Verification Queue</h3>
-            <p className="text-sm text-slate-500">Assigned tasks are loaded from the backend verification task endpoint.</p>
+            <p className="text-sm text-slate-500">Every installation in your districts waiting for, or already given, a field visit — grouped by district and tender.</p>
           </div>
           <div className="relative w-full md:w-80">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
@@ -30301,10 +30433,29 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
           </div>
         </div>
 
+        <div className="flex flex-wrap gap-2 pb-4">
+          {([
+            ["all", "All"],
+            ["todo", "To visit"],
+            ["reverify", "Re-verify"],
+            ["done", "Submitted"],
+            ["hold", "On hold"],
+          ] as const).map(([key, label]) => (
+            <button
+              key={key}
+              type="button"
+              onClick={() => setQueueFilter(key)}
+              className={`rounded-full border px-3 py-1 text-xs font-semibold ${queueFilter === key ? "border-emerald-500 bg-emerald-50 text-emerald-700" : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"}`}
+            >
+              {label} ({bucketCounts[key]})
+            </button>
+          ))}
+        </div>
+
         {loading ? (
           <div className="p-8 text-center text-slate-500">Loading assigned verification tasks...</div>
         ) : groupedQueueByDistrict.length === 0 ? (
-          <div className="p-8 text-center text-slate-500">No verification tasks matched your search.</div>
+          <div className="p-8 text-center text-slate-500">{searchQuery.trim() || queueFilter !== "all" ? "No verification tasks match this search or filter." : "No verification tasks are assigned to your districts right now."}</div>
         ) : (
           <div className="border border-slate-200 rounded-xl overflow-hidden">
             {groupedQueueByDistrict.map((group) => {
@@ -30418,7 +30569,10 @@ const FieldVerifierView = ({ mode = "dashboard", onNavigate }: { mode?: "dashboa
 
                                       <div className="flex items-center gap-4">
                                         <div className="text-right">
-                                          <p className="text-sm text-slate-500">{formatDateTime(item.submittedAt)}</p>
+                                          <p className="text-sm text-slate-500">Reported {formatDateTime(item.submittedAt)}</p>
+                                          {taskBucket(item.task.status) !== "done" && taskBucket(item.task.status) !== "hold" && (
+                                            <p className="text-xs font-semibold text-amber-700">{waitingLabel(item.submittedAt)}</p>
+                                          )}
                                           {item.task.distanceMeters != null && (
                                             <p className="text-xs text-slate-400">{item.task.distanceMeters.toFixed(1)} m from vendor pin</p>
                                           )}
