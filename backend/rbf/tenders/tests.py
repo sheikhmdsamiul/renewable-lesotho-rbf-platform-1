@@ -8793,3 +8793,123 @@ class EoiInviteQuickActionTests(APITestCase):
         self.assertEqual(self.client.post(f"/api/tender-bids/{bid.id}/accept/", {}, format="json").status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(self.client.post(f"/api/tenders/{self.eoi.id}/close/", {}, format="json").status_code, status.HTTP_200_OK)
         self.assertEqual(self.client.post(f"/api/tender-bids/{bid.id}/accept/", {}, format="json").status_code, status.HTTP_200_OK)
+
+
+class TenderPipelineFieldTests(APITestCase):
+    """The list/detail pipeline fields (bidder count, pending intent, contracts) are for
+    the RBF only; bidders never see them."""
+
+    def setUp(self):
+        self.rmt_user = User.objects.create_user(
+            username="pipe_rmt", password="securePass123", role=UserRole.RBF_OFFICIAL,
+            status="Active", full_name="Pipe RMT", email="pipe-rmt@example.com",
+        )
+        self.vendor = User.objects.create_user(
+            username="pipe_vendor", password="securePass123", role=UserRole.VENDOR,
+            status="Active", full_name="Pipe Vendor", email="pipe-vendor@example.com",
+        )
+        VendorPrequalification.objects.create(
+            vendor=self.vendor, company_name="Pipe Vendor Ltd", status=PrequalificationStatus.APPROVED, tech_tier="Level 3",
+        )
+        self.tender = Tender.objects.create(
+            reference_number="PIPE-001", name="Pipeline Tender", department="Department of Energy", category="SHS",
+            status=TenderStatus.PUBLISHED, deadline=timezone.now() + timedelta(days=10), technology_types=["SHS"],
+            procurement_workflow="combined", procurement_method="Open Tendering",
+            technical_deadline=timezone.now() + timedelta(days=10),
+        )
+        # One live submission, the same vendor's withdrawn earlier version, and another
+        # vendor's unsubmitted draft: exactly one bidder.
+        for idx, bid_status in enumerate([BidStatus.SUBMITTED, BidStatus.WITHDRAWN, BidStatus.DRAFT]):
+            TenderBid.objects.create(
+                tender=self.tender, vendor_id=str(self.vendor.id) if idx < 2 else "99999", vendor_name="V",
+                bid_stage="combined", stage="Technical & Financial", status=bid_status, version_number=idx + 1,
+            )
+
+    def _row(self):
+        response = self.client.get("/api/tenders/")
+        rows = response.data["results"] if isinstance(response.data, dict) else response.data
+        return next(r for r in rows if r["reference_number"] == "PIPE-001")
+
+    def test_staff_see_distinct_bidders_excluding_drafts(self):
+        self.client.force_authenticate(self.rmt_user)
+        row = self._row()
+        self.assertEqual(row["bidder_count"], 1)
+        self.assertFalse(row["has_pending_intent_award"])
+        detail = self.client.get(f"/api/tenders/{self.tender.id}/").data
+        self.assertEqual(detail["bidder_count"], 1)
+        self.assertEqual(detail["contracts_summary"], [])
+
+    def test_vendors_never_receive_pipeline_fields(self):
+        self.client.force_authenticate(self.vendor)
+        row = self._row()
+        for field in ("bidder_count", "has_pending_intent_award"):
+            self.assertNotIn(field, row)
+        detail = self.client.get(f"/api/tenders/{self.tender.id}/").data
+        for field in ("bidder_count", "has_pending_intent_award", "contracts_summary"):
+            self.assertNotIn(field, detail)
+
+
+class VendorEoiJourneyTests(APITestCase):
+    """A vendor asked to revise an EOI can still answer after the EOI deadline, and a
+    shortlisted vendor is pointed at the tender created from the shortlist."""
+
+    def setUp(self):
+        self.vendor = User.objects.create_user(
+            username="jour_vendor", password="securePass123", role=UserRole.VENDOR,
+            status="Active", full_name="Journey Vendor", email="jour-vendor@example.com",
+        )
+        VendorPrequalification.objects.create(
+            vendor=self.vendor, company_name="Journey Vendor Ltd", status=PrequalificationStatus.APPROVED, tech_tier="Level 3",
+        )
+        self.eoi = Tender.objects.create(
+            reference_number="JOUR-EOI-001", name="Journey EOI", department="Department of Energy", category="SHS",
+            status=TenderStatus.CLOSED, deadline=timezone.now() - timedelta(days=1), technology_types=["SHS"],
+            procurement_workflow="eoi_combined", procurement_method="Restricted Tendering",
+            is_eoi_invite_only=True, eoi_deadline=timezone.now() - timedelta(days=1),
+        )
+        self.client.force_authenticate(self.vendor)
+
+    def _eoi_bid(self, bid_status):
+        return TenderBid.objects.create(
+            tender=self.eoi, vendor_id=str(self.vendor.id), vendor_name=self.vendor.full_name,
+            bid_stage="eoi", stage="EOI", status=bid_status, version_number=1,
+            eoi_narrative="Expression of interest for community clean energy installations. " * 16,
+            female_target_pct=55, vulnerable_target_pct=35, low_income_target_pct=60, inclusion_commitment_confirmed=True,
+        )
+
+    def test_revision_can_be_resubmitted_after_the_deadline(self):
+        bid = self._eoi_bid(BidStatus.REVISION_REQUIRED)
+        response = self.client.post(f"/api/tender-bids/{bid.id}/submit/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        bid.refresh_from_db()
+        self.assertEqual(bid.status, BidStatus.SUBMITTED)
+
+    def test_revision_window_ends_once_the_shortlist_is_final(self):
+        bid = self._eoi_bid(BidStatus.REVISION_REQUIRED)
+        Tender.objects.filter(id=self.eoi.id).update(shortlist_finalized_at=timezone.now())
+        self.assertEqual(self.client.post(f"/api/tender-bids/{bid.id}/submit/").status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_shortlisted_vendor_is_pointed_at_the_follow_on_tender(self):
+        accepted = self._eoi_bid(BidStatus.ACCEPTED)
+        Tender.objects.filter(id=self.eoi.id).update(shortlist_finalized_at=timezone.now())
+        self.assertIsNone(self.client.get(f"/api/tender-bids/{accepted.id}/").data["follow_on_tender"])
+        linked = Tender.objects.create(
+            reference_number="JOUR-TND-001", name="Journey EOI", department="Department of Energy", category="SHS",
+            status=TenderStatus.PUBLISHED, deadline=timezone.now() + timedelta(days=10), technology_types=["SHS"],
+            procurement_workflow="eoi_combined", procurement_method="Restricted Tendering",
+            linked_eoi_tender=self.eoi, technical_deadline=timezone.now() + timedelta(days=10),
+        )
+        data = self.client.get(f"/api/tender-bids/{accepted.id}/").data
+        self.assertTrue(data["tender_is_eoi_invite_only"])
+        self.assertEqual(data["follow_on_tender"]["id"], str(linked.id))
+        self.assertEqual(data["follow_on_tender"]["status"], TenderStatus.PUBLISHED)
+
+    def test_unsuccessful_vendor_is_not_pointed_at_the_follow_on_tender(self):
+        rejected = self._eoi_bid(BidStatus.REJECTED)
+        Tender.objects.create(
+            reference_number="JOUR-TND-002", name="Journey EOI", department="Department of Energy", category="SHS",
+            status=TenderStatus.PUBLISHED, deadline=timezone.now() + timedelta(days=10), technology_types=["SHS"],
+            procurement_workflow="eoi_combined", procurement_method="Restricted Tendering",
+            linked_eoi_tender=self.eoi, technical_deadline=timezone.now() + timedelta(days=10),
+        )
+        self.assertIsNone(self.client.get(f"/api/tender-bids/{rejected.id}/").data["follow_on_tender"])

@@ -265,6 +265,10 @@ export interface Tender {
   maxVendorsToShortlist?: number;
   // Set once an EOI Invite's shortlist is frozen; only then can it be linked to a tender.
   shortlistFinalizedAt?: string;
+  // Staff-only pipeline fields (stripped for vendors and the public).
+  bidderCount?: number;
+  hasPendingIntentAward?: boolean;
+  contractsSummary?: { id: string; referenceNumber: string; status: string; lotName?: string | null; vendorName: string; hasProject: boolean }[];
   advertisementChannels?: string[];
   contactDetails?: string;
   technologyTypes?: string[];
@@ -593,6 +597,11 @@ export interface TenderBid {
   financial_unsealed_at?: string;
   tender_procurement_workflow?: "sequential" | "combined" | "eoi_combined";
   tender_skips_eoi_stage?: boolean;
+  // EOI Invite bids: the EOI stage is the whole journey on this tender; once shortlisted,
+  // the vendor bids on the separate follow-on tender created from the shortlist.
+  tender_is_eoi_invite_only?: boolean;
+  tender_shortlist_finalized?: boolean;
+  follow_on_tender?: { id: string; reference_number: string; name: string; status: string; deadline?: string | null } | null;
   financial_stage_open?: boolean;
   document_requirements?: Array<{ field: string; required: boolean; uploaded: boolean }>;
   document_counts?: { uploaded: number; required: number };

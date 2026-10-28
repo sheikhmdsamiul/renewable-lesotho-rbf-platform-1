@@ -398,6 +398,7 @@ import { ArchivedProjectBanner, ProjectLifecycleArchive } from "./components/Pro
 import { toCsv } from "./csv";
 import { ResultsFramework } from "./components/ResultsFramework";
 import { TenderClarifications, TenderBidOpeningPanel } from "./components/TenderClarifications";
+import { getTenderStage, relativeTime, formatDateTimeShort, openStageDeadline, workflowLabel, STAGE_TONE_CLASSES, TENDER_LIFECYCLE, type TenderStage } from "./components/tenderStage";
 import { ReportSchedules } from "./components/ReportSchedules";
 
 // <input type="datetime-local"> works in the browser's local time without a zone;
@@ -1517,7 +1518,7 @@ const PublishApprovals = ({ onOpenTender }: { onOpenTender?: (tenderId: string) 
                 </div>
                 <div>
                   <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Budget</p>
-                  <p className="font-medium text-slate-700 mt-0.5">M {tender.budget?.toLocaleString() ?? "N/A"}</p>
+                  <p className="font-medium text-slate-700 mt-0.5">{tender.budget ? `${tender.biddingCurrency || "LSL"} ${tender.budget.toLocaleString()}` : "Not set"}</p>
                 </div>
                 <div>
                   <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Requested</p>
@@ -2824,22 +2825,88 @@ const Tenders = ({
     return () => clearInterval(id);
   }, [loadTenders]);
 
+  // Stage groups behind the summary tiles / stage filter. Tender Management follows the
+  // whole lifecycle; Award Management only the award pipeline.
+  const stageGroupOf = (t: Tender): string => {
+    if (mode === "award") {
+      if (t.status === TenderStatus.AWARDED) return "awarded";
+      if (t.status === TenderStatus.DISPUTED) return "disputed";
+      if (t.status === TenderStatus.STANDSTILL) return "standstill";
+      return t.hasPendingIntentAward ? "pending" : "ready";
+    }
+    switch (t.status) {
+      case TenderStatus.DRAFT: return "preparation";
+      case TenderStatus.PENDING_PUBLISH_APPROVAL: return "approval";
+      case TenderStatus.PUBLISHED: return "open";
+      case TenderStatus.CLOSED:
+      case TenderStatus.EVALUATION: return "evaluation";
+      case TenderStatus.STANDSTILL:
+      case TenderStatus.DISPUTED: return "award";
+      case TenderStatus.AWARDED: return "awarded";
+      default: return "other";
+    }
+  };
+  const stageGroups: { key: string; label: string; hint: string }[] = mode === "award"
+    ? [
+        { key: "ready", label: "Ready to award", hint: "Evaluation complete — propose a winner" },
+        { key: "pending", label: "Awaiting approval", hint: "Intent to Award with the Super Admin" },
+        { key: "standstill", label: "Standstill", hint: "Intent issued, challenge window open" },
+        { key: "disputed", label: "Challenged", hint: "A bidder challenged the award" },
+        { key: "awarded", label: "Awarded", hint: "Contract and project assignment" },
+      ]
+    : [
+        { key: "preparation", label: "In preparation", hint: "Draft, verification, approval decisions" },
+        { key: "approval", label: "Awaiting approval", hint: "With the Super Admin" },
+        { key: "open", label: "Open for bids", hint: "Published and accepting submissions" },
+        { key: "evaluation", label: "Evaluation", hint: "Closed and being scored" },
+        { key: "award", label: "Award stage", hint: "Standstill or challenged" },
+        { key: "awarded", label: "Awarded", hint: "Award confirmed" },
+      ];
+  const [stageFilter, setStageFilter] = useState<string>("all");
+  const managedTenders = useMemo(() => tenders.filter(t => !t.isEoiInviteOnly), [tenders]);
+  const stageCounts = useMemo(() => {
+    const counts: Record<string, number> = { all: managedTenders.length, action: 0 };
+    managedTenders.forEach(t => {
+      const group = stageGroupOf(t);
+      counts[group] = (counts[group] || 0) + 1;
+      if (getTenderStage(t).owner === "RBF") counts.action += 1;
+    });
+    return counts;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [managedTenders, mode]);
+  // Filter options come from the tenders themselves, not a hard-coded list.
+  const departmentOptions = useMemo(() => Array.from(new Set(managedTenders.map(t => t.department).filter(Boolean))).sort(), [managedTenders]);
+  const categoryOptions = useMemo(() => Array.from(new Set(managedTenders.flatMap(t => (t.technologyTypes && t.technologyTypes.length ? t.technologyTypes : [t.category])).filter(Boolean))).sort(), [managedTenders]);
+  const filtersActive = Boolean(searchQuery.trim()) || selectedCategory !== "All Categories" || selectedDepartment !== "All Departments" || selectedProcurement !== "All Methods" || stageFilter !== "all";
+  const clearTenderFilters = () => {
+    setSearchQuery("");
+    setSelectedCategory("All Categories");
+    setSelectedDepartment("All Departments");
+    setSelectedProcurement("All Methods");
+    setStageFilter("all");
+  };
+
   const filteredTenders = useMemo(() => {
-    const list = tenders.filter(tender => {
-      const matchesSearch = tender.name.toLowerCase().includes(searchQuery.toLowerCase()) || 
-                            tender.referenceNumber.toLowerCase().includes(searchQuery.toLowerCase());
-      const matchesCategory = selectedCategory === "All Categories" || tender.category === selectedCategory;
+    const query = searchQuery.trim().toLowerCase();
+    const list = managedTenders.filter(tender => {
+      const haystack = [tender.name, tender.referenceNumber, tender.department, ...(tender.technologyTypes || [])].filter(Boolean).join(" ").toLowerCase();
+      const matchesSearch = !query || haystack.includes(query);
+      const matchesCategory = selectedCategory === "All Categories" || tender.category === selectedCategory || (tender.technologyTypes || []).includes(selectedCategory);
       const matchesDept = selectedDepartment === "All Departments" || tender.department === selectedDepartment;
       const matchesProc = selectedProcurement === "All Methods" || tender.procurementMethod === selectedProcurement;
-      // EOI Invites live in their own tab now, never in Tender Management.
-      return matchesSearch && matchesCategory && matchesDept && matchesProc && !tender.isEoiInviteOnly;
+      const matchesStage = stageFilter === "all"
+        || (stageFilter === "action" ? getTenderStage(tender).owner === "RBF" : stageGroupOf(tender) === stageFilter);
+      return matchesSearch && matchesCategory && matchesDept && matchesProc && matchesStage;
     });
     return list.sort((a, b) => {
       if (sortBy === "deadline") return new Date(a.deadline).getTime() - new Date(b.deadline).getTime();
       if (sortBy === "published_at") return new Date(b.publishedAt || 0).getTime() - new Date(a.publishedAt || 0).getTime();
       return new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime();
     });
-  }, [tenders, searchQuery, selectedCategory, selectedDepartment, selectedProcurement, sortBy]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [managedTenders, searchQuery, selectedCategory, selectedDepartment, selectedProcurement, stageFilter, sortBy, mode]);
+
+  React.useEffect(() => { setPage(1); }, [searchQuery, selectedCategory, selectedDepartment, selectedProcurement, stageFilter, sortBy]);
 
   const totalPages = Math.ceil(filteredTenders.length / perPage);
   const paginatedTenders = filteredTenders.slice((page - 1) * perPage, page * perPage);
@@ -3146,10 +3213,6 @@ const Tenders = ({
 
   const sendBidReminder = () => {
     showNotification("Reminder notifications queued for participating vendors.");
-  };
-
-  const runTenderSearch = () => {
-    showNotification(`Search complete. ${filteredTenders.length} tender(s) matched.`);
   };
 
   const upsertTender = (updatedTender: Tender) => {
@@ -5109,21 +5172,29 @@ const Tenders = ({
         tender_publish_changes_requested: "Publish Changes Requested",
         tender_closed: "Bidding Closed",
         tender_financial_opened: "Financial Stage Opened",
+        financial_stage_opened: "Financial Stage Opened",
+        tender_deadline_extended: "Deadline Extended",
+        tender_clarification_asked: "Clarification Requested",
+        tender_clarification_answered: "Clarification Answered",
+        tender_addendum_issued: "Addendum Issued",
+        tender_bids_opened: "Bids Opened",
+        tender_invited_vendors_updated: "Invited Vendors Updated",
+        eoi_shortlist_finalized: "EOI Shortlist Finalized",
+        evaluation_committee_assigned: "Evaluation Committee Assigned",
+        evaluation_comment_saved: "Evaluation Comment Saved",
+        bid_withdrawn: "Bid Withdrawn",
+        contract_generated: "Contract Generated",
+        contract_signed: "Contract Signed",
+        contract_approved: "Contract Approved",
+        contract_rejected: "Contract Rejected",
       };
-      return labels[action] || action.replace(/_/g, " ");
+      // Unknown events still read as words ("tender_foo_bar" -> "Tender Foo Bar").
+      return labels[action] || action.split("_").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
     };
     const stageTwoBids = tenderBids.filter(bid => (bid.stage_key === "technical" || bid.stage_key === "combined" || bid.stage_key === "financial") && bid.status !== BidStatus.DRAFT);
     const evaluatedStageTwoCount = stageTwoBids.filter(bid => bid.evaluation_status === "evaluated").length;
 
-    const statusBadgeClass =
-      selectedTender.publishApprovalStatus === "approved" && selectedTender.status === TenderStatus.DRAFT ? 'bg-emerald-100 text-emerald-700' :
-      selectedTender.publishApprovalStatus === "changes_requested" && selectedTender.status === TenderStatus.DRAFT ? 'bg-orange-100 text-orange-700' :
-      selectedTender.status === TenderStatus.PUBLISHED ? 'bg-emerald-100 text-emerald-700' :
-      selectedTender.status === TenderStatus.EVALUATION ? 'bg-blue-100 text-blue-700' :
-      selectedTender.status === TenderStatus.STANDSTILL ? 'bg-amber-100 text-amber-700' :
-      selectedTender.status === TenderStatus.AWARDED ? 'bg-purple-100 text-purple-700' :
-      selectedTender.status === TenderStatus.PENDING_PUBLISH_APPROVAL ? 'bg-sky-100 text-sky-700' :
-      'bg-amber-100 text-amber-700';
+    const detailStage = getTenderStage(selectedTender);
 
     return (
       <div className="max-w-[90rem] mx-auto pb-12 space-y-6">
@@ -5137,7 +5208,7 @@ const Tenders = ({
             </button>
             <div className="min-w-0">
               <div className="mb-1.5 flex flex-wrap items-center gap-2">
-                <span className={`badge ${statusBadgeClass}`}>{effectiveStatusLabel(selectedTender)}</span>
+                <span className={`badge ${STAGE_TONE_CLASSES[detailStage.tone]}`}>{detailStage.label}</span>
                 <span className="font-mono text-xs text-slate-400">{selectedTender.referenceNumber}</span>
                 {selectedTender.linkedEoiTenderId && (
                   <button
@@ -5154,7 +5225,9 @@ const Tenders = ({
               <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-slate-500">
                 <span>{selectedTender.department}</span>
                 <span className="text-slate-300">•</span>
-                <span>{selectedTender.category}</span>
+                <span>{workflowLabel(selectedTender)}</span>
+                <span className="text-slate-300">•</span>
+                <span>{(selectedTender.technologyTypes && selectedTender.technologyTypes.length ? selectedTender.technologyTypes : [selectedTender.category]).filter(Boolean).join(", ")}</span>
                 {selectedTender.publishApprovalStatus === "approved" && selectedTender.status !== TenderStatus.PUBLISHED && (
                   <><span className="text-slate-300">•</span><span className="font-semibold text-emerald-600">Publish Approval Granted</span></>
                 )}
@@ -5204,6 +5277,40 @@ const Tenders = ({
           </div>
         </div>
 
+        {/* Lifecycle progress + what happens next */}
+        <div className="card p-5 space-y-4">
+          <ol className="flex flex-wrap items-center gap-y-2">
+            {TENDER_LIFECYCLE.map((stepLabel, idx) => {
+              const done = idx < detailStage.step || (idx === detailStage.step && detailStage.tone === "success");
+              const current = idx === detailStage.step && !done;
+              return (
+                <li key={stepLabel} className="flex items-center">
+                  {idx > 0 && <span className={`mx-1.5 h-0.5 w-4 sm:w-8 rounded-full ${idx <= detailStage.step ? "bg-emerald-300" : "bg-slate-200"}`} />}
+                  <span className={`flex items-center gap-1.5 text-xs font-semibold ${current ? "text-slate-900" : done ? "text-emerald-700" : "text-slate-400"}`}>
+                    <span className={`flex h-5 w-5 items-center justify-center rounded-full text-[10px] ${current ? "bg-slate-900 text-white" : done ? "bg-emerald-600 text-white" : "bg-slate-200 text-slate-500"}`}>
+                      {done ? <Check size={11} /> : idx + 1}
+                    </span>
+                    {stepLabel}
+                  </span>
+                </li>
+              );
+            })}
+          </ol>
+          {detailStage.nextStep && (
+            <div className={`rounded-xl px-4 py-3 ${detailStage.owner === "RBF" ? "border border-amber-200 bg-amber-50" : "border border-slate-200 bg-slate-50"}`}>
+              <p className="text-sm font-semibold text-slate-900">
+                Next step{detailStage.owner !== "None" ? ` — ${detailStage.owner === "RBF" ? "your team (RBF)" : detailStage.owner}` : ""}
+              </p>
+              <p className="text-sm text-slate-700">{detailStage.nextStep}</p>
+              {detailStage.keyDate && (
+                <p className="mt-1 text-xs text-slate-500">
+                  {detailStage.keyDate.label}: {formatDateTimeShort(detailStage.keyDate.value)} ({relativeTime(detailStage.keyDate.value)})
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+
         {(selectedTender.publishApprovalStatus === "changes_requested" || selectedTender.publishApprovalStatus === "rejected") && (
           <div className={`p-4 rounded-xl border flex items-start gap-3 ${
             selectedTender.publishApprovalStatus === "changes_requested" ? "bg-orange-50 border-orange-200" : "bg-rose-50 border-rose-200"
@@ -5228,29 +5335,54 @@ const Tenders = ({
           </div>
         )}
 
-        {selectedTender.status !== TenderStatus.DRAFT && selectedTender.status !== TenderStatus.PENDING_PUBLISH_APPROVAL && (
-          <>
-            <TenderBidOpeningPanel tender={selectedTender} />
-            <TenderClarifications tender={selectedTender} mode="staff" />
-          </>
-        )}
-
         {/* Key facts strip */}
-        <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-          <div className="card p-5">
-            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Verification</p>
-            <p className={`mt-2 text-lg font-bold ${selectedTender.isVerified ? "text-emerald-600" : "text-amber-600"}`}>{selectedTender.isVerified ? "Verified" : "Pending"}</p>
-            <p className="mt-1 text-xs text-slate-500">By the RBF Management Team</p>
-          </div>
-          <div className="card p-5">
-            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Procurement Method</p>
-            <p className="mt-2 text-lg font-bold text-slate-900">{selectedTender.procurementMethod || "N/A"}</p>
-            <p className="mt-1 text-xs text-slate-500">{selectedTender.procurementWorkflow === "eoi_combined" ? "EOI → Combined" : selectedTender.procurementWorkflow === "combined" ? "Combined" : selectedTender.procurementWorkflow || ""}</p>
-          </div>
+        <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
           <div className="card p-5">
             <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Submission Deadline</p>
-            <p className="mt-2 text-lg font-bold text-slate-900">{selectedTender.deadline ? new Date(selectedTender.deadline).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "N/A"}</p>
-            <p className="mt-1 text-xs text-slate-500">Submission cutoff</p>
+            {(() => {
+              const deadline = openStageDeadline(selectedTender);
+              if (!deadline) return <p className="mt-2 text-lg font-bold text-slate-400">Not set</p>;
+              const open = new Date(deadline).getTime() > Date.now();
+              return (
+                <>
+                  <p className="mt-2 text-base font-bold text-slate-900">{formatDateTimeShort(deadline)}</p>
+                  <p className={`mt-1 text-xs font-semibold ${open ? "text-emerald-700" : "text-slate-500"}`}>{open ? `Closes ${relativeTime(deadline)}` : `Closed ${relativeTime(deadline)}`}</p>
+                  {selectedTender.clarificationDeadline && (
+                    <p className="mt-1 text-[11px] text-slate-500">Questions until {formatDateTimeShort(selectedTender.clarificationDeadline)}</p>
+                  )}
+                </>
+              );
+            })()}
+          </div>
+          <div className="card p-5">
+            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Bidders</p>
+            {selectedTender.status === TenderStatus.DRAFT || selectedTender.status === TenderStatus.PENDING_PUBLISH_APPROVAL ? (
+              <>
+                <p className="mt-2 text-lg font-bold text-slate-400">Not open yet</p>
+                <p className="mt-1 text-xs text-slate-500">Bids open once published</p>
+              </>
+            ) : (
+              <>
+                <p className="mt-2 text-lg font-bold text-slate-900">{selectedTender.bidderCount ?? 0}</p>
+                <p className="mt-1 text-xs text-slate-500">
+                  {(selectedTender.invitedVendorCount ?? 0) > 0 ? `of ${selectedTender.invitedVendorCount} invited vendor${selectedTender.invitedVendorCount === 1 ? "" : "s"}` : "submitted (drafts excluded)"}
+                </p>
+              </>
+            )}
+          </div>
+          <div className="card p-5">
+            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Budget Estimate</p>
+            <p className="mt-2 text-lg font-bold text-slate-900">
+              {selectedTender.budget ? `${selectedTender.biddingCurrency || "LSL"} ${Number(selectedTender.budget).toLocaleString()}` : "Not set"}
+            </p>
+            <p className="mt-1 text-xs text-slate-500">
+              {selectedTender.budgetDisclosure === "published" ? "Disclosed to bidders" : "Confidential — hidden from bidders"}
+            </p>
+          </div>
+          <div className="card p-5">
+            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Procurement</p>
+            <p className="mt-2 text-base font-bold text-slate-900">{selectedTender.procurementMethod || "N/A"}</p>
+            <p className="mt-1 text-xs text-slate-500">{workflowLabel(selectedTender)}</p>
           </div>
           <div className="card p-5">
             <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Lots</p>
@@ -5342,7 +5474,7 @@ const Tenders = ({
                       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                         <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-100">
                           <p className="text-[10px] font-bold text-emerald-500 uppercase tracking-widest">Budget Estimate</p>
-                          <p className="mt-1 text-2xl font-bold text-emerald-700">M {selectedTender.budget?.toLocaleString() ?? "N/A"}</p>
+                          <p className="mt-1 text-2xl font-bold text-emerald-700">{selectedTender.budget ? `${selectedTender.biddingCurrency || "LSL"} ${selectedTender.budget.toLocaleString()}` : "Not set"}</p>
                         </div>
                         <div className="p-4 rounded-xl bg-slate-50 border border-slate-100">
                           <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Bidding Currency</p>
@@ -5619,7 +5751,7 @@ const Tenders = ({
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                           <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
                             <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Budget</p>
-                            <p className="text-sm font-bold text-slate-900">{lot.budget != null ? `M ${Number(lot.budget).toLocaleString()}` : "Not set"}</p>
+                            <p className="text-sm font-bold text-slate-900">{lot.budget != null ? `${selectedTender.biddingCurrency || "LSL"} ${Number(lot.budget).toLocaleString()}` : "Not set"}</p>
                           </div>
                           <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
                             <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Installation Target</p>
@@ -6308,6 +6440,12 @@ const Tenders = ({
         </div>
       )}
 
+        {selectedTender.status !== TenderStatus.DRAFT && selectedTender.status !== TenderStatus.PENDING_PUBLISH_APPROVAL && (
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+            <TenderClarifications tender={selectedTender} mode="staff" />
+            <TenderBidOpeningPanel tender={selectedTender} />
+          </div>
+        )}
       </div>
     );
   }
@@ -6496,7 +6634,7 @@ const Tenders = ({
               </div>
               <div className="space-y-1">
                 <p className="text-xs font-bold text-slate-500">Budget Estimate</p>
-                <p className="text-sm font-medium">M {selectedTender.budget?.toLocaleString()}</p>
+                <p className="text-sm font-medium">{selectedTender.budget ? `${selectedTender.biddingCurrency || "LSL"} ${selectedTender.budget.toLocaleString()}` : "Not set"}</p>
               </div>
             </div>
 
@@ -6556,133 +6694,163 @@ const Tenders = ({
   }
 
 
+  const renderStageCell = (stage: TenderStage) => (
+    <div className="space-y-1">
+      <span className={`badge ${STAGE_TONE_CLASSES[stage.tone]}`}>{stage.label}</span>
+      {stage.nextStep && (
+        <p className="text-xs text-slate-600 leading-snug">
+          <span className="font-semibold text-slate-700">Next:</span> {stage.nextStep}
+          {stage.owner !== "None" && <span className="text-slate-400"> · {stage.owner}</span>}
+        </p>
+      )}
+    </div>
+  );
+
+  const renderKeyDateCell = (tender: Tender, stage: TenderStage) => {
+    const keyDate = stage.keyDate ?? (openStageDeadline(tender) ? { label: "Submission deadline", value: openStageDeadline(tender)! } : undefined);
+    if (!keyDate) return <span className="text-xs text-slate-400">—</span>;
+    const isFuture = new Date(keyDate.value).getTime() > Date.now();
+    return (
+      <div className="text-xs">
+        <p className="font-semibold text-slate-500">{keyDate.label}</p>
+        <p className="text-slate-800">{formatDateTimeShort(keyDate.value)}</p>
+        <p className={isFuture ? "font-semibold text-emerald-700" : "text-slate-400"}>{relativeTime(keyDate.value)}</p>
+      </div>
+    );
+  };
+
+  const renderRowActions = (tender: Tender) => {
+    const primary: { label: string; onClick: () => void } | null = mode === "award"
+      ? {
+          label: tender.status === TenderStatus.DISPUTED ? "Review challenge" : tender.status === TenderStatus.AWARDED || tender.intentToAwardAt || tender.hasPendingIntentAward ? "Manage award" : "Start award",
+          onClick: () => void openTenderView(tender.id, "award"),
+        }
+      : !tender.isVerified && tender.status === TenderStatus.DRAFT
+        ? { label: "Verify", onClick: () => void openTenderView(tender.id, "verify") }
+        : tender.status === TenderStatus.DRAFT && tender.publishApprovalStatus === "approved"
+          ? { label: "Publish", onClick: () => void openTenderView(tender.id, "publish") }
+          : tender.status === TenderStatus.DRAFT && tender.isVerified && tender.publishApprovalStatus !== "approved"
+            ? { label: "Request approval", onClick: () => void handleRequestPublishApproval(tender.id) }
+            : null;
+    return (
+      <div className="flex flex-col items-stretch gap-1.5 min-w-[8.5rem]">
+        {primary && (
+          <button onClick={primary.onClick} className="btn-primary py-1.5 px-3 text-xs">
+            {primary.label}
+          </button>
+        )}
+        <button onClick={() => void openTenderView(tender.id, "details")} className="btn-secondary py-1.5 px-3 text-xs">
+          View details
+        </button>
+      </div>
+    );
+  };
+
   const renderTenderTable = (list: Tender[], currentPage: number, setPageFn: (updater: (p: number) => number) => void, totalPagesForSection: number) => (
     <div className="card overflow-x-auto">
+      <div className="flex items-center justify-between px-6 py-3 border-b border-slate-100 text-xs text-slate-500">
+        <span>
+          Showing {list.length === 0 ? 0 : (currentPage - 1) * perPage + 1}–{(currentPage - 1) * perPage + list.length} of {filteredTenders.length} tender{filteredTenders.length === 1 ? "" : "s"}
+          {filtersActive ? ` (filtered from ${managedTenders.length})` : ""}
+        </span>
+        {filtersActive && (
+          <button onClick={clearTenderFilters} className="font-semibold text-emerald-700 hover:text-emerald-800">Clear filters</button>
+        )}
+      </div>
       <table className="w-full text-left border-collapse">
         <thead>
-          <tr className="bg-slate-50 border-bottom border-slate-200">
-            <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">ID</th>
-            <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Reference</th>
-            <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Tender Name</th>
-            <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Category</th>
-            <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Status</th>
-            <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Verification</th>
-            <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Lots</th>
-            <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Actions</th>
+          <tr className="bg-slate-50 border-b border-slate-200">
+            <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">Tender</th>
+            {mode !== "award" && <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">Workflow &amp; Method</th>}
+            <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">{mode === "award" ? "Award Stage" : "Stage"}</th>
+            <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">Key Date</th>
+            <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">Bidders</th>
+            <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">{mode === "award" ? "Contracts" : "Lots"}</th>
+            <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider text-right">Actions</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-200">
           {list.length === 0 && (
-            <tr><td colSpan={8} className="px-6 py-8 text-center text-sm text-slate-400">No tenders here.</td></tr>
+            <tr>
+              <td colSpan={mode === "award" ? 6 : 7} className="px-6 py-10 text-center text-sm text-slate-500">
+                {filtersActive
+                  ? <>No tenders match these filters. <button onClick={clearTenderFilters} className="font-semibold text-emerald-700">Clear filters</button></>
+                  : mode === "award"
+                    ? "No tenders are in the award pipeline yet. A tender appears here once its evaluation is complete."
+                    : "No tenders yet. Use “Add Tender” to create the first one."}
+              </td>
+            </tr>
           )}
           {list.map((tender) => {
-            const isDraft = tender.status === TenderStatus.DRAFT;
+            const stage = getTenderStage(tender);
             const lotCount = tender.lotCount ?? tender.lots?.length ?? 0;
             const isLotWiseRow = lotCount > 0;
             const awardedLotCount = isLotWiseRow ? (tender.awardedLotCount ?? tender.lots?.filter(l => l.awardedVendorId).length ?? 0) : 0;
-            const remainingLotCount = lotCount - awardedLotCount;
-            return (<tr key={tender.id} className={`transition-colors ${isDraft ? "bg-amber-50/60 border-l-4 border-amber-400 hover:bg-amber-50" : "hover:bg-slate-50"}`}>
-              <td className="px-6 py-4 align-top font-mono text-xs text-slate-500">{tender.id}</td>
-              <td className="px-6 py-4 align-top font-mono text-sm text-slate-600">{tender.referenceNumber}</td>
-              <td className="px-6 py-4 align-top font-medium text-slate-900">
-                <div className="flex items-center gap-2">
-                  <span>{tender.name}</span>
-                  {tender.linkedEoiTenderId && (
-                    <span className="inline-flex shrink-0 items-center rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold text-slate-600" title={`Linked to EOI Invite: ${tender.linkedEoiTenderName || ""}`}>Linked EOI</span>
-                  )}
-                </div>
-              </td>
-              <td className="px-6 py-4 align-top text-sm text-slate-600">{tender.category}</td>
-              <td className="px-6 py-4 align-top">
-                <span className={`badge ${
-                  tender.publishApprovalStatus === "approved" && tender.status === TenderStatus.DRAFT ? 'bg-emerald-100 text-emerald-700' :
-                  tender.publishApprovalStatus === "changes_requested" && tender.status === TenderStatus.DRAFT ? 'bg-orange-100 text-orange-700' :
-                  tender.status === TenderStatus.PUBLISHED ? 'bg-emerald-100 text-emerald-700' :
-                  tender.status === TenderStatus.EVALUATION ? 'bg-blue-100 text-blue-700' :
-                  tender.status === TenderStatus.STANDSTILL ? 'bg-amber-100 text-amber-700' :
-                  tender.status === TenderStatus.AWARDED ? 'bg-purple-100 text-purple-700' :
-                  tender.status === TenderStatus.PENDING_PUBLISH_APPROVAL ? 'bg-sky-100 text-sky-700' :
-                  'bg-amber-100 text-amber-700'
-                }`}>
-                  {effectiveStatusLabel(tender)}
-                </span>
-              </td>
-              <td className="px-6 py-4 align-top">
-                {tender.isVerified ? (
-                  <span className="flex items-center gap-1.5 text-xs font-bold text-emerald-600">
-                    <ShieldCheck size={14} /> Verified
-                  </span>
-                ) : (
-                  <span className="text-xs font-bold text-slate-400">Pending</span>
+            const contracts = tender.contractsSummary || [];
+            const needsRbf = stage.owner === "RBF";
+            return (
+              <tr key={tender.id} className={`transition-colors hover:bg-slate-50 ${needsRbf ? "border-l-4 border-l-amber-400" : "border-l-4 border-l-transparent"}`}>
+                <td className="px-6 py-4 align-top">
+                  <button onClick={() => void openTenderView(tender.id, "details")} className="text-left font-semibold text-slate-900 hover:text-emerald-700">
+                    {tender.name}
+                  </button>
+                  <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                    <span className="font-mono text-[11px] text-slate-500">{tender.referenceNumber}</span>
+                    {(tender.technologyTypes && tender.technologyTypes.length ? tender.technologyTypes : [tender.category]).filter(Boolean).map((tech) => (
+                      <span key={tech} className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-600">{tech}</span>
+                    ))}
+                    {tender.linkedEoiTenderId && (
+                      <span className="rounded bg-indigo-50 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700" title={`Linked to EOI Invite: ${tender.linkedEoiTenderName || ""}`}>From EOI shortlist</span>
+                    )}
+                  </div>
+                  {tender.department && <p className="mt-1 text-[11px] text-slate-400">{tender.department}</p>}
+                </td>
+                {mode !== "award" && (
+                  <td className="px-6 py-4 align-top text-xs">
+                    <p className="font-semibold text-slate-700">{workflowLabel(tender)}</p>
+                    <p className="text-slate-500">{tender.procurementMethod || "—"}</p>
+                  </td>
                 )}
-              </td>
-              <td className="px-6 py-4 align-top">
-                {isLotWiseRow ? (
-                  <div className="text-xs">
-                    <span className="badge bg-indigo-100 text-indigo-700">{lotCount} Lots</span>
-                    <p className="mt-1 text-slate-500">
-                      <span className="font-semibold text-emerald-600">{awardedLotCount} awarded</span>
-                      {" / "}
-                      <span className={remainingLotCount > 0 ? "font-semibold text-amber-600" : "text-slate-400"}>{remainingLotCount} remaining</span>
-                    </p>
-                    {(tender.lotStatuses || []).length > 0 && (
-                      <ul className="mt-2 space-y-1">
-                        {(tender.lotStatuses || []).map((lot) => (
-                          <li key={lot.id} className="flex items-center justify-between gap-2">
-                            <span className="truncate text-slate-600" title={lot.name}>{lot.name}</span>
-                            <LotStatusBadge status={lot.status} />
+                <td className="px-6 py-4 align-top max-w-[18rem]">{renderStageCell(stage)}</td>
+                <td className="px-6 py-4 align-top">{renderKeyDateCell(tender, stage)}</td>
+                <td className="px-6 py-4 align-top text-xs">
+                  {tender.status === TenderStatus.DRAFT || tender.status === TenderStatus.PENDING_PUBLISH_APPROVAL ? (
+                    <span className="text-slate-400">Not open yet</span>
+                  ) : (
+                    <>
+                      <p className="text-lg font-bold text-slate-900 leading-none">{tender.bidderCount ?? 0}</p>
+                      <p className="mt-1 text-slate-500">{(tender.bidderCount ?? 0) === 1 ? "bidder" : "bidders"}</p>
+                      {(tender.invitedVendorCount ?? 0) > 0 && <p className="text-slate-400">of {tender.invitedVendorCount} invited</p>}
+                    </>
+                  )}
+                </td>
+                <td className="px-6 py-4 align-top text-xs">
+                  {mode === "award" ? (
+                    contracts.length === 0 ? (
+                      <span className="text-slate-400">{tender.status === TenderStatus.AWARDED ? "Not generated" : "After award"}</span>
+                    ) : (
+                      <ul className="space-y-1">
+                        {contracts.map(c => (
+                          <li key={c.id} className="flex items-center gap-2">
+                            <span className="font-mono text-[11px] text-slate-500">{c.referenceNumber}</span>
+                            <span className={`badge ${c.status === "Approved" || c.status === "Closed" ? "bg-emerald-100 text-emerald-700" : c.status === "Rejected" ? "bg-rose-100 text-rose-700" : "bg-amber-100 text-amber-700"}`}>{c.status}</span>
+                            {c.lotName && <span className="text-slate-400 truncate" title={c.lotName}>{c.lotName}</span>}
                           </li>
                         ))}
                       </ul>
-                    )}
-                  </div>
-                ) : (
-                  <span className="text-xs font-medium text-slate-400">Single Award</span>
-                )}
-              </td>
-              <td className="px-6 py-4 align-top">
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
-                  <button
-                    onClick={() => void openTenderView(tender.id, "details")}
-                    className="text-emerald-600 hover:text-emerald-700 font-medium text-sm"
-                  >
-                    View
-                  </button>
-                  {!tender.isVerified && (
-                    <button
-                      onClick={() => void openTenderView(tender.id, "verify")}
-                      className="text-blue-600 hover:text-blue-700 font-medium text-sm"
-                    >
-                      Verify
-                    </button>
+                    )
+                  ) : isLotWiseRow ? (
+                    <div>
+                      <span className="badge bg-indigo-100 text-indigo-700">{lotCount} lots</span>
+                      <p className="mt-1 text-slate-500"><span className="font-semibold text-emerald-600">{awardedLotCount}</span> of {lotCount} awarded</p>
+                    </div>
+                  ) : (
+                    <span className="text-slate-500">Single award</span>
                   )}
-                  {tender.isVerified && tender.status === TenderStatus.DRAFT && tender.publishApprovalStatus !== "approved" && (
-                    <button
-                      onClick={() => void handleRequestPublishApproval(tender.id)}
-                      className="text-blue-600 hover:text-blue-700 font-medium text-sm"
-                    >
-                      {tender.publishApprovalStatus === "rejected" ? "Request Approval" : "Request Approval"}
-                    </button>
-                  )}
-                  {tender.isVerified && tender.status === TenderStatus.DRAFT && tender.publishApprovalStatus === "approved" && (
-                    <button
-                      onClick={() => void openTenderView(tender.id, "publish")}
-                      className="text-emerald-600 hover:text-emerald-700 font-medium text-sm"
-                    >
-                      Publish
-                    </button>
-                  )}
-                  {mode === "award" && (tender.status === TenderStatus.EVALUATION || tender.status === TenderStatus.PUBLISHED || tender.status === TenderStatus.STANDSTILL || tender.status === TenderStatus.AWARDED || tender.status === TenderStatus.DISPUTED) && (
-                    <button
-                      onClick={() => void openTenderView(tender.id, "award")}
-                      className="text-purple-600 hover:text-purple-700 font-medium text-sm"
-                    >
-                      {tender.status === TenderStatus.DISPUTED ? "Review Challenge" : tender.status === TenderStatus.AWARDED || tender.intentToAwardAt ? "Manage Award" : "Award"}
-                    </button>
-                  )}
-                </div>
-              </td>
-            </tr>);
+                </td>
+                <td className="px-6 py-4 align-top">{renderRowActions(tender)}</td>
+              </tr>
+            );
           })}
         </tbody>
       </table>
@@ -6698,29 +6866,57 @@ const Tenders = ({
     <div className="space-y-6">
       <NotificationToast />
 
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
           <h1 className="text-2xl font-bold text-slate-900">{mode === "award" ? "Award Management" : "Tender Management"}</h1>
-          <span className="text-xs font-bold text-slate-400 uppercase tracking-widest">{mode === "award" ? "Award & Contracting" : "Stage 1 & 2"}</span>
+          <p className="mt-1 text-sm text-slate-500">
+            {mode === "award"
+              ? "Tenders whose evaluation is complete: propose the winner, run the standstill period, handle challenges, then contract and assign the project."
+              : "Every tender from draft to award. Rows marked in amber are waiting on the RBF Management Team."}
+          </p>
         </div>
         {mode !== "award" && (
-          <div className="flex gap-3">
-            <button onClick={startCreateTender} className="btn-primary flex items-center gap-2">
-              <Plus size={18} /> Add Tender
-            </button>
-          </div>
+          <button onClick={startCreateTender} className="btn-primary flex items-center gap-2">
+            <Plus size={18} /> Add Tender
+          </button>
         )}
       </div>
 
-      <div className="card p-6 space-y-6">
-        <div className="grid grid-cols-1 md:grid-cols-5 lg:grid-cols-7 gap-4 items-end">
-          <div className="space-y-1 md:col-span-2">
-            <label className="text-[10px] font-bold text-slate-400 uppercase">Search Key</label>
+      {/* Stage summary — each tile filters the list */}
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 xl:grid-cols-8">
+        {[
+          { key: "all", label: "All tenders", hint: mode === "award" ? "In the award pipeline" : "Excluding EOI Invites" },
+          { key: "action", label: "Needs RBF action", hint: "Waiting on your team" },
+          ...stageGroups,
+        ].map((tile) => {
+          const active = stageFilter === tile.key;
+          const count = stageCounts[tile.key] || 0;
+          return (
+            <button
+              key={tile.key}
+              onClick={() => setStageFilter(active && tile.key !== "all" ? "all" : tile.key)}
+              title={tile.hint}
+              className={`rounded-xl border p-3 text-left transition-colors ${
+                active ? "border-emerald-500 bg-emerald-50" : tile.key === "action" && count > 0 ? "border-amber-300 bg-amber-50 hover:bg-amber-100" : "border-slate-200 bg-white hover:bg-slate-50"
+              }`}
+            >
+              <p className={`text-2xl font-bold leading-none ${tile.key === "action" && count > 0 ? "text-amber-700" : "text-slate-900"}`}>{count}</p>
+              <p className="mt-1.5 text-xs font-semibold text-slate-700">{tile.label}</p>
+              <p className="text-[11px] text-slate-400 leading-snug">{tile.hint}</p>
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="card p-4">
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-6 items-end">
+          <div className="space-y-1 lg:col-span-2">
+            <label className="text-[10px] font-bold text-slate-400 uppercase">Search</label>
             <div className="relative">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-              <input 
-                type="text" 
-                placeholder="Search by reference or name..." 
+              <input
+                type="text"
+                placeholder="Name, reference, department or technology"
                 className="input-field pl-10 py-2 text-sm"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
@@ -6729,38 +6925,21 @@ const Tenders = ({
           </div>
           <div className="space-y-1">
             <label className="text-[10px] font-bold text-slate-400 uppercase">Department</label>
-            <select 
-              className="input-field py-2 text-sm"
-              value={selectedDepartment}
-              onChange={(e) => setSelectedDepartment(e.target.value)}
-            >
+            <select className="input-field py-2 text-sm" value={selectedDepartment} onChange={(e) => setSelectedDepartment(e.target.value)}>
               <option>All Departments</option>
-              <option>Department of Energy</option>
-              <option>UNDP Lesotho</option>
+              {departmentOptions.map((d) => <option key={d} value={d}>{d}</option>)}
             </select>
           </div>
           <div className="space-y-1">
-            <label className="text-[10px] font-bold text-slate-400 uppercase">Category</label>
-            <select 
-              className="input-field py-2 text-sm"
-              value={selectedCategory}
-              onChange={(e) => setSelectedCategory(e.target.value)}
-            >
+            <label className="text-[10px] font-bold text-slate-400 uppercase">Technology</label>
+            <select className="input-field py-2 text-sm" value={selectedCategory} onChange={(e) => setSelectedCategory(e.target.value)}>
               <option>All Categories</option>
-              <option>SHS</option>
-              <option>Mini-Grid</option>
-              <option>ICS</option>
-              <option>SWP</option>
-              <option>PUE</option>
+              {categoryOptions.map((c) => <option key={c} value={c}>{c}</option>)}
             </select>
           </div>
           <div className="space-y-1">
-            <label className="text-[10px] font-bold text-slate-400 uppercase">Procurement</label>
-            <select 
-              className="input-field py-2 text-sm"
-              value={selectedProcurement}
-              onChange={(e) => setSelectedProcurement(e.target.value)}
-            >
+            <label className="text-[10px] font-bold text-slate-400 uppercase">Procurement Method</label>
+            <select className="input-field py-2 text-sm" value={selectedProcurement} onChange={(e) => setSelectedProcurement(e.target.value)}>
               <option>All Methods</option>
               {procurementMethodOptions.map((m) => (
                 <option key={m.value} value={m.value}>{m.value}</option>
@@ -6769,19 +6948,12 @@ const Tenders = ({
           </div>
           <div className="space-y-1">
             <label className="text-[10px] font-bold text-slate-400 uppercase">Sort By</label>
-            <select 
-              className="input-field py-2 text-sm"
-              value={sortBy}
-              onChange={(e) => setSortBy(e.target.value as any)}
-            >
-              <option value="created_at">Recent</option>
-              <option value="deadline">Deadline</option>
-              <option value="published_at">Published</option>
+            <select className="input-field py-2 text-sm" value={sortBy} onChange={(e) => setSortBy(e.target.value as any)}>
+              <option value="created_at">Newest first</option>
+              <option value="deadline">Deadline (soonest first)</option>
+              <option value="published_at">Recently published</option>
             </select>
           </div>
-          <button onClick={runTenderSearch} className="btn-primary py-2 flex items-center justify-center gap-2">
-            <Search size={16} /> Search Now
-          </button>
         </div>
       </div>
 
@@ -6810,6 +6982,43 @@ const Tenders = ({
               <p className="text-sm text-slate-500">
                 {selectedTender.status === TenderStatus.DISPUTED ? "The award process is paused due to a filed challenge. Review the challenge details below and resolve by selecting Upheld or Dismissed." : "The system ranks bidders by weighted technical and financial scoring. Propose the best evaluated bidder, then a Super Admin approves the request before the Intent to Award is issued and the cooling-off period starts."}
               </p>
+
+              {!isLotWiseTender && (() => {
+                // Single-award pipeline at a glance. (Lot-wise tenders show the same
+                // progress per lot in the ranking section below.)
+                const now = Date.now();
+                const contract = tenderContracts[0];
+                const standstillOver = Boolean(selectedTender.coolingOffUntil && new Date(selectedTender.coolingOffUntil).getTime() <= now);
+                const steps: { label: string; done: boolean; detail?: string }[] = [
+                  { label: "Evaluation complete", done: awardEvaluationStatus?.complete !== false || Boolean(selectedTender.intentToAwardAt) },
+                  { label: "Intent requested", done: Boolean(pendingIntentAward || selectedTender.intentToAwardAt), detail: pendingIntentAward ? "Awaiting Super Admin" : undefined },
+                  { label: "Intent issued", done: Boolean(selectedTender.intentToAwardAt), detail: selectedTender.intentToAwardAt ? formatDateTimeShort(selectedTender.intentToAwardAt) : undefined },
+                  {
+                    label: "Standstill",
+                    done: selectedTender.status === TenderStatus.AWARDED || standstillOver,
+                    detail: selectedTender.status === TenderStatus.DISPUTED ? "Challenged — paused" : selectedTender.coolingOffUntil ? `${standstillOver ? "Ended" : "Ends"} ${formatDateTimeShort(selectedTender.coolingOffUntil)}` : undefined,
+                  },
+                  { label: "Award confirmed", done: selectedTender.status === TenderStatus.AWARDED, detail: selectedTender.awardedVendorName && selectedTender.status === TenderStatus.AWARDED ? selectedTender.awardedVendorName : undefined },
+                  { label: "Contract approved", done: Boolean(contract && (contract.status === "Approved")), detail: contract ? contract.status : undefined },
+                  { label: "Project assigned", done: Boolean(contract?.projectId) },
+                ];
+                const currentIdx = steps.findIndex(step => !step.done);
+                return (
+                  <ol className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-7">
+                    {steps.map((step, idx) => {
+                      const current = idx === currentIdx;
+                      return (
+                        <li key={step.label} className={`rounded-lg border px-3 py-2 ${step.done ? "border-emerald-200 bg-emerald-50" : current ? "border-purple-300 bg-purple-50" : "border-slate-200 bg-white"}`}>
+                          <p className={`text-xs font-bold ${step.done ? "text-emerald-700" : current ? "text-purple-700" : "text-slate-400"}`}>
+                            {step.done ? "✓ " : `${idx + 1}. `}{step.label}
+                          </p>
+                          {step.detail && <p className="mt-0.5 text-[11px] text-slate-500">{step.detail}</p>}
+                        </li>
+                      );
+                    })}
+                  </ol>
+                );
+              })()}
 
               {pendingIntentAward && (
                 <div className="rounded-xl border border-amber-300 bg-amber-50 p-4">
@@ -7056,9 +7265,9 @@ const Tenders = ({
                                   </div>
                                 </div>
                                 <div className="mt-2 grid grid-cols-1 gap-2 text-slate-600 sm:grid-cols-3">
-                                  <p>Ts (Technical Score{awardRankingWeights ? `, ${awardRankingWeights.technical}%` : ""}): {row.technical_score ?? "N/A"}</p>
-                                  <p>Fs (Financial Score{awardRankingWeights ? `, ${awardRankingWeights.financial}%` : ""}): {row.financial_score ?? "Not finalized"}</p>
-                                  <p>S (Combined Score): {row.combined_score ?? "N/A"}</p>
+                                  <p>Technical score{awardRankingWeights ? ` (weight ${awardRankingWeights.technical}%)` : ""}: <span className="font-semibold text-slate-800">{row.technical_score ?? "Not scored"}</span></p>
+                                  <p>Financial score{awardRankingWeights ? ` (weight ${awardRankingWeights.financial}%)` : ""}: <span className="font-semibold text-slate-800">{row.financial_score ?? "Not finalized"}</span></p>
+                                  <p>Weighted total: <span className="font-semibold text-slate-800">{row.combined_score ?? "Pending"}</span></p>
                                 </div>
                                 {row.disqualification_reason && (
                                   <p className="mt-1 text-rose-600">{row.disqualification_reason}</p>
@@ -7140,9 +7349,9 @@ const Tenders = ({
                                 </div>
                               </div>
                               <div className="mt-2 grid grid-cols-1 gap-2 text-slate-600 sm:grid-cols-3">
-                                <p>Ts (Technical Score{awardRankingWeights ? `, ${awardRankingWeights.technical}%` : ""}): {row.technical_score ?? "N/A"}</p>
-                                <p>Fs (Financial Score{awardRankingWeights ? `, ${awardRankingWeights.financial}%` : ""}): {row.financial_score ?? "Not opened"}</p>
-                                <p>S (Combined Score): {row.combined_score ?? "N/A"}</p>
+                                <p>Technical score{awardRankingWeights ? ` (weight ${awardRankingWeights.technical}%)` : ""}: <span className="font-semibold text-slate-800">{row.technical_score ?? "Not scored"}</span></p>
+                                <p>Financial score{awardRankingWeights ? ` (weight ${awardRankingWeights.financial}%)` : ""}: <span className="font-semibold text-slate-800">{row.financial_score ?? "Not opened"}</span></p>
+                                <p>Weighted total: <span className="font-semibold text-slate-800">{row.combined_score ?? "Pending"}</span></p>
                               </div>
                               {row.disqualification_reason && (
                                 <p className="mt-2 text-rose-600">{row.disqualification_reason}</p>
@@ -8667,14 +8876,16 @@ const Blacklisting = ({ currentUser }: { currentUser: User | null }) => {
       setCases(caseRows);
       setAppeals(appealRows);
       setVendors(vendorRows);
-      setSelectedCase(prev => caseRows.find(item => item.id === prev?.id) || caseRows[0] || null);
+      // Staff land on the first case; a vendor's selection only means "appealing this
+      // case", so nothing is pre-selected for them.
+      setSelectedCase(prev => caseRows.find(item => item.id === prev?.id) || (canAppeal ? null : caseRows[0]) || null);
     } catch (err: any) {
       const raw = String(err?.message || "");
       showNotification(isConnectivityError(raw) ? `Cannot connect to backend (${API_BASE}).` : (toFriendlyApiMessage(raw) || "Failed to load blacklisting records."));
     } finally {
       setLoading(false);
     }
-  }, [canInitiate]);
+  }, [canInitiate, canAppeal]);
 
   React.useEffect(() => {
     void loadBlacklisting();
@@ -8796,6 +9007,196 @@ const Blacklisting = ({ currentUser }: { currentUser: User | null }) => {
   };
 
   const pendingCases = cases.filter(item => item.status === "Initiated" || item.status === "Under Review").length;
+
+  // ---- Vendor's own view: their standing, their cases, their appeals. ----
+  if (canAppeal) {
+    const summary = currentUser?.blacklistSummary || null;
+    const fmt = (iso?: string | null) => (iso ? new Date(iso).toLocaleString("en-GB", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "—");
+    const standing = !summary
+      ? { title: "Good standing", tone: "border-emerald-200 bg-emerald-50 text-emerald-900", body: "Your account has no restrictions. You can bid on tenders, report installations and claim payments as normal." }
+      : summary.status === "Blacklisted"
+        ? { title: summary.is_permanent ? "Blacklisted (permanent)" : `Blacklisted until ${summary.expiry_date ? new Date(summary.expiry_date).toLocaleDateString() : "further notice"}`, tone: "border-rose-200 bg-rose-50 text-rose-900", body: `Reason: ${summary.reason}. You cannot submit new bids or request payments, and field verification of your installations has stopped.` }
+        : { title: "Suspended pending review", tone: "border-amber-200 bg-amber-50 text-amber-900", body: `Reason: ${summary.reason}. While the case is reviewed you cannot submit new bids or request payments, and field verification is paused.${summary.cooling_off_until ? ` The response (cooling-off) period runs until ${fmt(summary.cooling_off_until)}.` : ""}` };
+    const caseSteps = (item: VendorBlacklistCase) => [
+      { label: "Notice issued", at: item.noticeSentAt || item.initiatedAt, done: true },
+      { label: "Under review", at: item.reviewedAt, done: Boolean(item.reviewedAt) || ["Under Review", "Blacklisted", "Rejected", "Reinstated", "Expired", "Requalified"].includes(item.status) },
+      {
+        label: item.status === "Rejected" ? "Case dismissed" : "Decision",
+        at: item.confirmedAt,
+        done: ["Blacklisted", "Rejected", "Reinstated", "Expired", "Requalified"].includes(item.status),
+      },
+      { label: "Reinstated", at: item.reinstatedAt, done: Boolean(item.reinstatedAt) || ["Reinstated", "Requalified"].includes(item.status) },
+    ];
+    const statusTone = (status: string) =>
+      status === "Blacklisted" ? "bg-rose-100 text-rose-700"
+      : status === "Initiated" || status === "Under Review" ? "bg-amber-100 text-amber-800"
+      : status === "Rejected" ? "bg-emerald-100 text-emerald-700"
+      : "bg-slate-100 text-slate-700";
+    const statusMeaning: Record<string, string> = {
+      Initiated: "A case has been opened and your account is suspended while it is reviewed.",
+      "Under Review": "The case is being reviewed by an independent reviewer before any decision.",
+      Blacklisted: "The decision was confirmed: your account is blacklisted.",
+      Rejected: "The case was dismissed. No restriction applies from it.",
+      Expired: "The blacklisting period has ended.",
+      Reinstated: "Your account was reinstated.",
+      Requalified: "You have re-qualified and may bid again.",
+    };
+    return (
+      <div className="space-y-6">
+        <AnimatePresence>
+          {notification && (
+            <motion.div initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }}
+              className="fixed top-24 right-8 z-[200] bg-slate-900 text-white px-6 py-3 rounded-xl shadow-xl flex items-center gap-3">
+              <CheckCircle2 size={20} />
+              <span className="font-medium">{notification}</span>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        <div>
+          <h1 className="text-2xl font-bold text-slate-900">Account Standing &amp; Blacklisting</h1>
+          <p className="text-sm text-slate-500">Any integrity case opened about your organisation, what it means for your account, and how to appeal.</p>
+        </div>
+
+        <div className={`rounded-2xl border px-5 py-4 ${standing.tone}`}>
+          <p className="text-lg font-bold">{standing.title}</p>
+          <p className="mt-1 text-sm">{standing.body}</p>
+          {summary?.appeal_allowed && <p className="mt-2 text-sm font-semibold">You may appeal this case — use “Appeal this case” below.</p>}
+        </div>
+
+        {loading && <p className="text-sm text-slate-500">Loading your cases…</p>}
+        {!loading && cases.length === 0 && (
+          <div className="card p-6 text-sm text-slate-500">No case has ever been opened about your account.</div>
+        )}
+
+        {cases.map(item => {
+          const caseAppeals = appeals.filter(a => a.case === item.id);
+          const appealPending = caseAppeals.some(a => a.status !== "Resolved");
+          const canAppealThis = ["Initiated", "Under Review", "Blacklisted"].includes(item.status) && !appealPending;
+          const appealingThis = selectedCase?.id === item.id;
+          return (
+            <div key={item.id} className="card p-6 space-y-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="text-base font-bold text-slate-900">{item.reason}</p>
+                  <p className="text-xs text-slate-500">Case opened {fmt(item.initiatedAt)}</p>
+                </div>
+                <span className={`badge ${statusTone(item.status)}`}>{item.status}</span>
+              </div>
+              {statusMeaning[item.status] && <p className="text-sm text-slate-600">{statusMeaning[item.status]}</p>}
+
+              <ol className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                {caseSteps(item).map(step => (
+                  <li key={step.label} className={`rounded-lg border px-3 py-2 ${step.done ? "border-emerald-200 bg-emerald-50" : "border-slate-200 bg-white"}`}>
+                    <p className={`text-xs font-bold ${step.done ? "text-emerald-700" : "text-slate-400"}`}>{step.done ? "✓ " : ""}{step.label}</p>
+                    {step.done && step.at && <p className="text-[11px] text-slate-500">{fmt(step.at)}</p>}
+                  </li>
+                ))}
+              </ol>
+
+              <dl className="grid grid-cols-1 gap-3 text-sm sm:grid-cols-3">
+                <div><dt className="text-[10px] font-bold uppercase text-slate-400">Response period ends</dt><dd className="text-slate-800">{fmt(item.coolingOffUntil)}</dd></div>
+                <div><dt className="text-[10px] font-bold uppercase text-slate-400">Restriction ends</dt><dd className="text-slate-800">{item.isPermanent ? "Permanent" : item.expiryDate ? new Date(item.expiryDate).toLocaleDateString() : "Not set"}</dd></div>
+                <div><dt className="text-[10px] font-bold uppercase text-slate-400">Decision date</dt><dd className="text-slate-800">{fmt(item.confirmedAt)}</dd></div>
+              </dl>
+
+              {item.description && (
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
+                  <p className="mb-1 text-[10px] font-bold uppercase text-slate-400">Grounds</p>
+                  {item.description}
+                </div>
+              )}
+              {item.finalDecisionNotes && (
+                <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-700">
+                  <p className="mb-1 text-[10px] font-bold uppercase text-slate-400">Decision notes</p>
+                  {item.finalDecisionNotes}
+                </div>
+              )}
+              {item.justificationDocument && (
+                <a href={toFileUrl(item.justificationDocument) || undefined} target="_blank" rel="noreferrer" className="text-emerald-600 hover:underline text-sm inline-flex items-center gap-2">
+                  <Download size={16} /> View the evidence document
+                </a>
+              )}
+
+              {caseAppeals.length > 0 && (
+                <div className="space-y-2">
+                  <p className="text-xs font-bold uppercase text-slate-400">Your appeals</p>
+                  {caseAppeals.map(appeal => (
+                    <div key={appeal.id} className="rounded-xl border border-slate-200 p-3 text-sm">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs text-slate-500">Submitted {fmt(appeal.submittedAt)}</span>
+                        <span className={`badge ${appeal.status === "Resolved" ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>{appeal.status === "Resolved" ? "Decided" : "Under review"}</span>
+                      </div>
+                      {appeal.rebuttalText && <p className="mt-1 text-slate-700">{appeal.rebuttalText}</p>}
+                      {appeal.resolutionNotes && <p className="mt-2 rounded-lg bg-slate-50 p-2 text-slate-700"><span className="font-semibold">Outcome: </span>{appeal.resolutionNotes}</p>}
+                      {appeal.reviewedAt && <p className="mt-1 text-xs text-slate-400">Decided {fmt(appeal.reviewedAt)}</p>}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {canAppealThis && !appealingThis && (
+                <div className="flex justify-end">
+                  <button type="button" onClick={() => { setSelectedCase(item); setAppealNotes(""); setAppealFile(null); }} className="btn-secondary text-sm">
+                    Appeal this case
+                  </button>
+                </div>
+              )}
+              {appealPending && <p className="text-xs text-slate-500">Your appeal is being reviewed. You'll be notified of the outcome.</p>}
+              {canAppealThis && appealingThis && (
+                <div className="space-y-2 rounded-xl border border-slate-200 bg-slate-50 p-4">
+                  <p className="text-sm font-semibold text-slate-800">Your appeal</p>
+                  <p className="text-xs text-slate-500">Explain why the case is wrong or the restriction should be lifted, and attach supporting evidence. An independent reviewer decides.</p>
+                  <textarea className="input-field min-h-24 text-sm" value={appealNotes} onChange={(e) => setAppealNotes(e.target.value)} placeholder="Your statement" />
+                  <input type="file" className="input-field py-2 text-sm" onChange={(e) => setAppealFile(e.target.files?.[0] ?? null)} />
+                  <div className="flex justify-end gap-2">
+                    <button type="button" onClick={() => setSelectedCase(null)} className="btn-secondary text-sm">Cancel</button>
+                    <button type="button" onClick={handleSubmitAppeal} disabled={isSubmitting || !appealNotes.trim()} className="btn-primary text-sm disabled:opacity-60">
+                      {isSubmitting ? "Submitting…" : "Submit appeal"}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+
+        <div className="card overflow-hidden">
+          <div className="p-6 border-b border-slate-100">
+            <h3 className="text-lg font-bold">What each status means for your account</h3>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left">
+              <thead>
+                <tr className="bg-slate-50">
+                  <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase">You can…</th>
+                  <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase">Suspended (case open)</th>
+                  <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase">Blacklisted</th>
+                  <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase">Reinstated</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {[
+                  ["Log in", "Yes", "Yes", "Yes"],
+                  ["See past projects", "Read-only", "Read-only", "Read-only"],
+                  ["Submit new bids", "No", "No", "After re-qualifying"],
+                  ["Request payments", "No", "No", "Yes"],
+                  ["Have installations verified", "Paused", "Stopped", "New reports only"],
+                ].map(([feature, suspended, blacklisted, reinstated]) => (
+                  <tr key={feature}>
+                    <td className="px-6 py-3 text-sm font-medium text-slate-900">{feature}</td>
+                    <td className="px-6 py-3 text-sm text-slate-600">{suspended}</td>
+                    <td className="px-6 py-3 text-sm text-slate-600">{blacklisted}</td>
+                    <td className="px-6 py-3 text-sm text-slate-600">{reinstated}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -9762,7 +10163,33 @@ const Disbursements = ({
     ];
   }, [getClaimEligibilityEntry, projectKpis]);
 
-  const budgetRemaining = Math.max(0, 35800000 - totalDisbursed);
+  // Contracted value not yet paid out, from the projects' real contract values (this
+  // used to be a hard-coded 35,800,000 programme budget).
+  const totalContracted = projects.reduce((sum, project) => sum + Number(project.contractValue || 0), 0);
+  const budgetRemaining = Math.max(0, totalContracted - totalDisbursed);
+  const returnedClaims = claims.filter(claim => claim.status === "Returned");
+  // Where a claim sits in the approval chain, and who is holding it.
+  const claimStage = (claim: PaymentClaim): { step: number; holder: string; text: string } => {
+    switch (claim.status) {
+      case "Submitted":
+      case "Pending": return { step: 0, holder: "RBF (RMT)", text: "With the RBF Management Team for verification of the delivered milestone." };
+      case "RMT Approved":
+      case "Verified": return { step: 1, holder: "TAC", text: "Verified by the RMT; with the Technical Advisory Committee for technical endorsement." };
+      case "TAC Endorsed": return { step: 2, holder: "PSC", text: "Technically endorsed; with the Project Steering Committee for payment approval." };
+      case "PSC Approved":
+      case "Approved": return { step: 3, holder: "RBF (payment)", text: "Approved for payment; the RBF is processing the transfer." };
+      case "Completed":
+      case "Paid": return { step: 4, holder: "—", text: claim.isPartial ? "Paid in part; the balance carries over to your next milestone claim." : "Paid in full." };
+      case "Returned": return { step: 0, holder: "You", text: "Returned to you: complete the listed items, then resubmit the claim." };
+      case "Rejected": return { step: -1, holder: "—", text: claim.remarks ? `Rejected: ${claim.remarks}` : "Rejected by the review team." };
+      default: return { step: 0, holder: "RBF", text: claim.status };
+    }
+  };
+  const CLAIM_STEPS = ["RMT verification", "TAC endorsement", "PSC approval", "Payment", "Paid"];
+  const claimProjectLabel = (claim: PaymentClaim) => {
+    const project = projectsById.get(claim.projectId);
+    return project?.projectReference || `PRJ-${claim.projectId}`;
+  };
   const selectedClaimTechnical = selectedClaimForReview ? getProjectTechnicalReview(selectedClaimForReview.projectId) : null;
   const selectedClaimEligibility = selectedClaimForReview ? getClaimEligibilityEntry(selectedClaimForReview) : null;
   const selectedClaimChecklist = selectedClaimForReview ? getClaimComplianceChecklist(selectedClaimForReview) : [];
@@ -9784,18 +10211,22 @@ const Disbursements = ({
       </AnimatePresence>
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">{isTacView ? "TAC Claim Reviews" : "Disbursement Management"}</h1>
+          <h1 className="text-2xl font-bold text-slate-900">{isTacView ? "TAC Claim Reviews" : isVendorView ? "Payment Claims" : "Disbursement Management"}</h1>
           <p className="text-sm text-slate-500 mt-1">
             {isTacView
               ? "Review technical KPI evidence, field verification quality, and endorse or push back claims without approving payment amounts."
-              : "Process payment claims through the approval and disbursement workflow."}
+              : isVendorView
+                ? "Your milestone payment claims: where each one is in approval (RMT → TAC → PSC → payment) and what has been paid."
+                : "Process payment claims through the approval and disbursement workflow."}
           </p>
         </div>
-        <div className="flex gap-2">
-          <button onClick={exportPaymentSchedule} className="btn-secondary flex items-center gap-2">
-            <Download size={18} /> Export Payment Schedule
-          </button>
-        </div>
+        {!isVendorView && (
+          <div className="flex gap-2">
+            <button onClick={exportPaymentSchedule} className="btn-secondary flex items-center gap-2">
+              <Download size={18} /> Export Payment Schedule
+            </button>
+          </div>
+        )}
       </div>
 
       {isTacView ? (
@@ -9859,18 +10290,27 @@ const Disbursements = ({
           </div>
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <div className={`grid grid-cols-1 gap-6 ${isVendorView ? "md:grid-cols-4" : "md:grid-cols-3"}`}>
           <div className="card p-6 bg-emerald-50 border-emerald-100">
-            <p className="text-xs font-bold text-emerald-600 uppercase mb-1">Total Disbursed</p>
-            <h3 className="text-2xl font-bold text-slate-900">M {totalDisbursed.toLocaleString()}</h3>
+            <p className="text-xs font-bold text-emerald-600 uppercase mb-1">{isVendorView ? "Paid to you" : "Total Disbursed"}</p>
+            <h3 className="text-2xl font-bold text-slate-900">LSL {totalDisbursed.toLocaleString()}</h3>
           </div>
           <div className="card p-6 bg-amber-50 border-amber-100">
-            <p className="text-xs font-bold text-amber-600 uppercase mb-1">Pending Approval</p>
-            <h3 className="text-2xl font-bold text-slate-900">M {pendingApproval.toLocaleString()}</h3>
+            <p className="text-xs font-bold text-amber-600 uppercase mb-1">{isVendorView ? "In approval" : "Pending Approval"}</p>
+            <h3 className="text-2xl font-bold text-slate-900">LSL {pendingApproval.toLocaleString()}</h3>
+            <p className="mt-1 text-xs text-slate-500">Submitted claims not yet paid</p>
           </div>
+          {isVendorView && (
+            <div className={`card p-6 ${returnedClaims.length ? "bg-rose-50 border-rose-100" : "bg-slate-50 border-slate-100"}`}>
+              <p className={`text-xs font-bold uppercase mb-1 ${returnedClaims.length ? "text-rose-600" : "text-slate-500"}`}>Returned to you</p>
+              <h3 className="text-2xl font-bold text-slate-900">{returnedClaims.length}</h3>
+              <p className="mt-1 text-xs text-slate-500">{returnedClaims.length ? "Complete the items and resubmit" : "Nothing needs your action"}</p>
+            </div>
+          )}
           <div className="card p-6 bg-blue-50 border-blue-100">
-            <p className="text-xs font-bold text-blue-600 uppercase mb-1">Budget Remaining</p>
-            <h3 className="text-2xl font-bold text-slate-900">M {budgetRemaining.toLocaleString()}</h3>
+            <p className="text-xs font-bold text-blue-600 uppercase mb-1">{isVendorView ? "Contract value still to earn" : "Contracted, not yet paid"}</p>
+            <h3 className="text-2xl font-bold text-slate-900">LSL {budgetRemaining.toLocaleString()}</h3>
+            <p className="mt-1 text-xs text-slate-500">Across {projects.length} contracted project{projects.length === 1 ? "" : "s"}</p>
           </div>
         </div>
       )}
@@ -9879,9 +10319,8 @@ const Disbursements = ({
         <table className="w-full text-left">
           <thead>
             <tr className="bg-slate-50">
-              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">ID</th>
-              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Claim ID</th>
-              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Vendor & Project</th>
+              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Claim</th>
+              <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">{isVendorView ? "Project" : "Vendor & Project"}</th>
               <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Milestone</th>
               <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">{isTacView ? "Technical Snapshot" : "Amount"}</th>
               <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase">Status</th>
@@ -9892,13 +10331,20 @@ const Disbursements = ({
             {!loading && claims.map(claim => {
               const isActionable = canActOnClaim(claim);
               return (<tr key={claim.id} className={`transition-colors ${isActionable ? "bg-amber-50/60 border-l-4 border-amber-400 hover:bg-amber-50" : "hover:bg-slate-50"}`}>
-                <td className="px-6 py-4 font-mono text-xs text-slate-500">{claim.id}</td>
-                <td className="px-6 py-4 font-mono text-sm text-slate-600">CLM-{String(claim.id).padStart(3, "0")}</td>
                 <td className="px-6 py-4">
-                  <div className="font-medium text-slate-900">{claim.vendorUsername || `Vendor ${claim.vendorId}`}</div>
-                  <div className="text-xs text-slate-500">PRJ-{claim.projectId}</div>
+                  <div className="font-mono text-sm text-slate-700">CLM-{String(claim.id).padStart(3, "0")}</div>
+                  <div className="text-xs text-slate-400">{claim.submittedAt ? `Submitted ${new Date(claim.submittedAt).toLocaleDateString()}` : ""}{claim.resubmissionCount ? ` · resubmitted ${claim.resubmissionCount}×` : ""}</div>
                 </td>
-                <td className="px-6 py-4 text-sm text-slate-600">{claim.milestone_details ? `Milestone ${claim.milestone_details.milestoneNumber || claim.milestoneId}` : "N/A"}</td>
+                <td className="px-6 py-4">
+                  {!isVendorView && <div className="font-medium text-slate-900">{claim.vendorUsername || `Vendor ${claim.vendorId}`}</div>}
+                  <div className={isVendorView ? "font-medium text-slate-900" : "text-xs text-slate-500"}>{claimProjectLabel(claim)}</div>
+                </td>
+                <td className="px-6 py-4 text-sm text-slate-600">
+                  {claim.milestone_details ? `Milestone ${claim.milestone_details.milestoneNumber || claim.milestoneId}` : "N/A"}
+                  {claim.milestone_details && (claim.milestone_details.disbursementPct || claim.milestone_details.percentage) ? (
+                    <span className="block text-xs text-slate-400">{claim.milestone_details.disbursementPct || claim.milestone_details.percentage}% of contract</span>
+                  ) : null}
+                </td>
                 <td className="px-6 py-4">
                   {isTacView ? (
                     <div className="text-sm">
@@ -9910,13 +10356,22 @@ const Disbursements = ({
                       </div>
                     </div>
                   ) : (
-                    <span className="font-bold text-slate-900">M {claim.payableAmount.toLocaleString()}{claim.isPartial ? " (partial)" : ""}</span>
+                    <div>
+                      <span className="font-bold text-slate-900">LSL {claim.payableAmount.toLocaleString()}{claim.isPartial ? " (partial)" : ""}</span>
+                      {claim.isPartial && <span className="block text-xs text-slate-400">of LSL {claim.claimAmount.toLocaleString()} claimed</span>}
+                    </div>
                   )}
                 </td>
                 <td className="px-6 py-4">
                   <span className={`badge ${getClaimWorkflowTone(claim)}`}>
                     {getClaimWorkflowLabel(claim)}
                   </span>
+                  {isVendorView && (
+                    <p className="mt-1 max-w-[16rem] text-xs text-slate-500">{claimStage(claim).text}</p>
+                  )}
+                  {claim.paymentLocked && (
+                    <p className="mt-1 text-xs font-semibold text-rose-700">Payment on hold{claim.paymentLockReason ? `: ${claim.paymentLockReason}` : ""}</p>
+                  )}
                 </td>
                 <td className="px-6 py-4">
                   <div className="flex flex-col gap-2">
@@ -9979,14 +10434,14 @@ const Disbursements = ({
             })}
             {!loading && claims.length === 0 && (
               <tr>
-                <td colSpan={7} className="px-6 py-12 text-center text-sm text-slate-500">
+                <td colSpan={6} className="px-6 py-12 text-center text-sm text-slate-500">
                   No payment claims found.
                 </td>
               </tr>
             )}
             {loading && (
               <tr>
-                <td colSpan={7} className="px-6 py-12 text-center text-sm text-slate-500">
+                <td colSpan={6} className="px-6 py-12 text-center text-sm text-slate-500">
                   Loading payment claims...
                 </td>
               </tr>
@@ -10140,10 +10595,39 @@ const Disbursements = ({
               </div>
 
               <div className="max-h-[80vh] space-y-6 overflow-y-auto p-6 md:p-8">
+                {(() => {
+                  const stage = claimStage(selectedVendorClaimDetails);
+                  return (
+                    <div className="space-y-3">
+                      {stage.step >= 0 && (
+                        <ol className="grid grid-cols-5 gap-2">
+                          {CLAIM_STEPS.map((label, idx) => {
+                            const done = idx < stage.step || stage.step === 4;
+                            const current = idx === stage.step && stage.step !== 4;
+                            return (
+                              <li key={label} className={`rounded-lg border px-2 py-2 text-center text-[11px] font-semibold ${done ? "border-emerald-200 bg-emerald-50 text-emerald-700" : current ? "border-amber-300 bg-amber-50 text-amber-800" : "border-slate-200 bg-white text-slate-400"}`}>
+                                {done ? "✓ " : ""}{label}
+                              </li>
+                            );
+                          })}
+                        </ol>
+                      )}
+                      <div className={`rounded-2xl border px-4 py-3 text-sm ${selectedVendorClaimDetails.status === "Returned" || selectedVendorClaimDetails.status === "Rejected" ? "border-rose-200 bg-rose-50 text-rose-900" : "border-slate-200 bg-slate-50 text-slate-800"}`}>
+                        <span className="font-semibold">Where it is: </span>{stage.text}
+                        {stage.holder !== "—" && <span className="text-slate-500"> (with: {stage.holder})</span>}
+                      </div>
+                      {selectedVendorClaimDetails.paymentLocked && (
+                        <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900">
+                          <span className="font-semibold">Payment on hold.</span> {selectedVendorClaimDetails.paymentLockReason || "An open audit or verification finding must be resolved before this claim can be paid."}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
                 <div className="grid gap-4 md:grid-cols-2">
                   <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                     <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Project</p>
-                    <p className="mt-1 text-base font-semibold text-slate-900">PRJ-{selectedVendorClaimDetails.projectId}</p>
+                    <p className="mt-1 text-base font-semibold text-slate-900">{claimProjectLabel(selectedVendorClaimDetails)}</p>
                   </div>
                   <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                     <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Status</p>
@@ -10151,9 +10635,9 @@ const Disbursements = ({
                   </div>
                   <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                     <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Claim Amount</p>
-                    <p className="mt-1 text-base font-semibold text-slate-900">M {selectedVendorClaimDetails.payableAmount.toLocaleString()}</p>
+                    <p className="mt-1 text-base font-semibold text-slate-900">LSL {selectedVendorClaimDetails.payableAmount.toLocaleString()}</p>
                     {selectedVendorClaimDetails.isPartial && (
-                      <p className="text-xs text-slate-500">of M {selectedVendorClaimDetails.claimAmount.toLocaleString()} claimed</p>
+                      <p className="text-xs text-slate-500">of LSL {selectedVendorClaimDetails.claimAmount.toLocaleString()} claimed</p>
                     )}
                   </div>
                   <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
@@ -10186,7 +10670,8 @@ const Disbursements = ({
                   <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                     <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Processed By</p>
                     <p className="mt-1 text-base font-semibold text-slate-900">
-                      {selectedVendorClaimDetails.disbursement?.processedByUsername || selectedVendorClaimDetails.reviewedByUsername || "RMT"}
+                      {/* Officials' identities stay internal; the vendor deals with the team. */}
+                      RBF Management Team
                     </p>
                   </div>
                 </div>
@@ -10893,7 +11378,9 @@ const VendorTenders = ({ onSubmitTender, onNavigate }: { onSubmitTender?: (tende
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("All Categories");
-  const [selectedStage, setSelectedStage] = useState("All Stages");
+  const [selectedMyStatus, setSelectedMyStatus] = useState("all");
+  // The vendor's own bids, so every tender can show "where am I on this one".
+  const [myBids, setMyBids] = useState<TenderBid[]>([]);
   const [selectedTech, setSelectedTech] = useState("All Technologies");
   const [sortBy, setSortBy] = useState<"deadline" | "recent">("recent");
   const [page, setPage] = useState(1);
@@ -10903,9 +11390,10 @@ const VendorTenders = ({ onSubmitTender, onNavigate }: { onSubmitTender?: (tende
     try {
       setLoading(true);
       setError(null);
-      const rows = await fetchTenders();
+      const [rows, bids] = await Promise.all([fetchTenders(), fetchTenderBids().catch(() => [] as TenderBid[])]);
       // EOI Invites live in their own "EOI Invites" tab (VendorEoiInvites) — never here.
       setTenders(rows.filter(t => t.status === TenderStatus.PUBLISHED && !t.isEoiInviteOnly));
+      setMyBids(bids);
     } catch (err: any) {
       const raw = String(err?.message || "");
       setError(isConnectivityError(raw) ? `Cannot connect to backend (${API_BASE}).` : (toFriendlyApiMessage(raw) || "Failed to load tenders."));
@@ -10923,11 +11411,23 @@ const VendorTenders = ({ onSubmitTender, onNavigate }: { onSubmitTender?: (tende
     tenders.forEach(t => t.category && set.add(t.category));
     return ["All Categories", ...Array.from(set).sort()];
   }, [tenders]);
-  const stages = useMemo(() => {
-    const set = new Set<string>();
-    tenders.forEach(t => t.stageType && set.add(t.stageType));
-    return ["All Stages", ...Array.from(set).sort()];
-  }, [tenders]);
+  // Where this vendor stands on each tender, from their newest bid record on it.
+  const myStatusByTender = useMemo(() => {
+    const map = new Map<string, { key: "draft" | "submitted" | "revision" | "withdrawn" | "decided"; label: string; tone: string; version?: number; submittedAt?: string }>();
+    const byTender = new Map<string, TenderBid[]>();
+    myBids.forEach(b => byTender.set(b.tender, [...(byTender.get(b.tender) || []), b]));
+    byTender.forEach((list, tenderId) => {
+      const latest = list.slice().sort((a, b) => (b.version_number || 0) - (a.version_number || 0))[0];
+      if (!latest) return;
+      const base = { version: latest.version_number, submittedAt: latest.status !== BidStatus.DRAFT ? latest.submitted_at : undefined };
+      if (latest.status === BidStatus.DRAFT) map.set(tenderId, { ...base, key: "draft", label: `Draft in progress (v${latest.version_number})`, tone: "bg-amber-100 text-amber-800" });
+      else if (latest.status === BidStatus.REVISION_REQUIRED) map.set(tenderId, { ...base, key: "revision", label: "Revision requested", tone: "bg-orange-100 text-orange-700" });
+      else if (latest.status === BidStatus.WITHDRAWN) map.set(tenderId, { ...base, key: "withdrawn", label: "You withdrew your bid", tone: "bg-slate-200 text-slate-700" });
+      else if (latest.status === BidStatus.SUBMITTED || latest.status === BidStatus.UNDER_REVIEW) map.set(tenderId, { ...base, key: "submitted", label: `Submitted (v${latest.version_number})`, tone: "bg-emerald-100 text-emerald-700" });
+      else map.set(tenderId, { ...base, key: "decided", label: latest.status, tone: "bg-blue-100 text-blue-700" });
+    });
+    return map;
+  }, [myBids]);
   const technologies = useMemo(() => {
     const set = new Set<string>();
     tenders.forEach(t => (t.technologyTypes || []).forEach(tech => set.add(tech)));
@@ -10947,7 +11447,12 @@ const VendorTenders = ({ onSubmitTender, onNavigate }: { onSubmitTender?: (tende
         );
       })
       .filter(t => selectedCategory === "All Categories" || t.category === selectedCategory)
-      .filter(t => selectedStage === "All Stages" || t.stageType === selectedStage)
+      .filter(t => {
+        if (selectedMyStatus === "all") return true;
+        const mine = myStatusByTender.get(t.id);
+        if (selectedMyStatus === "not_started") return !mine;
+        return mine?.key === selectedMyStatus;
+      })
       .filter(t => selectedTech === "All Technologies" || (t.technologyTypes || []).includes(selectedTech))
       .sort((a, b) => {
         if (sortBy === "recent") {
@@ -10955,9 +11460,9 @@ const VendorTenders = ({ onSubmitTender, onNavigate }: { onSubmitTender?: (tende
           const bTime = new Date(b.publishedAt || b.createdAt || 0).getTime();
           return bTime - aTime;
         }
-        return new Date(a.deadline || 0).getTime() - new Date(b.deadline || 0).getTime();
+        return new Date(openStageDeadline(a) || 0).getTime() - new Date(openStageDeadline(b) || 0).getTime();
       });
-  }, [tenders, searchQuery, selectedCategory, selectedStage, selectedTech, sortBy]);
+  }, [tenders, searchQuery, selectedCategory, selectedMyStatus, myStatusByTender, selectedTech, sortBy]);
 
   const totalPages = Math.ceil(filteredTenders.length / perPage);
   const paginatedTenders = filteredTenders.slice((page - 1) * perPage, page * perPage);
@@ -10967,7 +11472,7 @@ const VendorTenders = ({ onSubmitTender, onNavigate }: { onSubmitTender?: (tende
     const now = Date.now();
     return tenders.filter(t => {
       if (t.status !== TenderStatus.PUBLISHED) return false;
-      const deadline = Date.parse(t.deadline || "");
+      const deadline = Date.parse(openStageDeadline(t) || "");
       if (Number.isNaN(deadline)) return false;
       const days = Math.ceil((deadline - now) / (1000 * 60 * 60 * 24));
       return days >= 0 && days <= 7;
@@ -11032,7 +11537,14 @@ const VendorTenders = ({ onSubmitTender, onNavigate }: { onSubmitTender?: (tende
         };
       }) : []),
     ];
-    const deadlineValue = selectedTender.deadline;
+    const deadlineValue = openStageDeadline(selectedTender);
+    const mine = myStatusByTender.get(selectedTender.id);
+    // The bid stages this tender actually runs (a linked or single-stage Combined tender
+    // has no EOI of its own; only legacy Sequential has separate Technical/Financial).
+    const tenderStageKeys: string[] =
+      selectedTender.procurementWorkflow === "sequential" ? ["eoi", "technical", "financial"]
+      : selectedTender.linkedEoiTenderId || (selectedTender.procurementWorkflow === "combined" && !selectedTender.eoiDeadline) ? ["combined"]
+      : ["eoi", "combined"];
     const deadlineMs = deadlineValue ? Date.parse(deadlineValue) : NaN;
     const daysLeft = Number.isNaN(deadlineMs) ? null : Math.ceil((deadlineMs - Date.now()) / (1000 * 60 * 60 * 24));
     const isLotWise = Boolean(selectedTender.lots && selectedTender.lots.length > 0);
@@ -11047,7 +11559,8 @@ const VendorTenders = ({ onSubmitTender, onNavigate }: { onSubmitTender?: (tende
       <div className="rounded-xl border border-slate-100 bg-slate-50 p-4">
         <Clock size={16} className="mb-2 text-slate-400" />
         <p className="text-xs font-bold text-slate-500">{label}</p>
-        <p className="text-sm font-bold text-slate-900">{value ? new Date(value).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "N/A"}</p>
+        <p className="text-sm font-bold text-slate-900">{value ? formatDateTimeShort(value) : "N/A"}</p>
+        {value && <p className={`text-xs ${new Date(value).getTime() > Date.now() ? "text-emerald-700" : "text-slate-400"}`}>{relativeTime(value)}</p>}
       </div>
     );
     const section = (icon: React.ReactNode, title: string, description: string, children: React.ReactNode) => (
@@ -11119,23 +11632,26 @@ const VendorTenders = ({ onSubmitTender, onNavigate }: { onSubmitTender?: (tende
           </div>
         </div>
 
-        {selectedTender.status === TenderStatus.PUBLISHED && (
-          <TenderClarifications tender={selectedTender} mode="vendor" />
-        )}
-
         {/* Key facts strip */}
         <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
           <div className="card p-5">
-            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Deadline</p>
-            <p className="mt-2 text-lg font-bold text-slate-900">{selectedTender.deadline ? new Date(selectedTender.deadline).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "N/A"}</p>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Submission Deadline</p>
+            <p className="mt-2 text-base font-bold text-slate-900">{formatDateTimeShort(deadlineValue)}</p>
             <p className={`mt-1 text-xs ${daysLeft != null && daysLeft < 0 ? "text-rose-600 font-semibold" : daysLeft != null && daysLeft <= 7 ? "text-amber-600 font-semibold" : "text-slate-500"}`}>
               {daysLeft != null ? (daysLeft < 0 ? "Submission closed" : `${daysLeft} day${daysLeft === 1 ? "" : "s"} left to submit`) : "Submission cutoff"}
             </p>
           </div>
           <div className="card p-5">
-            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Verification</p>
-            <p className={`mt-2 text-lg font-bold ${selectedTender.isVerified ? "text-emerald-600" : "text-amber-600"}`}>{selectedTender.isVerified ? "Verified" : "Pending"}</p>
-            <p className="mt-1 text-xs text-slate-500">By the RBF Management Team</p>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Your Submission</p>
+            <p className="mt-2 text-base font-bold text-slate-900">{mine ? mine.label : "Not started"}</p>
+            <p className="mt-1 text-xs text-slate-500">
+              {mine?.submittedAt
+                ? `Submitted ${formatDateTimeShort(mine.submittedAt)}${daysLeft != null && daysLeft >= 0 ? " — you can revise until the deadline" : ""}`
+                : mine?.key === "draft" ? "Not submitted yet — finish and submit before the deadline"
+                : mine?.key === "withdrawn" ? "You can submit a new bid before the deadline"
+                : selectedTender.linkedEoiTenderId ? "You were invited from the EOI shortlist"
+                : "Use Submit Proposal to start your bid"}
+            </p>
           </div>
           <div className="card p-5">
             <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Tender Security</p>
@@ -11255,7 +11771,7 @@ const VendorTenders = ({ onSubmitTender, onNavigate }: { onSubmitTender?: (tende
                     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                       <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
                         <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Budget</p>
-                        <p className="text-sm font-bold text-slate-900">{lot.budget != null ? `M ${Number(lot.budget).toLocaleString()}` : "Not set"}</p>
+                        <p className="text-sm font-bold text-slate-900">{lot.budget != null ? `${selectedTender.biddingCurrency || "LSL"} ${Number(lot.budget).toLocaleString()}` : "Not set"}</p>
                       </div>
                       <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
                         <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Installation Target</p>
@@ -11317,8 +11833,8 @@ const VendorTenders = ({ onSubmitTender, onNavigate }: { onSubmitTender?: (tende
                   { key: "eoi", label: "Stage 1: EOI (Expression of Interest)" },
                   { key: "technical", label: "Stage 2: Technical" },
                   { key: "financial", label: "Stage 3: Financial" },
-                  { key: "combined", label: "Stage 2: Combined Technical & Financial" },
-                ];
+                  { key: "combined", label: tenderStageKeys.length === 1 ? "Your Technical & Financial submission" : "Stage 2: Combined Technical & Financial" },
+                ].filter(stage => tenderStageKeys.includes(stage.key));
                 const stageDocs = (key: string) => docs.filter(d => (d.bid_stage || "eoi") === key);
                 if (docs.length === 0) {
                   return <p className="text-sm text-slate-500">No required bid documents have been defined for this tender.</p>;
@@ -11354,6 +11870,10 @@ const VendorTenders = ({ onSubmitTender, onNavigate }: { onSubmitTender?: (tende
                 );
               })()
             ))}
+
+            {selectedTender.status === TenderStatus.PUBLISHED && (
+              <TenderClarifications tender={selectedTender} mode="vendor" />
+            )}
           </div>
 
           <div className="space-y-6">
@@ -11368,10 +11888,12 @@ const VendorTenders = ({ onSubmitTender, onNavigate }: { onSubmitTender?: (tende
                   <p className="mb-1 text-[10px] font-bold uppercase tracking-widest text-slate-400">Document Address</p>
                   <p className="text-slate-700">{selectedTender.addressForDocument || "Not specified"}</p>
                 </div>
-                <div className="rounded-lg border border-slate-100 bg-slate-50 p-3">
-                  <p className="mb-1 text-[10px] font-bold uppercase tracking-widest text-slate-400">Security Address</p>
-                  <p className="text-slate-700">{selectedTender.addressForSecurity || "Not specified"}</p>
-                </div>
+                {selectedTender.tenderSecurityRequired && (
+                  <div className="rounded-lg border border-slate-100 bg-slate-50 p-3">
+                    <p className="mb-1 text-[10px] font-bold uppercase tracking-widest text-slate-400">Tender Security Delivery Address</p>
+                    <p className="text-slate-700">{selectedTender.addressForSecurity || "Not specified"}</p>
+                  </div>
+                )}
                 <div className="rounded-lg border border-slate-100 bg-slate-50 p-3">
                   <p className="mb-1 text-[10px] font-bold uppercase tracking-widest text-slate-400">Opening Venue</p>
                   <p className="text-slate-700">{selectedTender.placeForOpening || "Not specified"}</p>
@@ -11413,22 +11935,24 @@ const VendorTenders = ({ onSubmitTender, onNavigate }: { onSubmitTender?: (tende
         )}
 
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-          <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
-            <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Active</p>
-            <p className="mt-1 text-xl font-black text-slate-900">{publishedCount}</p>
-          </div>
-          <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
-            <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Urgent</p>
-            <p className="mt-1 text-xl font-black text-amber-600">{closingSoonCount}</p>
-          </div>
-          <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
-            <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Latest Ref</p>
-            <p className="mt-1 text-sm font-semibold text-slate-900">{newestTender?.referenceNumber || "—"}</p>
-          </div>
-          <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
-            <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Latest Tender</p>
-            <p className="mt-1 truncate text-sm font-semibold text-slate-900">{newestTender?.name || "N/A"}</p>
-          </div>
+          {[
+            { label: "Open to you", value: publishedCount, hint: "Published tenders you can bid on", tone: "text-slate-900", filter: "all" },
+            { label: "Closing within 7 days", value: closingSoonCount, hint: "Submit before these close", tone: "text-amber-600", filter: null },
+            { label: "Drafts in progress", value: tenders.filter(t => myStatusByTender.get(t.id)?.key === "draft" || myStatusByTender.get(t.id)?.key === "revision").length, hint: "Started but not submitted", tone: "text-orange-600", filter: "draft" },
+            { label: "Submitted", value: tenders.filter(t => myStatusByTender.get(t.id)?.key === "submitted").length, hint: "You can still revise before the deadline", tone: "text-emerald-700", filter: "submitted" },
+          ].map(tile => (
+            <button
+              key={tile.label}
+              type="button"
+              onClick={() => { if (tile.filter) { setSelectedMyStatus(tile.filter); setPage(1); } else { setSortBy("deadline"); } }}
+              className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-left hover:border-emerald-200"
+              title={tile.filter ? "Filter the list" : "Sort by deadline"}
+            >
+              <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">{tile.label}</p>
+              <p className={`mt-1 text-xl font-black ${tile.tone}`}>{tile.value}</p>
+              <p className="text-[11px] text-slate-400">{tile.hint}</p>
+            </button>
+          ))}
         </div>
 
         {/* Filter Bar */}
@@ -11436,13 +11960,13 @@ const VendorTenders = ({ onSubmitTender, onNavigate }: { onSubmitTender?: (tende
           <div className="flex items-center justify-between mb-4">
             <div>
               <h3 className="text-sm font-bold text-slate-900">Filter Opportunities</h3>
-              <p className="text-xs text-slate-400 mt-0.5">Find open tenders by category, stage, and technology</p>
+              <p className="text-xs text-slate-400 mt-0.5">Find open tenders by category, technology, or where you stand on them</p>
             </div>
             <button
               onClick={() => {
                 setSearchQuery("");
                 setSelectedCategory("All Categories");
-                setSelectedStage("All Stages");
+                setSelectedMyStatus("all");
                 setSelectedTech("All Technologies");
                 setSortBy("recent");
               }}
@@ -11472,10 +11996,16 @@ const VendorTenders = ({ onSubmitTender, onNavigate }: { onSubmitTender?: (tende
             </select>
             <select
               className="input-field py-2.5 text-sm rounded-xl border-slate-200 focus:border-emerald-400 focus:ring-emerald-100"
-              value={selectedStage}
-              onChange={(e) => { setSelectedStage(e.target.value); setPage(1); }}
+              value={selectedMyStatus}
+              onChange={(e) => { setSelectedMyStatus(e.target.value); setPage(1); }}
+              title="Filter by where you stand on each tender"
             >
-              {stages.map(s => <option key={s}>{s}</option>)}
+              <option value="all">My status: any</option>
+              <option value="not_started">Not started</option>
+              <option value="draft">Draft in progress</option>
+              <option value="revision">Revision requested</option>
+              <option value="submitted">Submitted</option>
+              <option value="withdrawn">Withdrawn</option>
             </select>
             <select
               className="input-field py-2.5 text-sm rounded-xl border-slate-200 focus:border-emerald-400 focus:ring-emerald-100"
@@ -11542,8 +12072,10 @@ const VendorTenders = ({ onSubmitTender, onNavigate }: { onSubmitTender?: (tende
         )}
 
         {!loading && paginatedTenders.map((tender) => {
-          const deadline = tender.deadline;
+          // The deadline that binds vendors now (the overall deadline overstates it).
+          const deadline = openStageDeadline(tender);
           const deadlineMs = deadline ? Date.parse(deadline) : NaN;
+          const mine = myStatusByTender.get(tender.id);
           const daysLeft = Number.isNaN(deadlineMs) ? null : Math.ceil((deadlineMs - Date.now()) / (1000 * 60 * 60 * 24));
           const isClosingSoon = daysLeft !== null && daysLeft >= 0 && daysLeft <= 7;
           const isExpired = daysLeft !== null && daysLeft < 0;
@@ -11580,16 +12112,30 @@ const VendorTenders = ({ onSubmitTender, onNavigate }: { onSubmitTender?: (tende
                     <h3 className="text-lg font-bold text-slate-900 group-hover:text-emerald-700 transition-colors leading-snug">
                       {tender.name}
                     </h3>
-                    <p className="text-sm text-slate-500 mt-1.5">{tender.department}</p>
+                    <p className="text-sm text-slate-500 mt-1.5">
+                      {tender.department}
+                      {" · "}{tender.linkedEoiTenderId ? "Invited — from your EOI shortlist" : workflowLabel(tender)}
+                      {tender.procurementMethod ? ` · ${tender.procurementMethod}` : ""}
+                      {(tender.lotCount ?? 0) > 0 ? ` · ${tender.lotCount} lots` : ""}
+                    </p>
+                    <p className="mt-2 text-xs">
+                      {mine ? (
+                        <span className={`rounded-lg px-2.5 py-1 font-semibold ${mine.tone}`}>
+                          {mine.label}{mine.submittedAt ? ` · ${formatDateTimeShort(mine.submittedAt)}` : ""}
+                        </span>
+                      ) : (
+                        <span className="rounded-lg bg-slate-100 px-2.5 py-1 font-semibold text-slate-600">Not started</span>
+                      )}
+                    </p>
 
                     <div className="flex flex-wrap gap-2 mt-4">
                       {(tender.technologyTypes || []).slice(0, 4).map((tech) => (
                         <span key={tech} className="px-3 py-1.5 bg-slate-50 text-slate-600 rounded-lg text-[10px] font-bold uppercase tracking-wider border border-slate-100 group-hover:bg-slate-100 transition-colors">{tech}</span>
                       ))}
                       <span className="px-3 py-1.5 bg-blue-50 text-blue-600 rounded-lg text-[10px] font-bold uppercase tracking-wider border border-blue-100">{tender.category}</span>
-                      {tender.stageType && (
-                        <span className="px-3 py-1.5 bg-purple-50 text-purple-600 rounded-lg text-[10px] font-bold uppercase tracking-wider border border-purple-100">{tender.stageType}</span>
-                      )}
+                      {(tender.targetDistricts || []).slice(0, 3).map((d) => (
+                        <span key={d} className="px-3 py-1.5 bg-blue-50 text-blue-600 rounded-lg text-[10px] font-bold uppercase tracking-wider border border-blue-100">{d}</span>
+                      ))}
                     </div>
                   </div>
 
@@ -11600,7 +12146,7 @@ const VendorTenders = ({ onSubmitTender, onNavigate }: { onSubmitTender?: (tende
                       <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Deadline</p>
                       <p className={`text-sm font-black ${deadlineColor}`}>{deadlineLabel}</p>
                       {deadline && !Number.isNaN(deadlineMs) && (
-                        <p className="text-[10px] text-slate-400 mt-0.5">{new Date(deadlineMs).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })}</p>
+                        <p className="text-[10px] text-slate-400 mt-0.5">{formatDateTimeShort(deadline)}</p>
                       )}
                     </div>
 
@@ -11613,7 +12159,7 @@ const VendorTenders = ({ onSubmitTender, onNavigate }: { onSubmitTender?: (tende
                       }}
                       disabled={detailLoading}
                     >
-                      View Details
+                      {isExpired ? "View Details" : !mine || mine.key === "withdrawn" ? "View & Bid" : mine.key === "draft" ? "Continue Draft" : mine.key === "revision" ? "Revise Bid" : "View Details"}
                       <ChevronRight size={14} className="group-hover:translate-x-0.5 transition-transform" />
                     </button>
                   </div>
@@ -11671,6 +12217,7 @@ const VendorEoiInvites = ({ onSubmitEoi }: { onSubmitEoi: (tenderId: string) => 
   // / Rejected / Revision Required), so they are never left guessing.
   const [ownEoiStatus, setOwnEoiStatus] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [myEoiBids, setMyEoiBids] = useState<TenderBid[]>([]);
   const [page, setPage] = useState(1);
   const perPage = 10;
 
@@ -11678,8 +12225,9 @@ const VendorEoiInvites = ({ onSubmitEoi }: { onSubmitEoi: (tenderId: string) => 
     setIsLoading(true);
     setLoadError(null);
     try {
-      const rows = await fetchTenders();
+      const [rows, bids] = await Promise.all([fetchTenders(), fetchTenderBids().catch(() => [] as TenderBid[])]);
       setInvites(rows.filter(t => t.isEoiInviteOnly && t.status === TenderStatus.PUBLISHED));
+      setMyEoiBids(bids.filter(b => (b.bid_stage || "eoi") === "eoi"));
     } catch (err: any) {
       setLoadError(err?.message || "Could not load EOI Invites.");
     } finally {
@@ -11801,22 +12349,44 @@ const VendorEoiInvites = ({ onSubmitEoi }: { onSubmitEoi: (tenderId: string) => 
       )}
 
       <div className="space-y-3">
-        {paginated.map(tender => (
-          <button
-            key={tender.id}
-            onClick={() => void openDetail(tender)}
-            className="card w-full text-left p-4 hover:bg-slate-50 transition-colors"
-          >
-            <div className="flex items-center justify-between mb-1.5">
-              <span className="font-mono text-xs text-slate-500">{tender.referenceNumber}</span>
-              <StatusChip color={AMBER} bg={AMBER_SOFT}>Open</StatusChip>
-            </div>
-            <p className="font-bold text-slate-900 mb-1">{tender.name}</p>
-            <p className="text-xs text-slate-500">
-              {tender.eoiDeadline ? `Deadline ${new Date(tender.eoiDeadline).toLocaleDateString()}` : "No deadline set"}
-            </p>
-          </button>
-        ))}
+        {paginated.map(tender => {
+          const windowClosed = Boolean(tender.eoiDeadline && new Date(tender.eoiDeadline).getTime() <= Date.now());
+          const mine = myEoiBids
+            .filter(b => b.tender === tender.id && b.status !== BidStatus.WITHDRAWN)
+            .sort((a, b) => (b.version_number || 0) - (a.version_number || 0))[0];
+          const mineLabel =
+            !mine ? null
+            : mine.status === BidStatus.DRAFT ? { text: "Draft — not submitted", cls: "bg-amber-100 text-amber-800" }
+            : mine.status === BidStatus.ACCEPTED ? { text: "Shortlisted", cls: "bg-emerald-100 text-emerald-700" }
+            : mine.status === BidStatus.REJECTED ? { text: "Not shortlisted", cls: "bg-slate-200 text-slate-700" }
+            : mine.status === BidStatus.REVISION_REQUIRED ? { text: "Revision requested", cls: "bg-orange-100 text-orange-700" }
+            : { text: "EOI submitted", cls: "bg-blue-100 text-blue-700" };
+          return (
+            <button
+              key={tender.id}
+              onClick={() => void openDetail(tender)}
+              className="card w-full text-left p-4 hover:bg-slate-50 transition-colors"
+            >
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="font-mono text-xs text-slate-500">{tender.referenceNumber}</span>
+                <div className="flex items-center gap-2">
+                  {mineLabel && <span className={`badge ${mineLabel.cls}`}>{mineLabel.text}</span>}
+                  <StatusChip color={AMBER} bg={AMBER_SOFT}>{windowClosed ? "Closed for EOIs" : "Open"}</StatusChip>
+                </div>
+              </div>
+              <p className="font-bold text-slate-900 mb-1">{tender.name}</p>
+              <p className="text-xs text-slate-500">
+                {(tender.technologyTypes || []).join(", ")}
+                {(tender.targetDistricts || []).length ? ` · ${(tender.targetDistricts || []).join(", ")}` : ""}
+              </p>
+              <p className={`mt-1 text-xs font-semibold ${windowClosed ? "text-slate-400" : "text-emerald-700"}`}>
+                {tender.eoiDeadline
+                  ? `${windowClosed ? "Closed" : "Closes"} ${formatDateTimeShort(tender.eoiDeadline)} (${relativeTime(tender.eoiDeadline)})`
+                  : "No deadline set"}
+              </p>
+            </button>
+          );
+        })}
       </div>
 
       {totalPages > 1 && (
@@ -12229,8 +12799,12 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
       : declaredWorkflow === "eoi_combined" ? "eoi_combined"
       : declaredWorkflow === "combined" && declaredSingleStageCombined ? "single_combined"
       : declaredWorkflow || (hasCombinedEvidence && !hasSequentialEvidence ? "combined" : "sequential");
+    // An EOI Invite's journey is the EOI alone: once shortlisted, the vendor bids on the
+    // separate follow-on tender created from the shortlist, never on this one.
+    const isEoiInvite = versions.some(v => v.tender_is_eoi_invite_only);
     const keys: StageKey[] =
-      workflow === "eoi_combined" ? ["eoi", "combined"]
+      isEoiInvite ? ["eoi"]
+      : workflow === "eoi_combined" ? ["eoi", "combined"]
       : workflow === "single_combined" ? ["combined"]
       : workflow === "combined" ? ["eoi", "combined"]
       : ["eoi", "technical", "financial"];
@@ -12263,7 +12837,7 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
         status = stageUnlocked(key) ? "action_required" : "locked";
       } else if (latest.status === BidStatus.ACCEPTED || latest.status === BidStatus.AWARDED || nextStageStarted(key)) {
         status = "completed";
-      } else if (latest.status === BidStatus.REJECTED) {
+      } else if (latest.status === BidStatus.REJECTED || latest.status === BidStatus.WITHDRAWN) {
         status = "failed";
       } else if (latest.status === BidStatus.REVISION_REQUIRED) {
         status = "revision_required";
@@ -12350,10 +12924,31 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
       ? describeActiveStep(activeStep, steps[0]?.key === activeStep.key)
       : { primary: "", secondary: "" };
 
+    // Submissions are only possible while the tender is open and before its deadline —
+    // except a bid the review team returned for revision, which may be resubmitted late.
+    const windowOpen = display.tender_status === TenderStatus.PUBLISHED && !display.deadline_passed;
+    const withdrawn = display.status === BidStatus.WITHDRAWN;
+    const isEoiInvite = Boolean(display.tender_is_eoi_invite_only);
+    const eoiShortlisted = isEoiInvite && display.status === BidStatus.ACCEPTED;
+    const eoiNotShortlisted = isEoiInvite && display.status === BidStatus.REJECTED;
+    const followOn = display.follow_on_tender || null;
+    const followOnOpen = Boolean(followOn && followOn.status === TenderStatus.PUBLISHED);
+
+    // A step still waiting on the vendor after its window has closed can no longer be
+    // acted on — it must not read as "action needed".
+    const missedWindow = Boolean(
+      activeStep && activeStep.status === "action_required" && !windowOpen
+      && !finalAwarded && !notAwarded && !intentToAwardIssued && !eoiShortlisted && !withdrawn
+    );
+
     const primaryMessage =
       finalAwarded ? "Tender awarded" :
       notAwarded ? "Not awarded" :
       intentToAwardIssued ? "You're the recommended winner" :
+      eoiShortlisted ? "You're shortlisted" :
+      eoiNotShortlisted ? "Not shortlisted" :
+      withdrawn ? "You withdrew this bid" :
+      missedWindow ? "Not submitted in time" :
       finalAccepted || allStepsCleared ? "Final evaluation passed" :
       primary;
 
@@ -12361,18 +12956,39 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
       finalAwarded ? "Your tender has been awarded. Open Contracting to download and sign the Performance-Based Agreement." :
       notAwarded ? "This tender was awarded to another vendor. Thank you for participating." :
       intentToAwardIssued ? "The RBF has issued an Intent to Award in your favor. Contracting will unlock once the award is finalized." :
+      eoiShortlisted ? (
+        followOn
+          ? followOnOpen
+            ? `Your shortlist led to tender ${followOn.reference_number} ("${followOn.name}"). It is open — submit your Technical & Financial bid there${followOn.deadline ? ` before ${new Date(followOn.deadline).toLocaleString()}` : ""}.`
+            : `Your shortlist led to tender ${followOn.reference_number} ("${followOn.name}"). You'll be notified when it opens for bids.`
+          : display.tender_shortlist_finalized
+            ? "The shortlist is final. You'll be invited to submit a full bid once the tender built from it is published."
+            : "The RBF is still finalizing the shortlist. You'll be notified when it is confirmed."
+      ) :
+      eoiNotShortlisted ? "Thank you for your Expression of Interest. You were not shortlisted for the next stage of this procurement." :
+      withdrawn ? (windowOpen ? "It stays on record as withdrawn. You can still submit a new bid before the deadline." : "It stays on record as withdrawn. The submission window has closed.") :
+      missedWindow ? "The submission window for this stage closed before this draft was submitted, so it can no longer be sent." :
       finalAccepted || allStepsCleared ? "Your bid has passed every evaluation step for this tender. Watch for the award announcement." :
       secondary;
 
-    // There's something to do whenever there's an editable draft to continue, or the
-    // review team asked for a resubmission, or the vendor may still update a submission
-    // that hasn't been locked in for review yet.
-    const canProceed = Boolean(editableDraft) || display.status === BidStatus.REVISION_REQUIRED || display.status === BidStatus.SUBMITTED;
+    const canProceed =
+      eoiShortlisted ? followOnOpen :
+      withdrawn ? windowOpen :
+      display.status === BidStatus.REVISION_REQUIRED ? true :
+      (Boolean(editableDraft) || display.status === BidStatus.SUBMITTED) && windowOpen;
     const proceedLabel =
+      eoiShortlisted ? (followOnOpen ? `Bid on ${followOn!.reference_number}` : null) :
+      withdrawn ? "Submit a new bid" :
       editableDraft ? `Continue ${STAGE_META[normalizeStage(editableDraft)].short}` :
       display.status === BidStatus.REVISION_REQUIRED ? "Revise & Resubmit" :
-      display.status === BidStatus.SUBMITTED ? "Resubmit" :
+      display.status === BidStatus.SUBMITTED ? "Revise submission" :
       null;
+    // What the proceed button opens: the follow-on tender for a shortlisted EOI, a fresh
+    // bid after a withdrawal, otherwise this bid.
+    const proceedTarget: TenderBid =
+      eoiShortlisted && followOn ? { ...display, id: "", tender: followOn.id } :
+      withdrawn ? { ...display, id: "" } :
+      display;
 
     return {
       workflow,
@@ -12382,17 +12998,34 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
       finalAccepted,
       finalAwarded,
       intentToAwardIssued,
-      rejected: activeStep?.status === "failed",
+      rejected: (activeStep?.status === "failed" && !withdrawn) || eoiNotShortlisted || missedWindow,
+      withdrawn,
+      missedWindow,
+      eoiShortlisted,
+      windowOpen,
       primaryMessage,
       secondaryMessage,
       canProceed,
       proceedLabel,
+      proceedTarget,
     };
   };
 
   const getVendorVisibleStatus = (display: TenderBid, progress: ReturnType<typeof getBidProgress>) => {
     if (progress.finalAwarded) {
       return { label: "Awarded - Contract Ready", color: "bg-emerald-100 text-emerald-700" };
+    }
+    if (display.status === BidStatus.NOT_AWARDED) {
+      return { label: "Not Awarded", color: "bg-slate-200 text-slate-700" };
+    }
+    if (progress.withdrawn) {
+      return { label: "Withdrawn", color: "bg-slate-200 text-slate-700" };
+    }
+    if (progress.eoiShortlisted) {
+      return { label: "Shortlisted", color: "bg-emerald-100 text-emerald-700" };
+    }
+    if (progress.missedWindow) {
+      return { label: "Not Submitted — Window Closed", color: "bg-slate-200 text-slate-700" };
     }
     if (progress.intentToAwardIssued) {
       return { label: "Intent to Award Issued", color: "bg-blue-100 text-blue-700" };
@@ -12413,6 +13046,9 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
   };
 
   const getBidOperationalState = (progress: ReturnType<typeof getBidProgress>) => {
+    if (progress.withdrawn) return progress.windowOpen ? "action_required" : "completed";
+    if (progress.eoiShortlisted) return progress.canProceed ? "action_required" : "completed";
+    if (progress.missedWindow) return "rejected";
     if (progress.finalAwarded || progress.finalAccepted || progress.allStepsCleared) return "completed";
     const step = progress.activeStep;
     if (!step) return "completed";
@@ -12576,7 +13212,7 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
               </span>
               <div>
                 <p className="text-sm font-bold text-slate-900">How the bidding process works</p>
-                <p className="mt-1 text-xs text-slate-600">Every tender follows the same path. Most bids move through it one step at a time — nothing here needs guessing.</p>
+                <p className="mt-1 text-xs text-slate-600">Tenders run one of two ways. An open tender takes one combined Technical &amp; Financial bid. A restricted tender starts with an Expression of Interest; only shortlisted vendors are invited to bid.</p>
               </div>
             </div>
             <button onClick={dismissHowItWorks} className="shrink-0 rounded-lg p-1.5 text-slate-400 hover:bg-white/60 hover:text-slate-600">
@@ -12585,10 +13221,10 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
           </div>
           <div className="grid grid-cols-1 gap-3 border-t border-emerald-100 bg-white px-5 py-4 sm:grid-cols-2 lg:grid-cols-4">
             {[
-              { step: "1", title: "Expression of Interest (EOI)", body: "A short application to confirm you're an eligible bidder. No pricing yet." },
-              { step: "2", title: "Technical Proposal", body: "If shortlisted, submit your detailed technical design — technology, sites, and your delivery plan." },
-              { step: "3", title: "Financial Proposal", body: "If your technical proposal clears review, submit your final, binding price." },
-              { step: "4", title: "Award", body: "The best-value qualifying bid receives an Intent to Award, then a signed contract." },
+              { step: "1", title: "EOI (restricted tenders only)", body: "Respond to an EOI Invite with your credentials and capacity — no pricing. After the EOI closes the RBF shortlists, and you're told whether you're on the shortlist." },
+              { step: "2", title: "Technical & Financial bid", body: "Submit one bid with your technical design, sites, inclusion commitments and binding price. You can revise or withdraw it until the deadline." },
+              { step: "3", title: "Evaluation", body: "After the deadline the Evaluation Committee scores the technical part; prices are only opened for bids that pass the technical threshold." },
+              { step: "4", title: "Award & contract", body: "The best-value bid gets an Intent to Award, followed by a standstill period when other bidders may challenge. Then the contract is signed." },
             ].map((item) => (
               <div key={item.step} className="rounded-xl border border-slate-100 bg-slate-50 p-3.5">
                 <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-slate-900 text-[11px] font-bold text-white">{item.step}</span>
@@ -12599,7 +13235,7 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
           </div>
           <div className="flex items-start gap-2.5 border-t border-emerald-100 bg-white px-5 py-3 text-xs text-slate-600">
             <AlertCircle size={14} className="mt-0.5 shrink-0 text-slate-400" />
-            <span>Some tenders combine Technical &amp; Financial into a single step submitted together — if that's the case for a tender, you'll see it labeled "Technical &amp; Financial" instead of two separate steps. Each step only unlocks after the review team accepts the one before it.</span>
+            <span>If you're shortlisted on an EOI, the actual tender appears in Published Tenders (and is linked from your EOI card below) once it's published — your bid goes there, not on the EOI itself.</span>
           </div>
         </div>
       )}
@@ -12716,7 +13352,7 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
                         </button>
                       )}
                       {progress.canProceed && progress.proceedLabel && (
-                        <button onClick={() => onOpenBid(display)} className="btn-primary py-1.5 px-3 text-xs">
+                        <button onClick={() => onOpenBid(progress.proceedTarget)} className="btn-primary py-1.5 px-3 text-xs">
                           {progress.proceedLabel}
                         </button>
                       )}
@@ -12728,8 +13364,13 @@ const VendorBids = ({ onOpenBid }: { onOpenBid: (bid: TenderBid) => void }) => {
                       {display.tender_name || `Tender ${display.tender_reference || display.tender}`}
                     </p>
                     <p className="mt-0.5 text-xs text-slate-500">
-                      Ref: {display.tender_reference || "N/A"} • {summarizeLotOffers(display) ?? (display.bid_amount != null ? `Amount: ${display.bid_currency || "LSL"} ${Number(display.bid_amount).toLocaleString()}` : "Amount: N/A")}
+                      Ref: {display.tender_reference || "N/A"} • {display.stage_badge || display.stage} • {summarizeLotOffers(display) ?? (display.bid_amount != null ? `Amount: ${display.bid_currency || "LSL"} ${Number(display.bid_amount).toLocaleString()}` : "Amount: not priced at this stage")}
                     </p>
+                    {display.deadline && !progress.finalAwarded && !progress.eoiShortlisted && (
+                      <p className={`mt-1 text-xs font-semibold ${display.deadline_passed ? "text-slate-400" : "text-emerald-700"}`}>
+                        {display.deadline_passed ? "Submission window closed" : "Submissions close"} {formatDateTimeShort(display.deadline)} ({relativeTime(display.deadline)})
+                      </p>
+                    )}
                   </div>
 
                   <div className="mt-4">
@@ -13517,6 +14158,9 @@ const VendorDashboard = ({
   const districts = ["Maseru", "Leribe", "Berea", "Mafeteng", "Mohale's Hoek", "Quthing", "Qacha's Nek", "Mokhotlong", "Thaba-Tseka", "Butha-Buthe"];
   const techTypes = ["SHS", "ICS", "GMG", "SWP", "PUE"];
 
+  // "loading" until the first fetch settles, so an empty list is never shown as a
+  // definitive "nothing here" while data is still on its way (or after it failed).
+  const [vendorDataState, setVendorDataState] = useState<"loading" | "ready" | "error">("loading");
   const loadVendorData = React.useCallback(async () => {
     try {
       const [prequals, projectRows, milestoneRows, tenders, contractRows, bids, reportRows] = await Promise.all([
@@ -13540,7 +14184,9 @@ const VendorDashboard = ({
       setContracts(contractRows);
       setBidHistory(bids);
       setInstallationReports(reportRows.filter(item => projectIds.has(item.projectId)));
+      setVendorDataState("ready");
     } catch {
+      setVendorDataState("error");
       setLatestApprovedPrequal(null);
       setProjects([]);
       setMilestones([]);
@@ -17704,7 +18350,11 @@ const VendorDashboard = ({
         <div className="p-6">
           {sortedContracts.length === 0 && (
             <div className="rounded-2xl border border-dashed border-slate-200 bg-white/70 p-8 text-sm text-slate-500">
-              {awardedBidPendingContract
+              {vendorDataState === "loading"
+                ? "Loading your contracts…"
+                : vendorDataState === "error"
+                ? "Your contracts could not be loaded. Check your connection and refresh the page."
+                : awardedBidPendingContract
                 ? "Final award has been recorded for your bid, but the contract package is not visible yet. Refresh in a moment and check again."
                 : intentToAwardPendingFinal
                   ? "An Intent to Award has been issued for your bid. The contract will appear here after the final award is confirmed."
@@ -17876,24 +18526,64 @@ const VendorDashboard = ({
         <div className="card">
           <div className="p-6 border-b border-slate-100">
             <h3 className="text-lg font-bold">Ongoing Projects</h3>
-            <p className="text-sm text-slate-500">Active implementations linked to your awarded tenders</p>
+            <p className="text-sm text-slate-500">Projects created from your approved contracts — set them up, report installations and claim milestones in the Projects Hub.</p>
           </div>
           <div className="p-6 space-y-4">
             {projects.length === 0 && (
-              <p className="text-sm text-slate-500">No ongoing projects yet.</p>
+              <p className="text-sm text-slate-500">
+                {vendorDataState === "loading"
+                  ? "Loading your projects…"
+                  : vendorDataState === "error"
+                  ? "Your projects could not be loaded. Refresh the page to try again."
+                  : "No projects yet. A project is created once your signed contract is approved and the RBF assigns it."}
+              </p>
             )}
-            {projects.map(project => (
-              <div key={project.id} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 rounded-xl border border-slate-100 p-4">
-                <div>
-                  <p className="text-sm font-bold text-slate-900">{project.projectReference || `Project ${project.id}`}</p>
-                  <p className="text-xs text-slate-500">{project.techType} • {project.assignedDistrict || project.district || project.region}</p>
+            {projects.map(project => {
+              const progress = Math.max(0, Math.min(100, Number(project.progress || 0)));
+              const facts: Array<[string, string]> = [
+                ["Contract", project.contractReference || "—"],
+                ["Contract value", project.contractValue != null ? `LSL ${Number(project.contractValue).toLocaleString()}` : "—"],
+                ["Installation target", (project.installationTarget ?? project.targetInstallations) != null ? `${Number(project.installationTarget ?? project.targetInstallations).toLocaleString()} installations` : "—"],
+                ["Delivery period", project.startDate || project.endDate ? `${project.startDate ? new Date(project.startDate).toLocaleDateString() : "?"} – ${project.endDate ? new Date(project.endDate).toLocaleDateString() : "?"}` : "Set at project setup"],
+                ["Milestones", project.milestoneCount != null ? String(project.milestoneCount) : "—"],
+              ];
+              return (
+                <div key={project.id} className="rounded-xl border border-slate-200 p-4 space-y-3">
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="min-w-0">
+                      <p className="text-sm font-bold text-slate-900">{project.projectReference || `Project ${project.id}`}</p>
+                      <p className="text-xs text-slate-500">
+                        {project.tenderName ? `${project.tenderName}${project.lotName ? ` · ${project.lotName}` : ""} · ` : ""}
+                        {project.techType} · {project.assignedDistrict || project.district || project.region}
+                      </p>
+                    </div>
+                    <span className="badge shrink-0 bg-slate-100 text-slate-700">{project.status}</span>
+                  </div>
+                  <dl className="grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-5">
+                    {facts.map(([label, value]) => (
+                      <div key={label} className="min-w-0">
+                        <dt className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">{label}</dt>
+                        <dd className="truncate text-xs font-semibold text-slate-800" title={value}>{value}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                  <div>
+                    <div className="flex items-center justify-between text-[11px] text-slate-500">
+                      <span>Delivery progress</span>
+                      <span className="font-semibold text-slate-700">{progress}%</span>
+                    </div>
+                    <div className="mt-1 h-2 rounded-full bg-slate-100">
+                      <div className="h-2 rounded-full bg-emerald-500" style={{ width: `${progress}%` }} />
+                    </div>
+                  </div>
+                  <div className="flex justify-end">
+                    <button onClick={() => onNavigate?.("projects_hub")} className="text-xs font-semibold text-emerald-700 hover:text-emerald-800">
+                      Open in Projects Hub →
+                    </button>
+                  </div>
                 </div>
-                <div className="flex items-center gap-3">
-                  <span className="badge bg-slate-100 text-slate-700">{project.status}</span>
-                  <span className="text-xs text-slate-500">Progress {project.progress}%</span>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       </div>
@@ -20035,6 +20725,8 @@ const ProjectsHub = ({
     if (milestone.status === "paid" || milestone.status === "Paid") return "PAID";
     if (milestone.status === "cancelled") return "CANCELLED";
     const relatedClaim = claimsForProject(projectId).find(claim => claim.milestoneId === milestone.id);
+    if (relatedClaim?.status === "Returned") return "RETURNED";
+    if (relatedClaim?.status === "Rejected") return "REJECTED";
     if (relatedClaim?.status === "PSC Approved") return "APPROVED";
     if (relatedClaim && ["Submitted", "RMT Approved", "TAC Endorsed", "Pending", "Verified", "Approved"].includes(relatedClaim.status)) return "UNDER REVIEW";
     if (relatedClaim && ["Completed", "Paid"].includes(relatedClaim.status)) return "PAID";
@@ -20046,6 +20738,7 @@ const ProjectsHub = ({
   const getMilestoneStateTone = (label: string) => {
     if (label === "PAID") return "text-emerald-700";
     if (label === "CLAIMABLE" || label === "APPROVED" || label === "VERIFIED") return "text-sky-700";
+    if (label === "RETURNED" || label === "REJECTED") return "text-rose-700";
     if (label === "UNDER REVIEW" || label === "PENDING" || label === "AWAITING VERIFICATION") return "text-amber-700";
     return "text-slate-500";
   };
@@ -25199,6 +25892,27 @@ const ProjectsHub = ({
           )}
           {!loading && isVendorPortal && filteredProjects.map(project => {
             const hasChangesRequested = project.status === ProjectStatus.SETUP_CHANGES_REQUESTED || project.setupStatusBanner?.status === "CHANGES_REQUESTED";
+            const setupComplete = isProjectSetupComplete(project);
+            const kpi = getProjectKpiSnapshot(project);
+            const projectMilestones = milestonesForProject(project.id).slice().sort((a, b) => (a.milestoneNumber || 0) - (b.milestoneNumber || 0));
+            const projectClaims = claimsForProject(project.id);
+            const paidSoFar = projectClaims.filter(c => ["Completed", "Paid"].includes(c.status)).reduce((sum, c) => sum + Number(c.payableAmount || 0), 0);
+            const inApproval = projectClaims.filter(c => !["Completed", "Paid", "Rejected", "Returned"].includes(c.status)).reduce((sum, c) => sum + Number(c.payableAmount || 0), 0);
+            const milestoneState = (m: Milestone) => getMilestoneStateLabel(m, project.id);
+            const returnedMilestone = projectMilestones.find(m => milestoneState(m) === "RETURNED");
+            const claimableMilestone = projectMilestones.find(m => milestoneState(m) === "CLAIMABLE");
+            const allPaid = projectMilestones.length > 0 && projectMilestones.every(m => ["PAID", "CANCELLED", "VERIFIED"].includes(milestoneState(m)));
+            const verifiedPct = kpi.target > 0 ? Math.min(100, Math.round((kpi.verified / kpi.target) * 100)) : Math.round(Number(kpi.progressPct || 0));
+            const nextStep: { text: string; tone: string } =
+              hasChangesRequested ? { text: "The RBF asked for changes to your project setup. Address the remarks above and resubmit.", tone: "border-amber-200 bg-amber-50 text-amber-900" }
+              : !setupComplete && (project.projectSetup?.reviewStatus === "submitted" || project.projectSetup?.reviewStatus === "under_review")
+                ? { text: "Your project setup is with the RBF for review. Installation reporting opens once it is approved.", tone: "border-sky-200 bg-sky-50 text-sky-900" }
+              : !setupComplete ? { text: "Complete your project setup (team, equipment, schedule, compliance documents) and submit it for review.", tone: "border-amber-200 bg-amber-50 text-amber-900" }
+              : returnedMilestone ? { text: `Your claim for Milestone ${returnedMilestone.milestoneNumber} was returned. Complete the listed items and resubmit it from Payment Claims.`, tone: "border-rose-200 bg-rose-50 text-rose-900" }
+              : claimableMilestone ? { text: `Milestone ${claimableMilestone.milestoneNumber} is ready to claim (LSL ${Number(claimableMilestone.amount || 0).toLocaleString()}). Submit your payment claim.`, tone: "border-emerald-200 bg-emerald-50 text-emerald-900" }
+              : allPaid ? { text: "All milestones are paid. Keep reporting device performance until the project closes.", tone: "border-emerald-200 bg-emerald-50 text-emerald-900" }
+              : kpi.target > 0 && kpi.verified < kpi.target ? { text: `Keep reporting installations — ${kpi.verified.toLocaleString()} of ${kpi.target.toLocaleString()} verified so far.`, tone: "border-slate-200 bg-slate-50 text-slate-800" }
+              : { text: "Your claims are being processed. No action is needed right now.", tone: "border-slate-200 bg-slate-50 text-slate-800" };
             return (
               <div key={project.id} className={`rounded-3xl border p-5 shadow-[0_24px_60px_-46px_rgba(15,23,42,0.55)] space-y-4 relative overflow-hidden transition-colors ${
                 hasChangesRequested
@@ -25208,22 +25922,22 @@ const ProjectsHub = ({
                 {!hasChangesRequested && <div className="absolute left-0 top-0 h-full w-1.5 bg-[linear-gradient(180deg,#22c55e_0%,#0ea5e9_60%,#1e293b_100%)]" />}
                 <div className={`rounded-2xl border px-4 py-3 text-sm font-semibold ${getSetupBannerClass(project)}`}>
                   Setup status: {getSetupStatusLabel(project)}
-                  {!isProjectSetupComplete(project) && <span className="ml-2 font-normal">Complete project setup to unlock installation reporting.</span>}
                   {hasChangesRequested && (project.setupStatusBanner?.reviewNotes || project.projectSetup?.reviewNotes) && (
                     <div className="mt-2 rounded-lg bg-white/70 p-2 text-xs font-normal text-amber-800 border border-amber-200">
                       Remarks: {project.setupStatusBanner?.reviewNotes || project.projectSetup?.reviewNotes}
                     </div>
                   )}
                 </div>
-                <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-                  <div className="pl-2">
+                <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                  <div className="pl-2 min-w-0">
                     <p className="text-base font-semibold text-slate-900">{project.projectReference || `PRJ-${project.id}`}</p>
-                    <p className="text-xs text-slate-500 mt-1">{project.techType || "N/A"} • {project.assignedDistrict || project.district || project.region || "Unassigned district"}</p>
+                    <p className="text-xs text-slate-500 mt-1">
+                      {project.tenderName ? `${project.tenderName}${project.lotName ? ` · ${project.lotName}` : ""} · ` : project.lotName ? `${project.lotName} · ` : ""}
+                      {project.techType || "N/A"} · {project.assignedDistrict || project.district || project.region || "Unassigned district"}
+                    </p>
                     <div className="flex flex-wrap gap-2 mt-3 text-[11px]">
-                      <span className="badge bg-slate-100 text-slate-700">Target {formatMetricValue(projectTarget(project))}</span>
-                      <span className="badge bg-slate-100 text-slate-700">Duration {projectDurationMonths(project) > 0 ? `${projectDurationMonths(project)} months` : "N/A"}</span>
                       {project.status && <span className="badge bg-emerald-50 text-emerald-700">{project.status}</span>}
-                      {project.contractStatus && <span className="badge bg-blue-50 text-blue-700">{project.contractStatus}</span>}
+                      {project.contractStatus && <span className="badge bg-blue-50 text-blue-700">Contract {project.contractStatus}</span>}
                     </div>
                   </div>
                   <div className="flex items-center gap-3">
@@ -25235,9 +25949,10 @@ const ProjectsHub = ({
                     </button>
                     <button
                       onClick={() => openProjectPage(project, "fieldwork")}
-                      disabled={!isProjectSetupComplete(project)}
+                      disabled={!setupComplete}
+                      title={setupComplete ? undefined : "Available once your project setup is approved"}
                       className={`text-xs px-4 py-2 rounded-xl font-semibold ${
-                        isProjectSetupComplete(project)
+                        setupComplete
                           ? "bg-blue-600 text-white"
                           : "bg-slate-100 text-slate-400 cursor-not-allowed"
                       }`}
@@ -25246,48 +25961,59 @@ const ProjectsHub = ({
                     </button>
                   </div>
                 </div>
-                <div className={`grid grid-cols-2 gap-3 text-[11px] text-slate-500 ${project.lotName ? "sm:grid-cols-6" : "sm:grid-cols-5"}`}>
-                  <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
-                    <p className="uppercase tracking-wider text-slate-400">Project ID</p>
-                    <p className="font-semibold text-slate-700">{project.projectReference || `PRJ-${project.id}`}</p>
-                  </div>
-                  {project.lotName && (
-                    <div className="rounded-xl border border-indigo-100 bg-indigo-50 px-3 py-2">
-                      <p className="uppercase tracking-wider text-indigo-400">Lot</p>
-                      <p className="font-semibold text-indigo-900">{project.lotName}</p>
-                    </div>
-                  )}
-                  <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
-                    <p className="uppercase tracking-wider text-slate-400">Technology</p>
-                    <p className="font-semibold text-slate-700">{project.techType || "N/A"}</p>
-                  </div>
-                  <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
-                    <p className="uppercase tracking-wider text-slate-400">District</p>
-                    <p className="font-semibold text-slate-700">{project.assignedDistrict || project.district || project.region || "N/A"}</p>
-                  </div>
-                  <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
-                    <p className="uppercase tracking-wider text-slate-400">Installation Target</p>
-                    <p className="font-semibold text-slate-700">{formatMetricValue(projectTarget(project))}</p>
-                  </div>
-                  <div className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
-                    <p className="uppercase tracking-wider text-slate-400">Project Duration</p>
-                    <p className="font-semibold text-slate-700">{projectDurationMonths(project) > 0 ? `${projectDurationMonths(project)} months` : "N/A"}</p>
-                  </div>
+
+                <div className={`rounded-2xl border px-4 py-3 text-sm ${nextStep.tone}`}>
+                  <span className="font-semibold">Next step: </span>{nextStep.text}
                 </div>
-                <div className="grid gap-3 md:grid-cols-3">
-                  {milestonesForProject(project.id).slice().sort((a, b) => (a.milestoneNumber || 0) - (b.milestoneNumber || 0)).map((milestone, index) => (
-                    <div key={milestone.id} className="rounded-2xl border border-slate-100 bg-slate-50 px-4 py-3">
-                      <p className="text-[11px] uppercase tracking-wider text-slate-400">Milestone {milestone.milestoneNumber || index + 1}</p>
-                      <p className="mt-1 text-sm font-semibold text-slate-900">{milestone.disbursementPct || milestone.percentage}%</p>
-                      <p className={`mt-1 text-xs font-semibold ${getMilestoneStateTone(getMilestoneStateLabel(milestone, project.id))}`}>
-                        {getMilestoneStateLabel(milestone, project.id)}
-                      </p>
+
+                <div className="grid grid-cols-2 gap-3 text-[11px] text-slate-500 sm:grid-cols-3 lg:grid-cols-6">
+                  {[
+                    ["Contract", project.contractReference || "—"],
+                    ["Contract value", Number(project.contractValue || 0) > 0 ? `LSL ${Number(project.contractValue).toLocaleString()}` : "—"],
+                    ["Paid so far", `LSL ${paidSoFar.toLocaleString()}`],
+                    ["In approval", inApproval > 0 ? `LSL ${inApproval.toLocaleString()}` : "Nothing pending"],
+                    ["Installation target", formatMetricValue(kpi.target || projectTarget(project))],
+                    ["Duration", projectDurationMonths(project) > 0 ? `${projectDurationMonths(project)} months` : "N/A"],
+                  ].map(([label, value]) => (
+                    <div key={label} className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2 min-w-0">
+                      <p className="uppercase tracking-wider text-slate-400">{label}</p>
+                      <p className="font-semibold text-slate-700 truncate" title={String(value)}>{value}</p>
                     </div>
                   ))}
                 </div>
-                <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
-                  <div className="bg-gradient-to-r from-emerald-500 via-teal-400 to-sky-500 h-full" style={{ width: `${project.progress}%` }} />
+
+                <div>
+                  <div className="flex items-center justify-between text-[11px] text-slate-500">
+                    <span>
+                      Verified installations:{" "}
+                      <span className="font-semibold text-slate-700">
+                        {kpi.target ? `${kpi.verified.toLocaleString()} of ${kpi.target.toLocaleString()}` : `${kpi.verified.toLocaleString()} (no target set yet)`}
+                      </span>
+                    </span>
+                    {kpi.target ? <span className="font-semibold text-slate-700">{verifiedPct}%</span> : null}
+                  </div>
+                  <div className="mt-1 w-full bg-slate-100 h-2 rounded-full overflow-hidden">
+                    <div className="bg-gradient-to-r from-emerald-500 via-teal-400 to-sky-500 h-full" style={{ width: `${verifiedPct}%` }} />
+                  </div>
                 </div>
+
+                {projectMilestones.length > 0 && (
+                  <div className="grid gap-3 md:grid-cols-3">
+                    {projectMilestones.map((milestone, index) => {
+                      const state = milestoneState(milestone);
+                      return (
+                        <div key={milestone.id} className="rounded-2xl border border-slate-100 bg-slate-50 px-4 py-3">
+                          <p className="text-[11px] uppercase tracking-wider text-slate-400">Milestone {milestone.milestoneNumber || index + 1}</p>
+                          <p className="mt-1 text-sm font-semibold text-slate-900">
+                            {milestone.disbursementPct || milestone.percentage}%
+                            {Number(milestone.amount || 0) > 0 && <span className="font-normal text-slate-500"> · LSL {Number(milestone.amount).toLocaleString()}</span>}
+                          </p>
+                          <p className={`mt-1 text-xs font-semibold ${getMilestoneStateTone(state)}`}>{state}</p>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
                 {selectedProject?.id === project.id && (
                   <div className="pt-2">
                     {renderProjectDetail(project)}

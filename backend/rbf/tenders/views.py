@@ -5506,7 +5506,18 @@ class TenderBidViewSet(viewsets.ModelViewSet):
         if latest_prequalification is None or latest_prequalification.status != PrequalificationStatus.APPROVED:
             raise ValidationError({'detail': 'Complete pre-qualification first'})
         _auto_close_tender_on_deadline(tender)
-        if tender.status != TenderStatus.PUBLISHED:
+        # A bid the RBF returned for revision may be resubmitted after the deadline: the
+        # RBF only decides responses once the window has closed (see
+        # _assert_stage_one_review_permission), so without this a vendor asked to revise
+        # could never answer. That ends once the shortlist is finalized or the tender has
+        # moved past evaluation.
+        revision_requested = (
+            bid is not None
+            and bid.status == BidStatus.REVISION_REQUIRED
+            and tender.status in {TenderStatus.PUBLISHED, TenderStatus.CLOSED, TenderStatus.EVALUATION}
+            and not tender.shortlist_finalized_at
+        )
+        if tender.status != TenderStatus.PUBLISHED and not revision_requested:
             raise ValidationError({'tender': 'Tender is not open for bidding.'})
 
         workflow = getattr(tender, 'procurement_workflow', ProcurementWorkflow.SEQUENTIAL)
@@ -5540,7 +5551,7 @@ class TenderBidViewSet(viewsets.ModelViewSet):
         # whether the tender then auto-closes on its own, see _auto_close_tender_on_deadline,
         # or stays Published until the RMT closes it.)
         deadline = spec['deadline']
-        if deadline and timezone.now() >= deadline:
+        if deadline and timezone.now() >= deadline and not revision_requested:
             raise ValidationError({'tender': 'Bidding deadline has passed.'})
 
         if stage == BidStage.EOI:

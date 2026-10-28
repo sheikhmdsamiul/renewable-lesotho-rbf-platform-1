@@ -971,6 +971,23 @@ class VendorBlacklistCaseSerializer(serializers.ModelSerializer):
             'reinstated_by_username',
         ]
 
+    # Withheld from the vendor the case is about: who initiated, reviewed and decided it
+    # (a four-eyes integrity process keeps officials' identities internal) and the
+    # reviewer's internal notes. The vendor still sees the reason, evidence, every
+    # timestamp and the formal final decision notes.
+    VENDOR_HIDDEN_FIELDS = (
+        'initiated_by', 'initiated_by_username', 'reviewed_by', 'reviewed_by_username', 'review_notes',
+        'confirmed_by', 'confirmed_by_username', 'reinstated_by', 'reinstated_by_username',
+    )
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        request = self.context.get('request')
+        if request and getattr(request.user, 'role', None) == UserRole.VENDOR:
+            for field in self.VENDOR_HIDDEN_FIELDS:
+                data.pop(field, None)
+        return data
+
 
 class BlacklistRecommendationSerializer(serializers.ModelSerializer):
     vendor_username = serializers.CharField(source='vendor.username', read_only=True)
@@ -1064,6 +1081,15 @@ class BlacklistAppealSerializer(serializers.ModelSerializer):
             'reviewed_by_username',
             'reviewed_at',
         ]
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        request = self.context.get('request')
+        # The vendor sees the outcome and resolution notes, not who reviewed the appeal.
+        if request and getattr(request.user, 'role', None) == UserRole.VENDOR:
+            data.pop('reviewed_by', None)
+            data.pop('reviewed_by_username', None)
+        return data
 
 
 class VendorProfileUpdateSerializer(serializers.ModelSerializer):

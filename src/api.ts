@@ -442,6 +442,19 @@ function mapTenderFromApi(api: any): Tender {
     digitalSignatureRequired: api.digital_signature_required ?? undefined,
     maxVendorsToShortlist: api.max_vendors_to_shortlist != null ? Number(api.max_vendors_to_shortlist) : undefined,
     shortlistFinalizedAt: api.shortlist_finalized_at ?? undefined,
+    bidderCount: api.bidder_count != null ? Number(api.bidder_count) : undefined,
+    hasPendingIntentAward: api.has_pending_intent_award ?? undefined,
+    disputeStartedAt: api.dispute_started_at ?? undefined,
+    contractsSummary: Array.isArray(api.contracts_summary)
+      ? api.contracts_summary.map((c: any) => ({
+          id: String(c.id),
+          referenceNumber: c.reference_number ?? "",
+          status: c.status ?? "",
+          lotName: c.lot_name ?? null,
+          vendorName: c.vendor_name ?? "",
+          hasProject: Boolean(c.has_project),
+        }))
+      : undefined,
     advertisementChannels: Array.isArray(api.advertisement_channels) ? api.advertisement_channels : undefined,
     contactDetails: api.contact_details ?? undefined,
     technologyTypes: api.technology_types ?? undefined,
@@ -461,7 +474,6 @@ function mapTenderFromApi(api: any): Tender {
     intentToAwardBidId: api.intent_to_award_bid != null ? String(api.intent_to_award_bid) : undefined,
     intentToAwardAt: api.intent_to_award_at ?? undefined,
     coolingOffUntil: api.cooling_off_until ?? undefined,
-    disputeStartedAt: api.dispute_started_at ?? undefined,
     createdAt: api.created_at ?? undefined,
     updatedAt: api.updated_at ?? undefined,
     publishedAt: api.published_at ?? undefined,
@@ -1725,6 +1737,9 @@ function mapTenderBidFromApi(api: any): TenderBid {
     financial_unsealed_at: api.financial_unsealed_at ?? undefined,
     tender_procurement_workflow: api.tender_procurement_workflow ?? undefined,
     tender_skips_eoi_stage: api.tender_skips_eoi_stage ?? undefined,
+    tender_is_eoi_invite_only: api.tender_is_eoi_invite_only ?? undefined,
+    tender_shortlist_finalized: api.tender_shortlist_finalized ?? undefined,
+    follow_on_tender: api.follow_on_tender ?? null,
     financial_stage_open: api.financial_stage_open != null ? Boolean(api.financial_stage_open) : undefined,
     document_requirements: Array.isArray(api.document_requirements) ? api.document_requirements : [],
     document_counts: api.document_counts ?? undefined,
@@ -2284,10 +2299,13 @@ async function refreshAccessToken(): Promise<string | null> {
 
 // ============ API functions ============
 
+// With no pageSize, returns every tender (all pages); with one, just that first page.
 export async function fetchTenders(pageSize?: number): Promise<Tender[]> {
-  const query = pageSize ? `?page_size=${pageSize}` : "";
-  const data = await http<any>(`/api/tenders/${query}`);
-  return unwrapListResponse<any>(data).map(mapTenderFromApi);
+  if (pageSize) {
+    const data = await http<any>(`/api/tenders/?page_size=${pageSize}`);
+    return unwrapListResponse<any>(data).map(mapTenderFromApi);
+  }
+  return (await fetchAllPages<any>(`/api/tenders/?page_size=100`)).map(mapTenderFromApi);
 }
 
 export interface EoiInviteCandidate {
@@ -3023,9 +3041,15 @@ export async function fetchTenderBids(tenderId?: string, pageSize?: number, vend
   if (tenderId) query.set("tender", tenderId);
   if (pageSize) query.set("page_size", String(pageSize));
   if (vendorId) query.set("vendor_id", vendorId);
-  const url = `/api/tender-bids/${query.toString() ? `?${query.toString()}` : ""}`;
-  const data = await http<any>(url);
-  return unwrapListResponse<any>(data).map(mapTenderBidFromApi);
+  // With no explicit pageSize, read every page — a vendor or reviewer with more than
+  // one page of bid records must never see a silently truncated list.
+  if (!pageSize) query.set("page_size", "100");
+  const url = `/api/tender-bids/?${query.toString()}`;
+  if (pageSize) {
+    const data = await http<any>(url);
+    return unwrapListResponse<any>(data).map(mapTenderBidFromApi);
+  }
+  return (await fetchAllPages<any>(url)).map(mapTenderBidFromApi);
 }
 
 // Vendor withdraws their own submitted bid before the deadline. The bid is kept on
