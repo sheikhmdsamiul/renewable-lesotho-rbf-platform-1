@@ -2954,6 +2954,13 @@ class TenderViewSet(viewsets.ModelViewSet):
             return Response({'detail': 'Publish approval has already been requested and is pending review.'}, status=status.HTTP_400_BAD_REQUEST)
         if tender.status != TenderStatus.DRAFT:
             return Response({'detail': f'Only a Draft tender can be submitted for publish approval (this one is {tender.status}).'}, status=status.HTTP_400_BAD_REQUEST)
+        # Catch an empty invite list now, not after the Super Admin has approved: an
+        # invite-only tender with nobody invited could never be published.
+        if self._publish_is_invite_only(tender) and not tender.linked_eoi_tender_id and not tender.invited_vendors.exists():
+            return Response(
+                {'detail': f'This tender uses {tender.procurement_method}, so only invited vendors can bid. Invite at least one vendor first, or switch the procurement method to Open Tendering.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         old_status = tender.status
         old_pub_status = tender.publish_approval_status
@@ -3114,7 +3121,8 @@ class TenderViewSet(viewsets.ModelViewSet):
         if not self._publish_recipients(tender)[0]:
             return Response(
                 {'detail': (
-                    'No invited vendors to notify — this tender is limited to its invited/shortlisted vendors.'
+                    f'No vendors have been invited. This tender uses {tender.procurement_method}, so only invited vendors can bid — '
+                    'invite vendors from the tender\'s "Invite Vendors" section, or switch the procurement method to Open Tendering.'
                     if self._publish_is_invite_only(tender)
                     else 'No approved pre-qualified vendors found to notify.'
                 )},
@@ -5498,7 +5506,18 @@ class TenderBidViewSet(viewsets.ModelViewSet):
         if latest_prequalification is None or latest_prequalification.status != PrequalificationStatus.APPROVED:
             raise ValidationError({'detail': 'Complete pre-qualification first'})
         _auto_close_tender_on_deadline(tender)
-        if tender.status != TenderStatus.PUBLISHED:
+        # A bid the RBF returned for revision may be resubmitted after the deadline: the
+        # RBF only decides responses once the window has closed (see
+        # _assert_stage_one_review_permission), so without this a vendor asked to revise
+        # could never answer. That ends once the shortlist is finalized or the tender has
+        # moved past evaluation.
+        revision_requested = (
+            bid is not None
+            and bid.status == BidStatus.REVISION_REQUIRED
+            and tender.status in {TenderStatus.PUBLISHED, TenderStatus.CLOSED, TenderStatus.EVALUATION}
+            and not tender.shortlist_finalized_at
+        )
+        if tender.status != TenderStatus.PUBLISHED and not revision_requested:
             raise ValidationError({'tender': 'Tender is not open for bidding.'})
 
         workflow = getattr(tender, 'procurement_workflow', ProcurementWorkflow.SEQUENTIAL)
@@ -5532,7 +5551,7 @@ class TenderBidViewSet(viewsets.ModelViewSet):
         # whether the tender then auto-closes on its own, see _auto_close_tender_on_deadline,
         # or stays Published until the RMT closes it.)
         deadline = spec['deadline']
-        if deadline and timezone.now() >= deadline:
+        if deadline and timezone.now() >= deadline and not revision_requested:
             raise ValidationError({'tender': 'Bidding deadline has passed.'})
 
         if stage == BidStage.EOI:

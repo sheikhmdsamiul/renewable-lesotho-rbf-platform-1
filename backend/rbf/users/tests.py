@@ -1512,3 +1512,40 @@ class RegistrationAndPrequalificationHardeningTests(APITestCase):
         response = self.client.post(f"/api/users/prequalifications/{preq_id}/reject/", {"reviewer_comments": "late"}, format="json")
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertTrue(Notification.objects.filter(recipient_id=str(self.vendor.id), title="Pre-Qualification Approved").exists())
+
+
+class VendorBlacklistCaseVisibilityTests(APITestCase):
+    """A vendor sees the reason, evidence, dates and formal decision on their own case,
+    but never who handled it or the reviewer's internal notes."""
+
+    def test_vendor_does_not_see_officials_or_internal_review_notes(self):
+        from .models import UserRole
+
+        User = get_user_model()
+        vendor = User.objects.create_user(
+            username="bl_vendor", password="securePass123", role=UserRole.VENDOR,
+            status="Active", full_name="BL Vendor", email="bl-vendor@example.com",
+        )
+        official = User.objects.create_user(
+            username="bl_official", password="securePass123", role=UserRole.RBF_OFFICIAL,
+            status="Active", full_name="BL Official", email="bl-official@example.com",
+        )
+        VendorBlacklistCase.objects.create(
+            vendor=vendor, reason="Integrity Breach", description="Duplicate installation records.",
+            status=BlacklistCaseStatus.UNDER_REVIEW, initiated_by=official, reviewed_by=official,
+            review_notes="Internal: cross-check with field team.", final_decision_notes="",
+        )
+        self.client.force_authenticate(vendor)
+        response = self.client.get("/api/users/blacklisting-cases/")
+        self.assertEqual(response.status_code, 200, response.data)
+        rows = response.data["results"] if isinstance(response.data, dict) else response.data
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["description"], "Duplicate installation records.")
+        for hidden in ("initiated_by", "initiated_by_username", "reviewed_by", "reviewed_by_username", "review_notes"):
+            self.assertNotIn(hidden, row)
+
+        self.client.force_authenticate(official)
+        staff_rows = self.client.get("/api/users/blacklisting-cases/").data
+        staff_rows = staff_rows["results"] if isinstance(staff_rows, dict) else staff_rows
+        self.assertEqual(staff_rows[0]["review_notes"], "Internal: cross-check with field team.")

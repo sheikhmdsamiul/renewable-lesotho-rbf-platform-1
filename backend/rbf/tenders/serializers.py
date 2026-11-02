@@ -379,6 +379,20 @@ def financial_bid_is_sealed(bid, request=None) -> bool:
     return not bool(getattr(bid, 'financial_stage_unlocked', False))
 
 
+def tender_bidder_count(tender) -> int:
+    """Distinct vendors with a live submission (not a draft, not withdrawn). Unlike
+    bid_count this ignores drafts and superseded versions, so it reads as "how many
+    bidders does this tender have"."""
+    return (
+        tender.bids.exclude(status__in=[BidStatus.DRAFT, BidStatus.WITHDRAWN])
+        .values('vendor_id').distinct().count()
+    )
+
+
+def tender_has_pending_intent_award(tender) -> bool:
+    return tender.intent_award_requests.filter(status=IntentAwardRequestStatus.PENDING).exists()
+
+
 class TenderBidSiteSerializer(serializers.ModelSerializer):
     target_beneficiary_type = serializers.ChoiceField(
         choices=SITE_TARGET_BENEFICIARY_CHOICES,
@@ -536,6 +550,9 @@ class TenderBidSerializer(serializers.ModelSerializer):
     technology_type = serializers.SerializerMethodField()
     tender_technology_types = serializers.SerializerMethodField()
     tender_procurement_workflow = serializers.SerializerMethodField()
+    tender_is_eoi_invite_only = serializers.SerializerMethodField()
+    tender_shortlist_finalized = serializers.SerializerMethodField()
+    follow_on_tender = serializers.SerializerMethodField()
     tender_skips_eoi_stage = serializers.SerializerMethodField()
     document_requirements = serializers.SerializerMethodField()
     document_counts = serializers.SerializerMethodField()
@@ -576,6 +593,7 @@ class TenderBidSerializer(serializers.ModelSerializer):
             'financial_stage_unlocked', 'financial_stage_unlocked_at', 'financial_stage_source_bid',
             'financial_sealed', 'financial_unsealed_at',
             'tender_procurement_workflow', 'tender_skips_eoi_stage', 'financial_stage_open',
+            'tender_is_eoi_invite_only', 'tender_shortlist_finalized', 'follow_on_tender',
             'document_requirements', 'document_counts',
             'deadline', 'deadline_passed', 'deadline_countdown_seconds', 'is_locked', 'version_history',
             'evaluation_status', 'technical_score_total', 'financial_score_total', 'has_challenge',
@@ -812,6 +830,22 @@ class TenderBidSerializer(serializers.ModelSerializer):
                 }))
                 if not attrs.get('inclusion_commitment_confirmed', instance.inclusion_commitment_confirmed if instance else False):
                     errors['inclusion_commitment_confirmed'] = 'You must confirm the inclusion commitment before submitting.'
+
+        # A single-stage Combined tender has no EOI, so its Combined submission is where
+        # the inclusion commitment is declared — validated exactly as at an EOI. (A tender
+        # linked to an EOI Invite inherits it from the linked EOI bid above instead.)
+        declares_inclusion_here = (
+            stage_key == BidStage.COMBINED
+            and tender is not None
+            and not workflow_has_eoi_stage(tender)
+            and not getattr(tender, 'linked_eoi_tender_id', None)
+        )
+        if declares_inclusion_here and bid_status == BidStatus.SUBMITTED:
+            errors.update(inclusion_target_errors({
+                field: attrs.get(field, getattr(instance, field) if instance else 0) for field, _, _ in INCLUSION_FIELDS
+            }))
+            if not attrs.get('inclusion_commitment_confirmed', instance.inclusion_commitment_confirmed if instance else False):
+                errors['inclusion_commitment_confirmed'] = 'You must confirm the inclusion commitment before submitting.'
 
         # ---- Financial pricing (Financial stage, or Combined which bundles both) ----
         collects_final_pricing = is_financial or (is_detailed and stage_key == BidStage.COMBINED)
@@ -1263,6 +1297,34 @@ class TenderBidSerializer(serializers.ModelSerializer):
 
     def get_tender_procurement_workflow(self, obj):
         return getattr(obj.tender, 'procurement_workflow', ProcurementWorkflow.SEQUENTIAL) if obj.tender_id else ProcurementWorkflow.SEQUENTIAL
+
+    def get_tender_is_eoi_invite_only(self, obj):
+        return bool(obj.tender_id and obj.tender.is_eoi_invite_only)
+
+    def get_tender_shortlist_finalized(self, obj):
+        return bool(obj.tender_id and obj.tender.shortlist_finalized_at)
+
+    def get_follow_on_tender(self, obj):
+        """For a shortlisted EOI on an EOI Invite: the tender created from that shortlist,
+        once it exists and is past Draft — so the vendor knows where to bid next. Only a
+        vendor actually on the shortlist (an accepted EOI) is ever pointed at it."""
+        if not (obj.tender_id and obj.tender.is_eoi_invite_only and obj.status == BidStatus.ACCEPTED):
+            return None
+        linked = (
+            obj.tender.linked_tenders
+            .exclude(status__in=[TenderStatus.DRAFT, TenderStatus.PENDING_PUBLISH_APPROVAL])
+            .order_by('-created_at')
+            .first()
+        )
+        if linked is None:
+            return None
+        return {
+            'id': str(linked.id),
+            'reference_number': linked.reference_number,
+            'name': linked.name,
+            'status': linked.status,
+            'deadline': (linked.technical_deadline or linked.deadline),
+        }
 
     def get_tender_skips_eoi_stage(self, obj):
         return bool(obj.tender_id and obj.tender.linked_eoi_tender_id)
@@ -1810,6 +1872,8 @@ class ProjectAssignmentSerializer(serializers.Serializer):
 class TenderListSerializer(serializers.ModelSerializer):
     """Lightweight serializer for tender list views"""
     bid_count = serializers.SerializerMethodField()
+    bidder_count = serializers.SerializerMethodField()
+    has_pending_intent_award = serializers.SerializerMethodField()
     skips_eoi_stage = serializers.SerializerMethodField()
     invited_vendor_count = serializers.SerializerMethodField()
     linked_tender_count = serializers.SerializerMethodField()
@@ -1819,6 +1883,12 @@ class TenderListSerializer(serializers.ModelSerializer):
 
     def get_bid_count(self, obj):
         return obj.bids.count()
+
+    def get_bidder_count(self, obj):
+        return tender_bidder_count(obj)
+
+    def get_has_pending_intent_award(self, obj):
+        return tender_has_pending_intent_award(obj)
 
     def get_skips_eoi_stage(self, obj):
         return bool(obj.linked_eoi_tender_id)
@@ -1849,9 +1919,10 @@ class TenderListSerializer(serializers.ModelSerializer):
         if is_public_viewer and instance.budget_disclosure != BudgetDisclosure.PUBLISHED:
             data.pop('budget', None)
         if is_public_viewer:
-            # How many others bid or were invited is competitive information.
-            data.pop('bid_count', None)
-            data.pop('invited_vendor_count', None)
+            # How many others bid or were invited is competitive information, and the
+            # award pipeline is internal.
+            for field in ('bid_count', 'bidder_count', 'invited_vendor_count', 'has_pending_intent_award'):
+                data.pop(field, None)
         return data
 
     class Meta:
@@ -1870,6 +1941,8 @@ class TenderListSerializer(serializers.ModelSerializer):
             'is_eoi_invite_only', 'linked_eoi_tender', 'skips_eoi_stage', 'invited_vendor_count',
             'shortlist_finalized_at',
             'linked_tender_count', 'lot_count', 'awarded_lot_count', 'lot_statuses',
+            'bidder_count', 'has_pending_intent_award', 'intent_to_award_at', 'cooling_off_until',
+            'awarded_at', 'closed_at', 'dispute_started_at',
         ]
 
 
@@ -1998,6 +2071,9 @@ class TenderInvitedVendorSerializer(serializers.ModelSerializer):
 class TenderSerializer(serializers.ModelSerializer):
     reference_number = serializers.CharField(required=False, allow_blank=True, default='')
     bid_count = serializers.SerializerMethodField()
+    bidder_count = serializers.SerializerMethodField()
+    has_pending_intent_award = serializers.SerializerMethodField()
+    contracts_summary = serializers.SerializerMethodField()
     required_documents = serializers.JSONField(required=False, allow_null=True, write_only=True)
     lots = serializers.JSONField(required=False, allow_null=True, write_only=True)
     # Tender-wide BOQ design — only meaningful for a non-lot-wise tender. A lot-wise
@@ -2014,6 +2090,26 @@ class TenderSerializer(serializers.ModelSerializer):
 
     def get_bid_count(self, obj):
         return obj.bids.count()
+
+    def get_bidder_count(self, obj):
+        return tender_bidder_count(obj)
+
+    def get_has_pending_intent_award(self, obj):
+        return tender_has_pending_intent_award(obj)
+
+    def get_contracts_summary(self, obj):
+        """One row per contract (one per awarded lot), for the award pipeline view."""
+        return [
+            {
+                'id': str(c.id),
+                'reference_number': c.reference_number,
+                'status': c.status,
+                'lot_name': c.lot.name if c.lot_id else None,
+                'vendor_name': c.vendor_name,
+                'has_project': bool(c.project_id),
+            }
+            for c in obj.contracts.select_related('lot').order_by('id')
+        ]
 
     def get_skips_eoi_stage(self, obj):
         return bool(obj.linked_eoi_tender_id)
@@ -2298,6 +2394,17 @@ class TenderSerializer(serializers.ModelSerializer):
             workflow == ProcurementWorkflow.COMBINED and (eoi_deadline or getattr(instance, 'eoi_deadline', None))
         )
 
+        # A required document attached to the EOI stage of a tender that has no EOI
+        # stage would never be requested from any vendor.
+        required_docs = attrs.get('required_documents')
+        if not has_eoi and isinstance(required_docs, list) and any(
+            isinstance(doc, dict) and normalize_bid_stage(doc.get('bid_stage') or BidStage.COMBINED) == BidStage.EOI
+            for doc in required_docs
+        ):
+            errors['required_documents'] = (
+                'This tender has no EOI stage, so required documents must belong to the Combined submission.'
+            )
+
         if workflow == ProcurementWorkflow.SEQUENTIAL:
             if eoi_deadline is None:
                 errors['eoi_deadline'] = 'EOI deadline is required for a sequential workflow.'
@@ -2426,7 +2533,8 @@ class TenderSerializer(serializers.ModelSerializer):
             data['invited_vendors'] = TenderInvitedVendorSerializer(invited_vendors_qs, many=True, context=self.context).data
         elif requester_role == UserRole.VENDOR or (request is not None and not request.user.is_authenticated):
             # Competitive / internal information a bidder (or the public) must not see.
-            for field in ('invited_vendor_count', 'bid_count', 'evaluation_comment', 'evaluation_comment_author'):
+            for field in ('invited_vendor_count', 'bid_count', 'bidder_count', 'evaluation_comment',
+                          'evaluation_comment_author', 'has_pending_intent_award', 'contracts_summary'):
                 data.pop(field, None)
         # Vendors and anonymous public-portal visitors only see a budget the RBF chose
         # to publish.
@@ -2460,6 +2568,12 @@ class TenderSerializer(serializers.ModelSerializer):
         tender.required_documents.all().delete()
         if not isinstance(docs, (list, tuple)):
             return
+        # A document sent without a stage belongs to the stage vendors open the tender at.
+        default_stage = (
+            BidStage.EOI
+            if workflow_has_eoi_stage(tender) and not tender.linked_eoi_tender_id
+            else BidStage.COMBINED
+        )
         for idx, doc in enumerate(docs):
             name = str((doc or {}).get('name') or '').strip()
             if not name:
@@ -2468,7 +2582,7 @@ class TenderSerializer(serializers.ModelSerializer):
                 tender=tender,
                 name=name,
                 expected_type=str((doc or {}).get('expected_type') or '').strip(),
-                bid_stage=(doc or {}).get('bid_stage') or BidStage.EOI,
+                bid_stage=(doc or {}).get('bid_stage') or default_stage,
                 field_key=str((doc or {}).get('field_key') or '').strip(),
                 position=int((doc or {}).get('position') if (doc or {}).get('position') not in (None, '') else idx),
             )
